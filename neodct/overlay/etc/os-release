@@ -1,0 +1,5 @@
+NAME=NeoDCT OS
+VERSION=v0.1.4a-PreM1
+ID=buildroot
+VERSION_ID=0.1.4
+PRETTY_NAME="NeoDCT OS v0.1.4a-PreM1"

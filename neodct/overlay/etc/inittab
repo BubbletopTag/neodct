@@ -1,0 +1,24 @@
+# /etc/inittab
+
+# 1. Startup Logic
+::sysinit:/bin/mount -t proc proc /proc
+::sysinit:/bin/mount -o remount,rw /
+::sysinit:/bin/mkdir -p /dev/pts
+::sysinit:/bin/mount -a
+::sysinit:/sbin/swapon -a
+::sysinit:/etc/init.d/rcS
+
+# 2. The "Silent" GUI (Framebuffer)
+# Run your script on the screen. No login prompt.
+tty1::once:/bin/run_neodct.sh
+
+# 3. The "Debug" Shell (Serial Port)
+# Spawn a login prompt on the serial port.
+# NOTE: Use 'ttyAMA0' for real Raspberry Pi. Use 'ttyS0' for QEMU.
+# It's safe to list both; init will just fail one silently if it doesn't exist.
+ttyAMA0::respawn:/sbin/getty -L ttyAMA0 115200 vt100
+
+# 4. System Hooks
+::restart:/sbin/init
+::ctrlaltdel:/sbin/reboot
+::shutdown:/bin/umount -a -r

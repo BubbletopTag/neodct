@@ -1,0 +1,14 @@
+# NeoDCT OS Changelog
+
+0.1.5a
+Added
+- The Changelog - ... ... This wasn't a thing before. So the previous versions aren't really tracked.
+- Linux Shell App - Full Linux root shell that can run on top of the GUI
+- EXPERIMENTAL WALLPAPER ENGINE - Extremely basic implementation of a wallpaper engine that loads and dims 240x240 jpeg images.
+- Music Player Application
+
+Changed
+- libjpeg from "jpeg-turbo" to just "jpeg"
+- "Snake" to "Games" (Updated manifest)
+- Replaced the extremely basic Web Browser application that was based on netsurf-fb with a full custom browser based on webkitgtk that runs inside of cage. (Very proud of this one)
+- Replaced many placeholder icons with real icons! :)

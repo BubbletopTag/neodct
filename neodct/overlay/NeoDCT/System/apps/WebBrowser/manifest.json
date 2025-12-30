@@ -1,0 +1,6 @@
+{
+	"name": "Browser",
+	"id": "991",
+	"icon": "icon.png",
+	"exec": "main.py"
+}

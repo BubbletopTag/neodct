@@ -1,0 +1,6 @@
+{
+	"name":	"Phone book",
+	"id" : "1",
+	"icon": "icon.png",
+	"exec": "main.py"
+}

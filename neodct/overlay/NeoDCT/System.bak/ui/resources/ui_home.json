@@ -1,0 +1,47 @@
+{
+    "background": null,
+    "elements": [
+        {
+            "type": "icon_set",
+            "count": 5,
+            "prefix": "bat",
+            "x": 190,
+            "y": 30,
+            "sim_val": 5,
+            "custom_images": {
+                "0": "/NeoDCT/System/ui/resources/img/battery/bat-0.png",
+                "1": "/NeoDCT/System/ui/resources/img/battery/bat-1.png",
+                "2": "/NeoDCT/System/ui/resources/img/battery/bat-2.png",
+                "3": "/NeoDCT/System/ui/resources/img/battery/bat-3.png",
+                "4": "/NeoDCT/System/ui/resources/img/battery/bat-4.png"
+            }
+        },
+        {
+            "type": "text",
+            "text": "No Service",
+            "font_size": 12,
+            "anchor": "center_h",
+            "x": 120,
+            "y": 71,
+            "color": "white"
+        },
+        {
+            "type": "text",
+            "text": "12:00",
+            "font_size": 8,
+            "anchor": "right",
+            "x": 193,
+            "y": 12,
+            "color": "white"
+        },
+        {
+            "type": "icon_set",
+            "count": 5,
+            "prefix": "sig",
+            "x": 7,
+            "y": 178,
+            "sim_val": 2,
+            "custom_images": {}
+        }
+    ]
+}

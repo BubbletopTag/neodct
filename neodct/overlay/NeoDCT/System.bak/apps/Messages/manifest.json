@@ -1,0 +1,6 @@
+{
+	"name":	"Messages",
+	"id":	"2",
+	"icon": "icon.png",
+	"exec": "main.py"
+}

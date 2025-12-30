@@ -1,0 +1,45 @@
+############################
+# Buildroot generated data
+############################
+buildroot/output/
+buildroot/dl/
+
+# Out-of-tree build dirs
+build-*/
+output-*/
+
+############################
+# Python
+############################
+__pycache__/
+*.pyc
+*.pyo
+
+############################
+# Editors / OS junk
+############################
+.DS_Store
+*.swp
+*.swo
+*.tmp
+
+############################
+# Secrets / keys (never commit)
+############################
+*.pem
+*.key
+*.crt
+secrets/
+
+############################
+# NeoDCT user data (runtime content)
+############################
+neodct/overlay/User/music/
+
+############################
+# NeoDCT large test media (keep repo lean)
+############################
+neodct/overlay/tests/*.avi
+neodct/overlay/tests/*.mp3
+neodct/overlay/tests/*.mp4
+neodct/overlay/tests/*.mkv
