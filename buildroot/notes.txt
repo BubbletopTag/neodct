@@ -1,0 +1,79 @@
+alright! that worked! Here goes let's make that AWESOME LAYOUT CREATOR
+
+
+All the features you just mentioned, and I also wanna see what it will look like when it's implemented! right! Things like
+
+
+Career Name (or No Service, this will be rendered from the script not from images because I bet later on the modem driver will be able to give the carrier name)
+
+Signal bars
+
+Battery bars
+
+Menu page
+
+Clock
+
+Alarm status
+
+Bottom tooltip button and it's text! 
+
+
+All sorts of stuff! and make the ui of the tk python app pretty if you have time :)
+
+
+qemu-system-aarch64 \
+    -M virt \
+    -cpu cortex-a53 \
+    -m 512 \
+    -kernel output/images/Image \
+    -drive file=output/images/rootfs.ext4,if=none,format=raw,id=hd0 \
+    -device virtio-blk-device,drive=hd0 \
+    -device virtio-gpu-pci \
+    -device virtio-keyboard-pci \
+    -device virtio-tablet-pci \
+    -display gtk,gl=off,zoom-to-fit=off \
+    -serial stdio \
+    -append "root=/dev/vda console=tty1 console=ttyS0,115200 vt.global_cursor_default=0 quiet loglevel=0" \
+
+qemu-system-aarch64 \
+    -M virt \
+    -cpu cortex-a53 \
+    -m 512 \
+    -kernel output/images/Image \
+    -drive file=output/images/rootfs.ext4,if=none,format=raw,id=hd0 \
+    -device virtio-blk-device,drive=hd0 \
+    -device virtio-gpu-pci \
+    -device virtio-keyboard-pci \
+    -device virtio-tablet-pci \
+    -display gtk,gl=off,zoom-to-fit=off \
+    -serial stdio \
+    -append "root=/dev/vda console=ttyAMA0 console=ttyS0,115200 vt.global_cursor_default=0 quiet loglevel=0 video=Virtual-1:256x256M"
+
+qemu-system-aarch64     -M virt     -cpu cortex-a53     -m 512     -kernel output/images/Image     -drive file=output/images/rootfs.ext4,if=none,format=raw,id=hd0     -device virtio-blk-device,drive=hd0     -device virtio-gpu-pci     -device virtio-keyboard-pci     -device virtio-tablet-pci    -display gtk,gl=off,zoom-to-fit=off     -serial stdio     -append "root=/dev/vda rw console=ttyAMA0 quiet video=Virtual-1:240x240M vt.global_cursor_default=0"
+
+NETSURF TESTING
+export SDL_NOMOUSE=1
+cp /usr/share/fonts/dejavu/DejaVuSans.ttf /usr/share/netsurf/
+
+killall python3
+export SDL_VIDEODRIVER=fbcon
+netsurf-fb -v -w 240 -h 240 https://www.knoxcc.org/o/knoxcc/page/computer-network-technology
+
+
+export SDL_MOUSEDEV=/dev/input/mice
+chmod +x /NeoDCT/System/apps/WebBrowser/launch.sh
+/NeoDCT/System/apps/WebBrowser/launch.sh
+
+
+
+netsurf-fb -v -w 240 -h 240 http://themostamazingwebsiteontheinternet.com
+
+netsurf-fb -v -w 240 -h 240 http://example.com
+
+
+
+
+1Ghz ARM Cortex-A53 (Underclocked 800Mhz)
+512MB LPDDR2
+240x240 ST7789 IPS LCD

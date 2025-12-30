@@ -1,0 +1,16 @@
+config BR2_PACKAGE_LIBNSFB
+    bool "libnsfb"
+    select BR2_PACKAGE_NETSURF_BUILDSYSTEM
+    help
+      Framebuffer abstraction library for NetSurf.
+      
+      http://www.netsurf-browser.org/projects/libnsfb/
+
+if BR2_PACKAGE_LIBNSFB
+
+config BR2_PACKAGE_LIBNSFB_LINUX
+    bool "Linux Framebuffer surface"
+    help
+      Enable the Linux Framebuffer surface backend.
+
+endif

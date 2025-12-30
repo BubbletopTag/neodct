@@ -1,0 +1,8 @@
+config BR2_PACKAGE_FBROWSER
+    bool "fbrowser"
+    depends on BR2_PACKAGE_QT5
+    depends on BR2_PACKAGE_QT5WEBKIT
+    help
+      QtWebKit-based web browser for Linux framebuffer.
+      
+      https://github.com/shownb/FBrowser

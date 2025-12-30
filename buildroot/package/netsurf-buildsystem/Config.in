@@ -1,0 +1,4 @@
+config BR2_PACKAGE_NETSURF_BUILDSYSTEM
+    bool "netsurf-buildsystem"
+    help
+      Shared build system for NetSurf libraries.
