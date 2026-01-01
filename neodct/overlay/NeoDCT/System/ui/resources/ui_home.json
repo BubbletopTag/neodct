@@ -7,7 +7,7 @@
             "prefix": "bat",
             "x": 190,
             "y": 30,
-            "sim_val": 5,
+            "sim_val": 4,
             "custom_images": {
                 "0": "/NeoDCT/System/ui/resources/img/battery/bat-0.png",
                 "1": "/NeoDCT/System/ui/resources/img/battery/bat-1.png",
@@ -39,9 +39,15 @@
             "count": 5,
             "prefix": "sig",
             "x": 7,
-            "y": 178,
-            "sim_val": 2,
-            "custom_images": {}
+            "y": 30,
+            "sim_val": 4,
+            "custom_images": {
+                "0": "/NeoDCT/System/ui/resources/img/cellsignal/sig-0.png",
+                "1": "/NeoDCT/System/ui/resources/img/cellsignal/sig-1.png",
+                "2": "/NeoDCT/System/ui/resources/img/cellsignal/sig-2.png",
+                "3": "/NeoDCT/System/ui/resources/img/cellsignal/sig-3.png",
+                "4": "/NeoDCT/System/ui/resources/img/cellsignal/sig-4.png"
+            }
         }
     ]
 }
