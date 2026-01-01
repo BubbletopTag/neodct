@@ -68,7 +68,7 @@ Currently, this device and operating system is a **work-in-progress**, not even 
 * **Userspace**: Minimal GNU/Linux
 * **UI**: Custom Python UI framework (framebuffer / DRM)
 * **Apps**: Python scripts deployed via rootfs overlay
-* **Graphics**: No heavyweight desktop stack (no X11, no Wayland compositor for UI)
+* **Graphics**: No heavyweight desktop stack (no X11, web browser uses a barebones wayland compositor)
 * **Input**: Physical buttons / keypad navigation
 * **Target hardware**: ARM SBCs and embedded platforms
 
@@ -190,7 +190,7 @@ See individual files for details.
 
 ## Contributing
 
-Contributions are welcome! I'm not the most experienced programmer! I use a lot of AI is the new stack overflow! :P
+Contributions are welcome! I'm not the most experienced programmer! AI is the new stack overflow! :P
 
 If you’re experimenting with NeoDCT OS and want to help out, go ahead and:
 
