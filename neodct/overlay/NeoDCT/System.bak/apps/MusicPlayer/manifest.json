@@ -1,6 +1,0 @@
-{
-    "name": "MusicPlayer",
-    "id": "970",
-    "icon": "icon.png",
-    "exec": "main.py"
-}

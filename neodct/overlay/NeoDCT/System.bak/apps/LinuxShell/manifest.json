@@ -1,6 +1,0 @@
-{
-  "name": "Linux Shell",
-  "id": "999",
-  "icon": "icon.png",
-  "exec": "main.py"
-}

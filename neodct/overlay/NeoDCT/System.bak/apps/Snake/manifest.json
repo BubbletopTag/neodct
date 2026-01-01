@@ -1,6 +1,0 @@
-{
-    "name": "Games",
-    "id": "960",
-    "icon": "icon.png",
-    "exec": "main.py"
-}

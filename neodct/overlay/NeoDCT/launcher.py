@@ -32,7 +32,7 @@ def show_boot_logo(fb):
     draw.text(((240-w)//2, 100), text, font=font, fill="white")
     
     # Draw Version
-    ver = "System v0.1.5a Pre-M1"
+    ver = "System v0.1.6a M1"
     bbox = draw.textbbox((0, 0), ver, font=font_small)
     w = bbox[2] - bbox[0]
     draw.text(((240-w)//2, 130), ver, font=font_small, fill="gray")

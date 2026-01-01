@@ -1,6 +1,0 @@
-{
-	"name":	"Call Log",
-	"id":	"3",
-	"icon": "icon.png",
-	"exec": "main.py"
-}

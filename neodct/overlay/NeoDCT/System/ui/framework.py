@@ -115,26 +115,35 @@ class SoftKeyBar:
         self.height = 30
         self.y_start = 240 - self.height
         self.current_text = None
+        
+        # --- ROBUST TRANSPARENCY CHECK ---
+        # We detect if we are the 'Main' system bar or an 'App' bar based on initialization order.
+        #
+        # 1. When main.py starts, it calls SoftKeyBar(self). 
+        #    At that exact moment, 'self.softkey' has NOT been assigned to the UI object yet.
+        #    So hasattr(ui, 'softkey') is False. -> We are the System Bar -> Transparent.
+        #
+        # 2. When an App (like Messages) runs later, it calls SoftKeyBar(ui).
+        #    By then, ui.softkey ALREADY exists.
+        #    So hasattr(ui, 'softkey') is True. -> We are an App Bar -> Opaque (Black).
+        
+        self.is_transparent = not hasattr(ui, 'softkey')
 
     def update(self, new_text, present=True):
-        # --- TRANSPARENCY FIX ---
-        # Check if the UI has a loaded wallpaper (added in main.py)
         wallpaper = getattr(self.ui, "wallpaper", None)
         
-        if wallpaper:
-            # If wallpaper exists, we crop the bottom strip from the wallpaper
-            # and paste it over the softkey area to "erase" the old text
-            # while preserving the background image.
+        if self.is_transparent and wallpaper:
+            # TRANSPARENT MODE (Home Screen only)
+            # Crop the bottom strip from the wallpaper and paste it
             box = (0, self.y_start, 240, 240)
             try:
-                # Wallpaper is already resized to 240x240 in main.py
                 bg_slice = wallpaper.crop(box)
                 self.ui.canvas.paste(bg_slice, box)
             except Exception:
-                # Fallback if cropping fails
                 self.ui.draw.rectangle((0, self.y_start, 240, 240), fill="black")
         else:
-            # No wallpaper -> Classic Black Box
+            # OPAQUE MODE (Apps, Dialogs, Lists)
+            # Always draw black to cover scrolling lists or game graphics
             self.ui.draw.rectangle((0, self.y_start, 240, 240), fill="black")
 
         if new_text:
