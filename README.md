@@ -2,7 +2,7 @@
 
 NeoDCT is a custom embedded Linux device designed to fit inside a Nokia 5110 / 5190 enclosure.
 
-## Planned Hardware (Condensed)
+## Planned Hardware
 
 - **Compute**: Radxa Zero 3W (RK3566, 1 GB RAM)
 - **Display**: 240 × 240 ST7789 IPS LCD
