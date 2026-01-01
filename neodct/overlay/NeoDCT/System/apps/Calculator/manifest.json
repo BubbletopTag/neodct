@@ -1,0 +1,6 @@
+{
+	"name":	"Calculator",
+	"id":	"7",
+	"icon": "icon.png",
+	"exec": "main.py"
+}

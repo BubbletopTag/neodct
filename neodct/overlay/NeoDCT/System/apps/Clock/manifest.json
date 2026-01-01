@@ -1,0 +1,6 @@
+{
+	"name":	"Clock",
+	"id":	"8",
+	"icon": "icon.png",
+	"exec": "main.py"
+}

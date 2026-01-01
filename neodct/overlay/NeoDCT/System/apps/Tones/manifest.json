@@ -1,0 +1,6 @@
+{
+	"name":	"Tones",
+	"id":	"9",
+	"icon": "icon.png",
+	"exec": "main.py"
+}
