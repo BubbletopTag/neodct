@@ -1,6 +1,6 @@
 {
-	"name":	"Placeholder",
-	"id":	"990",
+	"name":	"Tests",
+	"id":	"9999",
 	"icon": "icon.png",
 	"exec": "main.py"
 }

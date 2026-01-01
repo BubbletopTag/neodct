@@ -1,0 +1,6 @@
+{
+	"name":	"Settings",
+	"id":	"4",
+	"icon": "icon.png",
+	"exec": "main.py"
+}
