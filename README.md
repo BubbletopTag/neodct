@@ -138,7 +138,7 @@ NeoDCT OS is an early-stage prototype. The core UI and app framework work (inclu
 ### 🟡 Mostly Working
 - Phonebook (SQLite-backed; calling action is buggy)
 - Web Browser (WebKitGTK via cage; QEMU-only; no video/downloads)
-- Music Player (MP3 playback; no sorting/metadata)
+- Music Player (MP3 playback; no sorting/limited metadata support)
 
 ### 🟠 Stubbed
 - Messages (menu only)
