@@ -379,6 +379,11 @@ class TextInputLong:
         self.text_area_top = 45
         self.text_area_bottom = 210
         self._last_backspace_time = 0.0
+        self._backspace_hold_start = None
+        self._backspace_repeat_count = 0
+        self._backspace_hold_gap = 0.18
+        self._backspace_hold_duration = 0.8
+        self._backspace_hold_repeats = 8
 
         # Development Key Map (PC Keyboard -> Char)
         self.DEV_KEYMAP = {
@@ -485,10 +490,19 @@ class TextInputLong:
                 if callable(self.on_empty_backspace):
                     self.on_empty_backspace()
                 return "empty_backspace"
-            if now - self._last_backspace_time < 0.35:
-                self.clear_text()
-                self._last_backspace_time = 0.0
-                return "cleared"
+            gap = now - self._last_backspace_time
+            if gap > self._backspace_hold_gap:
+                self._backspace_hold_start = now
+                self._backspace_repeat_count = 1
+            else:
+                self._backspace_repeat_count += 1
+                if self._backspace_hold_start and (now - self._backspace_hold_start) >= self._backspace_hold_duration:
+                    if self._backspace_repeat_count >= self._backspace_hold_repeats:
+                        self.clear_text()
+                        self._backspace_hold_start = None
+                        self._backspace_repeat_count = 0
+                        self._last_backspace_time = now
+                        return "cleared"
             if self.cursor > 0:
                 self.text = self.text[:self.cursor - 1] + self.text[self.cursor:]
                 self.cursor = max(0, self.cursor - 1)
@@ -496,6 +510,8 @@ class TextInputLong:
             return "backspace"
 
         if key in self.DEV_KEYMAP:
+            self._backspace_hold_start = None
+            self._backspace_repeat_count = 0
             char = self.DEV_KEYMAP[key]
             if len(self.text) == 0:
                 char = char.upper()

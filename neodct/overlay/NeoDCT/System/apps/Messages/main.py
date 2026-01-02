@@ -235,7 +235,9 @@ def _show_write_message(ui, root_id, sub_index):
             softkey.update("Options")
             continue
 
-        input_widget.handle_key(key)
+        result = input_widget.handle_key(key)
+        if result == "empty_backspace":
+            return
         input_widget.draw(cursor_on)
         softkey.update("Options")
 
