@@ -201,7 +201,7 @@ def _show_outbox(ui, root_id, sub_index):
 
 def _show_write_message(ui, root_id, sub_index):
     softkey = SoftKeyBar(ui)
-    input_widget = TextInputLong(ui, "Write Message")
+    input_widget = TextInputLong(ui, "Write")
 
     cursor_on = True
     last_blink = time.time()
