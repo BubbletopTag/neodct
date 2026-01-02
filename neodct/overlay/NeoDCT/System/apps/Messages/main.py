@@ -1,7 +1,14 @@
 import os
 import sqlite3
 import time
-from System.ui.framework import PagedList, HeaderWidget, SoftKeyBar, VerticalList
+from System.ui.framework import (
+    MessageDialog,
+    PagedList,
+    HeaderWidget,
+    SoftKeyBar,
+    TextInputLong,
+    VerticalList,
+)
 
 ROOT_ID_MESSAGES = 2  # matches "2-1" style header
 DB_DIR = "/NeoDCT/User/db"
@@ -83,6 +90,20 @@ def _fetch_outbox_messages():
     data = c.fetchall()
     conn.close()
     return data
+
+def _save_outbox_message(text):
+    os.makedirs(DB_DIR, exist_ok=True)
+    conn = sqlite3.connect(OUTBOX_DB)
+    c = conn.cursor()
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS outbox
+           (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message TEXT,
+            timestamp INTEGER)"""
+    )
+    c.execute("INSERT INTO outbox (message, timestamp) VALUES (?, ?)", (text, int(time.time())))
+    conn.commit()
+    conn.close()
 
 def _show_empty_state(ui, title, root_id, sub_index, message):
     ui.draw.rectangle((0, 0, 240, 240), fill="black")
@@ -178,6 +199,48 @@ def _show_outbox(ui, root_id, sub_index):
         _, message, timestamp = messages[selection_index]
         _show_message_detail(ui, "Outbox", header_root, selection_index + 1, message, None, timestamp)
 
+def _show_write_message(ui, root_id, sub_index):
+    softkey = SoftKeyBar(ui)
+    input_widget = TextInputLong(ui, "Write Message")
+
+    cursor_on = True
+    last_blink = time.time()
+    input_widget.draw(cursor_on)
+    softkey.update("Options")
+
+    while True:
+        if time.time() - last_blink > 0.5:
+            cursor_on = not cursor_on
+            last_blink = time.time()
+            input_widget.draw(cursor_on)
+            softkey.update("Options")
+
+        key = ui.wait_for_key()
+        if key is None:
+            continue
+
+        if key in (28, 96):
+            options = VerticalList(ui, "Options", ["Send", "Save"], app_id=f"{root_id}-{sub_index}")
+            selection = options.show()
+            if selection == 0:
+                MessageDialog(
+                    ui,
+                    "This feature requires Telephony. Will hopefully be functional by M3",
+                ).show()
+            elif selection == 1:
+                _save_outbox_message(input_widget.get_text())
+                MessageDialog(ui, "Saved!").show()
+
+            input_widget.draw(cursor_on)
+            softkey.update("Options")
+            continue
+
+        result = input_widget.handle_key(key)
+        if result == "empty_backspace":
+            return
+        input_widget.draw(cursor_on)
+        softkey.update("Options")
+
 def run(ui):
     menu = PagedList(
         ui=ui,
@@ -201,4 +264,4 @@ def run(ui):
         elif sel == 1:
             _show_outbox(ui, ROOT_ID_MESSAGES, 2)
         elif sel == 2:
-            _show_stub_screen(ui, "Write Message", ROOT_ID_MESSAGES, 3)
+            _show_write_message(ui, ROOT_ID_MESSAGES, 3)
