@@ -91,20 +91,30 @@ def init_databases():
             
         conn.close()
 
-        # --- SMS DB ---
-        sms_file = f"{db_path}/sms.db"
-        conn = sqlite3.connect(sms_file)
+        # --- INBOX DB ---
+        inbox_file = f"{db_path}/sms_inbox.db"
+        conn = sqlite3.connect(inbox_file)
         c = conn.cursor()
-        
-        c.execute('''CREATE TABLE IF NOT EXISTS messages
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                      number TEXT, 
-                      body TEXT, 
-                      timestamp INTEGER, 
-                      status INTEGER)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS inbox
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      message TEXT,
+                      sender TEXT,
+                      timestamp INTEGER,
+                      is_read INTEGER DEFAULT 0)''')
         conn.commit()
         conn.close()
-        
+
+        # --- OUTBOX DB ---
+        outbox_file = f"{db_path}/sms_outbox.db"
+        conn = sqlite3.connect(outbox_file)
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS outbox
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      message TEXT,
+                      timestamp INTEGER)''')
+        conn.commit()
+        conn.close()
+
         print("[KERNEL] Databases initialized successfully.")
 
 # --- UI LOGIC ---
