@@ -91,6 +91,24 @@ def _fetch_outbox_messages():
     conn.close()
     return data
 
+def _delete_inbox_message(message_id):
+    if not os.path.exists(INBOX_DB):
+        return
+    conn = sqlite3.connect(INBOX_DB)
+    c = conn.cursor()
+    c.execute("DELETE FROM inbox WHERE id = ?", (message_id,))
+    conn.commit()
+    conn.close()
+
+def _delete_outbox_message(message_id):
+    if not os.path.exists(OUTBOX_DB):
+        return
+    conn = sqlite3.connect(OUTBOX_DB)
+    c = conn.cursor()
+    c.execute("DELETE FROM outbox WHERE id = ?", (message_id,))
+    conn.commit()
+    conn.close()
+
 def _save_outbox_message(text):
     os.makedirs(DB_DIR, exist_ok=True)
     conn = sqlite3.connect(OUTBOX_DB)
@@ -121,7 +139,7 @@ def _show_empty_state(ui, title, root_id, sub_index, message):
         if key == 14:
             return
 
-def _show_message_detail(ui, title, root_id, sub_index, message, sender=None, timestamp=None):
+def _show_message_detail(ui, title, root_id, sub_index, message, message_id=None, sender=None, timestamp=None):
     softkey = SoftKeyBar(ui)
     header = HeaderWidget(ui, root_id)
 
@@ -151,53 +169,94 @@ def _show_message_detail(ui, title, root_id, sub_index, message, sender=None, ti
             ui.draw.text((10, y), line, font=ui.font_n, fill="white")
             y += 22
 
-        softkey.update("Back", present=False)
+        softkey.update("Options", present=False)
         ui.fb.update(ui.canvas)
 
         key = ui.wait_for_key()
         if key == 14:
             return
+        if key in (28, 96):
+            if title == "Inbox":
+                options = VerticalList(ui, "Options", ["Just Erase for now"], app_id=root_id)
+                selection = options.show()
+                if selection == 0 and message_id is not None:
+                    _delete_inbox_message(message_id)
+                    MessageDialog(ui, "Erased!").show()
+                    return "deleted"
+            elif title == "Outbox":
+                options = VerticalList(ui, "Options", ["Erase", "Send"], app_id=root_id)
+                selection = options.show()
+                if selection == 0 and message_id is not None:
+                    _delete_outbox_message(message_id)
+                    MessageDialog(ui, "Erased!").show()
+                    return "deleted"
+                if selection == 1:
+                    MessageDialog(
+                        ui,
+                        "This feature requires Telephony. Will hopefully be functional by M3",
+                    ).show()
 
 def _show_inbox(ui, root_id, sub_index):
-    messages = _fetch_inbox_messages()
-    if not messages:
-        _show_empty_state(ui, "Inbox", f"{root_id}-{sub_index}", None, "No Messages")
-        return
-
-    list_items = [
-        f"{sender}" if is_read else f"* {sender}"
-        for _, message, sender, _, is_read in messages
-    ]
-    header_root = f"{root_id}-{sub_index}"
-    v_list = VerticalList(ui, "Inbox", list_items, app_id=header_root)
-    softkey = SoftKeyBar(ui)
-
     while True:
+        messages = _fetch_inbox_messages()
+        if not messages:
+            _show_empty_state(ui, "Inbox", f"{root_id}-{sub_index}", None, "No Messages")
+            return
+
+        list_items = [
+            f"{sender}" if is_read else f"* {sender}"
+            for _, message, sender, _, is_read in messages
+        ]
+        header_root = f"{root_id}-{sub_index}"
+        v_list = VerticalList(ui, "Inbox", list_items, app_id=header_root)
+        softkey = SoftKeyBar(ui)
+
         softkey.update("Open", present=False)
         selection_index = v_list.show()
         if selection_index == -1:
             return
-        _, message, sender, timestamp, _ = messages[selection_index]
-        _show_message_detail(ui, "Inbox", header_root, selection_index + 1, message, sender, timestamp)
+        message_id, message, sender, timestamp, _ = messages[selection_index]
+        result = _show_message_detail(
+            ui,
+            "Inbox",
+            header_root,
+            selection_index + 1,
+            message,
+            message_id=message_id,
+            sender=sender,
+            timestamp=timestamp,
+        )
+        if result == "deleted":
+            continue
 
 def _show_outbox(ui, root_id, sub_index):
-    messages = _fetch_outbox_messages()
-    if not messages:
-        _show_empty_state(ui, "Outbox", f"{root_id}-{sub_index}", None, "No Messages")
-        return
-
-    list_items = [message for _, message, _ in messages]
-    header_root = f"{root_id}-{sub_index}"
-    v_list = VerticalList(ui, "Outbox", list_items, app_id=header_root)
-    softkey = SoftKeyBar(ui)
-
     while True:
+        messages = _fetch_outbox_messages()
+        if not messages:
+            _show_empty_state(ui, "Outbox", f"{root_id}-{sub_index}", None, "No Messages")
+            return
+
+        list_items = [message for _, message, _ in messages]
+        header_root = f"{root_id}-{sub_index}"
+        v_list = VerticalList(ui, "Outbox", list_items, app_id=header_root)
+        softkey = SoftKeyBar(ui)
+
         softkey.update("Open", present=False)
         selection_index = v_list.show()
         if selection_index == -1:
             return
-        _, message, timestamp = messages[selection_index]
-        _show_message_detail(ui, "Outbox", header_root, selection_index + 1, message, None, timestamp)
+        message_id, message, timestamp = messages[selection_index]
+        result = _show_message_detail(
+            ui,
+            "Outbox",
+            header_root,
+            selection_index + 1,
+            message,
+            message_id=message_id,
+            timestamp=timestamp,
+        )
+        if result == "deleted":
+            continue
 
 def _show_write_message(ui, root_id, sub_index):
     softkey = SoftKeyBar(ui)
