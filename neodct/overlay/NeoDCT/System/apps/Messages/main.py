@@ -140,14 +140,15 @@ def _show_message_detail(ui, title, root_id, sub_index, message, sender=None, ti
 def _show_inbox(ui, root_id, sub_index):
     messages = _fetch_inbox_messages()
     if not messages:
-        _show_empty_state(ui, "Inbox", root_id, sub_index, "No Messages")
+        _show_empty_state(ui, "Inbox", f"{root_id}-{sub_index}", None, "No Messages")
         return
 
     list_items = [
         f"{sender}" if is_read else f"* {sender}"
         for _, message, sender, _, is_read in messages
     ]
-    v_list = VerticalList(ui, "Inbox", list_items, app_id=root_id)
+    header_root = f"{root_id}-{sub_index}"
+    v_list = VerticalList(ui, "Inbox", list_items, app_id=header_root)
     softkey = SoftKeyBar(ui)
 
     while True:
@@ -156,16 +157,17 @@ def _show_inbox(ui, root_id, sub_index):
         if selection_index == -1:
             return
         _, message, sender, timestamp, _ = messages[selection_index]
-        _show_message_detail(ui, "Inbox", root_id, sub_index, message, sender, timestamp)
+        _show_message_detail(ui, "Inbox", header_root, selection_index + 1, message, sender, timestamp)
 
 def _show_outbox(ui, root_id, sub_index):
     messages = _fetch_outbox_messages()
     if not messages:
-        _show_empty_state(ui, "Outbox", root_id, sub_index, "No Messages")
+        _show_empty_state(ui, "Outbox", f"{root_id}-{sub_index}", None, "No Messages")
         return
 
     list_items = [message for _, message, _ in messages]
-    v_list = VerticalList(ui, "Outbox", list_items, app_id=root_id)
+    header_root = f"{root_id}-{sub_index}"
+    v_list = VerticalList(ui, "Outbox", list_items, app_id=header_root)
     softkey = SoftKeyBar(ui)
 
     while True:
@@ -174,7 +176,7 @@ def _show_outbox(ui, root_id, sub_index):
         if selection_index == -1:
             return
         _, message, timestamp = messages[selection_index]
-        _show_message_detail(ui, "Outbox", root_id, sub_index, message, None, timestamp)
+        _show_message_detail(ui, "Outbox", header_root, selection_index + 1, message, None, timestamp)
 
 def run(ui):
     menu = PagedList(

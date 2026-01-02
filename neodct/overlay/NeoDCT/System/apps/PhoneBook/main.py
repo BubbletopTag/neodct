@@ -36,16 +36,18 @@ def run(ui):
             
             if query:
                 # 2. Show Filtered List
-                target = contact_manager.show_contact_selector(
+                result = contact_manager.show_contact_selector(
                     ui, 
                     title="Results", 
                     btn_text="Options",  # <--- Changed per request!
-                    search_query=query
+                    search_query=query,
+                    header_root="1-1",
                 )
                 
-                if target:
+                if result:
+                    target, selection_index = result
                     # 3. Open the specific Options Menu for this contact
-                    run_contact_options(ui, target)
+                    run_contact_options(ui, target, f"1-1-{selection_index + 1}")
 
         # --- ADD ENTRY ---
         elif selection == 1: 
@@ -54,14 +56,18 @@ def run(ui):
         # --- EDIT ---
         elif selection == 2:
             # Select from FULL list, then edit
-            target = contact_manager.show_contact_selector(ui, title="Edit", btn_text="Edit")
-            if target: edit_contact_action(ui, target)
+            result = contact_manager.show_contact_selector(ui, title="Edit", btn_text="Edit", header_root="1-3")
+            if result:
+                target, _ = result
+                edit_contact_action(ui, target)
             
         # --- ERASE ---
         elif selection == 3:
             # Select from FULL list, then delete
-            target = contact_manager.show_contact_selector(ui, title="Erase", btn_text="Erase")
-            if target: delete_contact_action(ui, target)
+            result = contact_manager.show_contact_selector(ui, title="Erase", btn_text="Erase", header_root="1-4")
+            if result:
+                target, _ = result
+                delete_contact_action(ui, target)
             
         # --- OPTIONS ---
         elif selection == 5:
@@ -137,13 +143,13 @@ def delete_contact_action(ui, contact):
 
 # --- SUBMENUS ---
 
-def run_contact_options(ui, contact):
+def run_contact_options(ui, contact, header_root):
     """ The submenu that appears after finding a contact in Search """
     # contact is tuple: (id, name, number, speed_dial)
     items = ["Call", "Edit", "Delete", "Send number"]
     
     # We use a sub-ID like 1-9 to show depth
-    options_list = VerticalList(ui, contact[1], items, app_id="1-0") 
+    options_list = VerticalList(ui, contact[1], items, app_id=header_root)
     softkey = SoftKeyBar(ui)
     
     while True:

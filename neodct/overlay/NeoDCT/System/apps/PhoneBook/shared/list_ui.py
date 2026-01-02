@@ -29,7 +29,7 @@ def get_all_contacts(search_query=None):
     conn.close()
     return data
 
-def show_contact_selector(ui, title="Contacts", btn_text="Select", search_query=None):
+def show_contact_selector(ui, title="Contacts", btn_text="Select", search_query=None, header_root="1"):
     """ 
     Displays the list and returns the selected contact Tuple.
     search_query: Optional string to filter the list.
@@ -55,8 +55,7 @@ def show_contact_selector(ui, title="Contacts", btn_text="Select", search_query=
     contact_names = [row[1] for row in contacts]
     
     # 4. Show List
-    # We use app_id=1 so the header is consistent
-    v_list = VerticalList(ui, title, contact_names, app_id=1)
+    v_list = VerticalList(ui, title, contact_names, app_id=header_root)
     softkey = SoftKeyBar(ui)
     
     while True:
@@ -67,4 +66,4 @@ def show_contact_selector(ui, title="Contacts", btn_text="Select", search_query=
         if selection_index == -1:
             return None # Back pressed
             
-        return contacts[selection_index]
+        return contacts[selection_index], selection_index
