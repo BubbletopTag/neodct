@@ -144,7 +144,7 @@ def _show_inbox(ui, root_id, sub_index):
         return
 
     list_items = [
-        f"{sender}: {message}" if is_read else f"* {sender}: {message}"
+        f"{sender}" if is_read else f"* {sender}"
         for _, message, sender, _, is_read in messages
     ]
     v_list = VerticalList(ui, "Inbox", list_items, app_id=root_id)
