@@ -364,6 +364,164 @@ class TextInput:
                 self.draw(cursor_on)
 
 """
+
+TextInputLong is a long-form text entry widget for composing messages and notes.
+
+"""
+class TextInputLong:
+    def __init__(self, ui, title, initial_text="", on_empty_backspace=None):
+        self.ui = ui
+        self.title = title
+        self.text = initial_text or ""
+        self.cursor = len(self.text)
+        self.on_empty_backspace = on_empty_backspace
+        self.font = getattr(ui, "font_s", None) or ui.font_n
+        self.text_area_top = 45
+        self.text_area_bottom = 210
+        self._last_backspace_time = 0.0
+        self._backspace_hold_start = None
+        self._backspace_repeat_count = 0
+        self._backspace_hold_gap = 0.18
+        self._backspace_hold_duration = 0.8
+        self._backspace_hold_repeats = 8
+
+        # Development Key Map (PC Keyboard -> Char)
+        self.DEV_KEYMAP = {
+            2: "1", 3: "2", 4: "3", 5: "4", 6: "5",
+            7: "6", 8: "7", 9: "8", 10: "9", 11: "0",
+            # QWERTY
+            16: "q", 17: "w", 18: "e", 19: "r", 20: "t", 21: "y", 22: "u", 23: "i", 24: "o", 25: "p",
+            30: "a", 31: "s", 32: "d", 33: "f", 34: "g", 35: "h", 36: "j", 37: "k", 38: "l",
+            44: "z", 45: "x", 46: "c", 47: "v", 48: "b", 49: "n", 50: "m",
+            57: " ", 52: ".", 51: ",", 12: "-"
+        }
+
+    def get_text(self):
+        return self.text
+
+    def set_text(self, text):
+        self.text = text or ""
+        self.cursor = len(self.text)
+
+    def clear_text(self):
+        self.text = ""
+        self.cursor = 0
+
+    def set_on_empty_backspace(self, callback):
+        self.on_empty_backspace = callback
+
+    def _wrap_text(self, text, max_w):
+        def text_w(s):
+            return self.ui.get_text_size(s, self.font)[0]
+
+        def break_long_word(word):
+            out = []
+            cur = ""
+            for ch in word:
+                nxt = cur + ch
+                if cur and text_w(nxt) > max_w:
+                    out.append(cur)
+                    cur = ch
+                else:
+                    cur = nxt
+            if cur:
+                out.append(cur)
+            return out or [word]
+
+        lines = []
+        for raw in (text or "").splitlines() or [""]:
+            words = raw.split(" ")
+            cur = ""
+            for w in words:
+                if w == "":
+                    continue
+                if text_w(w) > max_w:
+                    if cur:
+                        lines.append(cur)
+                        cur = ""
+                    lines.extend(break_long_word(w))
+                    continue
+
+                cand = w if not cur else (cur + " " + w)
+                if text_w(cand) <= max_w:
+                    cur = cand
+                else:
+                    if cur:
+                        lines.append(cur)
+                    cur = w
+            lines.append(cur)
+
+        if not lines:
+            return [""]
+        return lines
+
+    def _current_lines(self, blink_state):
+        cursor_marker = "_" if blink_state else ""
+        display_text = self.text + cursor_marker
+        return self._wrap_text(display_text, 220)
+
+    def draw(self, blink_state=True):
+        self.ui.draw.rectangle((0, 0, 240, 210), fill="black")
+
+        # Header
+        self.ui.draw.text((5, 5), self.title, font=self.ui.font_xl, fill="white")
+        char_count = str(len(self.text))
+        w, _ = self.ui.get_text_size(char_count, self.ui.font_n)
+        self.ui.draw.text((235 - w, 5), char_count, font=self.ui.font_n, fill="white")
+        self.ui.draw.line((0, 35, 240, 35), fill="white")
+
+        lines = self._current_lines(blink_state)
+        _, line_h = self.ui.get_text_size("Ag", self.font)
+        line_h += 3
+        max_lines = max(1, int((self.text_area_bottom - self.text_area_top) / line_h))
+        start = max(0, len(lines) - max_lines)
+
+        y = self.text_area_top
+        for line in lines[start:start + max_lines]:
+            self.ui.draw.text((10, y), line, font=self.font, fill="white")
+            y += line_h
+
+        self.ui.fb.update(self.ui.canvas)
+
+    def handle_key(self, key):
+        if key == 14:
+            now = time.time()
+            if len(self.text) == 0:
+                if callable(self.on_empty_backspace):
+                    self.on_empty_backspace()
+                return "empty_backspace"
+            gap = now - self._last_backspace_time
+            if gap > self._backspace_hold_gap:
+                self._backspace_hold_start = now
+                self._backspace_repeat_count = 1
+            else:
+                self._backspace_repeat_count += 1
+                if self._backspace_hold_start and (now - self._backspace_hold_start) >= self._backspace_hold_duration:
+                    if self._backspace_repeat_count >= self._backspace_hold_repeats:
+                        self.clear_text()
+                        self._backspace_hold_start = None
+                        self._backspace_repeat_count = 0
+                        self._last_backspace_time = now
+                        return "cleared"
+            if self.cursor > 0:
+                self.text = self.text[:self.cursor - 1] + self.text[self.cursor:]
+                self.cursor = max(0, self.cursor - 1)
+            self._last_backspace_time = now
+            return "backspace"
+
+        if key in self.DEV_KEYMAP:
+            self._backspace_hold_start = None
+            self._backspace_repeat_count = 0
+            char = self.DEV_KEYMAP[key]
+            if len(self.text) == 0:
+                char = char.upper()
+            self.text = self.text[:self.cursor] + char + self.text[self.cursor:]
+            self.cursor += 1
+            return "typed"
+
+        return None
+
+"""
 MessageDialog is a simple full-screen modal used for notices/warnings.
 
 Rules:
