@@ -74,7 +74,7 @@ neodct/tools/run_qemu.sh        # do NOT use NEODCT_SNAPSHOT here
 `NEODCT_SNAPSHOT=1` discards all writes on exit, so the staged update
 disappears and the install silently appears to do nothing.
 
-On the phone: **System Update** (app 12) → it finds `UPDATE.ndsw` → one page
+On the phone: **Update** (app 12) → it finds `UPDATE.ndsw` → one page
 showing the release picture, version, size, build date, whether it is signed
 and the release notes (**up/down** scrolls the notes) → **Install** → one
 progress screen that backs up contacts and messages to the card and then
@@ -92,7 +92,7 @@ console as it verifies and writes the image, then boots into it.
 - Settings → About shows the new version (this comes from
   `/NeoDCT/System/version.prop` inside the new image, so if it changed, the
   new rootfs really is what booted).
-- Opening System Update again reports **Updated / NeoDCT 0.3.1a** once, then
+- Opening Update again reports **Updated / NeoDCT 0.3.1a** once, then
   forgets it.
 - On the serial console: `[ndsys] installed 0.3.1a`.
 - Full history: `/NeoDCT/User/logs/update.log`.

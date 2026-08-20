@@ -1,4 +1,4 @@
-"""A phone with a card in it, for looking at the System Update screens.
+"""A phone with a card in it, for looking at the Update screens.
 
 The update flow is the one part of the UI that cannot be screenshotted by
 hand: every screen needs an SD card, a package on it, and a release key the
@@ -31,7 +31,7 @@ from System.core.UpdateService import staging  # noqa: E402
 
 from update_fixtures import PUB_PEM, make_ndsw, png  # noqa: E402
 
-APP_NAME = "System Update"
+APP_NAME = "Update"
 PLATFORM = "qemu-aarch64"
 INSTALLED_VERSION = "0.3.1a"
 
@@ -124,7 +124,7 @@ class Phone:
     # --- driving it -------------------------------------------------------
 
     def run(self, keys=(), frame_budget=240):
-        """Launch System Update exactly as the launcher would."""
+        """Launch Update exactly as the launcher would."""
         return run_app(self.ui, APP_NAME, keys=keys, frame_budget=frame_budget)
 
     @property

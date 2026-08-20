@@ -1,6 +1,6 @@
 {
-    "name": "Update",
-    "id": "12",
+    "name": "Power",
+    "id": "13",
     "icon": "icon.png",
     "exec": "main.py"
 }

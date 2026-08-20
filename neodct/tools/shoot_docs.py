@@ -84,7 +84,7 @@ def shoot_app_selector(out):
 
         by_name = {app["name"]: i for i, app in enumerate(ui.apps)}
         wanted = ["Phone book", "Messages", "Games", "Settings",
-                  "Calculator", "Koki Mobile", "Browser", "MusicPlayer"]
+                  "Calculator", "Koki Mobile", "Browser", "Music"]
         for name in wanted:
             if name not in by_name:
                 continue
@@ -111,8 +111,7 @@ def shoot_stock_apps(out):
         ("Calculator", [DIGIT[7], ENTER], "app-calculator-options", -1, 240),
         ("Clock", [], "app-clock", -1, 240),
         ("Tones", [], "app-tones", -1, 240),
-        ("MusicPlayer", [], "app-musicplayer", -1, 240),
-        ("Forwarding", [], "app-forwarding", -1, 240),
+        ("Music", [], "app-musicplayer", -1, 240),
         # Koki is a real-time game: it never polls read_keypress, so the
         # frame budget is what ends it. ~60 frames reaches the title card.
         ("Koki Mobile", [], "app-koki", -1, 400),

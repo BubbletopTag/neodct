@@ -1,4 +1,4 @@
-"""System Update: install an UPDATE.ndsw from the SD card.
+"""Update: install an UPDATE.ndsw from the SD card.
 
 The app never writes the system partition itself -- it cannot, the rootfs is
 a mounted read-only squashfs. It verifies a package, copies the image to the
@@ -53,7 +53,7 @@ NO_CARD_HELP = (
     "Format a card as FAT32, make a folder called \"update\" on it and copy "
     "UPDATE.ndsw into that folder.\n"
     "\n"
-    "Put the card in the phone and open System Update again."
+    "Put the card in the phone and open Update again."
 )
 
 NOT_READY_HELP = (

@@ -1,5 +1,18 @@
 # NeoDCT OS Changelog
 
+0.3.2a
+Added
+- Power app: switch off, restart, or restart into recovery.
+- The browser takes the keypad: 2/4/6/8 move the cursor, 5 follows a link,
+  and # reaches text entry for a web address.
+
+Changed
+- "MusicPlayer" is now "Music" and "System Update" is now "Update".
+- New Browser and Update icons, drawn to match the rest of the set.
+
+Removed
+- Call forwarding, which was never implemented.
+
 0.3.1a
 Added
 - Software update page: the release picture, version, size, build date and
