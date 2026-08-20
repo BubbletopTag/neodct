@@ -59,6 +59,10 @@ fi
 panic() {
     log "FATAL: $*"
     log "dropping to a rescue shell; the system partition may need reflashing"
+    # Put the sad face up if the panel helpers are available. Without this a
+    # phone that panics before switch_root shows nothing at all -- the rescue
+    # shell is on the console, which is a serial cable the owner may not have.
+    command -v panel_start > /dev/null 2>&1 && panel_start
     exec /bin/sh
 }
 

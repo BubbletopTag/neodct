@@ -206,3 +206,136 @@ def test_the_aliases_survive_into_the_archive(tmp_path):
                            capture_output=True, check=True).stdout.decode().split()
     assert "lib64" in names
     assert "usr/lib64" in names
+
+
+# --- recovery panel: the ST7789 daemon and the splash ---
+
+def _bmp24(width, height, pixels, bottom_up=True):
+    """Smallest legal 24-bit BMP. pixels is [(r,g,b), ...] in top-down order."""
+    stride = (width * 3 + 3) & ~3
+    rows = []
+    for y in range(height):
+        source_y = (height - 1 - y) if bottom_up else y
+        row = bytearray()
+        for x in range(width):
+            r, g, b = pixels[source_y * width + x]
+            row += bytes((b, g, r))
+        row += b"\x00" * (stride - width * 3)
+        rows.append(bytes(row))
+    body = b"".join(rows)
+    offset = 54
+    header = b"BM" + (offset + len(body)).to_bytes(4, "little") + b"\x00" * 4
+    header += offset.to_bytes(4, "little")
+    header += (40).to_bytes(4, "little")
+    header += width.to_bytes(4, "little", signed=True)
+    header += (height if bottom_up else -height).to_bytes(4, "little", signed=True)
+    header += (1).to_bytes(2, "little") + (24).to_bytes(2, "little")
+    header += b"\x00" * 24
+    return header + body
+
+
+def test_the_splash_is_converted_to_the_byte_order_the_daemon_reads(tmp_path):
+    """neodctDisplay.c reads 32bpp as XRGB8888 -- bytes B,G,R,X. Getting
+    this backwards is a red/blue swap nobody notices until hardware."""
+    bmp = tmp_path / "sad.bmp"
+    bmp.write_bytes(_bmp24(2, 1, [(255, 0, 0), (0, 0, 255)]))
+
+    raw = mkinitramfs.bmp_to_xrgb8888(bmp, 2, 1)
+
+    assert raw[0:4] == bytes((0, 0, 255, 0))    # red  -> B=0 G=0 R=255
+    assert raw[4:8] == bytes((255, 0, 0, 0))    # blue -> B=255 G=0 R=0
+
+
+def test_the_splash_is_emitted_top_down_whichever_way_the_bmp_stores_it(tmp_path):
+    """BMP is bottom-up by default; a framebuffer is not. A flipped sad
+    face is the kind of thing that only shows up on the phone."""
+    top, bottom = (255, 255, 255), (0, 0, 0)
+    pixels = [top, bottom]
+
+    up_path = tmp_path / "up.bmp"
+    down_path = tmp_path / "down.bmp"
+    up_path.write_bytes(_bmp24(1, 2, pixels, bottom_up=True))
+    down_path.write_bytes(_bmp24(1, 2, pixels, bottom_up=False))
+
+    up = mkinitramfs.bmp_to_xrgb8888(up_path, 1, 2)
+    down = mkinitramfs.bmp_to_xrgb8888(down_path, 1, 2)
+
+    assert up == down
+    assert up[0:3] == bytes((255, 255, 255))
+
+
+def test_a_splash_of_the_wrong_size_fails_the_build(tmp_path):
+    bmp = tmp_path / "sad.bmp"
+    bmp.write_bytes(_bmp24(2, 2, [(0, 0, 0)] * 4))
+
+    with pytest.raises(ValueError, match="expected"):
+        mkinitramfs.bmp_to_xrgb8888(bmp, 240, 175)
+
+
+def _panel_tree(tmp_path, daemon_source):
+    fake_target = tmp_path / "target"
+    (fake_target / "bin").mkdir(parents=True)
+    (fake_target / "usr" / "sbin").mkdir(parents=True)
+    (fake_target / "usr" / "lib").mkdir(parents=True)
+    shutil.copy(HOST_BINARY, fake_target / "bin" / "busybox")
+    shutil.copy(HOST_BINARY, fake_target / "usr" / "sbin" / "dmsetup")
+    panel = fake_target / mkinitramfs.PANEL_DAEMON
+    panel.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(daemon_source, panel)
+    for source in mkinitramfs.resolve_libs([HOST_BINARY], HOST_LIB_DIRS).values():
+        shutil.copy(source, fake_target / "usr" / "lib" / os.path.basename(source))
+    return fake_target
+
+
+def _names_in(out):
+    raw = subprocess.run(["gzip", "-dc", str(out)], capture_output=True,
+                         check=True).stdout
+    listing = subprocess.run(["cpio", "-it", "--quiet"], input=raw,
+                             capture_output=True, check=True)
+    return listing.stdout.decode().split()
+
+
+def test_the_panel_daemon_ships_when_it_matches_the_target(tmp_path):
+    fake_target = _panel_tree(tmp_path, HOST_BINARY)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "out.gz"
+
+    mkinitramfs.build(fake_target, init, out)
+
+    assert "bin/neodct_displayd" in _names_in(out)
+
+
+def test_a_daemon_of_another_architecture_is_left_out(tmp_path):
+    """The daemon is a prebuilt ARM binary carried in the overlay, so it is
+    present in the aarch64 QEMU tree too -- where shipping it would put an
+    unrunnable binary in the image."""
+    alien = tmp_path / "alien"
+    data = bytearray(open(HOST_BINARY, "rb").read(64))
+    data[18:20] = (0x28).to_bytes(2, "little")      # EM_ARM
+    alien.write_bytes(bytes(data))
+    fake_target = _panel_tree(tmp_path, alien)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "out.gz"
+
+    mkinitramfs.build(fake_target, init, out)
+
+    assert "bin/neodct_displayd" not in _names_in(out)
+
+
+def test_the_splash_lands_in_the_image_but_the_bitmap_does_not(tmp_path):
+    fake_target = _panel_tree(tmp_path, HOST_BINARY)
+    init_dir = tmp_path / "initdir"
+    (init_dir / "splash").mkdir(parents=True)
+    (init_dir / "init").write_text("#!/bin/sh\n")
+    (init_dir / "splash" / "sadface.bmp").write_bytes(
+        _bmp24(mkinitramfs.SPLASH_W, mkinitramfs.SPLASH_H,
+               [(0, 0, 0)] * (mkinitramfs.SPLASH_W * mkinitramfs.SPLASH_H)))
+    out = tmp_path / "out.gz"
+
+    mkinitramfs.build(fake_target, init_dir, out)
+
+    names = _names_in(out)
+    assert "splash.raw" in names
+    assert not any(n.endswith(".bmp") for n in names), names

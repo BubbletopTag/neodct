@@ -28,3 +28,41 @@ virtual framebuffer (vfb) to it. Proven working.
   on this board.
 - Flash rootfs only, without touching boot partition:
   sudo ./upgrade_tool di -rootfs rootfs.ubifs
+## Flashing a NeoDCT rootfs
+
+The SDK flashes whatever is in `luckfox-pico/output/image/`. NeoDCT's own
+Buildroot produces the UBI image; the link between them is a copy:
+
+```sh
+# 1. build the luckfox rootfs (build-luckfox/ is stale -- it points at a
+#    /home/bubbles/Documents path that no longer exists; use a fresh O=)
+make -C buildroot O=../build-lf \
+  BR2_DEFCONFIG=../neodct/configs/luckfox_pico_mini_defconfig defconfig
+make -C buildroot O=../build-lf
+
+# 2. hand it to the SDK
+cp ../build-lf/images/rootfs.ubi ../luckfox-pico/output/image/rootfs.img
+
+# 3. flash just that partition (device in maskrom/loader mode)
+cd ../luckfox-pico && sudo ./rkflash.sh rootfs
+```
+
+`rkflash.sh` with no argument flashes everything (loader, uboot, boot, oem,
+userdata, rootfs) and will wipe user data. `rkflash.sh rootfs` is the one to
+use day to day. `sudo ./upgrade_tool di -rootfs rootfs.ubifs` is the
+lower-level equivalent.
+
+## Kernel cmdline lives in the U-Boot env, not the DTS
+
+`output/image/env.img` carries it, and the DTS `bootargs` node is ignored on
+this board:
+
+```
+sys_bootargs= ubi.mtd=6 root=ubi0:rootfs rootfstype=ubifs rk_dma_heap_cma=24M
+```
+
+`output/image/.env.txt` holds the matching `mtdparts=` line. Anything the
+initramfs reads off the cmdline goes here -- `neodct.rectty=/dev/console` to
+drive recovery over the serial console, and eventually `neodct.sys=`,
+`neodct.user=` and `neodct.verity=` when the immutable layout reaches
+hardware.

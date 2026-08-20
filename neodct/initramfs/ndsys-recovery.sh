@@ -28,6 +28,50 @@
 
 ESC=$(printf '\033')
 CR=$(printf '\r')
+
+# --- panel output ----------------------------------------------------------
+# The phone's /dev/fb0 is vfb: the framebuffer console draws the menu below
+# into it, but those pixels only reach the ST7789 if something mirrors them
+# over SPI. The running system starts neodct_displayd for that; inside the
+# initramfs it is ours to start -- and only once something has gone wrong.
+# An ordinary boot must not pay for the panel reset, and two daemons must
+# never drive the same SPI bus at once.
+#
+# Absent on QEMU and on any build whose daemon is the wrong architecture
+# (mkinitramfs.py ships it only when it matches), so every step is optional:
+# recovery still runs, just headless, which is what serial is for.
+: "${PANEL_DAEMON:=/bin/neodct_displayd}"
+: "${PANEL_SPLASH:=/splash.raw}"
+: "${PANEL_FB:=/dev/fb0}"
+: "${PANEL_SETTLE:=2}"
+: "${PANEL_SPLASH_HOLD:=2}"
+PANEL_PID=""
+
+panel_start() {
+    [ -z "$PANEL_PID" ] || return 0
+    [ -x "$PANEL_DAEMON" ] || return 1
+    [ -c "$PANEL_FB" ] || return 1
+
+    "$PANEL_DAEMON" > /dev/null 2>&1 &
+    PANEL_PID=$!
+    # It resets the panel and forces fb0 to 32bpp on startup; a splash
+    # written before that lands in whatever format vfb happened to have.
+    sleep "$PANEL_SETTLE"
+
+    if [ -r "$PANEL_SPLASH" ]; then
+        cat "$PANEL_SPLASH" > "$PANEL_FB" 2>/dev/null
+        # Hold the face on screen before the console draws the menu over it.
+        sleep "$PANEL_SPLASH_HOLD"
+    fi
+    return 0
+}
+
+panel_stop() {
+    [ -n "$PANEL_PID" ] || return 0
+    kill "$PANEL_PID" 2>/dev/null
+    PANEL_PID=""
+    return 0
+}
 # A literal newline: LF=$(printf '\n') would be the empty string, because
 # command substitution strips trailing newlines -- so the Enter-as-LF case
 # could never match and half the Enter presses were swallowed.
@@ -528,6 +572,9 @@ recovery_requested() {
 # Used by init in place of a bare rescue shell.
 recovery_or_panic() {
     log "$*"
+    # Bring the screen up first: on hardware this is the only thing that
+    # makes any of what follows visible, and it is also the sad face.
+    panel_start
     if [ -r /ndsys-recovery.sh ] || command -v recovery_main > /dev/null 2>&1; then
         recovery_main "$*"
     fi

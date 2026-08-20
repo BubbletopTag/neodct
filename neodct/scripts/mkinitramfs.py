@@ -58,6 +58,65 @@ def _read_exact(handle, offset, size):
     return data
 
 
+def elf_machine(path):
+    """(e_machine, is64, endian) for an ELF file.
+
+    The panel daemon is a prebuilt binary carried in the overlay, so it is
+    present in every target tree -- including ones it cannot run on. Ship it
+    only when it matches the architecture of the rest of the initramfs.
+    """
+    with open(str(path), "rb") as handle:
+        ident = handle.read(16)
+        if len(ident) < 16 or ident[:4] != b"\x7fELF":
+            raise ValueError("%s is not an ELF file" % path)
+        endian = "<" if ident[5] == 1 else ">"
+        machine = struct.unpack(endian + "H", _read_exact(handle, 18, 2))[0]
+        return machine, ident[4] == 2, endian
+
+
+def bmp_to_xrgb8888(path, width, height):
+    """Read an uncompressed 24-bit BMP into framebuffer bytes.
+
+    neodctDisplay.c force_mode() asks the fb for 32bpp and reads it as
+    XRGB8888 -- bytes B,G,R,X -- so that is what a blob written straight to
+    /dev/fb0 has to be. Rows are emitted top-down; BMP stores them bottom-up.
+
+    Deliberately hand-rolled rather than using Pillow: this runs on the build
+    host during `make`, where nothing guarantees PIL is installed.
+    """
+    with open(str(path), "rb") as handle:
+        data = handle.read()
+    if data[:2] != b"BM":
+        raise ValueError("%s is not a BMP" % path)
+    offset = struct.unpack_from("<I", data, 10)[0]
+    bmp_w, bmp_h = struct.unpack_from("<ii", data, 18)
+    bpp = struct.unpack_from("<H", data, 28)[0]
+    compression = struct.unpack_from("<I", data, 30)[0]
+    if bpp != 24 or compression != 0:
+        raise ValueError("%s: need an uncompressed 24-bit BMP (got %d bpp, "
+                         "compression %d)" % (path, bpp, compression))
+    flip = bmp_h > 0                      # positive height means bottom-up
+    bmp_h = abs(bmp_h)
+    if (bmp_w, bmp_h) != (width, height):
+        raise ValueError("%s is %dx%d, expected %dx%d"
+                         % (path, bmp_w, bmp_h, width, height))
+
+    stride = (bmp_w * 3 + 3) & ~3         # BMP rows pad to 4 bytes
+    out = bytearray(width * height * 4)
+    for y in range(height):
+        row = (height - 1 - y) if flip else y
+        start = offset + row * stride
+        dst = y * width * 4
+        for x in range(width):
+            b, g, r = data[start + x * 3: start + x * 3 + 3]
+            out[dst] = b
+            out[dst + 1] = g
+            out[dst + 2] = r
+            out[dst + 3] = 0
+            dst += 4
+    return bytes(out)
+
+
 def elf_needed(path):
     """(DT_NEEDED names, PT_INTERP) for an ELF file.
 
@@ -189,6 +248,19 @@ def resolve_libs(binaries, lib_dirs):
 DMSETUP_CANDIDATES = ("usr/sbin/dmsetup", "sbin/dmsetup",
                       "usr/bin/dmsetup", "bin/dmsetup")
 
+# Prebuilt ST7789 daemon carried in the overlay (not a buildroot package),
+# so its path in the target tree is the overlay's own.
+PANEL_DAEMON = "NeoDCT/System/hw/neodct_displayd"
+
+# The recovery splash. Kept in a subdirectory of the init dir because
+# everything that is a *file* there is copied verbatim into the cpio, and
+# the 126KB bitmap has no business being in the image -- only the converted
+# blob does.
+SPLASH_SOURCE = os.path.join("splash", "sadface.bmp")
+SPLASH_TARGET = "splash.raw"
+# Matches UI_W/UI_H and neodctDisplay.c FB_W/FB_H.
+SPLASH_W, SPLASH_H = 240, 175
+
 
 def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None):
     """Stage and pack the initramfs. Returns the output path."""
@@ -214,6 +286,25 @@ def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None):
             sys.exit("mkinitramfs: no dmsetup in %s (looked in %s) -- enable "
                      "BR2_PACKAGE_LVM2; dm-verity cannot work without it"
                      % (target_dir, ", ".join(DMSETUP_CANDIDATES)))
+
+        # The SPI panel daemon, so recovery is visible on hardware. The
+        # phone's fb0 is vfb: the framebuffer console draws the recovery
+        # menu into it, but the pixels only reach the ST7789 if something
+        # mirrors them. Optional -- it is a prebuilt binary carried in the
+        # overlay, so it is present even in target trees of another
+        # architecture, where it must not be shipped.
+        panel = os.path.join(target_dir, PANEL_DAEMON)
+        if os.path.exists(panel):
+            try:
+                if elf_machine(panel) == elf_machine(busybox):
+                    binaries["bin/neodct_displayd"] = panel
+                else:
+                    print("mkinitramfs: %s is a different architecture; "
+                          "recovery will have no panel output"
+                          % PANEL_DAEMON, file=sys.stderr)
+            except ValueError as exc:
+                print("mkinitramfs: %s unreadable (%s); skipping"
+                      % (PANEL_DAEMON, exc), file=sys.stderr)
     else:
         for relative in extra_binaries:
             source = os.path.join(target_dir, relative)
@@ -284,6 +375,17 @@ def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None):
                 shutil.copy2(source, os.path.join(staging, name))
         if not os.path.exists(os.path.join(staging, "init")):
             sys.exit("mkinitramfs: no init in %s" % init_script)
+        # Convert the splash to raw framebuffer bytes here rather than
+        # committing the blob: the bitmap stays the one source of truth,
+        # and a 2-colour image costs almost nothing once gzipped.
+        splash = os.path.join(init_script, SPLASH_SOURCE)
+        if os.path.exists(splash):
+            try:
+                pixels = bmp_to_xrgb8888(splash, SPLASH_W, SPLASH_H)
+            except (ValueError, OSError) as exc:
+                sys.exit("mkinitramfs: cannot convert %s: %s" % (splash, exc))
+            with open(os.path.join(staging, SPLASH_TARGET), "wb") as handle:
+                handle.write(pixels)
     else:
         shutil.copy2(init_script, os.path.join(staging, "init"))
     os.chmod(os.path.join(staging, "init"), 0o755)
