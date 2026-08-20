@@ -1,0 +1,19 @@
+# NeoDCT network interfaces.
+#
+# Replaces the file buildroot generates from BR2_SYSTEM_DHCP, which marked
+# eth0 "auto" with a 15 second wait-delay. The phone has no ethernet: the
+# Luckfox DTS disables gmac, and QEMU only gets a NIC when run_qemu.sh is
+# given NEODCT_NET=1. So every boot spent 15 seconds waiting for an
+# interface that would never appear, then failed:
+#
+#   Starting network: Waiting for interface eth0 to appear....... timeout!
+#
+# Data comes from the modem instead (S45modem brings up the qmi_wwan
+# interface), so nothing here should block boot.
+
+auto lo
+iface lo inet loopback
+
+# Deliberately not "auto": defined so `ifup eth0` works when a NIC really
+# is attached (NEODCT_NET=1 for browser testing), without boot waiting on it.
+iface eth0 inet dhcp

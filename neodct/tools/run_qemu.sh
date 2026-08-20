@@ -148,6 +148,18 @@ fi
 # --- networking (off by default, as in the modem test invocation) --------
 if [ -n "${NEODCT_NET:-}" ]; then
     set -- "$@" -netdev user,id=eth0 -device virtio-net-device,netdev=eth0
+else
+    # No NIC unless one was asked for. Without this QEMU still creates a
+    # default user-mode NIC, and the guest gets an eth0 with its own IPv6
+    # default route at the same metric as the modem's:
+    #
+    #   default via fe80::2                   dev eth0        metric 1024
+    #   default via fe80::e147:b5cd:41f5:a46f dev wwp0s2u2i5  metric 1024
+    #
+    # eth0 wins, and every packet the modem should carry goes to slirp
+    # instead. It also cost 15s a boot waiting for DHCP on a NIC that
+    # leads nowhere real.
+    set -- "$@" -nic none
 fi
 
 # --- virtiofs share as the card -----------------------------------------

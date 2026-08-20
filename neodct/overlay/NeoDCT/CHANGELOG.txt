@@ -1,5 +1,12 @@
 # NeoDCT OS Changelog
 
+0.3.4a
+Fixed
+- Mobile data now connects. The QMI dial dropped the carrier's session the
+  moment it finished setting it up, and only ever offered one APN.
+- The phone no longer waits fifteen seconds at every boot for an ethernet
+  port it does not have.
+
 0.3.3a
 Added
 - Boot logo on the phone's own screen, drawn from the initramfs before the

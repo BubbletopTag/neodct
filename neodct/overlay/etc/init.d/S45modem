@@ -259,10 +259,17 @@ try_uqmi() {   # $1 = apn
     UQMI_DEV=$(ls /dev/cdc-wdm* 2>/dev/null | head -1)
     [ -n "$UQMI_DEV" ] || return 1
     log "QMI fallback via $UQMI_DEV: start-network apn=$1"
-    OUT=$(uqmi -d "$UQMI_DEV" -t 15000 --start-network --apn "$1" --ip-family ipv6 2>&1 | head -2)
+    # --keep-client-id wds is not optional. uqmi releases its WDS client
+    # when it exits, and the network tears the session down with it -- the
+    # call reports a packet-data handle, then AT+CEER says "Regular
+    # deactivation" and --get-data-status says "disconnected" seconds
+    # later. Holding the client id keeps the bearer up after uqmi returns.
+    OUT=$(uqmi -d "$UQMI_DEV" -t 15000 --keep-client-id wds \
+              --start-network --apn "$1" --ip-family ipv6 2>&1 | head -2)
     case "$OUT" in
         *nknown\ option*|*sage:*)   # older uqmi without --ip-family
-            OUT=$(uqmi -d "$UQMI_DEV" -t 15000 --start-network --apn "$1" 2>&1 | head -2)
+            OUT=$(uqmi -d "$UQMI_DEV" -t 15000 --keep-client-id wds \
+                      --start-network --apn "$1" 2>&1 | head -2)
             ;;
     esac
     log "  uqmi: $(printf '%s' "$OUT" | tr '\n' ' ')"
@@ -289,6 +296,7 @@ try_uqmi() {   # $1 = apn
 # while attached) and weak RF gets a fresh start.
 dial_rounds() {
     round=1
+    QTRIED=""      # APNs the QMI path has already tried this run
     while [ "$round" -le "$MODEM_DIAL_ROUNDS" ]; do
         if [ "$round" -gt 1 ]; then
             log "dial round $round/$MODEM_DIAL_ROUNDS: re-attaching PS"
@@ -345,7 +353,16 @@ dial_rounds() {
                 fi
             done
         done
-        try_uqmi "$MODEM_APN" && return 0
+        # QMI walks the same APN list the AT path does, not just the
+        # built-in default. The APN that works here is the modem's own
+        # cid1 (CUR_APN, "tello.com" on this SIM) -- trying only
+        # $MODEM_APN ("wholesale") meant the QMI path never saw it.
+        for qapn in $CACHED_APN $CUR_APN $MODEM_APN $MODEM_APN_FALLBACKS; do
+            [ -n "$qapn" ] || continue
+            case " $QTRIED " in *" $qapn "*) continue ;; esac
+            QTRIED="$QTRIED $qapn"
+            try_uqmi "$qapn" && return 0
+        done
         round=$((round + 1))
         [ "$round" -le "$MODEM_DIAL_ROUNDS" ] && sleep "$MODEM_DIAL_RETRY_WAIT_S"
     done
