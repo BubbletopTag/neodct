@@ -140,3 +140,27 @@ sudo ./upgrade_tool di -rootfs rootfs.ubifs   # luckfox-pico/tools/linux/Linux_U
 The board has a working SD/MMC controller (`mmc1` binds on the running kernel,
 and an `SD_CARD` board config exists for the Mini), so SD is a genuine option
 for user storage — relevant given only 128 MB of NAND.
+
+## Releases
+
+Cutting a release is pushing a tag; `.github/workflows/release.yml` does the
+rest. Use the helper rather than tagging by hand:
+
+```sh
+neodct/tools/release.sh --dry-run    # what it would tag, and the notes
+neodct/tools/release.sh              # tag + push
+```
+
+The version is never typed in. It comes from `VERSION_ID` in
+`neodct/overlay/etc/os-release` -- the same field the image reports -- and the
+workflow **fails the release** if the tag disagrees with it. Release notes are
+the matching section of `neodct/overlay/NeoDCT/CHANGELOG.txt`, so a version
+with no changelog section is refused before it is tagged.
+
+Tags carry no leading `v` (`0.3.7a`); the workflow accepts the older `v0.1.5a`
+form too. Releases are marked pre-release, as every release so far has been.
+
+**No `.ndsw` is attached yet.** Building one means building the whole
+buildroot tree and needs the signing key, and publishing an unsigned package
+would be worse than publishing none -- the phone shows "BAD SIGNATURE! UPDATE
+MAY BE CORRUPT!!" to anyone who installs it. Attach one by hand for now.

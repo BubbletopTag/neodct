@@ -1,0 +1,90 @@
+name: Release
+
+# Cutting a release is pushing a tag. Everything else here is bookkeeping.
+#
+# No .ndsw is attached yet, deliberately. Building one means building the
+# whole buildroot tree, which takes far longer than a runner should hold
+# and needs the signing key -- and an unsigned package published as a
+# release would be worse than no package at all, because the phone would
+# show "BAD SIGNATURE! UPDATE MAY BE CORRUPT!!" to whoever installed it.
+# Attach one by hand for now; wiring the build in is a separate job.
+
+on:
+  push:
+    tags:
+      - '0.*'          # the recent convention: 0.3.7a, no leading v
+      - 'v0.*'         # older tags used v0.1.5a; accept both
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build a release for (must already exist)'
+        required: true
+
+permissions:
+  contents: write      # needed to create the release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Work out the version
+        id: version
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          # Strip a leading v so the tag can be matched against os-release,
+          # which never carries one.
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Check the tag matches the image it claims to be
+        run: |
+          VERSION_ID=$(sed -n 's/^VERSION_ID=//p' neodct/overlay/etc/os-release \
+                       | tr -d '"' | head -n1)
+          echo "tag says      : ${{ steps.version.outputs.version }}"
+          echo "os-release says: $VERSION_ID"
+          if [ "$VERSION_ID" != "${{ steps.version.outputs.version }}" ]; then
+            echo "::error::Tag ${{ steps.version.outputs.tag }} does not match" \
+                 "VERSION_ID=$VERSION_ID in neodct/overlay/etc/os-release." \
+                 "A release whose version disagrees with the image is worse" \
+                 "than no release: the phone reports os-release, not the tag."
+            exit 1
+          fi
+
+      - name: Pull the notes out of the changelog
+        id: notes
+        run: |
+          CHANGELOG=neodct/overlay/NeoDCT/CHANGELOG.txt
+          VERSION="${{ steps.version.outputs.version }}"
+          # The section for this version: from its heading to the next one.
+          awk -v v="$VERSION" '
+            $0 == v { grab = 1; next }
+            grab && /^[0-9]+\.[0-9]+\.[0-9]+[a-z]?$/ { exit }
+            grab { print }
+          ' "$CHANGELOG" | sed -e 's/[[:space:]]*$//' > notes.md
+          if [ ! -s notes.md ]; then
+            echo "No changelog section for $VERSION." > notes.md
+            echo "::warning::CHANGELOG.txt has no section headed $VERSION"
+          fi
+          echo "--- notes ---"; cat notes.md
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "Release $TAG exists; updating its notes."
+            gh release edit "$TAG" \
+              --title "NeoDCT OS $TAG" --notes-file notes.md
+          else
+            # Pre-release to match every release so far: this is alpha
+            # software and marking it stable would be a lie.
+            gh release create "$TAG" \
+              --title "NeoDCT OS $TAG" \
+              --notes-file notes.md \
+              --prerelease
+          fi
