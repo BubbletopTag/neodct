@@ -20,7 +20,7 @@ if _APP_DIR not in sys.path:
 
 from System.ui.framework import MessageDialog, SoftKeyBar, VerticalList
 
-APP_ID = 13
+APP_ID = 971
 
 # Must match staging.STATE_DIR and ndsys-recovery.sh RECOVERY_FLAG. Written
 # from the running system, read by the initramfs as /mnt/user/.ndsys.
