@@ -1,5 +1,15 @@
 # NeoDCT OS Changelog
 
+0.3.7a
+Added
+- The browser reports itself in purple, and says what it is doing: the
+  pages it opens, how much memory and processor it is using together, and
+  any security warnings about a site, in red.
+
+Changed
+- The startup picture now appears at the end of start-up, after the system
+  messages, rather than before them.
+
 0.3.6a
 Added
 - The serial log opens with the NeoDCT name and version, and every service

@@ -1,8 +1,11 @@
 #!/bin/sh
-# The first thing the serial log shows: a rule, the name and version in
-# figlet, another rule. S00 so it lands before any other service speaks --
-# everything after it is tagged and coloured, and this is the line you
-# scroll back to when you want to know where a boot started.
+# A rule, the name and version in figlet, another rule.
+#
+# S99, so it is the last thing the boot prints rather than the first. The
+# buildroot init messages ("Starting crond: OK" and friends) are the noisy
+# part and they come before it, so the banner reads as "that is the boot
+# done, here is what you are running" instead of scrolling away under the
+# services it was meant to introduce.
 #
 # The art is pre-rendered at build time into /etc/neodct-banner by
 # post-build-system-metadata.sh, from the same VERSION_ID the rest of the

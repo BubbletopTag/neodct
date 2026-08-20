@@ -45,6 +45,7 @@ TAG_COLOURS = {
     "FB":       123,  # pale cyan
     "KERNEL":  244,   # grey          -- background noise
     "sdcard":  180,
+    "Browser": 141,   # purple        -- netsurf and its noise
     "CRASH":   196,   # red           -- something broke
     "ERROR":   196,
     "FATAL":   196,
@@ -52,7 +53,7 @@ TAG_COLOURS = {
 
 # Apps get their own band so they read as a group.
 APP_TAGS = ("Koki", "Music", "CallLog", "Settings", "PB", "Tones", "Games",
-            "Browser", "Messages", "Clock", "Calculator", "Power")
+            "Messages", "Clock", "Calculator", "Power")
 
 ERROR_COLOUR = 196
 _ENABLED = False

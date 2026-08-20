@@ -7,6 +7,7 @@
 import os
 import select
 import subprocess
+import time
 
 HOME_PAGE = "file:///NeoDCT/System/apps/Browser/home.html"
 
@@ -52,6 +53,109 @@ def _dump_dmesg_tail(lines=15):
             _log_console(line.decode(errors="replace"))
     except Exception:
         pass
+
+
+# --- console logging ------------------------------------------------------
+# netsurf writes a lot to stderr: its own warnings, SSL failures, and the
+# periodic "neodct-mem:" RSS lines the NeoDCT build emits. That used to go
+# straight to /dev/console untagged, so on a 64MB phone the most useful
+# stream in the system was also the only one you could not tell apart from
+# kernel noise. Everything now goes through here: tagged [Browser], purple,
+# with the CPU figure the memory lines were missing.
+
+TAG = "Browser"
+
+# Substrings that mark a line as a failure rather than chatter. Kept broad
+# on purpose -- a missed error is worse than a line painted too brightly.
+_ERROR_HINTS = ("ssl", "tls", "certificate", "handshake", "verify",
+                "error", "failed", "cannot", "refused", "timed out",
+                "unable", "denied", "abort")
+
+
+def _paint(text, code, bold=False):
+    try:
+        from System.core import logstyle
+        return logstyle.paint(text, code, bold=bold)
+    except Exception:
+        return text
+
+
+def _tagged(body, code=141):
+    """One console line: a purple [Browser] and the text after it."""
+    return _paint("[" + TAG + "]", code, bold=True) + " " + body
+
+
+class _CpuSampler:
+    """Percent CPU for one pid, between calls.
+
+    Read from /proc/<pid>/stat rather than shelling out to top: netsurf is
+    the heaviest thing this phone runs and the sampler must not be part of
+    the problem.
+    """
+
+    def __init__(self, pid):
+        self.pid = pid
+        self._last = None
+
+    def percent(self):
+        try:
+            with open("/proc/%d/stat" % self.pid, "rb") as handle:
+                parts = handle.read().split()
+            # utime and stime are fields 14 and 15, after the comm field
+            # which may itself contain spaces -- index from the closing ")".
+            busy = int(parts[13]) + int(parts[14])
+            now = time.monotonic()
+        except (OSError, ValueError, IndexError):
+            return None
+        if self._last is None:
+            self._last = (busy, now)
+            return None
+        prev_busy, prev_now = self._last
+        self._last = (busy, now)
+        elapsed = now - prev_now
+        if elapsed <= 0:
+            return None
+        ticks = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
+        return 100.0 * (busy - prev_busy) / (ticks * elapsed)
+
+
+def _classify(line):
+    """(colour, body) for one line of netsurf stderr."""
+    low = line.lower()
+    if low.startswith("neodct-mem:"):
+        return 141, line          # the memory line, handled by the caller
+    if any(hint in low for hint in _ERROR_HINTS):
+        return 196, line          # red: SSL, certificates, anything failing
+    if "http://" in low or "https://" in low:
+        return 117, line          # pale blue: a navigation
+    return 141, line
+
+
+def _pump_browser_log(proc, console):
+    """Read netsurf's stderr to EOF, tagging every line on the way.
+
+    Runs in the foreground because the UI is blocked on the browser anyway,
+    and a thread here would outlive the process it is reading.
+    """
+    cpu = _CpuSampler(proc.pid)
+    for raw in iter(proc.stderr.readline, b""):
+        try:
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+        except Exception:
+            continue
+        if not line.strip():
+            continue
+        code, body = _classify(line)
+        if body.lower().startswith("neodct-mem:"):
+            # Fold CPU in beside the memory the browser already reports, so
+            # one line answers "is it thrashing or is it spinning?".
+            pct = cpu.percent()
+            if pct is not None:
+                body = "%s cpu=%.0f%%" % (body, pct)
+        try:
+            console.write(_tagged(body, code).encode() + b"\r\n")
+        except Exception:
+            return
 
 
 def _start_key_bridge(ui):
@@ -113,14 +217,22 @@ def run(ui):
             pass
 
         try:
-            proc = subprocess.run(
+            # stderr through a pipe rather than straight at the console, so
+            # every line can be tagged and the memory lines can pick up a
+            # CPU figure on the way past. Popen, not run(): the pipe has to
+            # be drained while netsurf is alive or it fills and blocks it.
+            proc = subprocess.Popen(
                 [browser, HOME_PAGE],
                 env=env,
-                check=False,
                 stdout=subprocess.DEVNULL,
-                stderr=stderr,
+                stderr=subprocess.PIPE,
             )
-            _log_console(_describe_exit(proc.returncode))
+            _log_console(_tagged("neodct-browser: started pid %d" % proc.pid))
+            if stderr is not subprocess.DEVNULL:
+                _pump_browser_log(proc, stderr)
+            proc.wait()
+            _log_console(_tagged(_describe_exit(proc.returncode),
+                                 196 if proc.returncode != 0 else 141))
             if proc.returncode < 0:
                 _dump_dmesg_tail()
         finally:
