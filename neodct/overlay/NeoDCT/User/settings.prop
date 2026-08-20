@@ -1,6 +1,0 @@
-# NeoDCT settings
-system.audio.ringtone=/NeoDCT/System/tones/Low.mp3
-system.ui.wallpaper=NONE
-system.os.versionnumber=0.3.0a
-system.os.versionname=NeoDCT System v0.3.0a
-system.hw.battery_i2c_bus=3

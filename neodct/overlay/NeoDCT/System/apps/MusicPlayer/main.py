@@ -17,7 +17,8 @@ import subprocess
 import signal
 import io
 from PIL import Image, ImageFile
-from System.ui.framework import VerticalList, SoftKeyBar
+from System.ui.framework import VerticalList, SoftKeyBar, MessageDialog, TextScroller
+from System.core import Storage
 
 # 1. Be tolerant of bad MP3 art
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -38,7 +39,20 @@ except ImportError:
     HAS_MINIAUDIO = False
     print("[Music] 'miniaudio' library not found. Falling back to mpv.")
 
-MUSIC_DIR = "/NeoDCT/User/music"
+# Music lives on the SD card, not in the image: a 50MB read-only rootfs is
+# no place for an album. Storage.folder() only answers once a NeoDCT card is
+# actually mounted, so scan_music simply finds nothing without one.
+MUSIC_FOLDER = "music"
+
+NO_CARD_HELP = (
+    "Music is played from an SD card.\n"
+    "\n"
+    "Format a card as FAT32, make a folder called \"music\" on it, and copy "
+    "your .mp3, .flac, .wav or .ogg files into it.\n"
+    "\n"
+    "Put the card in the phone and your music shows up here. The phone can "
+    "set a blank card up for you from Settings."
+)
 
 MPV_CMD = [
     "nice", "-n", "-10",
@@ -203,15 +217,16 @@ class MusicPlayer:
         self.playlist = []
         self.player = _pick_player()
 
-        if not os.path.exists(MUSIC_DIR):
-            try: os.makedirs(MUSIC_DIR)
-            except: pass
+    def music_dir(self):
+        """The card's music folder, or None when no card is mounted."""
+        return Storage.folder(MUSIC_FOLDER)
 
     def scan_music(self):
         self.playlist = []
         exts = self.player.EXTS if self.player else ()
-        if exts and os.path.exists(MUSIC_DIR):
-            for root, dirs, files in os.walk(MUSIC_DIR):
+        music_dir = self.music_dir()
+        if exts and music_dir and os.path.exists(music_dir):
+            for root, dirs, files in os.walk(music_dir):
                 for f in sorted(files):
                     if f.lower().endswith(exts):
                         full_path = os.path.join(root, f)
@@ -489,6 +504,12 @@ class MusicPlayer:
 
 def run(ui):
     app = MusicPlayer(ui)
+    if app.music_dir() is None:
+        # Say why there is nothing to play rather than showing an empty list.
+        MessageDialog(ui, "No SD card.\nMusic is played from a card.",
+                      button_text="More").show()
+        TextScroller(ui, NO_CARD_HELP).show()
+        return
     try:
         app.run()
     finally:

@@ -1,0 +1,274 @@
+#!/bin/sh
+# Mount a removable card at /NeoDCT/User/sdcard and publish what was found.
+#
+# Called three ways:
+#   neodct-sdcard scan            at boot, for a card already in the slot
+#   neodct-sdcard add DEVNAME     from the udev rule when one is inserted
+#   neodct-sdcard remove DEVNAME  from the udev rule when one is pulled
+#   neodct-sdcard format DEV      make a fresh NeoDCT card (destructive)
+#
+# The state file is what System/core/Storage reads, so the UI never has to
+# poke at block devices itself:
+#   state=mounted|unmountable|share|absent  device=  fstype=  label=
+#
+# A card is anything that is not the system or user-data partition -- those
+# two come from the kernel cmdline, so this works the same on QEMU virtio
+# and on a real SD slot.
+set -u
+
+MOUNT_POINT="${NEODCT_SDCARD_MOUNT:-/NeoDCT/User/sdcard}"
+STATE_DIR="${NEODCT_RUN_DIR:-/run/neodct}"
+# Overridable so the host test suite can feed these in.
+CMDLINE="${NEODCT_CMDLINE:-/proc/cmdline}"
+MOUNTS="${NEODCT_MOUNTS:-/proc/mounts}"
+# What the initramfs actually resolved, which beats the cmdline names.
+BOOT_STATE="${NEODCT_BOOT_STATE:-/NeoDCT/User/.ndsys/verity_state.prop}"
+STATE_FILE="$STATE_DIR/sdcard.prop"
+LABEL=NEODCT
+FOLDERS="wallpapers tones backup_db music update"
+
+log() { echo "[sdcard] $*" >&2; }
+
+write_state() {   # write_state STATE DEVICE FSTYPE LABEL
+    mkdir -p "$STATE_DIR" 2>/dev/null
+    cat > "$STATE_FILE.new" <<EOF
+state=$1
+device=$2
+fstype=$3
+label=$4
+EOF
+    mv -f "$STATE_FILE.new" "$STATE_FILE"
+}
+
+# Devices the phone runs from; never treat these as removable.
+#
+# The kernel cmdline is only a hint: virtio-mmio devices are not enumerated
+# in the order QEMU is handed them, and the first boot that got this wrong
+# tried to mount the system image as an SD card. So three sources are used --
+# what the initramfs recorded, the cmdline names, and the mount table -- plus
+# a content check for the squashfs itself, which is mounted through
+# /dev/mapper and so never appears in the mount table under its own name.
+system_devices() {
+    # What the initramfs resolved, if it left a record. This wins outright:
+    # the cmdline names are a hint, and a wrong hint here is worse than no
+    # hint at all -- neodct.sys=/dev/vda once named the SD card, so trusting
+    # it excluded the card and left no candidate to mount.
+    recorded=""
+    for key in sys_device user_device; do
+        value="$(sed -n "s/^$key=//p" "$BOOT_STATE" 2>/dev/null | head -n1)"
+        if [ -n "$value" ]; then
+            echo "$value"
+            recorded=1
+        fi
+    done
+    [ -n "$recorded" ] && return 0
+
+    # No record (older initramfs, or the user partition is not mounted yet):
+    # the names are all we have. The squashfs and mount-table checks in
+    # is_reserved_device() still guard against them being wrong.
+    for word in $(cat "$CMDLINE" 2>/dev/null); do
+        case "$word" in
+            neodct.sys=*)  echo "${word#neodct.sys=}" ;;
+            neodct.user=*) echo "${word#neodct.user=}" ;;
+        esac
+    done
+}
+
+# "hsqs" is the squashfs magic, and printable, so no od is needed.
+is_squashfs() {
+    [ -b "$1" ] || [ -f "$1" ] || return 1
+    [ "$(dd if="$1" bs=4 count=1 2>/dev/null)" = "hsqs" ]
+}
+
+is_mounted() {
+    cut -d' ' -f1 "$MOUNTS" 2>/dev/null | grep -qx "$1"
+}
+
+# True for anything that must never be touched as a removable card.
+is_reserved_device() {
+    is_system_device "$1" && return 0
+    is_squashfs "$1" && return 0
+    is_mounted "$1" && return 0
+    return 1
+}
+
+# Whole disk a device belongs to: /dev/mmcblk0p1 -> /dev/mmcblk0,
+# /dev/sda2 -> /dev/sda, /dev/vdc -> /dev/vdc.
+#
+# The two naming styles have to be handled separately: mmcblk and nvme names
+# end in a digit while still being whole disks, and their partitions are
+# suffixed "p<N>" rather than plain digits.
+parent_disk() {
+    name="$1"
+    case "$name" in
+        *mmcblk[0-9]p[0-9]*|*nvme[0-9]n[0-9]p[0-9]*|*loop[0-9]p[0-9]*)
+            echo "${name%p*}"
+            return
+            ;;
+        *mmcblk[0-9]|*nvme[0-9]n[0-9]|*loop[0-9])
+            echo "$name"
+            return
+            ;;
+    esac
+    # sda1 / vdc2 style: strip the trailing partition number.
+    while :; do
+        case "$name" in
+            *[0-9]) name="${name%?}" ;;
+            *) break ;;
+        esac
+    done
+    echo "$name"
+}
+
+# True for anything the phone is running from -- the named partitions and
+# any sibling partition on the same physical disk.
+is_system_device() {
+    mine="$(parent_disk "$1")"
+    for reserved in $(system_devices); do
+        [ "$1" = "$reserved" ] && return 0
+        [ "$mine" = "$(parent_disk "$reserved")" ] && return 0
+    done
+    return 1
+}
+
+fstype_of() {
+    blkid "$1" 2>/dev/null | sed -n 's/.*[[:space:]]TYPE="\([^"]*\)".*/\1/p' \
+        | head -n1
+}
+
+label_of() {
+    blkid "$1" 2>/dev/null | sed -n 's/.*[[:space:]]LABEL="\([^"]*\)".*/\1/p' \
+        | head -n1
+}
+
+# Candidate card devices: partitions first (a real card is usually
+# partitioned), then whole disks formatted as a superfloppy.
+candidates() {
+    for path in /dev/mmcblk*p[0-9] /dev/mmcblk[0-9] /dev/sd[a-z][0-9] \
+                /dev/sd[a-z] /dev/vd[a-z][0-9] /dev/vd[a-z]; do
+        [ -b "$path" ] || continue
+        is_reserved_device "$path" && continue
+        echo "$path"
+    done
+}
+
+# What the kernel says is mounted at a path, from the mount table.
+mounted_fstype() {
+    awk -v mnt="$1" '$2 == mnt {print $3; exit}' "$MOUNTS" 2>/dev/null
+}
+
+# Filesystems to try, in the order a card is likely to be. vfat first: that
+# is what a NeoDCT card is.
+CARD_FSTYPES="vfat exfat ext4 ext3 ext2"
+
+try_mount() {   # try_mount DEV
+    mkdir -p "$MOUNT_POINT" 2>/dev/null
+
+    # Ask the kernel, not blkid. busybox's blkid has far fewer filesystem
+    # probers than util-linux's and reported *nothing* for a plain mkfs.vfat
+    # card, so a perfectly good FAT32 image was announced as having "no
+    # filesystem we can read". Whether it mounts is the only question that
+    # matters, and mount answers it directly.
+    for fstype in $CARD_FSTYPES; do
+        case "$fstype" in
+            # utf8 keeps accented filenames intact; flush writes through, so
+            # pulling the card loses less. Both are FAT-only -- passing them
+            # to ext4 makes the mount fail.
+            vfat|msdos|exfat) options="rw,noatime,utf8,flush" ;;
+            *)                options="rw,noatime" ;;
+        esac
+        if mount -t "$fstype" -o "$options" "$1" "$MOUNT_POINT" 2>/dev/null; then
+            write_state mounted "$1" "$fstype" "$(label_of "$1")"
+            log "mounted $1 ($fstype) at $MOUNT_POINT"
+            return 0
+        fi
+    done
+
+    # Last resort: let the kernel pick from its own probe list.
+    if mount -o rw,noatime "$1" "$MOUNT_POINT" 2>/dev/null; then
+        fstype="$(mounted_fstype "$MOUNT_POINT")"
+        write_state mounted "$1" "${fstype:-unknown}" "$(label_of "$1")"
+        log "mounted $1 (${fstype:-unknown}) at $MOUNT_POINT"
+        return 0
+    fi
+
+    write_state unmountable "$1" "$(fstype_of "$1")" "$(label_of "$1")"
+    log "$1 has no filesystem we can mount"
+    return 1
+}
+
+mount_share() {
+    # QEMU convenience: a host folder exported over virtiofs. Tagged on the
+    # kernel cmdline by neodct/tools/run_qemu.sh.
+    for word in $(cat "$CMDLINE" 2>/dev/null); do
+        case "$word" in
+            neodct.sdshare=*)
+                tag="${word#neodct.sdshare=}"
+                mkdir -p "$MOUNT_POINT" 2>/dev/null
+                if mount -t virtiofs "$tag" "$MOUNT_POINT" 2>/dev/null; then
+                    write_state share "$tag" virtiofs ""
+                    log "mounted virtiofs share $tag at $MOUNT_POINT"
+                    return 0
+                fi
+                log "virtiofs share $tag failed to mount"
+                ;;
+        esac
+    done
+    return 1
+}
+
+do_scan() {
+    if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+        log "something is already mounted at $MOUNT_POINT"
+        return 0
+    fi
+    mount_share && return 0
+    for device in $(candidates); do
+        try_mount "$device" && return 0
+    done
+    write_state absent "" "" ""
+    return 0
+}
+
+do_remove() {
+    umount -l "$MOUNT_POINT" 2>/dev/null
+    write_state absent "" "" ""
+    log "card removed"
+}
+
+do_format() {   # do_format DEV -- destroys everything on it
+    device="$1"
+    # Safety check first: never even look at whether it is a block device
+    # before ruling out anything the phone is running from.
+    if is_reserved_device "$device"; then
+        log "refusing to format $device: the phone is running from it"
+        return 1
+    fi
+    [ -b "$device" ] || { log "$device is not a block device"; return 1; }
+    umount -l "$MOUNT_POINT" 2>/dev/null
+    if ! mkfs.vfat -F 32 -n "$LABEL" "$device" > /dev/null 2>&1; then
+        log "mkfs.vfat failed on $device"
+        return 1
+    fi
+    try_mount "$device" || return 1
+    for folder in $FOLDERS; do
+        mkdir -p "$MOUNT_POINT/$folder" 2>/dev/null
+    done
+    sync
+    log "formatted $device as a NeoDCT card"
+    return 0
+}
+
+# Sourcing this file (the host test suite does) only defines the functions.
+# POSIX sh has no reliable "am I being sourced" test, hence the explicit
+# opt-out rather than something clever.
+if [ -z "${NEODCT_SDCARD_SOURCE_ONLY:-}" ]; then
+    case "${1:-scan}" in
+        scan)   do_scan ;;
+        add)    do_scan ;;
+        remove) do_remove ;;
+        format) shift; do_format "${1:-}" ;;
+        *)      echo "usage: neodct-sdcard {scan|add|remove|format DEV}" >&2
+                exit 2 ;;
+    esac
+fi

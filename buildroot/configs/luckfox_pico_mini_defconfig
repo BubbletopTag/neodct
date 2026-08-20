@@ -13,8 +13,8 @@ BR2_SYSTEM_DHCP="eth0"
 BR2_TOOLCHAIN_BUILDROOT_CXX=y
 BR2_TARGET_TZ_INFO=y
 BR2_ROOTFS_OVERLAY="../neodct/overlay"
-BR2_ROOTFS_POST_BUILD_SCRIPT="../neodct/scripts/post-build-prune-tests.sh"
-BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS="luckfox"
+BR2_ROOTFS_POST_BUILD_SCRIPT="../neodct/scripts/post-build-prune-tests.sh ../neodct/scripts/post-build-system-metadata.sh"
+BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS="luckfox-armv7"
 BR2_ROOTFS_POST_IMAGE_SCRIPT="board/qemu/post-image.sh"
 BR2_ROOTFS_POST_SCRIPT_ARGS="$(BR2_DEFCONFIG)"
 BR2_LINUX_KERNEL=y
@@ -59,3 +59,14 @@ BR2_TARGET_ROOTFS_UBI_PEBSIZE=0x20000
 BR2_TARGET_ROOTFS_UBI_SUBSIZE=2048
 BR2_TARGET_ROOTFS_UBI_OPTS="-O 2048"
 
+# --- SD card support (shared with the QEMU flavour) ---
+# Real hardware needs these to mount, name and repair a FAT32 card; the
+# squashfs/verity switch for NAND comes with the UBI layout work.
+BR2_PACKAGE_LVM2=y
+# BR2_PACKAGE_LVM2_STANDARD_INSTALL is not set
+BR2_PACKAGE_DOSFSTOOLS=y
+BR2_PACKAGE_DOSFSTOOLS_MKFS_FAT=y
+BR2_PACKAGE_DOSFSTOOLS_FATLABEL=y
+BR2_PACKAGE_DOSFSTOOLS_FSCK_FAT=y
+BR2_PACKAGE_HOST_DOSFSTOOLS=y
+BR2_PACKAGE_HOST_MTOOLS=y

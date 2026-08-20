@@ -1,0 +1,16 @@
+# /etc/fstab
+#
+# Root is a read-only squashfs and stays that way -- there is deliberately
+# no remount,rw anywhere in the boot path. Everything writable is either a
+# tmpfs listed here or the user-data partition, which the initramfs mounts
+# and mount --moves to /NeoDCT/User before switch_root (see
+# neodct/initramfs/init), so it needs no entry here.
+#
+# <file system>	<mount pt>	<type>	<options>	<dump>	<pass>
+/dev/root	/		auto	ro,noauto	0	1
+proc		/proc		proc	defaults	0	0
+devpts		/dev/pts	devpts	defaults,gid=5,mode=620,ptmxmode=0666	0	0
+tmpfs		/dev/shm	tmpfs	mode=1777	0	0
+tmpfs		/tmp		tmpfs	mode=1777	0	0
+tmpfs		/run		tmpfs	mode=0755,nosuid,nodev	0	0
+sysfs		/sys		sysfs	defaults	0	0

@@ -16,8 +16,17 @@ printf "\033[?25l" > /dev/tty0
 clear > /dev/tty0
 
 # 4. Run the UI
+#
+# /NeoDCT is inside the read-only squashfs, so the crash log goes to the
+# user-data partition. PYTHONPYCACHEPREFIX matters more than it looks: with
+# a read-only rootfs python cannot drop .pyc files next to the .py files, so
+# without a writable cache prefix every boot re-parses the whole UI.
+export PYTHONPYCACHEPREFIX=/NeoDCT/User/.pycache
+CRASH_LOG=/NeoDCT/User/logs/crash.log
+mkdir -p /NeoDCT/User/logs 2>/dev/null || CRASH_LOG=/tmp/crash.log
+
 echo "[NeoDCT] Booting..." > /dev/tty0
-python3 /NeoDCT/launcher.py 2> /NeoDCT/crash.log
+python3 /NeoDCT/launcher.py 2> "$CRASH_LOG"
 EXIT_CODE=$?
 
 # ==========================================================

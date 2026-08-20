@@ -674,3 +674,563 @@ own.
 
 Note: the README status table is now well out of date -- it still lists
 telephony/SMS/settings as unimplemented. The docs page reflects 0.3.0a.
+
+- ROOT CAUSE FOUND (in-lab QEMU loop, stable cable): the days of instant
+  NO CARRIER / QMI "Call failed" were RADIO, not software. Smoking gun:
+  +CGATT: 0 while +CEREG: 0,1, and a fresh-cid AT+CGACT=1,5 returning
+  "+CEER: NAS Service request failed, no throttle" -- at RSRP ~-120dBm
+  the radio cannot complete the NAS service request every dial needs;
+  the firmware fails fast with no cause. The "active" cid1 PDN with a
+  real 2607:fb90:: address is preserved ESM state from a lucky attach
+  (IMS rode the same luck -> calls worked "eventually"). Also verified
+  en route: WDA data format is raw-ip on LE20B04SIM7600G22 firmware,
+  QMI control path works fine under QEMU passthrough, ModemManager
+  leftovers were NOT the cause (inactive + fresh power cycles).
+- S45modem: ensure_attached() gate -- CEREG can read registered while
+  CGATT: 0 (observed zombie state where every dial is doomed); each
+  round now checks and forces AT+CGATT=1, and diagnostics log cgatt
+
+---
+
+immutable rootfs + on-device system updates (branch immutable_n_updates)
+
+Read-only squashfs root verified by dm-verity, /NeoDCT/User on its own
+partition, and .ndsw update packages installed from an SD card. QEMU-only
+so far; the Luckfox NAND/UBI layout is deliberately untouched.
+
+Why an initramfs. You cannot dd over the squashfs the kernel is
+demand-paging from, so SystemUpdate never writes the system partition. It
+verifies a package, copies the image to the user partition as a pending
+update and reboots; a ~1.3MB initramfs applies it before the root is
+mounted. That makes the write power-fail safe: the staged image and its
+record are only deleted after the write has been read back off the device
+and hashed, so an interrupted install just happens again next boot, and a
+write that keeps failing is abandoned after three attempts.
+
+Single slot, not A/B. Two ~50MB slots do not fit in the Pico Mini's 128MB
+NAND alongside userdata, and a design that only works on QEMU would have
+to be thrown away for hardware.
+
+Update format. UPDATE.ndsw is a zip of rootfs.squashfs (padded squashfs
+with the dm-verity hash tree appended), manifest.json and manifest.sig.
+The manifest carries the image sha256 and the verity parameters, so
+signing the manifest covers the image. Two fields beyond the proposed
+format: "platform" (qemu-aarch64 / luckfox-armv7), refused on a mismatch
+because both images come out of this repo with the same filename and one
+wrong copy onto real hardware is a reflash; and optional "min_kernel".
+
+Signing is RSA-4096/SHA-256 verified by a dependency-free PKCS#1 v1.5
+verifier (System/core/UpdateService/signing.py) -- real gnupg2 on the
+device would have cost 4-6MB of libgcrypt/libassuan/libksba for the same
+security. It rebuilds the whole expected encoded block and compares it
+whole, so Bleichenbacher'06-style short-padding forgeries and SHA-1
+algorithm substitution are both rejected (tested). Releases are signed
+with `openssl dgst -sha256 -sign`; NEODCT_SIGN_KEY unset still builds a
+package, just unsigned, which is the BAD SIGNATURE path on purpose.
+
+dm-verity is enforced by default (neodct.verity=enforce; permissive and
+off exist as escape hatches, and a failure under enforce drops to a
+rescue shell rather than a reboot loop). Honest scope: the root hash
+comes from installed.prop on the user partition, so this is integrity,
+not authenticity -- it catches NAND bit-rot, partial writes and corrupt
+flash on every block read, while authenticity comes from the signature
+check the app does before staging. Anyone able to rewrite the user
+partition can rewrite the system partition too. The upgrade is
+CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG with the release cert built into the
+kernel, which needs no userspace crypto at all.
+
+Version metadata had to move. system.os.* lived in
+/NeoDCT/User/settings.prop, which only appeared to work because an update
+replaced the whole filesystem including that file. With /NeoDCT/User on
+its own partition it survives an update, so the phone would have reported
+its factory version forever. Those keys now come from a read-only
+/NeoDCT/System/version.prop generated at build time from os-release
+VERSION_ID; SettingsStorage layers defaults < settings.prop <
+version.prop and drops stale system.os.* keys it finds.
+
+Read-only fallout fixed: no more `mount -o remount,rw /` in either
+inittab; crash log to /NeoDCT/User/logs; PYTHONPYCACHEPREFIX to
+/NeoDCT/User/.pycache (without it a read-only root re-parses the whole UI
+every boot); S45modem's cache off /etc; host-built __pycache__ pruned
+from the image (host python 3.14 != target 3.13.11 anyway). Stock
+wallpapers moved to /NeoDCT/System/wallpapers -- they are image content,
+like System/tones. The shipped seed DBs and settings.prop were dropped:
+init_databases() already creates schemas and DEFAULTS covers the rest, so
+an empty user partition self-provisions.
+
+SD card: /NeoDCT/System/hw/neodct-sdcard mounts anything that is not the
+system or user partition at /NeoDCT/User/sdcard and publishes state to
+/run/neodct/sdcard.prop for System/core/Storage. Boot scan (S06sdcard) +
+udev rule for hotplug. Its parent-disk logic is tested: mmcblk0p1 is
+recognised as part of mmcblk0, so "format this card" can never point
+mkfs.vfat at a partition the phone is running from. Settings > Memory
+card offers folder setup for a plain card (non-destructive) and
+reformatting only for one that cannot be read.
+
+Apps: SystemUpdate (id 12, placeholder icon -- wants real art). Music now
+requires a card and reads sdcard/music. Tones gains an "Add more..." row
+and Settings/Wallpaper a "Get more...", both explaining the card in a
+TextScroller. Dialog wording is per spec and pinned by tests: INVALID
+UPDATE and WRONG UPDATE are dead ends with OK and no cancel key, BAD
+SIGNATURE is overridable with an Acknowledge softkey in engineering mode
+only.
+
+Build: BR2_TARGET_ROOTFS_SQUASHFS (zstd), lvm2 without STANDARD_INSTALL
+(dmsetup only, ~400KB instead of all of cryptsetup's dependency tree),
+dosfstools, host-mtools/dosfstools/e2fsprogs. Kernel gains SQUASHFS
+(zstd+xz+zlib), DM_VERITY+CRYPTO_SHA256, BLK_DEV_INITRD, VFAT+NLS.
+post-image-neodct.sh assembles system.img, initramfs.cpio.gz,
+userdata.ext4 (label NDUSER, carrying the factory installed.prop) and a
+ready-made sdcard.img, which it never overwrites if one already exists.
+`make update` packages the built tree as UPDATE.ndsw. Boot it with
+neodct/tools/run_qemu.sh (NEODCT_SD=share also mounts a host folder as
+the card over virtiofs -- CONFIG_VIRTIO_FS was already enabled).
+
+Tests: 113 -> 314. The parts that can brick a phone are tested rather
+than trusted -- the verity hash tree is byte-for-byte identical to
+veritysetup 2.8.6 (golden vectors plus a live cross-check), the shell
+applier's dm-verity table is compared against the Python implementation
+of the same layout, and the applier itself is driven on the host with
+files standing in for block devices (corrupt image refused without
+touching the device, failed write retried, injection canary in the
+records). One test runs the whole feature: the app stages a package and
+the real busybox applier installs it.
+
+Not done: no full buildroot build has been run yet, so nothing here has
+booted -- the image set was verified by assembling it against a fake
+target tree. Luckfox phase 2 (UBI/ubiblock layout, SQUASHFS+DM_VERITY+
+VFAT in the 5.10 SDK kernel, initramfs into boot.img, SDMMC pins) is
+untouched. No initramfs SD-card recovery: an unbootable system partition
+means a USB reflash.
+
+run_qemu.sh reconciled with the known-good ext4 invocation: virtio-gpu-pci
+/ virtio-keyboard-pci / virtio-tablet-pci (PCI, not the MMIO variants),
+-m 72, video=Virtual-1:240x175M (not 240x240 -- on QEMU the framebuffer is
+the UI band directly, there is no panel to letterbox into), both consoles
+plus vt.global_cursor_default=0 and quiet/loglevel=0, xhci + usb-audio via
+pulse, and optional SIM7600 passthrough (NEODCT_MODEM=1). Networking is off
+by default to match that invocation; NEODCT_NET=1 adds the NIC back for
+browser testing. root= is gone -- the initramfs mounts everything.
+
+Added neodct/tools/mkbadupdate.py (11 deliberately broken .ndsw variants:
+unsigned, wrong-key, tampered-manifest, corrupt-image, truncated-image,
+no-manifest, no-image, not-a-zip, wrong-platform, future-kernel,
+bad-root-hash), neodct/tools/sdcard.sh (put/ls/rm/init/new on sdcard.img via
+buildroot's host mtools -- no sudo, no loop mount) and
+docs/TESTING_UPDATES.md walking through building, installing and breaking an
+update by hand. test_mkbadupdate.py asserts every variant still triggers its
+specific refusal, so the manual matrix in that doc cannot silently rot.
+Variants that edit the manifest are re-signed so they fail for exactly one
+reason. bad-root-hash is the one that proves verity is on: it passes every
+check the app makes and only fails at boot.
+
+First real boot found two initramfs bugs, both now covered by tests:
+
+* No library search aliases. glibc's built-in path here is /lib64 and
+  /usr/lib64, and an initramfs has no /etc/ld.so.cache to redirect it, so
+  libraries in /lib were invisible and boot died at "/bin/sh: error while
+  loading shared libraries: libresolv.so.2". The target tree solves this with
+  lib64 -> lib symlinks; mkinitramfs now mirrors them (lib64, usr/lib,
+  usr/lib64 all -> lib) so it does not matter which path the loader was built
+  with, or which libc.
+* Three applets used by the scripts (wc, tr, dirname) had no busybox symlink.
+  That class of bug can be silent rather than loud: `wc` failing inside a
+  command substitution yields an empty size, which reads as a truncated image
+  and discards a perfectly good update. test_initramfs_applets.py now scans
+  both scripts for command names and fails if APPLETS does not cover them, so
+  the list cannot drift from the code again. Dropped findfs, which this
+  busybox does not build and nothing calls.
+
+Second real boot: the system image was never found. "no /sbin/init in the
+system image" was the initramfs having mounted the SD card as root --
+virtio-mmio devices are NOT enumerated in the order QEMU is handed them, so
+neodct.sys=/dev/vda pointed at the wrong disk. (Confirmed by verity=off
+failing identically, and by system.img starting with "hsqs" as it should.)
+
+Device names from the cmdline are now a hint only. find_system_device()
+identifies the system image by its squashfs magic ("hsqs", conveniently
+printable, so no od needed) and find_user_device() by the NDUSER label, both
+falling back to scanning every block device. Chosen devices are always
+logged, since that is the first thing worth knowing when this goes wrong.
+This is also more robust for real hardware, where the names differ again
+(mmcblk, ubiblock).
+
+Added recovery mode (neodct/initramfs/ndsys-recovery.sh), following the menu
+in the rec.py prototype -- update system / wipe user data / wipe system /
+reboot / shell, arrow keys or j/k, confirmations defaulting to "no". Shell
+rather than python (there is no python in an initramfs) and text rather than
+framebuffer graphics, because CONFIG_FRAMEBUFFER_CONSOLE is on, so writing to
+/dev/tty1 already appears on the phone's screen. Every string is written to
+fit 30x10, which is what a 240x175 panel gives in the 8x16 font.
+
+init now enters recovery instead of a bare rescue shell whenever an SD card
+could fix the problem: no system image found, verity refused it, the root
+would not mount, or no /sbin/init. neodct.recovery=1 forces it.
+
+recovery_install_package() is separated from the menus and unit tested (10
+tests): it hashes the image straight out of the zip BEFORE writing anything,
+writes, reads back and re-hashes, then records installed.prop and clears any
+stale pending update. It cannot check signatures -- no crypto in the
+initramfs -- so it is an integrity check gated on physical access, and the
+confirmation screen says so.
+
+Also: "wipe user data" preserves .ndsys, or the next boot would have no
+installed.prop, fail verity and land straight back in recovery.
+
+Third boot: it works. Content-based detection found the system on /dev/vdc
+(the device order was fully reversed -- vda was the 128MiB card, vdb the
+512MiB userdata, vdc the 134MiB system image), dm-verity loaded, and the
+launcher came up under verity=enforce.
+
+The card was still missing, though, for the same root cause one layer up:
+neodct-sdcard excluded devices by the cmdline names, so it skipped the real
+card and tried to mount the system image. It now excludes by content as well
+-- squashfs magic, the mount table, and whatever the initramfs recorded --
+and init publishes sys_device/user_device into verity_state.prop so userspace
+and the initramfs cannot disagree about which disk is which.
+
+Two more read-only artifacts the boot log exposed: /dev/shm had no mountpoint
+(devtmpfs hides the one in the image, so inittab makes it at runtime) and
+seedrng could not persist its seed (/var/lib/seedrng is now a symlink to
+/NeoDCT/User/.seedrng, created by S05userdata).
+
+post-image no longer silently resets user data on every build: it warns that
+it did, and NEODCT_KEEP_USERDATA=1 keeps the partition, refreshing
+.ndsys/installed.prop in place with debugfs. That refresh is not optional --
+installed.prop records the root hash of the image that was installed, so a
+kept partition plus a rebuilt image would fail verity on the next boot.
+
+App folder renamed SystemUpdate -> Update (display name unchanged).
+
+Fourth boot: the card was found (/dev/vda) but announced as having "no
+filesystem we can read". The image was a perfectly valid FAT32 -- util-linux
+blkid reports TYPE="vfat" and mtools lists the folders -- but *busybox's*
+blkid has far fewer filesystem probers and reported nothing at all, so the
+empty-fstype branch fired.
+
+blkid was the wrong question. try_mount now asks the kernel: it tries vfat,
+exfat, then the ext family, then lets the kernel pick from its own probe
+list, and only reports unmountable when all of that fails. FAT-only options
+(utf8, flush) are gated per filesystem, since passing them to ext4 fails the
+mount. blkid is now only consulted for the label, which is cosmetic.
+
+Tested by stubbing `mount` as a shell function (functions win over PATH), so
+the ordering, the per-filesystem options and the recorded state are all
+checked on the host without needing root.
+
+Also: S05userdata -> S00userdata. buildroot's seedrng script is S01, so it
+ran before the directory its symlink target needs existed; .seedrng is now in
+the factory skeleton too, so a fresh partition has it before anything runs.
+
+"staged update is incomplete; discarding" was a real staged update being
+thrown away, not a signature check. The record stores image=, and the app
+writes it as /NeoDCT/User/.ndsys/pending.img -- correct where the app runs,
+meaningless in the initramfs, which has the same partition mounted at
+/mnt/user. The `[ ! -f "$image" ]` guard therefore always failed.
+
+Both sides now resolve the image against whichever state directory they are
+reading, never trusting the recorded string: Record grew a state_dir and an
+image property, and the shell applier joins basename onto its own STATE_DIR.
+The record still carries the path for readability. Two tests reproduce the
+exact failure by rewriting a staged record to the device-side path.
+
+Worth noting for the future: this is the third bug of the same shape -- a
+name that is only valid in one context (device order, loader search path,
+mount namespace). Anything crossing the initramfs/system boundary should be
+treated as needing re-resolution, not re-use.
+
+Recovery entry points wired up: NEODCT_RECOVERY=1 (neodct.recovery=1 on the
+cmdline) and a one-shot flag file, /NeoDCT/User/.ndsys/boot_recovery, which is
+consumed as it is read so rebooting out of recovery does not loop back in.
+The flag is the route that works on real hardware, where the cmdline cannot be
+edited. neodct.rectty=/dev/console (NEODCT_RECTTY) drives the menu over serial
+if keys are not reaching the framebuffer VT. docs/TESTING_UPDATES.md gained a
+recovery section.
+
+Recovery navigation: arrow keys echoed as ^[[A and the menu appeared frozen.
+Raw mode was only applied to the primary tty, but in QEMU both the framebuffer
+VT (tty1) and the serial console are live and there is no way to know which
+one the user is typing into -- and without raw mode `dd bs=1 count=1` blocks
+for a whole line, which an arrow key never completes.
+
+Now every candidate tty gets raw -echo and the menu is drawn to all of them.
+Digits also move the selection (Enter still selects), which works even if raw
+mode fails entirely: "3<Enter>" reads identically in raw and line-buffered
+modes, and unlike select-on-digit a stray Enter cannot pick something by
+accident. j/k still work for terminals with no arrow keys.
+
+Nine tests drive recovery_menu with scripted keys -- wrapping, digits,
+out-of-range digits, digit-then-arrow. Writing them exposed read_key stashing
+its value in a global for the digit case to read back; the menu now captures
+the key once and cases on it.
+
+Recovery input rewritten rather than patched again. The old version read one
+tty and put only that one in raw mode, but in QEMU the framebuffer VT (tty1)
+and the serial console are both live and there is no way to know which the
+user is typing into -- so half the time arrows echoed as ^[[A and Enter did
+nothing.
+
+Now every candidate tty is put in raw mode and pumped by its own `cat` into a
+single FIFO, which the menu reads as fd 8. The FIFO is opened O_RDWR so the
+open cannot block and read_key never sees EOF. Typing works in either window.
+Without mkfifo it degrades to reading the primary tty directly.
+
+Three bugs surfaced while writing the tests for it:
+
+* LF=$(printf '\n') is the empty string -- command substitution strips
+  trailing newlines -- so the Enter-as-LF case could never match and Enter
+  presses arriving as \n were silently swallowed. Now a literal newline.
+* ESC O A (application cursor mode, which some emulators send) was not
+  handled at all, only ESC [ A.
+* mkfifo had no busybox symlink, so the merge would have silently fallen back
+  to one tty. The applet scanner caught it, which is what it is for; kill was
+  added alongside it.
+
+Also: recovery_confirm still wrote its warning straight to $TTY, so on a
+two-tty setup the question appeared on one screen and the yes/no on both, and
+it carried a dead `for line in $1; do :; done`. It uses say() now. The rescue
+shell stops the pumps before handing over and restarts them after, or they
+would fight over every keystroke.
+
+read_key is now driven from a byte stream in tests (a regular file on fd 8),
+which also pins that the fd is opened once and read sequentially -- reopening
+per call would restart at byte 0 and parse the same key forever.
+
+---
+
+initramfs: identify the system device by disk serial, and read recovery's
+keys off the screen it draws on
+
+Two faults, both of which made recovery unusable for the thing it exists to
+do -- reinstalling a phone that cannot boot.
+
+## The system device could not be found once it was wiped
+
+find_system_device identified the system image by its squashfs magic, which
+works right up until "wipe system" zeroes it -- exactly when knowing the
+answer matters. The cmdline hint is no fallback: QEMU does not enumerate
+virtio-mmio devices in the order they are given, so `system, user, card`
+comes up in the guest as vda=card, vdb=user, vdc=system, and neodct.sys=
+/dev/vda has always pointed at the wrong disk. Confirmed by reading
+/sys/block/*/serial in a booted guest. With a wiped image and no serials the
+initramfs picked /dev/vda and would have installed onto the SD card.
+
+The drives now carry a disk serial (NDSYS / NDUSER / NDCARD, set with
+-device virtio-blk-device,serial=), read back from /sys/block/*/serial. A
+serial belongs to the device rather than to anything written on it, so
+zeroing the image cannot take it away, and it outranks both the hint and the
+content scan -- which also stops an SD card someone has written a system
+image onto from being adopted as the root filesystem.
+
+The scan and the hint stay as fallbacks: an eMMC partition has no disk
+serial, and on real hardware the names are stable anyway, which is why this
+was only ever a QEMU problem.
+
+Verified in QEMU with the first megabyte of system.img zeroed: `system=
+/dev/vdc` with serials, `system=/dev/vda` (the card) without.
+
+## Arrow keys did nothing on the phone's screen
+
+Two independent reasons, either of which was enough on its own.
+
+The terminal would not stay in character-at-a-time mode. `stty -F /dev/tty1
+raw -echo`, and equally `stty ... < /dev/tty1`, opens the terminal, sets the
+mode and closes it -- and the VT console driver sets TTY_DRIVER_RESET_TERMIOS
+(drivers/tty/vt/vt.c), so closing the last descriptor puts it straight back
+to canonical with echo on. The mode was gone before anything read a byte,
+which is why every arrow press printed ^[[B over the menu and nothing was
+readable until Enter. recovery_input_start now holds the terminal open on fd
+8 for as long as recovery runs and sets the mode through that descriptor.
+
+And the keys were read from the shell's stdin, which for init is /dev/console
+-- the serial port. The screen's VT was never read at all, so input "worked"
+over serial and did nothing on the phone. read_key reads fd 8.
+
+read_key is back to dd rather than `read -n 1`: this busybox is built without
+CONFIG_ASH_READ_NCHARS, so ash's read has no -n and takes a whole line.
+
+The pump-and-FIFO merge is gone with it. Reading both ttys needed two readers
+merged into one stream, and it wedged in the guest -- the console pump sat in
+pipe_lock in D state, blocking the shared FIFO for everything else. Recovery
+now drives one terminal, drawn on and read from; neodct.rectty=/dev/console
+moves the whole UI to the serial port, which is what a headless run wants.
+That also fixes the menu being painted twice, once on the display and once in
+the terminal QEMU was started from.
+
+## Tests
+
+Device identification is driven against a stand-in /sys/block and /dev,
+including the wiped case and a squashfs planted on the card.
+
+The input path is driven through a real pty, with a shim that gives it the
+one property of a VT that matters here: a mode set through a descriptor
+nobody holds is undone when the setting process exits. Without it the bug is
+invisible on the host, because a pty keeps whatever it is told. The pty test
+reproduced the exact symptom -- b'^[[B' echoed back, no key delivered.
+
+Verified end to end in QEMU: arrows move the selection on the display, Enter
+on "reboot" reboots, and nothing is painted on the serial console.
+
+================================================================================
+
+update: a software-update page worth reading, and pictures in .ndsw
+
+The update app worked and looked like a debugging tool. Installing meant
+paging through five screens of release notes at 20px, then answering four
+questions -- install?, back up?, the backup's own "done" dialog, restart? --
+each one a modal with a warning triangle on it, whether or not anything was
+wrong. The progress bar, the one thing that already looked right, had "0.0 MB
+of 0.0 MB" drawn straight through it.
+
+It is now one page and one bar.
+
+## The page
+
+DetailPage (framework) is a page you read: a picture, a title, a couple of
+lines of detail beside it, then body text, all in one column that scrolls a
+line at a time with up/down and carries the Nokia scrollbar when there is
+more below. The update page is a picture, the version, size and build date,
+"Verified" or "Not signed", and the release notes -- softkey Install.
+
+Three rules in it are worth knowing, because each one is a thing that looked
+wrong before:
+
+* The hero row shrinks until the body starts on the same screen. Picture and
+  details stacked, they filled the screen on their own and everything worth
+  reading was below the fold; beside each other they cost 72 pixels. If the
+  details still do not fit, the picture gives ground rather than the text.
+* A block that would be sliced by the bottom edge is left for the next
+  scroll. Half a line of type at the fold reads as a rendering bug.
+* A page that fits is centred. Three words pinned to the top of an otherwise
+  black screen reads as a crash.
+
+The same paragraph rule went into TextScroller, which every other app's help
+text still uses: a blank line is a gap of a third of a line, not an empty
+line of 20px type. Four short paragraphs used to need three screens.
+
+## The bar
+
+ProgressScreen (framework) keeps the bar and gives it room: step label above,
+percentage and byte count below, hint at the foot, nothing on top of it. One
+screen covers the whole install -- "Backing up data" then "Copying update"
+via set_step, not two screens that flicker between them. It repaints only
+when the whole percentage changes, so the copy loop can call it per 256KB
+chunk without slowing the copy down. Labels and hints drop a font size, then
+ellipsize, rather than running off both edges.
+
+## The backup is not a question
+
+It happens while the bar is on screen. User data is on its own partition and
+an update does not touch it, so the backup is belt and braces -- which means
+a full or write-protected card is no reason to refuse to install. It is best
+effort, and a failure is admitted on the last page instead of interrupting.
+
+## Signature warnings
+
+Same warning either way, "OK" on both -- "Acknowledge" was a word from a
+lawyer. Outside engineering mode that dialog is the end of it. In
+engineering mode it is followed by "Install Anyway?", which C cancels. An
+unsigned image is how you end up stuck on a phone that will not boot, and a
+dead phone cannot be talked out of it afterwards.
+
+INVALID UPDATE and WRONG UPDATE FOR THIS PHONE are unchanged and still have
+no way past them.
+
+## Pictures in packages
+
+.ndsw can carry thumbnail.png, a square PNG the phone draws at 64x64. Its
+sha256 goes in manifest.json, so the one signature over the manifest covers
+the art as well; write_ndsw is the only place that knows about both, so the
+bytes written and the bytes signed cannot disagree. Art with no hash recorded
+is treated as absent, and art that does not match its hash is dropped in
+favour of the app icon -- it is decoration, and the image's own sha256 is
+what says whether an update is safe. There is a 256KB cap read from the zip
+directory, so an oversized "thumbnail" is refused without being decompressed.
+
+`make update` picks up neodct/release-thumbnail.png if it exists, or
+NEODCT_UPDATE_THUMBNAIL=..., and mkupdate refuses anything that is not a PNG
+or is over the cap rather than shipping art the phone will not draw.
+
+## Tests
+
+Three suites, all TDD'd, 82 tests:
+
+* test_update_ui.py -- the widgets, judged on real drawn frames from the real
+  font: no text within three pixels of the bar, nothing in the softkey bar,
+  the notes start on the first screen, the bottom line is never cut in half.
+* test_update_flow.py -- whole flows through the shipped app against a staged
+  card with a real signed .ndsw on it. Installing is two key presses; the
+  whole install is two screens and a bar (repaints are not screens); the
+  release picture reaches the screen; the databases are on the card
+  afterwards.
+* test_systemupdate_app.py -- the policy, rewritten for the new flow: what is
+  refused, what engineering mode may walk past, and that nothing asks about
+  the backup.
+
+tests/update_ui_fixtures.py stages the card, the release key and the version
+file and hands back the real UI; NEODCT_UI_SHOTS=/some/dir writes every
+screen the tests draw to PNG, which is how the design was reviewed.
+
+Two harness fixes fell out of it: uistub's PathRemap now covers io.open (what
+zipfile actually calls -- a package on the card was unreadable through the
+stub) and shutil.copy2 (the backup), and test_sdcard_helper no longer leaves
+its tmp path in Storage.MOUNT_POINT for the rest of the suite to trip over.
+
+482 tests pass.
+
+================================================================================
+
+0.3.1a: the first release installed by the update system it ships
+
+Version bumped in the one place a version is supposed to be bumped --
+VERSION_ID in overlay/etc/os-release -- plus the SettingsStorage fallbacks and
+a CHANGELOG section, which is what mkupdate reads to fill the release notes on
+the update page.
+
+Two things that had drifted are now derived instead of typed:
+
+* The boot splash had "System v0.3.0a" written into launcher.py, so it was a
+  release behind from the moment anything else moved. It reads
+  system.os.versionnumber now, like every other screen that shows a version.
+
+* **system.os.platform was a path on my machine.** Buildroot calls post-build
+  scripts as `script TARGET_DIR $BR2_ROOTFS_POST_SCRIPT_ARGS
+  $BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS`, and the qemu board needs the defconfig
+  path in POST_SCRIPT_ARGS -- so $2 was that path and the platform was $3.
+  post-build-system-metadata.sh read $2, so every image built here recorded
+  system.os.platform=/home/bubbles/.../neodct_qemu_defconfig.
+
+  That is the value an update's manifest is compared against, and a platform
+  mismatch is the one refusal with no way past it, on purpose: it is the brick
+  case. So an update built in a different directory -- or by anyone else --
+  would have been refused as the wrong hardware, and the phone would have said
+  WRONG UPDATE FOR THIS PHONE with no explanation that made any sense. The
+  script now takes the last argument and refuses anything with a slash in it,
+  because a platform id has to mean the same thing on every machine.
+
+  The catch is that the fix cannot travel by update: the check compares the
+  new manifest against the running image, so the first image with a corrected
+  platform is refused by any phone still carrying the old value. Nothing has
+  shipped to anyone, so the 0.3.0a base was simply rebuilt with the fix before
+  0.3.1a was built on top of it.
+
+## Tests
+
+test_post_build_metadata.py drives the script the way buildroot drives it, and
+pins the argument order that caused this -- including that a path is never
+recorded as a platform, whatever position it arrives in.
+
+test_settings_version_layering.py gained the splash: it reads the version out
+of the image, and still says something when there is no version.prop.
+
+490 pass.
+
+## The release
+
+  buildroot/output/images/UPDATE.ndsw   0.3.1a, qemu-aarch64, 57.5 MiB, signed
+                                        with the dev key, carrying a 64x64
+                                        thumbnail.png the manifest vouches for
+
+output/images/system.img and userdata.ext4 are the rebuilt **0.3.0a** pair, so
+the phone boots the old version and the card has the new one on it. The
+pristine base is kept in output/images-0.3.0a/ to run the install again.

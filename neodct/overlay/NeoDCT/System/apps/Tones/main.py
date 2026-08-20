@@ -3,12 +3,33 @@ import time
 import subprocess
 import select
 
-from System.ui.framework import SoftKeyBar, MessageDialog, PagedList, VerticalList
+from System.ui.framework import (SoftKeyBar, MessageDialog, PagedList,
+                                 VerticalList, TextScroller)
 from System.core.SettingsStorage import set_setting
+from System.core import Storage
 
 ROOT_ID = 9
 SYSTEM_TONES_DIR = "/NeoDCT/System/tones"
 USER_TONES_DIR = "/NeoDCT/User/tones"
+
+ADD_MORE_LABEL = "Add more..."
+
+ADD_MORE_HELP = (
+    "Add more ringtones by adding an SD card!\n"
+    "\n"
+    "Format a card as FAT32, make a folder called \"tones\" on it, and copy "
+    "your .mp3 files into it.\n"
+    "\n"
+    "Put the card in the phone and the tones appear in this list next to the "
+    "built-in ones. The phone can set a blank card up for you from Settings."
+)
+
+ADD_MORE_HELP_WITH_CARD = (
+    "Add more ringtones from your SD card!\n"
+    "\n"
+    "Copy .mp3 files into the \"tones\" folder on the card that is in the "
+    "phone, and they appear in this list next to the built-in ones."
+)
 SUPPORTED_EXTS = (".mp3")
 
 MPV_CMD = [
@@ -66,9 +87,17 @@ def _flush_input(ui):
             break
 
 
+def _tone_dirs():
+    """Stock tones from the image, then the card's, then user-added ones."""
+    dirs = list(Storage.media_dirs("tones", system_dir=SYSTEM_TONES_DIR))
+    if os.path.isdir(USER_TONES_DIR) and USER_TONES_DIR not in dirs:
+        dirs.append(USER_TONES_DIR)
+    return dirs
+
+
 def _scan_tones():
     tones = []
-    for base in (SYSTEM_TONES_DIR, USER_TONES_DIR):
+    for base in _tone_dirs():
         if not os.path.exists(base):
             continue
         for root, _, files in os.walk(base):
@@ -104,6 +133,9 @@ def _show_ringing_tones(ui):
         MessageDialog(ui, "No ringtones found.").show()
         return
 
+    # A pseudo-entry at the end explains how to get more, which is the only
+    # discoverable place to say "you need an SD card for this".
+    tones.append({"name": ADD_MORE_LABEL, "path": None})
     names = [tone["name"] for tone in tones]
     vlist = VerticalList(ui, "Tones", names, app_id=ROOT_ID)
     softkey = SoftKeyBar(ui)
@@ -114,9 +146,12 @@ def _show_ringing_tones(ui):
 
     def schedule_preview():
         nonlocal pending_index, pending_time
+        player.stop()
+        if tones[vlist.selected_index]["path"] is None:
+            pending_index = None      # nothing to preview for "Add more..."
+            return
         pending_index = vlist.selected_index
         pending_time = time.time()
-        player.stop()
 
     def redraw():
         softkey.update("Select", present=False)
@@ -163,6 +198,12 @@ def _show_ringing_tones(ui):
 
         elif key in (28, 96):  # ENTER / center
             player.stop()
+            if tones[vlist.selected_index]["path"] is None:
+                TextScroller(ui, ADD_MORE_HELP_WITH_CARD if Storage.is_ready()
+                             else ADD_MORE_HELP).show()
+                _flush_input(ui)
+                redraw()
+                continue
             set_setting("system.audio.ringtone", tones[vlist.selected_index]["path"])
             MessageDialog(ui, f"Ringtone set to {names[vlist.selected_index]}.").show()
             return

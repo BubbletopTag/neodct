@@ -1,5 +1,22 @@
 # NeoDCT OS Changelog
 
+0.3.1a
+Added
+- Software update page: the release picture, version, size, build date and
+  whether it is signed, with the notes scrolling underneath.
+- Updates can carry a 64x64 picture, covered by the same signature.
+
+Changed
+- Installing is two presses: Install, then Restart.
+- Contacts and messages are backed up to the card automatically.
+- One progress bar for the whole install, with the reading under it.
+- Unsigned builds warn once, then ask again in engineering mode only.
+
+Fixed
+- The build wrote a machine path into the platform field, so an update built
+  anywhere else was refused as the wrong hardware.
+- The boot splash showed a version typed in by hand.
+
 0.1.5a
 Added
 - The Changelog - ... ... This wasn't a thing before. So the previous versions aren't really tracked.

@@ -28,6 +28,17 @@ def _redirect_stdio_to_serial():
     except Exception as exc:
         print(f"[Launcher] Serial redirect failed for {serial_dev}: {exc}")
 
+def splash_version():
+    """What the boot splash says under the name.
+
+    Read from the image's own version.prop rather than typed in here: this
+    line spent a release showing the version before the one it was running.
+    """
+    from System.core.SettingsStorage import get_setting
+
+    return "System v%s" % (get_setting("system.os.versionnumber", "") or "?")
+
+
 def show_boot_logo(fb):
     from PIL import Image, ImageDraw, ImageFont
     screen_w = getattr(ui_engine, "UI_WIDTH", 240)
@@ -53,7 +64,7 @@ def show_boot_logo(fb):
     draw.text(((screen_w - w) // 2, title_y), text, font=font, fill="white")
 
     # Draw Version
-    ver = "System v0.3.0a"
+    ver = splash_version()
     bbox = draw.textbbox((0, 0), ver, font=font_small)
     w = bbox[2] - bbox[0]
     draw.text(((screen_w - w) // 2, title_y + 30), ver, font=font_small, fill="gray")

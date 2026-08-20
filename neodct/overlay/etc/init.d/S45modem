@@ -58,7 +58,10 @@ MODEM_RESET_ON_FAIL="${MODEM_RESET_ON_FAIL:-y}" # AT+CFUN=1,1 once if all dials 
 LOG=/tmp/modem-boot.log
 STATUS=/tmp/modem.status
 PIDFILE=/tmp/modem-boot.pid
-CACHE=/etc/modem.cache        # written on success: CACHED_APN/_PDP/_RAW
+# On the user-data partition, not /etc: the rootfs is a read-only squashfs,
+# so a cache under /etc would silently never persist and every boot would
+# re-scan the APN list.
+CACHE=/NeoDCT/User/.modem.cache   # written on success: CACHED_APN/_PDP/_RAW
 RESOLV=/etc/resolv.conf       # symlink into /run -- only ever append through it
 
 log() {
@@ -151,7 +154,7 @@ module_reset() {
 diag_reject() {
     log "  cause: $(at 'AT+CEER' 8 | grep -v '^OK$' | tr '\n' ' ')"
     log "  cell:  $(at 'AT+CPSI?' 8 | grep '+CPSI')"
-    log "  cgact: $(at 'AT+CGACT?' 8 | grep '+CGACT' | tr '\n' ' ')"
+    log "  cgact: $(at 'AT+CGACT?' 8 | grep '+CGACT' | tr '\n' ' ')  cgatt: $(at 'AT+CGATT?' 8 | grep '+CGATT')"
     log "  rmcall: $(at 'AT$QCRMCALL?' 8 | tr '\n' ' ')"
 }
 
@@ -176,6 +179,20 @@ wait_registered() {   # $1 = max seconds; sets LAST_REG on failure
         [ "$w" -ge "$1" ] && return 1
         sleep 2
     done
+}
+
+# CEREG can read "registered" while the PS attach is actually gone
+# (observed live: +CEREG: 0,1 with +CGATT: 0 -- every dial then fails
+# instantly with "NAS Service request failed"). Force it back.
+ensure_attached() {
+    A=$(at 'AT+CGATT?' 8 | grep '+CGATT:')
+    case "$A" in *": 1"*) return 0 ;; esac
+    log "PS not attached (${A:-no reply}); forcing AT+CGATT=1"
+    at 'AT+CGATT=1' 40 >> /dev/null 2>&1
+    A=$(at 'AT+CGATT?' 8 | grep '+CGATT:')
+    case "$A" in *": 1"*) log "PS attach restored"; return 0 ;; esac
+    log "still not attached (${A:-no reply})"
+    return 1
 }
 
 wait_v6() {   # $1 = max seconds to wait for a global-scope SLAAC address
@@ -284,6 +301,12 @@ dial_rounds() {
         # the void.
         if ! wait_registered 45; then
             log "not registered right now (CEREG: $LAST_REG); skipping round $round"
+            round=$((round + 1))
+            sleep "$MODEM_DIAL_RETRY_WAIT_S"
+            continue
+        fi
+        if ! ensure_attached; then
+            log "skipping round $round (no PS attach -- radio too weak for service request?)"
             round=$((round + 1))
             sleep "$MODEM_DIAL_RETRY_WAIT_S"
             continue

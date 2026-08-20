@@ -1,19 +1,27 @@
 import os
 
 SETTINGS_PATH = "/NeoDCT/User/settings.prop"
+
+# Facts about the installed image, generated at build time by
+# neodct/scripts/post-build-set-buildtime.sh. This file lives inside the
+# read-only rootfs, so it is replaced wholesale by a system update -- unlike
+# settings.prop, which is user data on its own partition and survives one.
+VERSION_PATH = "/NeoDCT/System/version.prop"
+
+# Anything under this prefix describes the image, never a user preference.
+# It is read from VERSION_PATH and is never persisted to settings.prop.
+SYSTEM_PREFIX = "system.os."
+
 DEFAULTS = {
     "system.audio.ringtone": "/NeoDCT/System/tones/Low.mp3",
     "system.ui.wallpaper": "NONE",
     "system.ui.engineering_mode": "ON",
-    "system.os.versionnumber": "0.3.0a",
-    "system.os.versionname": "NeoDCT System v0.3.0a",
+    "system.os.versionnumber": "0.3.1a",
+    "system.os.versionname": "NeoDCT System v0.3.1a",
+    "system.os.platform": "unknown",
     "system.hw.battery_i2c_bus": "3",
     "system.hw.battery_i2c_addr": "0x36",
 }
-
-# Version strings track the installed build, not a user preference; refresh
-# them when an older settings.prop carries stale values.
-VERSION_KEYS = ("system.os.versionnumber", "system.os.versionname")
 
 
 def _parse_settings(text):
@@ -54,30 +62,50 @@ def load_settings():
         return {}
 
 
+def load_version():
+    """Read the image's version.prop. Missing or corrupt reads as empty."""
+    try:
+        with open(VERSION_PATH, "r") as f:
+            return _parse_settings(f.read())
+    except Exception:
+        return {}
+
+
 def save_settings(settings):
-    _ensure_parent(SETTINGS_PATH)
-    temp_path = SETTINGS_PATH + ".tmp"
-    data = _format_settings(settings)
-    with open(temp_path, "w") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(temp_path, SETTINGS_PATH)
+    """Persist user settings. Never writes system.os.* -- those are image facts.
+
+    Failures are swallowed: an unwritable user partition must not stop the
+    phone from booting, it just means preferences don't stick.
+    """
+    settings = {key: value for key, value in settings.items()
+                if not key.startswith(SYSTEM_PREFIX)}
+    try:
+        _ensure_parent(SETTINGS_PATH)
+        temp_path = SETTINGS_PATH + ".tmp"
+        data = _format_settings(settings)
+        with open(temp_path, "w") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, SETTINGS_PATH)
+    except Exception as exc:
+        print(f"[Settings] Failed to write {SETTINGS_PATH}: {exc}")
 
 
 def load_with_defaults(defaults=None):
-    settings = load_settings()
+    """Effective settings: defaults < settings.prop < version.prop."""
+    stored = load_settings()
     defaults = defaults or {}
-    changed = False
-    for key, value in defaults.items():
-        if key not in settings:
-            settings[key] = value
-            changed = True
-    for key in VERSION_KEYS:
-        if key in defaults and settings.get(key) != defaults[key]:
-            settings[key] = defaults[key]
-            changed = True
-    if changed or not os.path.exists(SETTINGS_PATH):
+
+    settings = dict(defaults)
+    settings.update(stored)
+    # Image facts always win, so an update is visible immediately even
+    # though settings.prop outlived it.
+    settings.update(load_version())
+
+    stale = [key for key in stored if key.startswith(SYSTEM_PREFIX)]
+    missing = [key for key in defaults if key not in stored]
+    if stale or missing or not os.path.exists(SETTINGS_PATH):
         save_settings(settings)
     return settings
 

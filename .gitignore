@@ -44,3 +44,8 @@ neodct/overlay/tests/*.mp3
 neodct/overlay/tests/*.mp4
 neodct/overlay/tests/*.mkv
 netsurf-neodct/
+
+############################
+# Agent tooling (local only)
+############################
+.claude/

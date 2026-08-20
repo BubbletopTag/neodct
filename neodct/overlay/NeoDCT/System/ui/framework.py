@@ -5,6 +5,8 @@ import os
 import math
 import time
 
+from PIL import Image, ImageDraw
+
 from System.hw import t9_engine
 
 
@@ -37,6 +39,65 @@ def _content_bottom(ui):
 
 def _header_divider_y(ui):
     return max(30, int(_ui_height(ui) * 0.11))
+
+
+def _font_ladder(ui, *names):
+    """The named ui fonts that actually exist, biggest first."""
+    fonts = []
+    for name in names:
+        font = getattr(ui, name, None)
+        if font is not None and font not in fonts:
+            fonts.append(font)
+    return fonts
+
+
+def _fit_font(ui, text, max_w, fonts):
+    """The largest of `fonts` that draws `text` inside max_w."""
+    for font in fonts:
+        if ui.get_text_size(text, font)[0] <= max_w:
+            return font
+    return fonts[-1]
+
+
+def _ellipsize(ui, text, font, max_w):
+    """Trim `text` until it fits, marking that something was cut."""
+    if ui.get_text_size(text, font)[0] <= max_w:
+        return text
+    trimmed = text
+    while trimmed and ui.get_text_size(trimmed + "...", font)[0] > max_w:
+        trimmed = trimmed[:-1]
+    return (trimmed + "...") if trimmed else text
+
+
+def _wrap_lines(ui, text, font, max_w):
+    """Word-wrap `text` to max_w pixels, keeping blank lines as blanks.
+
+    A blank line comes back as "" so the caller can decide what a paragraph
+    break is worth -- a full empty line of type is far too much on a screen
+    this size.
+    """
+    def width(candidate):
+        return ui.get_text_size(candidate, font)[0]
+
+    lines = []
+    for raw in (text or "").splitlines() or [""]:
+        if not raw.strip():
+            lines.append("")
+            continue
+        current = ""
+        for word in raw.split(" "):
+            if not word:
+                continue
+            candidate = word if not current else current + " " + word
+            if width(candidate) <= max_w or not current:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+    while lines and lines[-1] == "":
+        lines.pop()
+    return lines
 
 
 class AppSelector:
@@ -1072,36 +1133,34 @@ class TextScroller:
         self.top = 8
 
     def _wrap_text(self, text, max_w):
-        def text_w(s):
-            return self.ui.get_text_size(s, self.font)[0]
-
-        lines = []
-        for raw in (text or "").splitlines() or [""]:
-            words = raw.split(" ")
-            cur = ""
-            for w in words:
-                if w == "":
-                    continue
-                cand = w if not cur else (cur + " " + w)
-                if text_w(cand) <= max_w:
-                    cur = cand
-                else:
-                    if cur:
-                        lines.append(cur)
-                    cur = w
-            lines.append(cur)
-        while lines and lines[-1] == "":
-            lines.pop()
-        return lines or [""]
+        return _wrap_lines(self.ui, text, self.font, max_w) or [""]
 
     def _paginate(self):
+        """Pages of (line, height). A blank line is a gap, not a line.
+
+        Giving a paragraph break the full height of a line of 20px type is
+        what turned one changelog into five screens of paging.
+        """
         screen_w = _ui_width(self.ui)
         content_bottom = _content_bottom(self.ui)
         lines = self._wrap_text(self.text, screen_w - (self.margin * 2))
         line_h = self.ui.get_text_size("Ag", self.font)[1] + 4
-        per_page = max(1, (content_bottom - self.top - 4) // line_h)
-        pages = [lines[i:i + per_page] for i in range(0, len(lines), per_page)]
-        return pages or [[""]], line_h
+        gap_h = max(4, line_h // 3)
+        budget = content_bottom - self.top - 4
+
+        pages, current, used = [], [], 0
+        for line in lines:
+            height = line_h if line else gap_h
+            if current and used + height > budget:
+                pages.append(current)
+                current, used = [], 0
+            if not line and not current:
+                continue        # never start a page with an empty gap
+            current.append((line, height))
+            used += height
+        if current:
+            pages.append(current)
+        return pages or [[("", line_h)]], line_h
 
     def draw(self):
         screen_w = _ui_width(self.ui)
@@ -1111,9 +1170,11 @@ class TextScroller:
 
         self.ui.draw.rectangle((0, 0, screen_w, content_bottom), fill="black")
         y = self.top
-        for line in pages[self.page]:
-            self.ui.draw.text((self.margin, y), line, font=self.font, fill="white")
-            y += line_h
+        for line, height in pages[self.page]:
+            if line:
+                self.ui.draw.text((self.margin, y), line, font=self.font,
+                                  fill="white")
+            y += height
 
         last_page = self.page >= len(pages) - 1
         SoftKeyBar(self.ui).update(self.back_text if last_page else self.more_text)
@@ -1204,3 +1265,432 @@ class InfoScreen:
             key = ui.wait_for_key()
             if key in (28, 14):
                 return key
+
+"""
+
+ProgressScreen is the "this will take a while" screen: a step label, the bar,
+and the reading underneath it. Nothing is ever drawn on top of the bar -- a
+percentage sitting across its own fill is the one thing that makes a progress
+bar look broken.
+
+Callers drive it with draw(done, total) as often as they like; it only
+repaints when the whole percentage changes, so a copy loop can call it per
+chunk without slowing the copy down.
+
+"""
+class ProgressScreen:
+    BAR_HEIGHT = 14
+    BAR_MARGIN = 20
+    INSET = 2
+
+    def __init__(self, ui, step, header=None, hint=None, detail=None):
+        self.ui = ui
+        self.step = step or ""
+        self.header = header
+        self.hint = hint
+        # detail: callable(done, total) -> str, shown right of the percentage
+        # (the update app puts "5.6 of 12.4 MB" there).
+        self.detail = detail
+        self._percent = None
+
+        width = _ui_width(ui)
+        bottom = _content_bottom(ui)
+        self.font_step = getattr(ui, "font_n", None) or ui.font_md
+        self.font_small = getattr(ui, "font_s", None) or self.font_step
+        # "Backing up your data" does not fit at full size; the ladder drops
+        # a step rather than letting the label run off both edges.
+        self._label_fonts = _font_ladder(ui, "font_n", "font_md", "font_s") \
+            or [self.font_step]
+
+        step_h = ui.get_text_size("Ag", self.font_step)[1]
+        small_h = ui.get_text_size("Ag", self.font_small)[1]
+
+        self.header_box = (0, 4, width, 4 + small_h)
+        self.divider_y = self.header_box[3] + 5
+
+        bar_top = int(bottom * 0.55)
+        self.bar_box = (self.BAR_MARGIN, bar_top,
+                        width - self.BAR_MARGIN, bar_top + self.BAR_HEIGHT)
+
+        label_y = bar_top - 14 - step_h
+        self.label_box = (0, label_y, width, label_y + step_h)
+
+        status_y = self.bar_box[3] + 9
+        self.status_box = (self.BAR_MARGIN, status_y,
+                           width - self.BAR_MARGIN, status_y + small_h)
+
+        hint_y = bottom - small_h - 6
+        self.hint_box = (0, hint_y, width, hint_y + small_h)
+
+    def set_step(self, step):
+        """Change what the screen says it is doing, and repaint on next draw."""
+        self.step = step or ""
+        self._percent = None
+
+    def _centered(self, text, font, box):
+        text_w = self.ui.get_text_size(text, font)[0]
+        return (max(0, (box[0] + box[2] - text_w) // 2), box[1])
+
+    def draw(self, done, total):
+        percent = int(done * 100 / total) if total else 100
+        percent = max(0, min(100, percent))
+        if percent == self._percent:
+            return False
+        self._percent = percent
+
+        ui = self.ui
+        width = _ui_width(ui)
+        bottom = _content_bottom(ui)
+        ui.draw.rectangle((0, 0, width, bottom), fill="black")
+
+        if self.header:
+            ui.draw.text((10, self.header_box[1]), self.header,
+                         font=self.font_small, fill="white")
+            ui.draw.line((10, self.divider_y, width - 10, self.divider_y),
+                         fill="white")
+
+        if self.step:
+            room = width - 16
+            font = _fit_font(ui, self.step, room, self._label_fonts)
+            label = _ellipsize(ui, self.step, font, room)
+            ui.draw.text(self._centered(label, font, self.label_box),
+                         label, font=font, fill="white")
+
+        left, top, right, base = self.bar_box
+        ui.draw.rectangle((left, top, right, base), outline="white", width=1)
+        span = (right - self.INSET) - (left + self.INSET)
+        filled = int(span * percent / 100.0)
+        if filled > 0:
+            ui.draw.rectangle((left + self.INSET, top + self.INSET,
+                               left + self.INSET + filled, base - self.INSET),
+                              fill="white")
+
+        reading = "%d%%" % percent
+        detail = self.detail(done, total) if self.detail else ""
+        if detail:
+            ui.draw.text((self.status_box[0], self.status_box[1]), reading,
+                         font=self.font_small, fill="white")
+            detail_w = ui.get_text_size(detail, self.font_small)[0]
+            ui.draw.text((self.status_box[2] - detail_w, self.status_box[1]),
+                         detail, font=self.font_small, fill="white")
+        else:
+            ui.draw.text(self._centered(reading, self.font_small, self.status_box),
+                         reading, font=self.font_small, fill="white")
+
+        if self.hint:
+            hint = _ellipsize(ui, self.hint, self.font_small, width - 16)
+            ui.draw.text(self._centered(hint, self.font_small, self.hint_box),
+                         hint, font=self.font_small, fill="white")
+
+        SoftKeyBar(ui).update("", present=False)
+        ui.fb.update(ui.canvas)
+        return True
+
+
+"""
+
+DetailPage is a page you read: an optional picture, a title, a line or two of
+detail, then body text -- all in one column that scrolls by a line at a time
+with UP/DOWN, with the Nokia scrollbar down the right edge when there is more
+below the fold.
+
+It replaces the pattern of "MessageDialog, then a TextScroller" for anything
+that wants to show a thing and its details together (the update page, an
+about screen). Paragraph breaks cost half a line instead of a whole empty
+one, so a changelog reads as a changelog instead of as five screens.
+
+"""
+class DetailPage:
+    MARGIN = 10
+    IMAGE_MAX = 64
+    MIN_IMAGE = 40
+    SCROLLBAR_W = 8
+
+    def __init__(self, ui, title="", subtitle=None, body="", image=None,
+                 badge=None, header=None, softkey_text="OK",
+                 accept_keys=(28,), cancel_keys=(14,)):
+        self.ui = ui
+        self.title = title or ""
+        self.subtitle = subtitle or ""
+        self.badge = badge or ""
+        self.body = body or ""
+        self.header = header
+        self.softkey_text = softkey_text
+        self.accept_keys = tuple(accept_keys or ())
+        self.cancel_keys = tuple(cancel_keys or ())
+        self.offset = 0
+
+        self.font_title = getattr(ui, "font_n", None) or ui.font_md
+        self.font_small = getattr(ui, "font_s", None) or self.font_title
+        self.line_height = ui.get_text_size("Ag", self.font_small)[1] + 3
+
+        width = _ui_width(ui)
+        small_h = ui.get_text_size("Ag", self.font_small)[1]
+        top = 4
+        if self.header:
+            self.header_box = (0, top, width, top + small_h)
+            self.divider_y = self.header_box[3] + 5
+            top = self.divider_y + 6
+        else:
+            self.header_box = None
+            self.divider_y = None
+        # Two pixels of air above the softkey bar: the page must never look
+        # like its last line is sitting on the softkey.
+        self.viewport = (0, top, width, _content_bottom(ui) - 2)
+
+        self.image = self._prepare_image(image)
+        self._blocks = self._layout()
+        self.content_height = sum(height for _, height in self._blocks)
+
+    # --- layout -----------------------------------------------------------
+
+    @property
+    def viewport_height(self):
+        return self.viewport[3] - self.viewport[1]
+
+    @property
+    def scrollable(self):
+        return self.content_height > self.viewport_height
+
+    @property
+    def max_offset(self):
+        return max(0, self.content_height - self.viewport_height)
+
+    def _prepare_image(self, image):
+        if image is None:
+            return None
+        if isinstance(image, str):
+            try:
+                return self.ui.get_image(image, max_size=self.IMAGE_MAX)
+            except TypeError:
+                return self.ui.get_image(image)
+        if image.width > self.IMAGE_MAX or image.height > self.IMAGE_MAX:
+            image = image.copy()
+            image.thumbnail((self.IMAGE_MAX, self.IMAGE_MAX),
+                            Image.Resampling.LANCZOS)
+        return image
+
+    def _text_width(self):
+        room = _ui_width(self.ui) - (self.MARGIN * 2)
+        return room - self.SCROLLBAR_W if self.scrollable else room
+
+    def _hero_block(self, image):
+        """Picture on the left, everything it is on the right.
+
+        Stacking the two used up the whole screen before a word of the body
+        got a look in, which is the difference between a page you read and a
+        page you have to scroll to find out anything at all.
+        """
+        width = _ui_width(self.ui)
+        text_x = self.MARGIN + image.width + 8
+        column = width - text_x - self.MARGIN - self.SCROLLBAR_W
+
+        title_font = _fit_font(
+            self.ui, self.title, column,
+            _font_ladder(self.ui, "font_n", "font_md", "font_s") or [self.font_title])
+        title = _ellipsize(self.ui, self.title, title_font, column)
+        title_h = self.ui.get_text_size("Ag", title_font)[1] + 5 if title else 0
+
+        subtitle_lines = _wrap_lines(self.ui, self.subtitle, self.font_small,
+                                     column) if self.subtitle else []
+        rows = [(title, title_font, title_h)]
+        rows += [(line, self.font_small, self.line_height)
+                 for line in subtitle_lines]
+        if self.badge:
+            rows.append((_ellipsize(self.ui, self.badge, self.font_small, column),
+                         self.font_small, self.line_height))
+        rows = [row for row in rows if row[0]]
+
+        stack_h = sum(height for _, _, height in rows)
+        inner = max(image.height, stack_h)
+        height = inner + 6
+
+        def paint(canvas, draw, y, image=image, rows=rows):
+            box = (self.MARGIN, y + 3 + (inner - image.height) // 2)
+            if image.mode == "RGBA":
+                canvas.paste(image, box, image)
+            else:
+                canvas.paste(image, box)
+            row_y = y + 3 + (inner - stack_h) // 2
+            for text, font, row_h in rows:
+                draw.text((text_x, row_y), text, font=font, fill="white")
+                row_y += row_h
+
+        return paint, height
+
+    def _fitted_hero(self):
+        """The hero row, shrunk until the body can start on the same screen.
+
+        Whatever the picture and the details add up to, the first line of
+        what changed has to be visible without touching a key -- so the
+        picture gives ground rather than the page turning into a hero card
+        with everything worth reading below the fold.
+        """
+        image = self.image
+        while True:
+            paint, height = self._hero_block(image)
+            if height + self.line_height <= self.viewport_height:
+                return paint, height, image
+            if image.height <= self.MIN_IMAGE:
+                return paint, height, image
+            smaller = image.copy()
+            side = max(self.MIN_IMAGE, image.height - 8)
+            smaller.thumbnail((side, side), Image.Resampling.LANCZOS)
+            image = smaller
+
+    def _layout(self):
+        """The page as a list of (draw_callable, height) blocks."""
+        blocks = []
+        width = _ui_width(self.ui)
+        self.hero_box = None
+
+        def centered(text, font):
+            def paint(canvas, draw, y):
+                text_w = self.ui.get_text_size(text, font)[0]
+                draw.text(((width - text_w) // 2, y), text, font=font, fill="white")
+            return paint
+
+        if self.image is not None and (self.subtitle or self.badge):
+            paint_hero, hero_h, self.image = self._fitted_hero()
+            blocks.append((paint_hero, hero_h))
+            self.hero_box = (0, 0, width, hero_h)
+        elif self.image is not None:
+            image = self.image
+
+            def paint_image(canvas, draw, y, image=image):
+                box = ((width - image.width) // 2, y)
+                if image.mode == "RGBA":
+                    canvas.paste(image, box, image)
+                else:
+                    canvas.paste(image, box)
+
+            blocks.append((paint_image, image.height + 8))
+            if self.title:
+                title_h = self.ui.get_text_size("Ag", self.font_title)[1]
+                blocks.append((centered(self.title, self.font_title), title_h + 6))
+        else:
+            # Nothing to sit beside: centre the type instead.
+            if self.title:
+                title_h = self.ui.get_text_size("Ag", self.font_title)[1]
+                blocks.append((centered(self.title, self.font_title), title_h + 6))
+            if self.subtitle:
+                for line in _wrap_lines(self.ui, self.subtitle, self.font_small,
+                                        width - self.MARGIN * 2):
+                    blocks.append((centered(line, self.font_small), self.line_height))
+            if self.badge:
+                blocks.append((centered(self.badge, self.font_small),
+                               self.line_height + 4))
+
+        self.body_top = sum(height for _, height in blocks)
+
+        if self.body:
+            rule_h = 10
+            # The rule is the first thing to go when the page is tight: it
+            # separates, but it does not say anything.
+            if blocks and self.body_top + rule_h + self.line_height \
+                    <= self.viewport_height:
+                def paint_rule(canvas, draw, y):
+                    draw.line((self.MARGIN * 3, y + 4, width - self.MARGIN * 3, y + 4),
+                              fill="white")
+                blocks.append((paint_rule, rule_h))
+                self.body_top += rule_h
+
+            # Wrapping depends on whether a scrollbar is taking room, which
+            # depends on the height wrapping produces. Measure without it,
+            # then redo it if the page turned out to need one.
+            body_width = _ui_width(self.ui) - (self.MARGIN * 2)
+            for _ in range(2):
+                lines = _wrap_lines(self.ui, self.body, self.font_small, body_width)
+                text_blocks = []
+                for line in lines:
+                    if not line:
+                        # A paragraph break is a breath, not an empty line.
+                        text_blocks.append((None, self.line_height // 2))
+                        continue
+
+                    def paint_line(canvas, draw, y, line=line):
+                        draw.text((self.MARGIN, y), line, font=self.font_small,
+                                  fill="white")
+                    text_blocks.append((paint_line, self.line_height))
+
+                height = sum(h for _, h in blocks) + sum(h for _, h in text_blocks)
+                narrowed = body_width - self.SCROLLBAR_W
+                if height <= self.viewport_height or body_width == narrowed:
+                    break
+                body_width = narrowed
+            blocks.extend(text_blocks)
+        return blocks
+
+    # --- drawing ----------------------------------------------------------
+
+    def draw(self):
+        ui = self.ui
+        width = _ui_width(ui)
+        bottom = _content_bottom(ui)
+        ui.draw.rectangle((0, 0, width, bottom), fill="black")
+
+        if self.header:
+            ui.draw.text((self.MARGIN, self.header_box[1]), self.header,
+                         font=self.font_small, fill="white")
+            ui.draw.line((self.MARGIN, self.divider_y, width - self.MARGIN,
+                          self.divider_y), fill="white")
+
+        # The column is painted into its own image and pasted, so scrolled
+        # text is clipped by construction rather than by careful arithmetic.
+        column = Image.new("RGB", (width, max(1, self.viewport_height)), "black")
+        painter = ImageDraw.Draw(column)
+        # A page that fits is centred: a few words pinned to the top of an
+        # otherwise black screen reads as a crash rather than as an answer.
+        y = -self.offset
+        if not self.scrollable:
+            y += (self.viewport_height - self.content_height) // 2
+        for paint, height in self._blocks:
+            # Blocks that would be sliced by the bottom edge are left for the
+            # next scroll: half a line of type at the fold reads as a bug,
+            # and the scrollbar is what says there is more to come.
+            if paint is not None and y + height > 0 \
+                    and y + height <= self.viewport_height:
+                paint(column, painter, y)
+            y += height
+        ui.canvas.paste(column, (0, self.viewport[1]))
+
+        if self.scrollable:
+            self._draw_scrollbar()
+
+        SoftKeyBar(ui).update(self.softkey_text, present=False)
+        ui.fb.update(ui.canvas)
+
+    def _draw_scrollbar(self):
+        ui = self.ui
+        x = _ui_width(ui) - 5
+        top = self.viewport[1] + 2
+        base = self.viewport[3] - 2
+        ui.draw.line((x, top, x, base), fill="white", width=2)
+        travel = base - top - 10
+        position = top + int(travel * (self.offset / float(self.max_offset or 1)))
+        ui.draw.rectangle((x - 3, position, x + 3, position + 10), fill="white")
+
+    # --- input ------------------------------------------------------------
+
+    def handle_key(self, key):
+        """Scroll on UP/DOWN. True when the page moved."""
+        if key == 108:
+            new = min(self.max_offset, self.offset + self.line_height)
+        elif key == 103:
+            new = max(0, self.offset - self.line_height)
+        else:
+            return False
+        if new == self.offset:
+            return False
+        self.offset = new
+        self.draw()
+        return True
+
+    def show(self):
+        """Blocking. Returns the key that left the page."""
+        self.draw()
+        while True:
+            key = self.ui.wait_for_key()
+            if key in self.accept_keys or key in self.cancel_keys:
+                return key
+            self.handle_key(key)

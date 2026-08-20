@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+"""Pack the boot-time update applier into an initramfs cpio.gz.
+
+The applier (neodct/initramfs/init) runs before the root filesystem is
+mounted, which is the only moment the system partition can safely be
+rewritten. It needs busybox (mount/dd/sha256sum/switch_root) and dmsetup
+(to load the dm-verity table), both taken from the built target tree so
+they are the right architecture and libc.
+
+Only the shared libraries those two binaries actually need get copied --
+target/lib is 14MB and the whole cpio is unpacked into RAM on a 64MB
+device. DT_NEEDED is read straight out of the ELF headers here because
+buildroot ships no cross-ldd, and running the target's dynamic loader on
+the build host is not an option.
+"""
+
+import argparse
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+
+# Set by build() so tests (and post-image debugging) can inspect the tree
+# that was packed.
+LAST_STAGING = None
+
+DEFAULT_LIB_DIRS = ("lib", "usr/lib", "lib64", "usr/lib64")
+
+# Applets the init script relies on. busybox --install would create every
+# applet; this is the documented set, and symlinking only these keeps the
+# image honest about what it uses.
+# Kept honest by neodct/tests/test_initramfs_applets.py, which scans the
+# scripts for command names and fails if any of them is missing here. A
+# missing applet does not always announce itself: `wc` failing inside a
+# command substitution just yields an empty size, which reads as a truncated
+# image and silently discards a perfectly good update.
+APPLETS = (
+    "sh", "mount", "umount", "mkdir", "cat", "echo", "sleep", "dd", "sync",
+    "sha256sum", "switch_root", "blkid", "ls", "rm", "mv", "cp", "grep",
+    "sed", "awk", "printf", "test", "true", "false", "dmesg", "mknod",
+    "modprobe", "losetup", "head", "cut", "date", "expr",
+    "wc", "tr", "dirname", "basename", "mountpoint", "chmod", "ln",
+    "unzip", "stty", "reboot", "clear", "mkfifo", "kill",
+)
+
+
+class MissingLibrary(Exception):
+    """A needed shared library was not found in the target tree."""
+
+
+def _read_exact(handle, offset, size):
+    handle.seek(offset)
+    data = handle.read(size)
+    if len(data) != size:
+        raise ValueError("truncated ELF")
+    return data
+
+
+def elf_needed(path):
+    """(DT_NEEDED names, PT_INTERP) for an ELF file.
+
+    Minimal 32/64-bit, little/big-endian ELF reader: parse the program
+    headers to find PT_DYNAMIC and PT_INTERP, walk the dynamic table for
+    DT_NEEDED (1) and DT_STRTAB (5), then read the names out of .dynstr.
+    """
+    with open(str(path), "rb") as handle:
+        ident = handle.read(16)
+        if len(ident) < 16 or ident[:4] != b"\x7fELF":
+            raise ValueError("%s is not an ELF file" % path)
+        is64 = ident[4] == 2
+        endian = "<" if ident[5] == 1 else ">"
+
+        if is64:
+            header = _read_exact(handle, 16, 48)
+            (_, _, _, _, phoff, _, _, _, phentsize, phnum, _, _, _) = \
+                struct.unpack(endian + "HHIQQQIHHHHHH", header)
+        else:
+            header = _read_exact(handle, 16, 36)
+            (_, _, _, _, phoff, _, _, _, phentsize, phnum, _, _, _) = \
+                struct.unpack(endian + "HHIIIIIHHHHHH", header)
+
+        dynamic = None
+        interpreter = None
+        for index in range(phnum):
+            entry = _read_exact(handle, phoff + index * phentsize, phentsize)
+            if is64:
+                p_type, _, p_offset, _, _, p_filesz = \
+                    struct.unpack(endian + "IIQQQQ", entry[:40])
+            else:
+                p_type, p_offset, _, _, p_filesz = \
+                    struct.unpack(endian + "IIIII", entry[:20])
+            if p_type == 2:      # PT_DYNAMIC
+                dynamic = (p_offset, p_filesz)
+            elif p_type == 3:    # PT_INTERP
+                interpreter = _read_exact(handle, p_offset, p_filesz)
+                interpreter = interpreter.split(b"\x00")[0].decode()
+
+        if dynamic is None:
+            return [], interpreter
+
+        offset, size = dynamic
+        entry_size = 16 if is64 else 8
+        fmt = endian + ("qQ" if is64 else "iI")
+        needed_offsets = []
+        strtab = None
+        raw = _read_exact(handle, offset, size)
+        for position in range(0, size - entry_size + 1, entry_size):
+            tag, value = struct.unpack(fmt, raw[position:position + entry_size])
+            if tag == 0:         # DT_NULL
+                break
+            if tag == 1:         # DT_NEEDED
+                needed_offsets.append(value)
+            elif tag == 5:       # DT_STRTAB (a virtual address)
+                strtab = value
+
+        if strtab is None or not needed_offsets:
+            return [], interpreter
+
+        # DT_STRTAB is a vaddr; map it back to a file offset via the segment
+        # that contains it.
+        file_offset = None
+        for index in range(phnum):
+            entry = _read_exact(handle, phoff + index * phentsize, phentsize)
+            if is64:
+                p_type, _, p_offset, p_vaddr, _, p_filesz = \
+                    struct.unpack(endian + "IIQQQQ", entry[:40])
+            else:
+                p_type, p_offset, p_vaddr, _, p_filesz = \
+                    struct.unpack(endian + "IIIII", entry[:20])
+            if p_type == 1 and p_vaddr <= strtab < p_vaddr + p_filesz:  # PT_LOAD
+                file_offset = p_offset + (strtab - p_vaddr)
+                break
+        if file_offset is None:
+            return [], interpreter
+
+        names = []
+        for string_offset in needed_offsets:
+            handle.seek(file_offset + string_offset)
+            chunk = handle.read(256).split(b"\x00")[0]
+            if chunk:
+                names.append(chunk.decode())
+        return names, interpreter
+
+
+def resolve_libs(binaries, lib_dirs):
+    """Transitive closure of shared libraries, as {archive path: source path}."""
+    lib_dirs = [str(d) for d in lib_dirs]
+    resolved = {}
+    pending = []
+    for binary in binaries:
+        names, interpreter = elf_needed(binary)
+        pending.extend(names)
+        if interpreter:
+            pending.append(os.path.basename(interpreter))
+
+    seen = set()
+    while pending:
+        # FIFO, so a missing dependency is always reported as the first one
+        # the binary itself asked for rather than whichever happened to be
+        # last on the stack.
+        name = pending.pop(0)
+        if name in seen:
+            continue
+        seen.add(name)
+        for directory in lib_dirs:
+            candidate = os.path.join(directory, name)
+            if os.path.exists(candidate):
+                # Flatten into /lib: the loader is told where to look by the
+                # interpreter path, and a flat /lib keeps the cpio simple.
+                resolved["lib/" + name] = candidate
+                try:
+                    more, _ = elf_needed(candidate)
+                except ValueError:
+                    more = []
+                pending.extend(more)
+                break
+        else:
+            raise MissingLibrary(
+                "%s not found in %s" % (name, ", ".join(lib_dirs)))
+    return resolved
+
+
+# dmsetup is required, and buildroot's lvm2 configures with
+# --exec-prefix=/usr so it lands in /usr/sbin -- but a hand-built or
+# differently configured tree may put it elsewhere. Whichever is found is
+# installed at sbin/dmsetup, which is on the PATH the kernel gives init.
+DMSETUP_CANDIDATES = ("usr/sbin/dmsetup", "sbin/dmsetup",
+                      "usr/bin/dmsetup", "bin/dmsetup")
+
+
+def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None):
+    """Stage and pack the initramfs. Returns the output path."""
+    global LAST_STAGING
+    target_dir = str(target_dir)
+    busybox = os.path.join(target_dir, "bin", "busybox")
+    if not os.path.exists(busybox):
+        sys.exit("mkinitramfs: no busybox in %s -- build the target first"
+                 % target_dir)
+
+    binaries = {"bin/busybox": busybox}
+
+    if extra_binaries is None:
+        for candidate in DMSETUP_CANDIDATES:
+            source = os.path.join(target_dir, candidate)
+            if os.path.exists(source):
+                binaries["sbin/dmsetup"] = source
+                break
+        else:
+            # Without dmsetup the initramfs cannot load a verity table, and
+            # neodct.verity=enforce would drop every boot into the rescue
+            # shell. Fail the build instead of shipping that.
+            sys.exit("mkinitramfs: no dmsetup in %s (looked in %s) -- enable "
+                     "BR2_PACKAGE_LVM2; dm-verity cannot work without it"
+                     % (target_dir, ", ".join(DMSETUP_CANDIDATES)))
+    else:
+        for relative in extra_binaries:
+            source = os.path.join(target_dir, relative)
+            if os.path.exists(source):
+                binaries[relative] = source
+            else:
+                print("mkinitramfs: warning: %s missing" % relative,
+                      file=sys.stderr)
+
+    if lib_dirs is None:
+        lib_dirs = [os.path.join(target_dir, d) for d in DEFAULT_LIB_DIRS]
+    lib_dirs = [d for d in lib_dirs if os.path.isdir(d)]
+
+    staging = tempfile.mkdtemp(prefix="neodct-initramfs-")
+    LAST_STAGING = staging
+    for directory in ("bin", "sbin", "lib", "usr", "proc", "sys", "dev", "mnt",
+                      "mnt/root", "mnt/user", "mnt/sdcard", "newroot"):
+        os.makedirs(os.path.join(staging, directory), exist_ok=True)
+
+    # Everything lands in /lib, but the dynamic loader does not necessarily
+    # look there. This glibc's built-in search path is /lib64 and /usr/lib64,
+    # and an initramfs has no /etc/ld.so.cache to redirect it -- so without
+    # these aliases the loader cannot find a single library and boot dies with
+    # "error while loading shared libraries". The target tree solves it the
+    # same way (lib64 -> lib); mirror that so every directory the loader might
+    # try resolves to the one real lib dir, whichever libc this is.
+    for alias, target in (("lib64", "lib"),
+                          ("usr/lib", "../lib"),
+                          ("usr/lib64", "../lib")):
+        link = os.path.join(staging, alias)
+        if not os.path.lexists(link):
+            os.symlink(target, link)
+
+    for archive_path, source in binaries.items():
+        destination = os.path.join(staging, archive_path)
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        shutil.copy2(source, destination)
+        os.chmod(destination, 0o755)
+
+    for archive_path, source in resolve_libs(binaries.values(), lib_dirs).items():
+        destination = os.path.join(staging, archive_path)
+        shutil.copy2(source, destination)
+
+    # The loader is looked up by its absolute PT_INTERP path, so mirror it.
+    for _, interpreter in (elf_needed(b) for b in binaries.values()):
+        if not interpreter:
+            continue
+        destination = os.path.join(staging, interpreter.lstrip("/"))
+        if os.path.exists(destination):
+            continue
+        source = os.path.join(staging, "lib", os.path.basename(interpreter))
+        if os.path.exists(source):
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            shutil.copy2(source, destination)
+
+    for applet in APPLETS:
+        link = os.path.join(staging, "bin", applet)
+        if not os.path.exists(link):
+            os.symlink("busybox", link)
+
+    # init_script may be the init file itself or the directory holding it
+    # plus the sourced helpers (ndsys-apply.sh).
+    init_script = str(init_script)
+    if os.path.isdir(init_script):
+        for name in sorted(os.listdir(init_script)):
+            source = os.path.join(init_script, name)
+            if os.path.isfile(source):
+                shutil.copy2(source, os.path.join(staging, name))
+        if not os.path.exists(os.path.join(staging, "init")):
+            sys.exit("mkinitramfs: no init in %s" % init_script)
+    else:
+        shutil.copy2(init_script, os.path.join(staging, "init"))
+    os.chmod(os.path.join(staging, "init"), 0o755)
+
+    names = subprocess.run(["find", ".", "-mindepth", "1", "-printf", "%P\\n"],
+                           cwd=staging, capture_output=True, text=True,
+                           check=True).stdout
+    with open(str(output), "wb") as handle:
+        cpio = subprocess.Popen(["cpio", "--quiet", "-o", "-H", "newc"],
+                                cwd=staging, stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, text=True)
+        gzip = subprocess.Popen(["gzip", "-9", "-n"], stdin=cpio.stdout,
+                                stdout=handle)
+        cpio.stdout.close()
+        cpio.communicate(names)
+        gzip.communicate()
+        if cpio.returncode or gzip.returncode:
+            sys.exit("mkinitramfs: cpio/gzip failed")
+    return str(output)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--target-dir", required=True)
+    parser.add_argument("--init", required=True)
+    parser.add_argument("--output", required=True)
+    args = parser.parse_args(argv)
+
+    path = build(args.target_dir, args.init, args.output)
+    print("mkinitramfs: %s (%.1f KiB)"
+          % (path, os.path.getsize(path) / 1024.0))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

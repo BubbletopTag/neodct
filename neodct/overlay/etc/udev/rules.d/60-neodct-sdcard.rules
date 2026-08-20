@@ -1,0 +1,10 @@
+# Mount a card as soon as it is inserted, unmount when it is pulled.
+#
+# The helper decides for itself whether a device is removable (anything that
+# is not the system or user-data partition from the kernel cmdline), so this
+# rule can afford to be broad. RUN is fine here because the helper returns
+# immediately after mounting.
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", RUN+="/NeoDCT/System/hw/neodct-sdcard add %k"
+ACTION=="add", SUBSYSTEM=="block", KERNEL=="mmcblk[0-9]", RUN+="/NeoDCT/System/hw/neodct-sdcard add %k"
+ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", RUN+="/NeoDCT/System/hw/neodct-sdcard remove %k"
+ACTION=="remove", SUBSYSTEM=="block", KERNEL=="mmcblk[0-9]", RUN+="/NeoDCT/System/hw/neodct-sdcard remove %k"

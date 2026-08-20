@@ -105,6 +105,9 @@ class PathRemap:
     # (module, attribute, indices of the path arguments)
     _TARGETS = (
         ("builtins", "open", (0,)),
+        # zipfile (and anything else opening through the io module) reaches
+        # io.open by attribute, so patching builtins.open alone misses it.
+        ("io", "open", (0,)),
         ("os.path", "exists", (0,)),
         ("os.path", "isfile", (0,)),
         ("os.path", "isdir", (0,)),
@@ -122,6 +125,7 @@ class PathRemap:
         ("os", "replace", (0, 1)),
         ("shutil", "copyfile", (0, 1)),
         ("shutil", "copy", (0, 1)),
+        ("shutil", "copy2", (0, 1)),
         ("sqlite3", "connect", (0,)),
         ("PIL.Image", "open", (0,)),
         ("PIL.ImageFont", "truetype", (0,)),
@@ -301,7 +305,9 @@ class StubUI:
         }
         if self._wallpaper_name:
             values["system.ui.wallpaper"] = (
-                NEODCT_PREFIX + "/User/wallpapers/" + self._wallpaper_name
+                # Stock wallpapers ship inside the read-only image; only
+                # user-added ones live under /NeoDCT/User.
+                NEODCT_PREFIX + "/System/wallpapers/" + self._wallpaper_name
             )
         values.update(self._settings)
 

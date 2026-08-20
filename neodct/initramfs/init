@@ -1,0 +1,242 @@
+#!/bin/sh
+# NeoDCT initramfs: apply staged system updates, then boot the verified root.
+#
+# This runs before the root filesystem is mounted, which is the only moment
+# the system partition can safely be rewritten -- you cannot dd over a
+# squashfs the kernel is demand-paging from.
+#
+# Boot order:
+#   1. mount /proc /sys /dev
+#   2. read the kernel cmdline for the device names
+#   3. mount the user-data partition read-write
+#   4. apply a staged update, if there is one (see ndsys-apply.sh, which is
+#      where the risky part lives and is unit tested on the host)
+#   5. build a dm-verity device over the system partition
+#   6. mount it read-only, move the user partition inside it, switch_root
+#
+# Kernel cmdline:
+#   neodct.sys=DEV      system image partition (squashfs + verity tree)
+#   neodct.user=DEV     user-data partition (ext4)
+#   neodct.verity=MODE  enforce (default) | permissive | off
+#   neodct.debug=1      verbose, and a shell instead of a silent stop
+
+# The kernel hands init a PATH of its own; be explicit so dmsetup and the
+# busybox applet symlinks are always found.
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+
+SYS_DEV=""
+USER_DEV=""
+VERITY_MODE="enforce"
+DEBUG=""
+FORCE_RECOVERY=""
+RECOVERY_TTY_OVERRIDE=""
+
+MNT_USER=/mnt/user
+MNT_ROOT=/mnt/root
+STATE_DIR="$MNT_USER/.ndsys"
+LOG_FILE="$MNT_USER/logs/update.log"
+USER_MOUNTED=""
+
+log() {
+    echo "[ndsys] $*" > /dev/console 2>/dev/null
+    [ -d "$MNT_USER/logs" ] && \
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE" 2>/dev/null
+    return 0
+}
+
+debug() {
+    [ -n "$DEBUG" ] && log "$*"
+    return 0
+}
+
+# If recovery is not available (older initramfs), degrade to panic().
+if ! command -v recovery_or_panic > /dev/null 2>&1; then
+    recovery_or_panic() { panic "$@"; }
+fi
+
+# Unrecoverable: log loudly and stop somewhere useful rather than reboot-loop.
+panic() {
+    log "FATAL: $*"
+    log "dropping to a rescue shell; the system partition may need reflashing"
+    exec /bin/sh
+}
+
+# --- 1. kernel filesystems ------------------------------------------------
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+# CONFIG_DEVTMPFS_MOUNT does not apply when booting an initramfs, so /dev is
+# ours to mount -- and ours to move into the new root, or the phone comes up
+# with no /dev/tty0 and no framebuffer.
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || mount -t tmpfs tmpfs /dev
+
+# --- 2. kernel cmdline ----------------------------------------------------
+for word in $(cat /proc/cmdline 2>/dev/null); do
+    case "$word" in
+        neodct.sys=*)    SYS_DEV="${word#neodct.sys=}" ;;
+        neodct.user=*)   USER_DEV="${word#neodct.user=}" ;;
+        neodct.verity=*) VERITY_MODE="${word#neodct.verity=}" ;;
+        neodct.debug=*)  DEBUG="${word#neodct.debug=}" ;;
+        neodct.recovery=*) FORCE_RECOVERY="${word#neodct.recovery=}" ;;
+        neodct.rectty=*) RECOVERY_TTY_OVERRIDE="${word#neodct.rectty=}" ;;
+    esac
+done
+
+# Devices can take a moment: virtio is instant, an SD/eMMC controller is not.
+wait_for_device() {
+    tries=0
+    while [ "$tries" -lt 50 ]; do
+        [ -b "$1" ] && return 0
+        sleep 0.1
+        tries=$((tries + 1))
+    done
+    [ -b "$1" ]
+}
+
+find_by_label() {
+    blkid 2>/dev/null | sed -n "s/^\([^:]*\):.*LABEL=\"$1\".*/\1/p" | head -n1
+}
+
+# The helpers below need to be available before the devices are resolved.
+. /ndsys-apply.sh
+[ -r /ndsys-recovery.sh ] && . /ndsys-recovery.sh
+
+# Give the block devices a moment to probe, then identify them by content
+# rather than by name: cmdline names are only a hint (see the comment in
+# ndsys-apply.sh -- virtio-mmio ordering is not the command line's).
+[ -n "$SYS_DEV" ] && wait_for_device "$SYS_DEV"
+RESOLVED_SYS="$(find_system_device "$SYS_DEV")" || RESOLVED_SYS=""
+if [ -z "$RESOLVED_SYS" ]; then
+    # Devices may still be settling; wait for anything to appear and retry.
+    tries=0
+    while [ "$tries" -lt 30 ] && [ -z "$RESOLVED_SYS" ]; do
+        sleep 0.1
+        tries=$((tries + 1))
+        RESOLVED_SYS="$(find_system_device "$SYS_DEV")" || RESOLVED_SYS=""
+    done
+fi
+SYS_DEV="$RESOLVED_SYS"
+
+USER_DEV="$(find_user_device "$USER_DEV")" || USER_DEV=""
+
+# Always log this: when something is wrong here, it is the first thing worth
+# knowing, and it is what the first real boot got wrong.
+log "system=${SYS_DEV:-NONE} user=${USER_DEV:-NONE} verity=$VERITY_MODE"
+
+if [ -z "$SYS_DEV" ]; then
+    log "no system image found on any block device"
+    recovery_or_panic "no system image found -- install one from an SD card"
+fi
+
+# --- 3. user-data partition ----------------------------------------------
+# Not fatal: the phone can boot without it, it just has nowhere to save.
+if [ -n "$USER_DEV" ] && wait_for_device "$USER_DEV"; then
+    if mount -t ext4 -o rw,noatime "$USER_DEV" "$MNT_USER" 2>/dev/null || \
+       mount -o rw,noatime "$USER_DEV" "$MNT_USER" 2>/dev/null; then
+        USER_MOUNTED=1
+        mkdir -p "$MNT_USER/logs" "$STATE_DIR" 2>/dev/null
+    else
+        log "WARNING: cannot mount user partition $USER_DEV"
+    fi
+else
+    log "WARNING: no user-data partition found"
+fi
+
+if [ -n "$FORCE_RECOVERY" ]; then
+    log "recovery requested on the cmdline"
+    recovery_or_panic "recovery mode"
+elif [ -n "$USER_MOUNTED" ] && command -v recovery_requested > /dev/null 2>&1 \
+        && recovery_requested; then
+    log "recovery requested by the system"
+    recovery_or_panic "recovery mode"
+fi
+
+# --- 4. apply a staged update --------------------------------------------
+[ -n "$USER_MOUNTED" ] && apply_pending
+
+# --- 5. dm-verity --------------------------------------------------------
+# The root hash comes from installed.prop on the user partition, so this is
+# an integrity guarantee rather than an authenticity one: the signature is
+# checked by SystemUpdate before staging, and anyone able to rewrite the user
+# partition could rewrite the system partition too. Moving the trust root
+# into the kernel (CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG with the release
+# certificate built in) is the upgrade path.
+ROOT_SOURCE="$SYS_DEV"
+VERITY_STATE="off"
+
+setup_verity() {
+    table="$(verity_table)" || {
+        log "no verity parameters recorded; cannot verify the system image"
+        return 1
+    }
+    if ! command -v dmsetup > /dev/null 2>&1; then
+        log "dmsetup missing from the initramfs; cannot verify"
+        return 1
+    fi
+    modprobe dm-verity 2>/dev/null
+    if ! dmsetup create "$DM_NAME" --readonly --table "$table" 2>/dev/null; then
+        log "dm-verity table load failed"
+        return 1
+    fi
+    ROOT_SOURCE="/dev/mapper/$DM_NAME"
+    return 0
+}
+
+case "$VERITY_MODE" in
+    off)
+        log "verity disabled on the cmdline"
+        ;;
+    permissive)
+        if setup_verity; then
+            VERITY_STATE="enforced"
+        else
+            log "WARNING: booting unverified (permissive)"
+            VERITY_STATE="failed"
+        fi
+        ;;
+    *)
+        if setup_verity; then
+            VERITY_STATE="enforced"
+        else
+            recovery_or_panic "system failed verification"
+        fi
+        ;;
+esac
+debug "verity state: $VERITY_STATE, root source $ROOT_SOURCE"
+
+# --- 6. mount the root and hand over ------------------------------------
+if ! mount -t squashfs -o ro "$ROOT_SOURCE" "$MNT_ROOT" 2>/dev/null; then
+    mount -o ro "$ROOT_SOURCE" "$MNT_ROOT" 2>/dev/null || \
+        recovery_or_panic "cannot mount the system image"
+fi
+[ -x "$MNT_ROOT/sbin/init" ] || \
+    recovery_or_panic "no system installed"
+
+if [ -n "$USER_MOUNTED" ]; then
+    # Tell the UI how the system was verified, then hand the partition over.
+    # Publish the devices that were actually used, not the names from the
+    # cmdline: /NeoDCT/System/hw/neodct-sdcard reads these so it cannot
+    # mistake the system image for a removable card.
+    putprop_file "$STATE_DIR/verity_state.prop" <<EOF
+state=$VERITY_STATE
+mode=$VERITY_MODE
+sys_device=$SYS_DEV
+user_device=$USER_DEV
+EOF
+    if [ -d "$MNT_ROOT/NeoDCT/User" ]; then
+        mount --move "$MNT_USER" "$MNT_ROOT/NeoDCT/User" 2>/dev/null || \
+            log "WARNING: could not move the user partition into the new root"
+    else
+        log "WARNING: no /NeoDCT/User mountpoint in the system image"
+    fi
+fi
+
+# Move the kernel filesystems across. The target's inittab mounts proc and
+# sysfs again from /etc/fstab; a stacked mount there is harmless, whereas an
+# empty /dev after switch_root is a phone with no screen.
+mount --move /dev "$MNT_ROOT/dev" 2>/dev/null
+mount --move /proc "$MNT_ROOT/proc" 2>/dev/null
+mount --move /sys "$MNT_ROOT/sys" 2>/dev/null
+
+exec switch_root "$MNT_ROOT" /sbin/init
+panic "switch_root failed"

@@ -827,6 +827,21 @@ target-post-image: $(TARGETS_ROOTFS) target-finalize staging-finalize
 			$(call qstrip,$(BR2_ROOTFS_POST_SCRIPT_ARGS)) \
 			$(call qstrip,$(BR2_ROOTFS_POST_IMAGE_SCRIPT_ARGS))$(sep))
 
+# NeoDCT: package the built rootfs as an installable UPDATE.ndsw. Runs on an
+# already-built tree (no rebuild), so `make && make update` is the flow.
+# Sign it by exporting NEODCT_SIGN_KEY=/path/to/release.key first.
+#
+# The square PNG at neodct/release-thumbnail.png (if there is one) becomes the
+# picture the phone shows on its update page; NEODCT_UPDATE_THUMBNAIL=... on
+# the command line points at a different one for a one-off release.
+NEODCT_UPDATE_THUMBNAIL ?= $(wildcard $(TOPDIR)/../neodct/release-thumbnail.png)
+.PHONY: update
+update:
+	$(Q)$(TOPDIR)/../neodct/tools/mkupdate.py \
+		--images-dir $(BINARIES_DIR) \
+		--target-dir $(TARGET_DIR) \
+		$(if $(NEODCT_UPDATE_THUMBNAIL),--thumbnail $(NEODCT_UPDATE_THUMBNAIL))
+
 .PHONY: source
 source: $(foreach p,$(PACKAGES),$(p)-all-source)
 

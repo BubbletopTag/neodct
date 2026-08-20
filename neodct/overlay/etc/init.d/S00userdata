@@ -1,0 +1,37 @@
+#!/bin/sh
+# Prepare the user-data partition.
+#
+# The rootfs is a read-only squashfs, so every directory the runtime writes
+# to has to be created here, on the partition mounted at /NeoDCT/User. A
+# fresh partition is empty: there is no skeleton to copy because the
+# databases create their own schema (System/core/main.py init_databases)
+# and settings.prop is written from SettingsStorage.DEFAULTS on first read.
+#
+# Safe to run on the legacy ext4 image too -- then /NeoDCT/User is just a
+# directory and the mkdirs are no-ops.
+
+USER_DIR=/NeoDCT/User
+
+case "$1" in
+  start|"")
+    if ! mkdir -p "$USER_DIR" 2>/dev/null; then
+        echo "[userdata] $USER_DIR is not writable -- read-only fallback" >&2
+        exit 0
+    fi
+    # db     sqlite databases (phonebook, sms, call log)
+    # logs   crash.log from run_neodct.sh, update.log from the applier
+    # .ndsys pending/installed update records shared with the initramfs
+    # .pycache PYTHONPYCACHEPREFIX target, see run_neodct.sh
+    # sdcard mountpoint for a removable card (S06sdcard mounts onto it)
+    # tones/wallpapers user-added media, alongside the stock ones in System
+    # .seedrng is where /var/lib/seedrng points: the image is read-only, and
+    # seedrng needs somewhere persistent or entropy is reseeded from nothing
+    # on every boot.
+    for dir in db logs .ndsys .pycache .seedrng sdcard tones wallpapers; do
+        mkdir -p "$USER_DIR/$dir" 2>/dev/null
+    done
+    ;;
+  stop)
+    ;;
+esac
+exit 0

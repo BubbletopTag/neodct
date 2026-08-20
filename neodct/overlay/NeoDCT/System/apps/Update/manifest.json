@@ -1,0 +1,6 @@
+{
+    "name": "System Update",
+    "id": "12",
+    "icon": "icon.png",
+    "exec": "main.py"
+}
