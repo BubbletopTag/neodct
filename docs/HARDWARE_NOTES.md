@@ -66,3 +66,41 @@ initramfs reads off the cmdline goes here -- `neodct.rectty=/dev/console` to
 drive recovery over the serial console, and eventually `neodct.sys=`,
 `neodct.user=` and `neodct.verity=` when the immutable layout reaches
 hardware.
+
+## SDK kernel: dm-verity added for the immutable layout
+
+The stock luckfox kernel has no device-mapper at all, so dm-verity could not
+run. Added to `sysdrv/source/kernel/arch/arm/configs/luckfox_rv1106_linux_defconfig`
+(a `.bak-YYYYMMDD` copy sits beside it):
+
+```
+CONFIG_MD=y
+CONFIG_BLK_DEV_DM=y
+CONFIG_DM_VERITY=y
+CONFIG_CRYPTO_SHA256=y
+```
+
+Rebuild inside the Ubuntu 22.04 container, which is not optional -- a native
+Arch build hangs on the atbm wifi driver:
+
+```sh
+distrobox enter luckfox -- bash -lc 'cd /path/to/luckfox-pico && ./build.sh kernel'
+```
+
+Already present and needed by the same layout: `CONFIG_MTD_UBI_BLOCK`
+(exposes a UBI volume as `/dev/ubiblockN_M`, the block device squashfs and
+verity both require) and `CONFIG_SQUASHFS_XZ`. Note there is **no**
+`CONFIG_SQUASHFS_ZSTD`, so the luckfox defconfig must build squashfs with XZ
+while qemu uses zstd.
+
+## NAND images
+
+`neodct/tools/mknand.sh <images-dir> <target-dir> [host-dir]` turns a finished
+luckfox build into flashable images: `system.ubi` (the squashfs + verity tree
+as a UBI static volume) and `userdata.ubi` (an empty ubifs volume). Geometry
+matches the chip -- 128KiB erase blocks, 2048-byte pages and sub-pages -- and
+it refuses to emit anything larger than its partition.
+
+There is no `ubiattach`, `ubiblock` or `ubinize` in the target, so attaching
+is the kernel's job from the cmdline: `ubi.mtd=` for each partition and
+`ubi.block=` to expose the system volume.
