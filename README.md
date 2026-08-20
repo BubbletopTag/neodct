@@ -112,16 +112,20 @@ Produces a bootable image suitable for QEMU.
 
 ---
 
-### Real Hardware (example: Radxa board)
+### Real Hardware (Luckfox Pico Mini B)
 
 ```bash
-make -C buildroot O=../build-radxa \
-  BR2_DEFCONFIG=../neodct/configs/neodct_radxa_defconfig defconfig
+make -C buildroot O=../build-luckfox \
+  BR2_DEFCONFIG=../neodct/configs/luckfox_pico_mini_defconfig defconfig
 
-make -C buildroot O=../build-radxa
+make -C buildroot O=../build-luckfox
 ```
 
 Output images will appear in the corresponding `output/images/` directory.
+
+Note that the hardware target still builds the older writable-UBIFS layout: the
+read-only squashfs, dm-verity and over-the-air update system described below
+currently exist on QEMU only.
 
 ---
 

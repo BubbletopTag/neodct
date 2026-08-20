@@ -125,10 +125,6 @@ path on purpose.
   (`.env.txt`) because DTS bootargs are ignored on this board.
 - `build-luckfox/` is stale — it points at a `/home/bubbles/Documents/...`
   path that no longer exists. Start a fresh out-of-tree build dir.
-- `neodct/configs/neodct_radxa_defconfig` is dead — a leftover from the
-  abandoned Radxa Zero 3W target.
-- `docs/AGENTS.md` predates this file and describes the Radxa layout. Trust
-  this file.
 - SDK kernel builds must happen in an Ubuntu 22.04 distrobox; native Arch hangs
   on the atbm wifi driver. See `docs/HARDWARE_NOTES.md`.
 
