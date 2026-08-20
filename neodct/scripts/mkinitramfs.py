@@ -256,8 +256,14 @@ PANEL_DAEMON = "NeoDCT/System/hw/neodct_displayd"
 # everything that is a *file* there is copied verbatim into the cpio, and
 # the 126KB bitmap has no business being in the image -- only the converted
 # blob does.
-SPLASH_SOURCE = os.path.join("splash", "sadface.bmp")
-SPLASH_TARGET = "splash.raw"
+# (bitmap in the init dir, blob in the cpio). The boot logo is optional in
+# the strong sense: with no bootlogo.raw the init script never starts the
+# panel daemon at boot, so an image without one costs nothing.
+SPLASH_IMAGES = (
+    (os.path.join("splash", "sadface.bmp"), "splash.raw"),
+    (os.path.join("splash", "bootlogo.bmp"), "bootlogo.raw"),
+)
+SPLASH_SOURCE, SPLASH_TARGET = SPLASH_IMAGES[0]
 # Matches UI_W/UI_H and neodctDisplay.c FB_W/FB_H.
 SPLASH_W, SPLASH_H = 240, 175
 
@@ -378,13 +384,15 @@ def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None):
         # Convert the splash to raw framebuffer bytes here rather than
         # committing the blob: the bitmap stays the one source of truth,
         # and a 2-colour image costs almost nothing once gzipped.
-        splash = os.path.join(init_script, SPLASH_SOURCE)
-        if os.path.exists(splash):
+        for relative, blob in SPLASH_IMAGES:
+            source = os.path.join(init_script, relative)
+            if not os.path.exists(source):
+                continue
             try:
-                pixels = bmp_to_xrgb8888(splash, SPLASH_W, SPLASH_H)
+                pixels = bmp_to_xrgb8888(source, SPLASH_W, SPLASH_H)
             except (ValueError, OSError) as exc:
-                sys.exit("mkinitramfs: cannot convert %s: %s" % (splash, exc))
-            with open(os.path.join(staging, SPLASH_TARGET), "wb") as handle:
+                sys.exit("mkinitramfs: cannot convert %s: %s" % (source, exc))
+            with open(os.path.join(staging, blob), "wb") as handle:
                 handle.write(pixels)
     else:
         shutil.copy2(init_script, os.path.join(staging, "init"))

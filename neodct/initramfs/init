@@ -16,7 +16,8 @@
 #
 # Kernel cmdline:
 #   neodct.sys=DEV      system image partition (squashfs + verity tree)
-#   neodct.user=DEV     user-data partition (ext4)
+#   neodct.user=DEV     user-data partition: a block device holding ext4,
+#                       or "ubiN:volume" for ubifs on raw NAND
 #   neodct.verity=MODE  enforce (default) | permissive | off
 #   neodct.debug=1      verbose, and a shell instead of a silent stop
 
@@ -62,7 +63,9 @@ panic() {
     # Put the sad face up if the panel helpers are available. Without this a
     # phone that panics before switch_root shows nothing at all -- the rescue
     # shell is on the console, which is a serial cable the owner may not have.
-    command -v panel_start > /dev/null 2>&1 && panel_start
+    if command -v panel_start > /dev/null 2>&1; then
+        panel_start && panel_show "${PANEL_SPLASH:-/splash.raw}"
+    fi
     exec /bin/sh
 }
 
@@ -105,6 +108,15 @@ find_by_label() {
 . /ndsys-apply.sh
 [ -r /ndsys-recovery.sh ] && . /ndsys-recovery.sh
 
+# Boot logo. This is the earliest anything can appear on a phone whose panel
+# is only ever painted by neodct_displayd, and it doubles as proof of life
+# for the seconds spent attaching UBI and mounting. It costs the panel reset
+# on every boot, so it happens only when the logo was actually built in --
+# no logo, no daemon, no delay.
+if command -v panel_start > /dev/null 2>&1 && [ -r /bootlogo.raw ]; then
+    panel_start && panel_show /bootlogo.raw && debug "boot logo up"
+fi
+
 # Give the block devices a moment to probe, then identify them by content
 # rather than by name: cmdline names are only a hint (see the comment in
 # ndsys-apply.sh -- virtio-mmio ordering is not the command line's).
@@ -133,9 +145,29 @@ if [ -z "$SYS_DEV" ]; then
 fi
 
 # --- 3. user-data partition ----------------------------------------------
+# Two spellings, because two kinds of storage. On eMMC/SD/virtio it is a
+# block device holding ext4. On the raw NAND of a Luckfox there is no block
+# device at all: the partition is a UBI volume named "ubiN:volume", carrying
+# ubifs, and it exists once the kernel has attached UBI rather than after a
+# device node appears -- so there is nothing to wait for either.
+user_is_ubi() {
+    case "$1" in ubi[0-9]*:?*) return 0 ;; *) return 1 ;; esac
+}
+
+if [ -z "$USER_DEV" ]; then
+    USER_READY=""
+elif user_is_ubi "$USER_DEV"; then
+    USER_READY=1
+elif wait_for_device "$USER_DEV"; then
+    USER_READY=1
+else
+    USER_READY=""
+fi
+
 # Not fatal: the phone can boot without it, it just has nowhere to save.
-if [ -n "$USER_DEV" ] && wait_for_device "$USER_DEV"; then
-    if mount -t ext4 -o rw,noatime "$USER_DEV" "$MNT_USER" 2>/dev/null || \
+if [ -n "$USER_READY" ]; then
+    if user_is_ubi "$USER_DEV"; then USER_FSTYPE=ubifs; else USER_FSTYPE=ext4; fi
+    if mount -t "$USER_FSTYPE" -o rw,noatime "$USER_DEV" "$MNT_USER" 2>/dev/null || \
        mount -o rw,noatime "$USER_DEV" "$MNT_USER" 2>/dev/null; then
         USER_MOUNTED=1
         mkdir -p "$MNT_USER/logs" "$STATE_DIR" 2>/dev/null
@@ -241,6 +273,10 @@ fi
 mount --move /dev "$MNT_ROOT/dev" 2>/dev/null
 mount --move /proc "$MNT_ROOT/proc" 2>/dev/null
 mount --move /sys "$MNT_ROOT/sys" 2>/dev/null
+
+# Hand the SPI bus back before the new root starts its own daemon. The logo
+# stays on the panel -- nothing clears it -- until the UI draws over it.
+command -v panel_stop > /dev/null 2>&1 && panel_stop
 
 exec switch_root "$MNT_ROOT" /sbin/init
 panic "switch_root failed"

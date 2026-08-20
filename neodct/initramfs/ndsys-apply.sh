@@ -161,6 +161,13 @@ find_user_device() {
         echo "$1"
         return 0
     fi
+    # A UBI volume is not a block device and has no blkid label, so none of
+    # the above can find it. On raw NAND (Luckfox) the user partition is
+    # ubifs, named "ubiN:volume" rather than given as a path -- take that
+    # spelling from the cmdline as-is and let the mount decide.
+    case "${1:-}" in
+        ubi[0-9]*:?*) echo "$1"; return 0 ;;
+    esac
     return 1
 }
 

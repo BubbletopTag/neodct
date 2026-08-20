@@ -1,5 +1,15 @@
 # NeoDCT OS Changelog
 
+0.3.3a
+Added
+- Boot logo on the phone's own screen, drawn from the initramfs before the
+  system is mounted.
+- Recovery is visible on hardware: the panel comes up with a sad face when
+  the phone drops into recovery or panics, instead of showing nothing.
+- Recovery can be driven over the serial console.
+- Luckfox Pico Mini B: the user partition can be ubifs on raw NAND, not
+  only ext4 on a block device.
+
 0.3.2a
 Added
 - Power app: switch off, restart, or restart into recovery.

@@ -41,12 +41,15 @@ CR=$(printf '\r')
 # (mkinitramfs.py ships it only when it matches), so every step is optional:
 # recovery still runs, just headless, which is what serial is for.
 : "${PANEL_DAEMON:=/bin/neodct_displayd}"
+: "${PANEL_BOOTLOGO:=/bootlogo.raw}"
 : "${PANEL_SPLASH:=/splash.raw}"
 : "${PANEL_FB:=/dev/fb0}"
 : "${PANEL_SETTLE:=2}"
 : "${PANEL_SPLASH_HOLD:=2}"
 PANEL_PID=""
 
+# Bring the panel up. Costs PANEL_SETTLE seconds of boot, so the caller
+# decides whether it is worth it.
 panel_start() {
     [ -z "$PANEL_PID" ] || return 0
     [ -x "$PANEL_DAEMON" ] || return 1
@@ -54,18 +57,26 @@ panel_start() {
 
     "$PANEL_DAEMON" > /dev/null 2>&1 &
     PANEL_PID=$!
-    # It resets the panel and forces fb0 to 32bpp on startup; a splash
+    # It resets the panel and forces fb0 to 32bpp on startup; anything
     # written before that lands in whatever format vfb happened to have.
     sleep "$PANEL_SETTLE"
-
-    if [ -r "$PANEL_SPLASH" ]; then
-        cat "$PANEL_SPLASH" > "$PANEL_FB" 2>/dev/null
-        # Hold the face on screen before the console draws the menu over it.
-        sleep "$PANEL_SPLASH_HOLD"
-    fi
     return 0
 }
 
+# panel_show <raw> [hold] -- blit one pre-converted image and optionally
+# sit on it. The blobs are built by mkinitramfs.py from the bitmaps and are
+# already in the daemon's byte order, so this is a copy, not a conversion.
+panel_show() {
+    [ -n "$PANEL_PID" ] || return 1
+    [ -r "$1" ] || return 1
+    cat "$1" > "$PANEL_FB" 2>/dev/null || return 1
+    [ -n "${2:-}" ] && [ "${2:-0}" != "0" ] && sleep "$2"
+    return 0
+}
+
+# Must run before switch_root. The daemon keeps running across it -- its
+# binary is gone but the process is not -- and the real system starts its
+# own, so two of them would drive the same SPI bus at once.
 panel_stop() {
     [ -n "$PANEL_PID" ] || return 0
     kill "$PANEL_PID" 2>/dev/null
@@ -573,8 +584,9 @@ recovery_requested() {
 recovery_or_panic() {
     log "$*"
     # Bring the screen up first: on hardware this is the only thing that
-    # makes any of what follows visible, and it is also the sad face.
-    panel_start
+    # makes any of what follows visible. The face replaces whatever was on
+    # the panel (usually the boot logo) so the failure is unmistakable.
+    panel_start && panel_show "$PANEL_SPLASH" "$PANEL_SPLASH_HOLD"
     if [ -r /ndsys-recovery.sh ] || command -v recovery_main > /dev/null 2>&1; then
         recovery_main "$*"
     fi
