@@ -59,7 +59,7 @@ An update built without bumping it installs but shows no change on screen.
 python3 -m pytest neodct/tests/ -q      # from the repo root
 ```
 
-490 tests, ~18s. They import the real overlay code — `conftest.py` puts
+510 tests, ~20s. They import the real overlay code — `conftest.py` puts
 `neodct/overlay/NeoDCT` on `sys.path` so `System.ui...` imports resolve exactly
 as they do on the device. Run them before and after any overlay change; they
 are fast enough that there is no excuse not to.
@@ -116,15 +116,23 @@ path on purpose.
 - **Two copies of every defconfig** — `buildroot/configs/` and
   `neodct/configs/`. The build uses the `buildroot/` copy. Edit both, or the
   next person builds something else. Verify with `diff` before committing.
-- **The luckfox target is not on the current design.** Its defconfig builds
-  `BR2_TARGET_ROOTFS_UBIFS` and never runs `post-image-neodct.sh`, so it has no
-  squashfs, no verity, no split system/user partitions, and no OTA. Hardware
-  runs a writable UBIFS root with `/NeoDCT/User` as an ordinary directory.
-  Porting it is real work: squashfs + post-image, initramfs into `boot.img`,
-  NAND repartitioning, and cmdline changes that must go in the **U-Boot env**
-  (`.env.txt`) because DTS bootargs are ignored on this board.
-- `build-luckfox/` is stale — it points at a `/home/bubbles/Documents/...`
-  path that no longer exists. Start a fresh out-of-tree build dir.
+- **The luckfox target is now on the immutable design** — squashfs root under
+  dm-verity on `/dev/ubiblock0_0`, ubifs userdata on `ubi1`, initramfs built
+  into the kernel. `docs/PARTITIONS.md` has the layout, `neodct/tools/mknand.sh`
+  builds the images. It needed a repartition (oem dropped, boot grown to 16M)
+  and a kernel rebuilt with `DM_VERITY`, so a phone on the old table must be
+  fully reflashed, not updated. Kernel cmdline lives in the **U-Boot env**, not
+  the DTS, which is ignored on this board.
+- Out-of-tree build dirs bake in absolute paths. `buildroot/output` and
+  `build-luckfox/` were both built at a `/home/bubbles/Documents/...` path that
+  no longer exists; host tools carry it in shebangs and RPATHs, and `fakeroot`
+  dies with "libfakeroot.so not found". Rebuilding just `host-fakeroot` was
+  enough both times, but a cold rebuild is the only real cure.
+- **Extra kernel args must not use an `RK_*` name** in the SDK board config.
+  `unset_env_config_rk()` clears those with `env | grep -oh "^RK_.*=" | source`
+  and that `.*` is greedy, so a value containing `=` becomes a malformed line
+  that is sourced — the build dies on an unterminated quote before printing
+  anything. Use `NEODCT_BOOTARGS_EXTRA`.
 - SDK kernel builds must happen in an Ubuntu 22.04 distrobox; native Arch hangs
   on the atbm wifi driver. See `docs/HARDWARE_NOTES.md`.
 
