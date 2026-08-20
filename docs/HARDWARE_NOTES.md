@@ -109,7 +109,13 @@ is the kernel's job from the cmdline: `ubi.mtd=` for each partition and
 
 The stock table wasted 30M on an `oem` partition that was never mounted, and
 left only 4M for boot -- too little for a kernel plus the 1.65M initramfs.
-New table (`RK_PARTITION_CMD_IN_ENV` in the board config):
+That 30M is split three ways: boot +12M, rootfs +15M, userdata +2M. That is
+29M, so the new table uses 1M *less* of the chip than the old one, which
+becomes extra bad-block slack.
+
+`docs/PARTITIONS.md` describes the whole layout in Simplified Technical
+English, with a per-partition delta table. New table
+(`RK_PARTITION_CMD_IN_ENV` in the board config):
 
 ```
 256K(env),256K@256K(idblock),512K(uboot),16M(boot),8M(userdata),100M(rootfs)
