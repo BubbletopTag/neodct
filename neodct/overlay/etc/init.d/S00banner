@@ -1,0 +1,49 @@
+#!/bin/sh
+# The first thing the serial log shows: a rule, the name and version in
+# figlet, another rule. S00 so it lands before any other service speaks --
+# everything after it is tagged and coloured, and this is the line you
+# scroll back to when you want to know where a boot started.
+#
+# The art is pre-rendered at build time into /etc/neodct-banner by
+# post-build-system-metadata.sh, from the same VERSION_ID the rest of the
+# image uses. Nothing here parses a version, so nothing here can disagree
+# with one.
+
+BANNER=/etc/neodct-banner
+CONSOLE=/dev/console
+COLORS=/etc/neodct-colors.sh
+
+[ -r "$COLORS" ] && . "$COLORS"
+
+case "$1" in
+  start|"")
+    {
+        echo
+        if command -v nd_rule > /dev/null 2>&1; then
+            nd_rule = 72
+        else
+            echo "========================================================================"
+        fi
+        if [ -r "$BANNER" ]; then
+            # 46 is the green the CORE tag uses, so the banner and the OS
+            # that follows it read as the same voice.
+            if [ -n "${ND_COLOR:-}" ]; then
+                printf '%s%s' "$ND_BOLD" "$(nd_fg 46)"
+                cat "$BANNER"
+                printf '%s' "$ND_RESET"
+            else
+                cat "$BANNER"
+            fi
+        fi
+        if command -v nd_rule > /dev/null 2>&1; then
+            nd_rule = 72
+        else
+            echo "========================================================================"
+        fi
+        echo
+    } > "$CONSOLE" 2>/dev/null
+    ;;
+  stop)
+    ;;
+esac
+exit 0

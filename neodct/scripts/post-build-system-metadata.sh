@@ -78,3 +78,30 @@ EOF
 mkdir -p "$TARGET_DIR/NeoDCT/User"
 
 echo "[post-build] $PLATFORM v$VERSION ($BUILD_TIME)"
+
+# --- boot banner ----------------------------------------------------------
+# Rendered here, on the build host, rather than on the phone: figlet is a
+# build-time convenience and has no business in a 64MB image. The version
+# comes from the same VERSION_ID as everything else, so the banner cannot
+# drift from what the phone actually is -- which is exactly what happened
+# to the login issue string, still advertising 0.3.0a several releases on.
+#
+# No figlet on the build host is not an error. The banner falls back to
+# plain text and the boot looks slightly duller.
+BANNER="$TARGET_DIR/etc/neodct-banner"
+BANNER_TEXT="NeoDCT OS $VERSION"
+if command -v figlet > /dev/null 2>&1; then
+    # "small" is 66 columns for this string -- fits an 80-column console
+    # with room to spare. "standard" is 77 and wraps on anything narrower.
+    figlet -f small "$BANNER_TEXT" > "$BANNER" 2>/dev/null \
+        || printf '%s\n' "$BANNER_TEXT" > "$BANNER"
+else
+    printf '%s\n' "$BANNER_TEXT" > "$BANNER"
+fi
+echo "[post-build] boot banner: $BANNER_TEXT"
+
+# /etc/issue too. BR2_TARGET_GENERIC_ISSUE is a literal string in the
+# defconfig, so it says whatever it said when someone last remembered to
+# edit it -- it was still advertising 0.3.0a at 0.3.5a. Rewrite it from
+# VERSION_ID like everything else here.
+printf 'NeoDCT System v%s\n' "$VERSION" > "$TARGET_DIR/etc/issue"

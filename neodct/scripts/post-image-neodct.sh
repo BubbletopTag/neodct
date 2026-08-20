@@ -72,17 +72,41 @@ if [ -f "$USERDATA" ] && [ -n "${NEODCT_KEEP_USERDATA:-}" ]; then
     # installed, and the image just changed -- a stale hash means dm-verity
     # refuses to boot the new system.
     if DEBUGFS="$(host_tool debugfs)"; then
+        # The source file has to exist before any of this is worth doing.
+        # It is written by mkupdate above; if that changed or failed, the
+        # write below silently does nothing and the phone keeps booting the
+        # previous image's root hash -- dm-verity then builds a device whose
+        # blocks do not hash, and the boot dies at "cannot mount the system
+        # image" with no clue why. That failure shipped once. Check first.
+        if [ ! -f "$SKEL/.ndsys/installed.prop" ]; then
+            say "no $SKEL/.ndsys/installed.prop -- mkupdate did not write it"
+            say "  refusing to keep a userdata whose root hash would be stale"
+            exit 1
+        fi
         "$DEBUGFS" -w -R "mkdir /.ndsys" "$USERDATA" > /dev/null 2>&1 || true
         "$DEBUGFS" -w -R "rm /.ndsys/installed.prop" "$USERDATA" \
             > /dev/null 2>&1 || true
-        "$DEBUGFS" -w -R \
-            "write $SKEL/.ndsys/installed.prop .ndsys/installed.prop" \
-            "$USERDATA" > /dev/null 2>&1
+        # Not silenced: this is the write that matters.
+        if ! "$DEBUGFS" -w -R \
+                "write $SKEL/.ndsys/installed.prop .ndsys/installed.prop" \
+                "$USERDATA" 2>&1 | grep -qv "^debugfs"; then
+            :   # debugfs prints its banner on stderr even when it works
+        fi
         # debugfs leaks the blocks of the file it unlinked; tidy up.
         if E2FSCK="$(host_tool e2fsck)"; then
             "$E2FSCK" -fy "$USERDATA" > /dev/null 2>&1 || true
         fi
-        say "userdata.ext4 kept, installed.prop refreshed for the new image"
+        # Prove it landed rather than trusting the exit status: read the
+        # hash back out and compare it to the image we just built.
+        WANT=$(sed -n 's/^verity_root_hash=//p' "$SKEL/.ndsys/installed.prop")
+        GOT=$("$DEBUGFS" -R "cat /.ndsys/installed.prop" "$USERDATA" 2>/dev/null \
+              | sed -n 's/^verity_root_hash=//p')
+        if [ -z "$GOT" ] || [ "$GOT" != "$WANT" ]; then
+            say "installed.prop did not take: userdata says '${GOT:-nothing}',"
+            say "  image is '$WANT'. That userdata cannot boot this image."
+            exit 1
+        fi
+        say "userdata.ext4 kept, installed.prop refreshed (root ${WANT%%"${WANT#????????}"}...)"
     else
         say "debugfs not found; cannot refresh installed.prop in place."
         say "  Unset NEODCT_KEEP_USERDATA to rebuild the partition instead."

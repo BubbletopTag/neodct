@@ -1,5 +1,18 @@
 # NeoDCT OS Changelog
 
+0.3.6a
+Added
+- The serial log opens with the NeoDCT name and version, and every service
+  now has its own colour. The modem is blue, the system green, anything
+  that failed is red.
+- The modem talks to the serial console as it works. It used to keep
+  everything it knew in a file on the phone.
+
+Fixed
+- Mobile data. Each dial attempt was taking a connection slot from the
+  modem and never giving it back, so after enough tries the modem stopped
+  answering until it was power-cycled.
+
 0.3.5a
 Changed
 - The phone now tries the modem's QMI data path first. It used to work

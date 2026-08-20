@@ -29,7 +29,8 @@
 #     Delete that file to re-probe from scratch.
 #
 # Everything runs backgrounded so boot never blocks on cell registration.
-# Progress log: /tmp/modem-boot.log   Status flag: /tmp/modem.status
+# Progress goes to the console AND /tmp/modem-boot.log; status flag is
+# /tmp/modem.status. Set MODEM_CONSOLE= to silence the console copy.
 # Config overrides: /etc/default/modem (plain sh vars, all optional).
 #
 # The UI's ModemService only reads status (CSQ/CEREG/COPS) and shares the
@@ -64,8 +65,29 @@ PIDFILE=/tmp/modem-boot.pid
 CACHE=/NeoDCT/User/.modem.cache   # written on success: CACHED_APN/_PDP/_RAW
 RESOLV=/etc/resolv.conf       # symlink into /run -- only ever append through it
 
+# Colours, shared with the Python side so a [MODEM] line is the same blue
+# whoever printed it. Missing file is not fatal: nd_tag degrades to plain.
+[ -r /etc/neodct-colors.sh ] && . /etc/neodct-colors.sh
+command -v nd_tag > /dev/null 2>&1 || nd_tag() { printf '[%s]' "$1"; }
+
+MODEM_CONSOLE="${MODEM_CONSOLE:-/dev/console}"
+
 log() {
-    echo "[$(date '+%H:%M:%S')] $*" >> "$LOG"
+    _ts="$(date '+%H:%M:%S')"
+    echo "[$_ts] $*" >> "$LOG"
+    # ...and to the console. Everything this script knew used to go to a
+    # file and nowhere else, so a boot could fail its way through the whole
+    # APN matrix in total silence and the only way to find out why was to
+    # go fishing in /tmp afterwards. Watch it over serial instead.
+    echo "$(nd_tag MODEM) $_ts $*" > "$MODEM_CONSOLE" 2>/dev/null
+}
+
+# logv <label> <value> -- one state fact, indented under the step it belongs
+# to. Used for the readings worth seeing on every dial attempt.
+logv() {
+    _ts="$(date '+%H:%M:%S')"
+    echo "[$_ts]   $1: $2" >> "$LOG"
+    echo "$(nd_tag MODEM) $_ts   $1: $2" > "$MODEM_CONSOLE" 2>/dev/null
 }
 
 fail() {
@@ -255,36 +277,82 @@ try_apn() {   # $1 = apn, $2 = pdp type
 # The QMI path -- what ModemManager used on the host, proven to work
 # with this SIM and tower. Needs the uqmi package (post-0.3.0a image).
 try_uqmi() {   # $1 = apn
-    command -v uqmi > /dev/null 2>&1 || return 1
+    command -v uqmi > /dev/null 2>&1 || { log "  uqmi not installed"; return 1; }
     UQMI_DEV=$(ls /dev/cdc-wdm* 2>/dev/null | head -1)
-    [ -n "$UQMI_DEV" ] || return 1
-    log "QMI fallback via $UQMI_DEV: start-network apn=$1"
-    # --keep-client-id wds is not optional. uqmi releases its WDS client
-    # when it exits, and the network tears the session down with it -- the
-    # call reports a packet-data handle, then AT+CEER says "Regular
-    # deactivation" and --get-data-status says "disconnected" seconds
-    # later. Holding the client id keeps the bearer up after uqmi returns.
-    OUT=$(uqmi -d "$UQMI_DEV" -t 15000 --keep-client-id wds \
-              --start-network --apn "$1" --ip-family ipv6 2>&1 | head -2)
-    case "$OUT" in
-        *nknown\ option*|*sage:*)   # older uqmi without --ip-family
-            OUT=$(uqmi -d "$UQMI_DEV" -t 15000 --keep-client-id wds \
-                      --start-network --apn "$1" 2>&1 | head -2)
-            ;;
-    esac
-    log "  uqmi: $(printf '%s' "$OUT" | tr '\n' ' ')"
+    [ -n "$UQMI_DEV" ] || { log "  no /dev/cdc-wdm* -- qmi_wwan not bound?"; return 1; }
+
+    # One QMI client for the whole run. uqmi allocates a fresh client on
+    # every invocation, and --keep-client-id stops it releasing that client
+    # on exit -- necessary, or the network tears the session down the moment
+    # uqmi returns ("Regular deactivation"). The two together leak a client
+    # per dial. QMI's pool is small: after ~20 attempts every later call
+    # fails with "Failed to connect to service" and QMI is dead until the
+    # modem is power-cycled. So allocate once and pass --set-client-id after.
+    if [ -z "$QMI_CID" ]; then
+        QMI_CID=$(uqmi -d "$UQMI_DEV" -t 8000 --get-client-id wds 2>/dev/null)
+        case "$QMI_CID" in
+            ""|*[!0-9]*)
+                log "  could not allocate a WDS client (got: ${QMI_CID:-nothing})"
+                log "  the client pool may be exhausted; power-cycle the modem"
+                QMI_CID=""
+                return 1 ;;
+        esac
+        logv "wds client" "$QMI_CID"
+    fi
+    QMI="-d $UQMI_DEV --set-client-id wds,$QMI_CID --keep-client-id wds"
+
+    # QMI needs raw-ip framing; 802.3 framing gives a link that never gets
+    # an address. prep_wwan may have left it at N from the cache.
+    if [ -w "/sys/class/net/$WWAN_IF/qmi/raw_ip" ] \
+       && [ "$(cat "/sys/class/net/$WWAN_IF/qmi/raw_ip" 2>/dev/null)" != "Y" ]; then
+        log "  framing is 802.3; QMI needs raw-ip -- switching"
+        set_raw_ip Y
+    fi
+    sysctl -qw "net.ipv6.conf.$WWAN_IF.accept_ra=2" \
+               "net.ipv6.conf.$WWAN_IF.disable_ipv6=0" 2>> "$LOG"
+
+    log "QMI dial: apn=$1 family=ipv6 dev=$UQMI_DEV client=$QMI_CID"
+    logv "signal" "$(uqmi $QMI -t 8000 --get-signal-info 2>&1 | tr -d ' \n')"
+    logv "serving" "$(uqmi $QMI -t 8000 --get-serving-system 2>&1 | tr -d ' \n' | head -c 120)"
+
+    # shellcheck disable=SC2086  # $QMI is intentionally word-split
+    OUT=$(uqmi $QMI -t 20000 --start-network --apn "$1" --ip-family ipv6 2>&1 | head -2)
+    logv "start-network" "$(printf '%s' "$OUT" | tr '\n' ' ')"
+
+    # start-network's own output is not the verdict. It says "Policy
+    # mismatch" while the bearer comes up perfectly, and hands back a
+    # packet-data handle in cases that are already dead. Ask the modem.
+    st=""
+    w=0
+    while [ "$w" -lt 10 ]; do
+        st=$(uqmi $QMI -t 8000 --get-data-status 2>&1 | tr -d '"')
+        [ "$st" = "connected" ] && break
+        w=$((w + 1)); sleep 1
+    done
+    logv "data-status" "${st:-unknown} (after ${w}s)"
+    [ "$st" = "connected" ] || { log "  QMI did not connect on \"$1\""; return 1; }
+
+    logv "settings" "$(uqmi $QMI -t 8000 --get-current-settings 2>&1 | tr -d ' \n' | head -c 200)"
+
     got=""
     if wait_v6 "$MODEM_ADDR_WAIT_S"; then
         got=v6
     elif [ "$MODEM_RAW_IP" = "auto" ] && [ "$RAW_FLIPPED" != "y" ]; then
         RAW_FLIPPED=y
-        log "no SLAAC -- flipping to raw-ip framing"
+        log "  no SLAAC yet -- re-flipping framing and waiting again"
         set_raw_ip Y
         wait_v6 "$MODEM_ADDR_WAIT_S" && got=v6
     fi
     [ -n "$got" ] || { udhcpc -i "$WWAN_IF" -n -q -t 5 >> "$LOG" 2>&1 && got=v4; }
-    [ -n "$got" ] || { log "  uqmi path: no usable address either"; return 1; }
-    log "address family up: $got (via QMI)"
+    if [ -z "$got" ]; then
+        log "  connected but no address on $WWAN_IF"
+        logv "addrs" "$(ip -o addr show "$WWAN_IF" 2>/dev/null | tr -s ' ' | cut -d' ' -f3,4 | tr '\n' ' ')"
+        return 1
+    fi
+
+    log "DATA UP: $got via QMI on \"$1\""
+    logv "address" "$(ip -o -6 addr show "$WWAN_IF" scope global 2>/dev/null | tr -s ' ' | cut -d' ' -f4 | tr '\n' ' ')"
+    logv "route" "$(ip -6 route show default 2>/dev/null | head -1)"
     GOOD_APN="$1"
     GOOD_PDP="qmi"
     GOOD_CID=qmi
@@ -521,6 +589,16 @@ case "$1" in
         CID=$(cat /tmp/modem-cid 2>/dev/null)
         case "${CID:-1}" in
             *[!0-9]*) : ;;   # qmi session: link down below is teardown enough
+            qmi)
+                # Hand the WDS client back. Without this every stop/start
+                # cycle burns one from a pool of about thirty.
+                if [ -n "$QMI_CID" ]; then
+                    UQMI_DEV=$(ls /dev/cdc-wdm* 2>/dev/null | head -1)
+                    [ -n "$UQMI_DEV" ] && uqmi -d "$UQMI_DEV" \
+                        --set-client-id wds,"$QMI_CID" \
+                        --stop-network 0xffffffff > /dev/null 2>&1
+                    QMI_CID=""
+                fi ;;
             *) "$ATCMD" -p "$MODEM_PORT" -t 10 'AT$QCRMCALL=0,'"${CID:-1}" >> /dev/null 2>&1 ;;
         esac
         find_wwan && ip link set "$WWAN_IF" down 2>/dev/null

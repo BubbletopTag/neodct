@@ -24,6 +24,13 @@ def _redirect_stdio_to_serial():
         serial_out = open(serial_dev, "w")
         sys.stdout = serial_out
         sys.stderr = serial_out
+        # Colour goes on after the redirect, never before: it has to wrap the
+        # serial stream, not the one that was replaced a line ago.
+        try:
+            from System.core import logstyle
+            logstyle.install()
+        except Exception:
+            pass          # a log with no colour still has to boot the phone
         print(f"[Launcher] Serial console active: {serial_dev}")
     except Exception as exc:
         print(f"[Launcher] Serial redirect failed for {serial_dev}: {exc}")
