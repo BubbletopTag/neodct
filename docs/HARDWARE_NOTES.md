@@ -104,3 +104,61 @@ it refuses to emit anything larger than its partition.
 There is no `ubiattach`, `ubiblock` or `ubinize` in the target, so attaching
 is the kernel's job from the cmdline: `ubi.mtd=` for each partition and
 `ubi.block=` to expose the system volume.
+
+## The immutable layout on NAND
+
+The stock table wasted 30M on an `oem` partition that was never mounted, and
+left only 4M for boot -- too little for a kernel plus the 1.65M initramfs.
+New table (`RK_PARTITION_CMD_IN_ENV` in the board config):
+
+```
+256K(env),256K@256K(idblock),512K(uboot),16M(boot),8M(userdata),100M(rootfs)
+   mtd0     mtd1              mtd2         mtd3      mtd4          mtd5
+```
+
+The initramfs is built **into the kernel** (`CONFIG_INITRAMFS_SOURCE`) rather
+than carried as a FIT ramdisk: the boot image the standard path builds has no
+ramdisk slot, and embedding avoids rebuilding that tooling. boot.img is 5.27M
+of the 16M partition. The path in the defconfig is absolute, so it points at
+whichever build tree produced `initramfs.cpio` -- regenerate it before
+rebuilding the kernel.
+
+Extra kernel arguments come from `NEODCT_BOOTARGS_EXTRA` in the board config,
+appended by `__GET_BOOTARGS_FROM_BOARD_CFG` in `project/build.sh`.
+
+**It must not be called `RK_*`.** `unset_env_config_rk()` at the top of
+build.sh clears RK variables with `env | grep -oh "^RK_.*=" | source`, and
+that `.*` is greedy: a value containing `=` -- which every kernel argument
+has -- becomes a malformed line that is then sourced, and the build dies with
+`unexpected EOF while looking for matching '"'` before it prints anything.
+
+Resulting cmdline:
+
+```
+ubi.mtd=5 root=ubi0:rootfs rootfstype=ubifs rk_dma_heap_cma=1M
+ubi.mtd=4 ubi.block=0,system neodct.sys=/dev/ubiblock0_0
+neodct.user=ubi1:userdata neodct.verity=enforce neodct.rectty=/dev/console
+```
+
+mtd5 attaches first so the system volume is ubi0 and `ubi.block=0,system`
+exposes it as `/dev/ubiblock0_0`; userdata follows as ubi1. The generated
+`root=` is ignored because an initramfs `/init` exists. Note CMA drops from
+24M to 1M, which hands ~23M of a 64M phone back to the system.
+
+### Building and flashing it
+
+```sh
+make -C buildroot O=../build-lf BR2_DEFCONFIG=.../luckfox_pico_mini_defconfig defconfig
+make -C buildroot O=../build-lf
+neodct/tools/mknand.sh ../build-lf/images ../build-lf/target ../build-lf/host
+gzip -dc ../build-lf/images/initramfs.cpio.gz > ../build-lf/images/initramfs.cpio
+
+cp ../build-lf/images/system.ubi   luckfox-pico/output/image/rootfs.img
+cp ../build-lf/images/userdata.ubi luckfox-pico/output/image/userdata.img
+distrobox enter luckfox -- bash -lc 'cd luckfox-pico && ./build.sh kernel && ./build.sh env && ./build.sh updateimg'
+cd luckfox-pico && sudo ./rkflash.sh update      # device in maskrom mode
+```
+
+`rkflash.sh` has no `env` target and its default "all" matches no branch and
+does nothing, so a partition-table change has to go through `update`
+(`upgrade_tool uf update.img`), which rewrites the table and every partition.

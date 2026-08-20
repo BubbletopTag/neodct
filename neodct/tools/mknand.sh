@@ -50,10 +50,11 @@ LEB_SIZE=0x1f000        # PEB minus two 2048-byte headers
 # Partition sizes from mtdparts (see docs/HARDWARE_NOTES.md). The userdata
 # volume's max LEB count has to suit *its* partition, not the rootfs one --
 # a ubifs superblock claiming more LEBs than the volume has will not mount.
-USERDATA_BYTES=$((6 * 1024 * 1024))
-# 6MiB / 128KiB = 48 erase blocks, less UBI's layout volume and its bad-block
-# reserve. 40 leaves room for both without cutting it fine.
-USERDATA_MAX_LEB=40
+USERDATA_BYTES=$((8 * 1024 * 1024))
+SYSTEM_BYTES=$((100 * 1024 * 1024))
+# 8MiB / 128KiB = 64 erase blocks, less UBI's layout volume and its bad-block
+# reserve. 56 leaves room for both without cutting it fine.
+USERDATA_MAX_LEB=56
 
 WORK="$IMAGES/.mknand"
 rm -rf "$WORK"
@@ -128,7 +129,7 @@ check_fits() {
     fi
     say "$(basename "$1"): $size bytes fits in $2"
 }
-check_fits "$IMAGES/system.ubi" $((85 * 1024 * 1024))
+check_fits "$IMAGES/system.ubi" "$SYSTEM_BYTES"
 check_fits "$IMAGES/userdata.ubi" "$USERDATA_BYTES"
 
 rm -rf "$WORK"
