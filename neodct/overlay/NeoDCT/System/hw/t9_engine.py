@@ -83,6 +83,18 @@ class T9Engine:
     def mode(self):
         return self._modes[self._mode_idx]
 
+    @property
+    def modes(self):
+        """The mode cycle for this filter, in the order # walks them."""
+        return self._modes
+
+    def set_mode_index(self, index):
+        """Jump straight to one mode. Used by callers that fold their own
+        state into the # cycle (the browser bridge adds a cursor mode)."""
+        self._mode_idx = index % len(self._modes)
+        self.reset()
+        return self.mode
+
     def reset(self):
         """Commit any pending multi-tap cycle (e.g. after backspace)."""
         self._pending_digit = None

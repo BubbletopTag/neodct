@@ -57,10 +57,14 @@ def _dump_dmesg_tail(lines=15):
 def _start_key_bridge(ui):
     """Keypad-only hardware: mirror i2c keypad presses into a uinput
     keyboard netsurf can read. Returns None on QEMU/dev where a real
-    keyboard evdev device already exists."""
+    keyboard evdev device already exists.
+
+    The browser bridge, not the shell one: netsurf needs arrows to scroll
+    and follow links, and the keypad has no Left or Right key at all, so
+    2/4/6/8 stand in for the d-pad and # reaches text entry for a URL."""
     try:
-        from System.hw.t9_uinput import start_shell_bridge
-        return start_shell_bridge(ui)
+        from System.hw.t9_uinput import start_browser_bridge
+        return start_browser_bridge(ui)
     except Exception:
         return None
 

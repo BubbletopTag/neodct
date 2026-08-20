@@ -247,3 +247,89 @@ def test_start_shell_bridge_keyboard_failure_returns_none():
 
     assert tu.start_shell_bridge(FakeUI(FakeMatrixInput()),
                                  keyboard_factory=boom) is None
+
+
+# --- browser bridge: number pad as a d-pad ---
+
+K4, K5, K6, K8 = 5, 6, 7, 9          # keypad 4, 5, 6, 8
+K1, K7, K9, K0 = 2, 8, 10, 11        # keypad 1, 7, 9, 0
+DOWN, LEFT, RIGHT = 108, 105, 106
+
+
+def make_browser_bridge():
+    kb = FakeKeyboard()
+    bridge = tu.T9BrowserBridge(read_key=lambda timeout: None, keyboard=kb)
+    return bridge, kb
+
+
+def test_browser_starts_in_cursor_mode():
+    bridge, _ = make_browser_bridge()
+    assert bridge.cursor_mode
+    assert bridge.mode == tu.CURSOR_MODE
+
+
+def test_browser_digits_are_arrows():
+    bridge, kb = make_browser_bridge()
+    for code, expected in ((K2, UP), (K8, DOWN), (K4, LEFT), (K6, RIGHT)):
+        kb.calls.clear()
+        bridge.handle_code(code)
+        assert kb.calls == [("key", expected)]
+
+
+def test_browser_five_follows_link():
+    bridge, kb = make_browser_bridge()
+    bridge.handle_code(K5)
+    assert kb.calls == [("key", ENTER)]
+
+
+def test_browser_cursor_mode_does_not_type():
+    bridge, kb = make_browser_bridge()
+    for code in (K1, K7, K9, K0, STAR):
+        bridge.handle_code(code)
+    assert kb.calls == []
+
+
+def test_browser_passthrough_still_works_in_cursor_mode():
+    bridge, kb = make_browser_bridge()
+    for code in (ENTER, BACKSPACE, UP):
+        kb.calls.clear()
+        bridge.handle_code(code)
+        assert kb.calls == [("key", code)]
+
+
+def test_browser_hash_cycles_nav_abc_upper_123_and_back():
+    bridge, _ = make_browser_bridge()
+    seen = [bridge.mode]
+    for _ in range(4):
+        seen.append(bridge.cycle_mode())
+    assert seen == [tu.CURSOR_MODE, "abc", "ABC", "123", tu.CURSOR_MODE]
+
+
+def test_browser_hash_keypress_leaves_cursor_mode():
+    bridge, kb = make_browser_bridge()
+    bridge.handle_code(HASH)
+    assert not bridge.cursor_mode
+    kb.calls.clear()
+    bridge.handle_code(K2)               # now types, does not scroll
+    assert kb.calls == [("char", "a")]
+
+
+def test_browser_returns_to_cursor_after_full_cycle():
+    bridge, kb = make_browser_bridge()
+    for _ in range(4):                   # nav -> abc -> ABC -> 123 -> nav
+        bridge.handle_code(HASH)
+    assert bridge.cursor_mode
+    kb.calls.clear()
+    bridge.handle_code(K2)
+    assert kb.calls == [("key", UP)]
+
+
+def test_browser_cycling_out_of_text_resets_pending_multitap():
+    bridge, kb = make_browser_bridge()
+    bridge.handle_code(HASH)             # into abc
+    bridge.handle_code(K2)               # pending 'a'
+    kb.calls.clear()
+    bridge.handle_code(HASH)             # into ABC; pending must be dropped
+    bridge.handle_code(K2)
+    assert ("backspace",) not in kb.calls
+    assert kb.calls == [("char", "A")]

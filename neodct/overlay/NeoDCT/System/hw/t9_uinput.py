@@ -1,5 +1,9 @@
 """
-t9_uinput.py -- T9 keypad -> Linux console bridge for the LinuxShell app.
+t9_uinput.py -- T9 keypad -> Linux virtual-keyboard bridges.
+
+Two consumers, both keypad-only hardware talking to a program that expects
+a keyboard: LinuxShell (start_shell_bridge, types into the console) and
+the browser (start_browser_bridge, drives netsurf's cursor).
 
 On keypad-only hardware the console on /dev/tty2 has no keyboard, so this
 module creates a virtual keyboard via /dev/uinput and mirrors i2c keypad
@@ -26,7 +30,7 @@ import struct
 import threading
 import time
 
-from System.hw.t9_engine import T9Engine
+from System.hw.t9_engine import KEY_HASH, T9Engine
 
 # linux/input-event-codes.h
 EV_SYN = 0x00
@@ -36,6 +40,10 @@ SYN_REPORT = 0
 KEY_BACKSPACE = 14
 KEY_ENTER = 28
 KEY_LEFTSHIFT = 42
+KEY_UP = 103
+KEY_LEFT = 105
+KEY_RIGHT = 106
+KEY_DOWN = 108
 
 # linux/uinput.h ioctls
 UI_SET_EVBIT = 0x40045564    # _IOW('U', 100, int)
@@ -243,5 +251,94 @@ def start_shell_bridge(ui, keyboard_factory=None):
         print(f"[T9] uinput keyboard unavailable: {exc}")
         return None
     bridge = T9ShellBridge(matrix.read_key, keyboard)
+    bridge.start()
+    return bridge
+
+
+# --- browser bridge --------------------------------------------------------
+
+# Cursor mode is a fourth stop on the # cycle rather than a separate toggle
+# key, because # is already the only "change what the keys mean" key the
+# phone has and users know it as that.
+CURSOR_MODE = "nav"
+
+# Keypad digit -> arrow. The enrolment in System/hw/i2c_keypad_setup.py
+# collects Up and Down and no Left or Right at all, so netsurf can never
+# see a horizontal arrow unless the number pad stands in for one.
+BROWSER_NAV_CODES = {
+    3: KEY_UP,      # keypad 2
+    5: KEY_LEFT,    # keypad 4
+    6: KEY_ENTER,   # keypad 5 -- follow the highlighted link
+    7: KEY_RIGHT,   # keypad 6
+    9: KEY_DOWN,    # keypad 8
+}
+
+
+class T9BrowserBridge(T9ShellBridge):
+    """Keypad bridge for netsurf: a d-pad until you ask to type.
+
+    Same wiring as the shell bridge, but the number pad drives the cursor
+    instead of typing, so a page can be scrolled and links followed on a
+    keypad that has no arrows. # walks one cycle through
+
+        nav -> abc -> ABC -> 123 -> nav
+
+    so text entry for a URL is still reachable and returns to the cursor
+    the same way it was left.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._pos = 0            # 0 = cursor, 1..n = engine.modes[pos - 1]
+
+    @property
+    def mode(self):
+        if self._pos == 0:
+            return CURSOR_MODE
+        return self.engine.modes[self._pos - 1]
+
+    @property
+    def cursor_mode(self):
+        return self._pos == 0
+
+    def cycle_mode(self):
+        """Advance the # cycle, treating cursor as the mode before abc."""
+        self.engine.reset()
+        self._pos = (self._pos + 1) % (len(self.engine.modes) + 1)
+        if self._pos:
+            self.engine.set_mode_index(self._pos - 1)
+        return self.mode
+
+    def handle_code(self, code):
+        if code == KEY_HASH:
+            self.cycle_mode()
+            return
+        if self.cursor_mode:
+            arrow = BROWSER_NAV_CODES.get(code)
+            if arrow is not None:
+                self.keyboard.send_key(arrow)
+            elif code in PASSTHROUGH_CODES:
+                self.keyboard.send_key(code)
+            # every other key is inert here: typing a letter by accident
+            # while scrolling is worse than the press doing nothing
+            return
+        super().handle_code(code)
+
+
+def start_browser_bridge(ui, keyboard_factory=None):
+    """Start the keypad->netsurf bridge. Same contract as
+    start_shell_bridge: None when there is no i2c keypad (QEMU/dev, where
+    a real keyboard already reaches netsurf) or uinput is unavailable."""
+    matrix = getattr(ui, "matrix_input", None)
+    if matrix is None:
+        return None
+    if keyboard_factory is None:
+        keyboard_factory = UInputKeyboard
+    try:
+        keyboard = keyboard_factory()
+    except Exception as exc:
+        print(f"[T9] uinput keyboard unavailable: {exc}")
+        return None
+    bridge = T9BrowserBridge(matrix.read_key, keyboard)
     bridge.start()
     return bridge
