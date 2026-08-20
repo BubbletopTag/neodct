@@ -337,6 +337,18 @@ dial_rounds() {
                 return 0
             fi
         done
+        # QMI first. On this modem AT$QCRMCALL answers NO CARRIER every
+        # time while QMI connects, so trying AT first spent the whole APN
+        # x PDP matrix failing -- minutes per round -- before reaching the
+        # method that works. QMI walks the same APN list, because the one
+        # that works is the modem's own cid1 (CUR_APN, "tello.com" here)
+        # and not the built-in $MODEM_APN default.
+        for qapn in $CACHED_APN $CUR_APN $MODEM_APN $MODEM_APN_FALLBACKS; do
+            [ -n "$qapn" ] || continue
+            case " $QTRIED " in *" $qapn "*) continue ;; esac
+            QTRIED="$QTRIED $qapn"
+            try_uqmi "$qapn" && return 0
+        done
         TRIED=""
         for apn in $CACHED_APN $CUR_APN $MODEM_APN $MODEM_APN_FALLBACKS; do
             case " $TRIED " in *" $apn "*) continue ;; esac
@@ -352,16 +364,6 @@ dial_rounds() {
                     return 0
                 fi
             done
-        done
-        # QMI walks the same APN list the AT path does, not just the
-        # built-in default. The APN that works here is the modem's own
-        # cid1 (CUR_APN, "tello.com" on this SIM) -- trying only
-        # $MODEM_APN ("wholesale") meant the QMI path never saw it.
-        for qapn in $CACHED_APN $CUR_APN $MODEM_APN $MODEM_APN_FALLBACKS; do
-            [ -n "$qapn" ] || continue
-            case " $QTRIED " in *" $qapn "*) continue ;; esac
-            QTRIED="$QTRIED $qapn"
-            try_uqmi "$qapn" && return 0
         done
         round=$((round + 1))
         [ "$round" -le "$MODEM_DIAL_ROUNDS" ] && sleep "$MODEM_DIAL_RETRY_WAIT_S"
