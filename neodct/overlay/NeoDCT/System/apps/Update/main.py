@@ -33,7 +33,8 @@ from System.ui.framework import (DetailPage, MessageDialog, ProgressScreen,
 from System.core import Storage
 from System.core.SettingsStorage import get_setting
 from System.core.UpdateService import (BadSignature, IncompatibleUpdate,
-                                       InvalidUpdate, package, staging)
+                                       InvalidUpdate, UpdateError, package,
+                                       staging)
 
 ROOT_ID = 12
 
@@ -329,6 +330,108 @@ def _choose_package(ui, packages):
     return packages[selection]
 
 
+
+# --- fetching one over the network ----------------------------------------
+# The card is still the only place a package lives: this downloads onto it
+# and then hands the path to the same _install() a card-found package goes
+# through, so the signature check, the staging and the applier are shared.
+# Nothing here decides whether a package is trustworthy.
+
+def _has_network():
+    """True when a default route exists.
+
+    Cheaper than trying GitHub and waiting for a timeout, and it keeps the
+    offline phone to a single screen: offering "look online?" to a phone
+    with no carrier is a dialog whose only honest answer is no.
+    """
+    # uistub drives this code on a build host whose /proc is not the
+    # phone's; PathRemap cannot cover /proc, so the stub says so instead.
+    if os.environ.get("NEODCT_STUB"):
+        return False
+    try:
+        with open("/proc/net/route") as handle:
+            for line in handle.read().splitlines()[1:]:
+                fields = line.split()
+                if len(fields) > 2 and fields[1] == "00000000":
+                    return True
+    except OSError:
+        pass
+    try:
+        with open("/proc/net/ipv6_route") as handle:
+            for line in handle:
+                fields = line.split()
+                # A default route is destination ::/0 -- all-zero prefix
+                # with a zero prefix length. T-Mobile is IPv6-only, so on
+                # this phone this is the branch that matters.
+                if len(fields) > 1 and fields[0] == "0" * 32 \
+                        and fields[1] == "00":
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def _check_online(ui):
+    """Look for a newer release, download it, return its path or None."""
+    from System.core.UpdateService import remote
+
+    platform = get_setting("system.os.platform", "unknown")
+    installed = _installed_version()
+
+    dialog = ProgressScreen(ui, "Checking for updates", header=HEADER)
+    dialog.draw(0, 1)
+    try:
+        found = remote.latest(platform)
+    except remote.NoRelease:
+        _page(ui, "Nothing published", subtitle="for this phone",
+              body="There is no update for %s in the latest release.\n\n"
+                   "That is normal while a release is still being "
+                   "uploaded. Try again shortly." % platform,
+              image=APP_ICON)
+        return None
+    except remote.NetworkError as exc:
+        _page(ui, "No connection", subtitle="Could not reach GitHub",
+              body="%s\n\nMobile data has to be working before the phone "
+                   "can look for updates. Updates can still be installed "
+                   "from the card." % exc, image=APP_ICON)
+        return None
+
+    if not remote.is_newer(found["version"], installed):
+        _page(ui, "Up to date", subtitle="NeoDCT %s" % (installed or "?"),
+              body="The newest release is %s, which is what this phone is "
+                   "already running." % found["version"], image=APP_ICON)
+        return None
+
+    if not _confirm(ui, "Download NeoDCT %s?\n%s"
+                    % (found["version"], _format_size(found["size"])),
+                    "Download"):
+        return None
+
+    folder = Storage.folder("update")
+    if not folder:
+        _refuse(ui, "The card has no update folder.")
+        return None
+    destination = os.path.join(folder, remote.asset_name(platform))
+
+    progress = ProgressScreen(ui, "Downloading %s" % found["version"],
+                              header=HEADER)
+    try:
+        remote.download(found["url"], destination,
+                        size=found["size"],
+                        progress=lambda done, total: progress.draw(
+                            done, total or found["size"] or 1))
+    except remote.NetworkError as exc:
+        # Expected on this phone rather than exceptional: the carrier drops
+        # and a 60MB download is a long time to hold a weak bearer.
+        _refuse(ui, "Download failed.\n%s\n\nNothing was installed." % exc)
+        return None
+    except UpdateError as exc:
+        _refuse(ui, "Download failed.\n%s" % exc)
+        return None
+
+    return destination
+
+
 def run(ui):
     _report_last_result(ui)
 
@@ -344,6 +447,16 @@ def run(ui):
 
     packages = Storage.find_updates()
     if not packages:
+        # Nothing on the card is the normal case now that the phone can
+        # fetch its own updates. Only offer that when there is actually a
+        # route out: a phone with no carrier should get the one "up to
+        # date" screen, not a dialog it cannot usefully answer.
+        if _has_network() and _confirm(ui, "No update on the card.\n"
+                                       "Look online?", "Check"):
+            path = _check_online(ui)
+            if path:
+                _install(ui, path)
+            return
         version = _installed_version()
         _page(ui, "Up to date",
               subtitle=("NeoDCT %s" % version) if version else "Nothing to install",

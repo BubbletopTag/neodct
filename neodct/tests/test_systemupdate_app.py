@@ -148,7 +148,14 @@ class Recorder:
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    """A phone with a NeoDCT card in it and a temporary state directory."""
+    """A phone with a NeoDCT card in it and a temporary state directory.
+
+    No carrier: these tests run on a build host whose /proc/net/route is the
+    host's, not the phone's, and a phone that believes it is online takes
+    the "look for a release" path instead of the card one. Tests that want
+    the online path say so by patching _has_network themselves.
+    """
+    monkeypatch.setattr(app, "_has_network", lambda: False)
     mount = tmp_path / "sdcard"
     for folder in Storage.FOLDERS:
         (mount / folder).mkdir(parents=True)
@@ -649,3 +656,33 @@ def test_what_the_app_stages_is_what_the_applier_installs(env, tmp_path):
     assert staging.read_installed(env.state).version == "0.3.2a"
     assert staging.read_installed(env.state).verity_root_hash == tree.root_hash
     assert staging.read_pending(env.state) is None
+
+
+# --- looking online when there is nothing on the card ---
+
+def test_a_connected_phone_with_an_empty_card_offers_to_look_online(env, monkeypatch):
+    """The card is no longer the only source, so an empty card is not the
+    end of the conversation on a phone that has a carrier."""
+    monkeypatch.setattr(app, "_has_network", lambda: True)
+    asked = []
+    monkeypatch.setattr(app, "_confirm",
+                        lambda ui, message, button: asked.append(message) or False)
+
+    app.run(FakeUI())
+
+    assert asked, "a connected phone should have been offered the online check"
+    assert "online" in asked[0].lower()
+
+
+def test_a_phone_with_no_carrier_is_not_offered_a_download_it_cannot_do(env, monkeypatch):
+    """Offering "look online?" to a phone with no route is a dialog whose
+    only honest answer is no, and it costs the owner a keypress to say it."""
+    monkeypatch.setattr(app, "_has_network", lambda: False)
+    asked = []
+    monkeypatch.setattr(app, "_confirm",
+                        lambda ui, message, button: asked.append(message) or False)
+
+    app.run(FakeUI())
+
+    assert not asked
+    assert env.pages, "it should still say what version it is on"

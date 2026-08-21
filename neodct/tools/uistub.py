@@ -280,6 +280,13 @@ class StubUI:
         if REPO_NEODCT not in sys.path:
             sys.path.insert(0, REPO_NEODCT)
 
+        # PathRemap only covers /NeoDCT, so anything the runtime reads out
+        # of /proc still belongs to the build host. That matters for the
+        # network check in the Update app: the host has a default route and
+        # the phone does not, so without this a stubbed phone believes it
+        # is online and starts offering to download releases.
+        os.environ["NEODCT_STUB"] = "1"
+
         self._prepare_user_dir()
         self.remap.__enter__()
         try:
