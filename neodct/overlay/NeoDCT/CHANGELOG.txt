@@ -1,5 +1,13 @@
 # NeoDCT OS Changelog
 
+0.3.12a
+Fixed
+- Remote Shell would not let you in, even with the right key. It reported
+  the same "permission denied" a wrong key gives, so there was nothing to
+  go on. The phone was refusing to read its own list of allowed keys
+  because of the permissions on the folder above it, which a fresh
+  install leaves open.
+
 0.3.11a
 Added
 - Remote Shell, in the engineering tools: reach this phone over the
