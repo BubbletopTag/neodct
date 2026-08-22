@@ -42,7 +42,6 @@ from . import UpdateError
 # a build over the LAN, can be pointed at without rebuilding the image.
 DEFAULT_REPO = "BubbletopTag/neodct"
 REPO_ENV = "NEODCT_UPDATE_REPO"
-API_ROOT = "https://api.github.com/repos/%s/releases/latest"
 API_ALL = "https://api.github.com/repos/%s/releases?per_page=%d"
 
 # GitHub rejects requests with no User-Agent.
@@ -96,30 +95,24 @@ def _open(url, timeout=CONNECT_TIMEOUT):
 
 
 def latest(platform):
-    """What is published for this platform.
+    """The newest published package for this platform.
 
     Returns a dict with version, tag, url, size and notes. Raises
-    NoRelease when the newest release carries nothing for this platform,
-    which is normal while a release is being uploaded one asset at a time.
-    """
-    try:
-        with _open(API_ROOT % repo()) as response:
-            body = json.loads(response.read().decode("utf-8", "replace"))
-    except ValueError:
-        raise NetworkError("GitHub sent something that is not JSON")
+    NoRelease when nothing published carries a package for this platform.
 
-    tag = body.get("tag_name") or ""
-    wanted = asset_name(platform)
-    for asset in body.get("assets") or ():
-        if asset.get("name") == wanted:
-            return {
-                "version": tag.lstrip("v"),
-                "tag": tag,
-                "url": asset.get("browser_download_url"),
-                "size": int(asset.get("size") or 0),
-                "notes": body.get("body") or "",
-            }
-    raise NoRelease("release %s has no %s" % (tag or "?", wanted))
+    Built on all_releases rather than GitHub's /releases/latest, which
+    looks like the obvious endpoint and is the wrong one here: it ignores
+    prereleases, and every NeoDCT release is a prerelease because the
+    software is alpha and saying otherwise would be a lie. With no stable
+    release ever published, that endpoint answers 404 for this repository
+    and the phone concluded there was nothing to install -- not "no newer
+    version", but no releases at all, for every release ever made.
+
+    Ordered by version rather than by publication date, so re-publishing
+    an old tag cannot make it the newest thing on offer.
+    """
+    published = all_releases(platform)
+    return max(published, key=lambda entry: version_key(entry["version"]))
 
 
 def all_releases(platform, limit=30):
@@ -161,6 +154,20 @@ def all_releases(platform, limit=30):
     return out
 
 
+def version_key(text):
+    """Sort key for a version like 0.3.10a: numbers first, then any
+    letter suffix. Compared piecewise so 0.3.10a sorts above 0.3.9a,
+    which a plain string comparison gets backwards."""
+    out = []
+    for chunk in re.split(r"[.\-_]", (text or "").strip()):
+        match = re.match(r"^(\d+)([a-zA-Z]*)$", chunk)
+        if match:
+            out.append((int(match.group(1)), match.group(2)))
+        elif chunk:
+            out.append((-1, chunk))
+    return out
+
+
 def is_newer(candidate, installed):
     """True when candidate should be offered over installed.
 
@@ -168,18 +175,9 @@ def is_newer(candidate, installed):
     Compared piecewise so 0.3.10a sorts above 0.3.9a, which a plain string
     comparison gets backwards.
     """
-    def parts(text):
-        out = []
-        for chunk in re.split(r"[.\-_]", (text or "").strip()):
-            match = re.match(r"^(\d+)([a-zA-Z]*)$", chunk)
-            if match:
-                out.append((int(match.group(1)), match.group(2)))
-            elif chunk:
-                out.append((-1, chunk))
-        return out
     if not installed:
         return True
-    return parts(candidate) > parts(installed)
+    return version_key(candidate) > version_key(installed)
 
 
 def enough_space(directory, size):

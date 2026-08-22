@@ -13,6 +13,11 @@ Added
 Fixed
 - Websites no longer report security warnings. The phone believed it was
   1970, and no certificate on the internet is valid that far back.
+- Update can find updates again. "Look online" reported that nothing was
+  published no matter what had been released, because the phone asked for
+  the newest finished release and every NeoDCT release is marked as a
+  test build. This is the first version that can see them; older ones
+  cannot, so this one has to be installed from a card.
 
 0.3.8a
 Added

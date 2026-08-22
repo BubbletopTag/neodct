@@ -25,14 +25,29 @@ class _Response(io.BytesIO):
         return False
 
 
-def _release(tag="0.3.7a", assets=(), body="notes here"):
-    return json.dumps({
+def _entry(tag="0.3.7a", assets=(), body="notes here", prerelease=True):
+    return {
         "tag_name": tag,
         "body": body,
+        "prerelease": prerelease,
         "assets": [{"name": n, "size": s,
                     "browser_download_url": "https://example/%s" % n}
                    for n, s in assets],
-    }).encode()
+    }
+
+
+def _release(tag="0.3.7a", assets=(), body="notes here", prerelease=True):
+    """One release, as GitHub's list endpoint returns it -- in a list.
+
+    A list, not a bare object: latest() reads /releases, not
+    /releases/latest. See the endpoint tests at the bottom of this file
+    for why that distinction cost every release its updates."""
+    return json.dumps([_entry(tag, assets, body, prerelease)]).encode()
+
+
+def _release_list(*entries):
+    """Several releases, newest-published first, as GitHub lists them."""
+    return json.dumps(list(entries)).encode()
 
 
 @pytest.fixture
@@ -233,3 +248,64 @@ def test_a_non_list_reply_is_a_network_error(fake_open):
 
     with pytest.raises(remote.NetworkError, match="list of releases"):
         remote.all_releases("luckfox-armv7")
+
+
+# --- which endpoint the phone asks ---
+#
+# These exist because the old tests all passed while the feature was
+# completely broken on every phone. latest() used GitHub's
+# /releases/latest, which quietly ignores prereleases -- and every NeoDCT
+# release is a prerelease, because the software is alpha. So the endpoint
+# answered 404, the phone reported "no published release", and it did that
+# for every release ever made. A fixture handing latest() a single release
+# object could never notice: it never asked what URL was fetched.
+
+def test_the_phone_does_not_ask_for_the_latest_release(fake_open):
+    """/releases/latest ignores prereleases. Every release here is one, so
+    that endpoint answers 404 and the phone concludes nothing exists."""
+    calls = fake_open(_release(assets=[("UPDATE-x.ndsw", 1)]))
+
+    remote.latest("x")
+
+    assert calls, "latest() fetched nothing"
+    for url in calls:
+        assert not url.rstrip("/").endswith("/releases/latest"), url
+
+
+def test_a_prerelease_is_still_an_update(fake_open):
+    """The one that matters: alpha software ships as prereleases, and a
+    phone that skips them never updates at all."""
+    fake_open(_release(tag="0.3.9a", prerelease=True,
+                       assets=[("UPDATE-luckfox-armv7.ndsw", 99)]))
+
+    found = remote.latest("luckfox-armv7")
+
+    assert found["version"] == "0.3.9a"
+
+
+def test_the_newest_version_wins_not_the_newest_publication(fake_open):
+    """GitHub lists by publication date. Re-publishing an old tag would
+    put it first, and the phone would offer a downgrade as an update."""
+    fake_open(_release_list(
+        _entry(tag="0.3.2a", assets=[("UPDATE-x.ndsw", 1)]),
+        _entry(tag="0.3.10a", assets=[("UPDATE-x.ndsw", 2)]),
+        _entry(tag="0.3.9a", assets=[("UPDATE-x.ndsw", 3)]),
+    ))
+
+    assert remote.latest("x")["version"] == "0.3.10a"
+
+
+def test_a_release_carrying_another_platform_is_skipped_not_chosen(fake_open):
+    """The newest release may not have this phone's package yet -- an
+    upload in progress. Offer the newest one that does."""
+    fake_open(_release_list(
+        _entry(tag="0.3.9a", assets=[("UPDATE-qemu-aarch64.ndsw", 1)]),
+        _entry(tag="0.3.8a", assets=[("UPDATE-luckfox-armv7.ndsw", 2)]),
+    ))
+
+    assert remote.latest("luckfox-armv7")["version"] == "0.3.8a"
+
+
+def test_version_key_orders_the_way_the_phone_needs():
+    assert remote.version_key("0.3.10a") > remote.version_key("0.3.9a")
+    assert remote.version_key("0.4.0a") > remote.version_key("0.3.99a")
