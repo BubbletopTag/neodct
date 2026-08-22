@@ -16,6 +16,11 @@ Fixed
   up every retry inside that gap.
 - Looking up addresses recovers faster when one of the carrier's name
   servers stops answering.
+- The phone notices when mobile data drops and dials again by itself. It
+  used to connect once at start-up and never check afterwards, so a
+  connection lost an hour later stayed lost until the phone was
+  restarted. Calls kept working throughout, which made it look like only
+  the internet was broken.
 
 0.3.12a
 Fixed

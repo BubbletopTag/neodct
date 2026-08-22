@@ -470,6 +470,62 @@ setup_dns() {
         echo "options timeout:2 attempts:2 rotate" >> "$RESOLV"
 }
 
+# --- keeping the session up -------------------------------------------------
+#
+# How often to look, and how many consecutive misses before redialling. A
+# single miss is a blip; three is the bearer being gone.
+: "${MODEM_WATCH_EVERY_S:=30}"
+: "${MODEM_WATCH_MISSES:=3}"
+
+# have_route -- true while there is a default route out of the wwan device.
+#
+# This is the thing that actually goes away. "Temporary failure in name
+# resolution" is what every caller reports when it happens, which reads
+# like a DNS fault and is not one: with no route there is no way to reach
+# a nameserver either. Checking the route sees the real state.
+have_route() {
+    ip -6 route 2>/dev/null | grep -q "^default.*$WWAN_IF" && return 0
+    ip route 2>/dev/null | grep -q "^default.*$WWAN_IF" && return 0
+    return 1
+}
+
+# watchdog -- notice the data call dropping, and dial again.
+#
+# Without this the worker declared DONE and exited, so a session that
+# dropped an hour later stayed dropped until somebody rebooted the phone.
+# Voice keeps working throughout, which makes it look like the phone is
+# fine and only the internet is broken -- and it is, but nothing was
+# coming to fix it.
+watchdog() {
+    misses=0
+    while :; do
+        sleep "$MODEM_WATCH_EVERY_S"
+        if have_route; then
+            if [ "$misses" -gt 0 ]; then
+                log "route back after $misses missed checks"
+                misses=0
+            fi
+            continue
+        fi
+        misses=$((misses + 1))
+        log "no default route on $WWAN_IF (miss $misses/$MODEM_WATCH_MISSES)"
+        [ "$misses" -lt "$MODEM_WATCH_MISSES" ] && continue
+
+        log "data call is gone; redialling"
+        echo "redialling" > "$STATUS"
+        misses=0
+        RESET_DONE=n
+        until dial_rounds; do
+            log "redial rejected; waiting ${MODEM_REDIAL_IDLE_S}s"
+            sleep "$MODEM_REDIAL_IDLE_S"
+            wait_registered 30 || log "registration down (CEREG: $LAST_REG)"
+        done
+        log "data call back up on APN \"$GOOD_APN\" ($GOOD_PDP)"
+        setup_dns
+        echo "up:$WWAN_IF" > "$STATUS"
+    done
+}
+
 verify_net() {
     ip -6 route 2>/dev/null | grep '^default' >> "$LOG"
     if ping -6 -c 1 -W 3 2606:4700:4700::1111 > /dev/null 2>&1 \
@@ -587,6 +643,9 @@ worker() {
 
     echo "up:$WWAN_IF" > "$STATUS"
     log "DONE: $WWAN_IF is on the cellular network"
+
+    # Stay resident and keep it that way.
+    watchdog
 }
 
 case "$1" in
