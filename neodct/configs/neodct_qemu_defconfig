@@ -72,3 +72,14 @@ BR2_PACKAGE_DOSFSTOOLS_FSCK_FAT=y
 BR2_PACKAGE_HOST_E2FSPROGS=y
 BR2_PACKAGE_HOST_DOSFSTOOLS=y
 BR2_PACKAGE_HOST_MTOOLS=y
+
+# --- Remote Shell (engineering mode) ---
+# ssh/sftp to the phone over the internet, so development does not need two
+# serial wires soldered to the back of it. Off unless deliberately enabled;
+# see docs/REMOTE_SHELL.md. openssh rather than dropbear because sftp-server
+# comes with it, and the OpenSSL it links is already in the image for the
+# browser and python.
+BR2_PACKAGE_OPENSSH=y
+BR2_PACKAGE_OPENSSH_CLIENT=y
+BR2_PACKAGE_OPENSSH_SERVER=y
+BR2_PACKAGE_OPENSSH_KEY_UTILS=y

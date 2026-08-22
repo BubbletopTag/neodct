@@ -94,6 +94,16 @@ def main():
     except Exception as exc:
         print(f"[CLOCK] clock service unavailable: {exc}")
 
+    # Remote Shell, if it was left on. Engineering-mode ssh/sftp, off unless
+    # somebody turned it on -- see System/core/RemoteShell. It comes up here
+    # rather than waiting for a route: the tunnel is a retry loop, and mobile
+    # data on this phone can take a minute to attach or never attach at all.
+    try:
+        from System.core import RemoteShell
+        RemoteShell.start_if_enabled()
+    except Exception as exc:
+        print(f"[RSHELL] remote shell unavailable: {exc}")
+
     # 1. Init Hardware
     print("[Launcher] Initializing Hardware...")
     fb = ui_engine.Framebuffer() # We reuse the driver from main.py

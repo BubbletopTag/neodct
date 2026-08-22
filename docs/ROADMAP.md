@@ -52,6 +52,24 @@ be true whatever the approach:
 - It has to work with the system partition unmountable, because that is
   when recovery matters.
 
+## Remote Shell -- ssh and sftp instead of serial wires
+
+Built, needs an icon and a first real connection. See
+`docs/REMOTE_SHELL.md`.
+
+The phone dials out to a relay and carries a way back, because CGNAT and
+IPv6-only mobile data mean nothing can connect to it. sshd binds loopback
+and nothing else; the way in is the tunnel the phone opened, or nothing.
+
+This does not replace serial entirely and is not meant to: a phone that
+will not boot cannot start the thing you would use to log in. That is what
+0.3.11a is for. What it does replace is every other day, which is most of
+them.
+
+Idea came from LeapPad developer mode, which exposes telnet and ftpd over
+USB ethernet. The USB-C port here is charging only, so it goes over the
+internet instead.
+
 ## 0.4.0a -- what a second-number bump is waiting for
 
 Not scheduled. Recorded so the bar stays in one place instead of being

@@ -1,0 +1,6 @@
+{
+  "name": "Remote Shell",
+  "id": "9007",
+  "icon": "icon.png",
+  "exec": "main.py"
+}

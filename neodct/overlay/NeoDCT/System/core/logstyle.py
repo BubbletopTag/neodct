@@ -46,6 +46,7 @@ TAG_COLOURS = {
     "KERNEL":  244,   # grey          -- background noise
     "sdcard":  180,
     "CLOCK":   129,   # violet        -- time, and what set it
+    "RSHELL":  162,   # deep pink     -- the phone is reachable from outside
     "Browser": 141,   # purple        -- netsurf and its noise
     "CRASH":   196,   # red           -- something broke
     "ERROR":   196,
