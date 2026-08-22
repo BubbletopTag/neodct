@@ -8,7 +8,7 @@ Added
   press each letter's key once and the phone guesses the word. Press * for
   the next word the same keys could spell, and clear to take one key back.
   The guess is underlined until you type a space, so you can see what is
-  still a guess. It knows 315,000 words.
+  still a guess. It knows 315,000 words, "NeoDCT" among them.
 
 Fixed
 - Websites no longer report security warnings. The phone believed it was

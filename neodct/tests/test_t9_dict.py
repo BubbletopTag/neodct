@@ -111,3 +111,64 @@ def test_every_word_in_a_larger_dictionary_is_findable(tmp_path):
 
     for word in words:
         assert word in d.suggest(t9_dict.digits_for(word), limit=64), word
+
+
+# --- words that keep their capitals ---
+
+def test_a_capitalised_word_keys_like_any_other():
+    """You press the same keys for NeoDCT as for neodct, so the key has to
+    ignore case -- otherwise the word is unsearchable and, worse, the
+    binary search walks straight past it while probing."""
+    assert t9_dict.digits_for("NeoDCT") == t9_dict.digits_for("neodct")
+    assert t9_dict.digits_for("NeoDCT") == "636328"
+
+
+def test_a_capitalised_word_is_offered_with_its_capitals(tmp_path):
+    """The point of storing the capitals is getting them back."""
+    d = make_dict(tmp_path, ["NeoDCT", "mended", "phone"])
+
+    assert d.suggest("636328") == ["NeoDCT"]
+
+
+def test_capitals_do_not_disturb_the_words_around_them(tmp_path):
+    """A mixed-case entry sits in the sorted file like any other word, so
+    its neighbours must still be findable across it."""
+    d = make_dict(tmp_path, ["NeoDCT", "mended", "mendee", "neofascism"])
+
+    assert "mended" in d.suggest("636333")
+    assert "neofascism" in d.suggest("6363272476")
+
+
+# --- the shipped dictionary ---
+
+def test_the_shipped_dictionary_knows_the_phone_it_runs_on():
+    """NeoDCT is added by mkt9dict --add and must survive in the file that
+    actually ships, not only in the builder's word list."""
+    import os
+    shipped = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "overlay", "NeoDCT", "System", "ui", "resources", "t9.dict")
+    if not os.path.exists(shipped):
+        pytest.skip("shipped dictionary not present")
+
+    d = t9_dict.T9Dictionary(shipped)
+    assert d.suggest("636328")[0] == "NeoDCT"
+
+
+def test_the_shipped_dictionary_is_sorted_by_key():
+    """The binary search is only correct on a sorted file, and --add is a
+    hand edit of one -- so check the invariant it depends on."""
+    import os
+    shipped = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "overlay", "NeoDCT", "System", "ui", "resources", "t9.dict")
+    if not os.path.exists(shipped):
+        pytest.skip("shipped dictionary not present")
+
+    previous = ""
+    with open(shipped) as handle:
+        for number, line in enumerate(handle, 1):
+            key = t9_dict.digits_for(line.strip())
+            assert key is not None, "line %d is not typeable: %r" % (number, line)
+            assert key >= previous, "line %d is out of order: %r" % (number, line)
+            previous = key

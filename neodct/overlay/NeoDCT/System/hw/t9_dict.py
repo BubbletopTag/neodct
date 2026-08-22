@@ -37,10 +37,17 @@ MIN_PREFIX = 2
 
 
 def digits_for(word):
-    """The key sequence for a word, or None if it contains anything else."""
+    """The key sequence for a word, or None if it contains anything else.
+
+    Case-insensitive, because a few entries keep their capitals -- you
+    press the same keys for "NeoDCT" as for "neodct", and the phone should
+    offer the name spelled the way it is spelled. The builder keys them
+    the same way, so the file's sort order still matches what the binary
+    search computes.
+    """
     out = []
     for char in word:
-        digit = _LETTER_TO_DIGIT.get(char)
+        digit = _LETTER_TO_DIGIT.get(char.lower())
         if digit is None:
             return None
         out.append(digit)
