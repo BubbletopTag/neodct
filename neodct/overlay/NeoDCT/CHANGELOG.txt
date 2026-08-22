@@ -1,5 +1,11 @@
 # NeoDCT OS Changelog
 
+0.3.8a
+Added
+- Downgrade, in the engineering tools: lists every published release and
+  installs the one you pick, so you can go back to an older version when a
+  newer one gives you trouble.
+
 0.3.7a
 Added
 - The phone can update itself over the internet. Update now offers to look
