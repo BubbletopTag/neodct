@@ -10,6 +10,12 @@ Fixed
 - The phone waits longer for a slow download before giving up. Twenty
   seconds is right for checking whether an update exists and far too
   short for fetching one.
+- The phone now waits and tries again when mobile data drops out during a
+  download, instead of giving up straight away. On a weak signal the
+  connection can disappear entirely for a few seconds, and it used to use
+  up every retry inside that gap.
+- Looking up addresses recovers faster when one of the carrier's name
+  servers stops answering.
 
 0.3.12a
 Fixed
