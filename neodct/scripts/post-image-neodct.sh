@@ -86,12 +86,15 @@ if [ -f "$USERDATA" ] && [ -n "${NEODCT_KEEP_USERDATA:-}" ]; then
         "$DEBUGFS" -w -R "mkdir /.ndsys" "$USERDATA" > /dev/null 2>&1 || true
         "$DEBUGFS" -w -R "rm /.ndsys/installed.prop" "$USERDATA" \
             > /dev/null 2>&1 || true
-        # Not silenced: this is the write that matters.
-        if ! "$DEBUGFS" -w -R \
-                "write $SKEL/.ndsys/installed.prop .ndsys/installed.prop" \
-                "$USERDATA" 2>&1 | grep -qv "^debugfs"; then
-            :   # debugfs prints its banner on stderr even when it works
-        fi
+        # Deliberately NOT piped anywhere. An earlier version sent this
+        # through `grep -q` to filter debugfs's banner, and grep exits at
+        # its first match -- closing the pipe and SIGPIPEing debugfs in the
+        # middle of the write. The image then carried the previous build's
+        # root hash and would not boot. Capture to a file if the output is
+        # wanted; never put a short-circuiting reader on the other end.
+        "$DEBUGFS" -w -R \
+            "write $SKEL/.ndsys/installed.prop .ndsys/installed.prop" \
+            "$USERDATA" > "$BINARIES_DIR/.debugfs.log" 2>&1 || true
         # debugfs leaks the blocks of the file it unlinked; tidy up.
         if E2FSCK="$(host_tool e2fsck)"; then
             "$E2FSCK" -fy "$USERDATA" > /dev/null 2>&1 || true
