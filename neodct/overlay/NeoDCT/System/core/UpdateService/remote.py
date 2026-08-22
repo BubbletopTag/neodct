@@ -43,6 +43,7 @@ from . import UpdateError
 DEFAULT_REPO = "BubbletopTag/neodct"
 REPO_ENV = "NEODCT_UPDATE_REPO"
 API_ROOT = "https://api.github.com/repos/%s/releases/latest"
+API_ALL = "https://api.github.com/repos/%s/releases?per_page=%d"
 
 # GitHub rejects requests with no User-Agent.
 USER_AGENT = "NeoDCT-Update/1.0 (+https://github.com/BubbletopTag/neodct)"
@@ -119,6 +120,45 @@ def latest(platform):
                 "notes": body.get("body") or "",
             }
     raise NoRelease("release %s has no %s" % (tag or "?", wanted))
+
+
+def all_releases(platform, limit=30):
+    """Every published release that has a package for this platform.
+
+    Newest first, as GitHub returns them. Used by the Downgrade tool, which
+    needs the whole list rather than just the newest -- the point of it is
+    going backwards.
+
+    A release with no asset for this platform is skipped rather than shown
+    and then refused: an entry you cannot pick is worse than one that is
+    not there.
+    """
+    try:
+        with _open(API_ALL % (repo(), limit)) as response:
+            body = json.loads(response.read().decode("utf-8", "replace"))
+    except ValueError:
+        raise NetworkError("GitHub sent something that is not JSON")
+    if not isinstance(body, list):
+        raise NetworkError("GitHub did not send a list of releases")
+
+    wanted = asset_name(platform)
+    out = []
+    for entry in body:
+        tag = entry.get("tag_name") or ""
+        for asset in entry.get("assets") or ():
+            if asset.get("name") == wanted:
+                out.append({
+                    "version": tag.lstrip("v"),
+                    "tag": tag,
+                    "url": asset.get("browser_download_url"),
+                    "size": int(asset.get("size") or 0),
+                    "notes": entry.get("body") or "",
+                    "prerelease": bool(entry.get("prerelease")),
+                })
+                break
+    if not out:
+        raise NoRelease("no release carries %s" % wanted)
+    return out
 
 
 def is_newer(candidate, installed):

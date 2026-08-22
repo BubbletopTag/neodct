@@ -181,3 +181,55 @@ def test_the_repository_can_be_pointed_elsewhere(monkeypatch):
     a rebuilt image."""
     monkeypatch.setenv(remote.REPO_ENV, "someone/else")
     assert remote.repo() == "someone/else"
+
+
+# --- listing every release, for the Downgrade tool ---
+
+def _releases(entries):
+    """entries: [(tag, [(asset_name, size)], prerelease)]"""
+    return json.dumps([
+        {"tag_name": tag, "body": "notes", "prerelease": pre,
+         "assets": [{"name": n, "size": s,
+                     "browser_download_url": "https://example/%s/%s" % (tag, n)}
+                    for n, s in assets]}
+        for tag, assets, pre in entries
+    ]).encode()
+
+
+def test_all_releases_returns_every_one_carrying_this_platform(fake_open):
+    fake_open(_releases([
+        ("0.3.7a", [("UPDATE-luckfox-armv7.ndsw", 3)], True),
+        ("0.3.6a", [("UPDATE-luckfox-armv7.ndsw", 2)], True),
+    ]))
+
+    found = remote.all_releases("luckfox-armv7")
+
+    assert [r["version"] for r in found] == ["0.3.7a", "0.3.6a"]
+
+
+def test_releases_without_a_package_for_this_phone_are_left_out(fake_open):
+    """An entry you cannot pick is worse than one that is not there."""
+    fake_open(_releases([
+        ("0.3.7a", [("UPDATE-luckfox-armv7.ndsw", 3)], True),
+        ("0.3.6a", [("UPDATE-qemu-aarch64.ndsw", 2)], True),   # qemu only
+    ]))
+
+    found = remote.all_releases("luckfox-armv7")
+
+    assert [r["version"] for r in found] == ["0.3.7a"]
+
+
+def test_no_release_at_all_for_this_platform_is_reported(fake_open):
+    fake_open(_releases([("0.3.7a", [("UPDATE-qemu-aarch64.ndsw", 1)], True)]))
+
+    with pytest.raises(remote.NoRelease):
+        remote.all_releases("luckfox-armv7")
+
+
+def test_a_non_list_reply_is_a_network_error(fake_open):
+    """The single-release endpoint returns an object; asking for the list
+    and getting one back means something is wrong."""
+    fake_open(b'{"tag_name": "0.3.7a"}')
+
+    with pytest.raises(remote.NetworkError, match="list of releases"):
+        remote.all_releases("luckfox-armv7")

@@ -1,0 +1,6 @@
+{
+    "name": "Downgrade",
+    "id": "9006",
+    "icon": "icon.png",
+    "exec": "main.py"
+}
