@@ -195,6 +195,64 @@ original is untouched.
 Anything else that speaks SFTP works the same way, including most Linux
 file managers via `sftp://root@127.0.0.1:2222`.
 
+### "REMOTE HOST IDENTIFICATION HAS CHANGED"
+
+You will see this the first time you point the same tunnel at a different
+phone, and it is not an attack:
+
+```
+@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @
+Offending ED25519 key in /home/you/.ssh/known_hosts:13
+```
+
+Every phone arrives as `127.0.0.1:2222` on your machine, because that is
+the mouth of the tunnel rather than an address belonging to any one
+device. Reach a QEMU phone today and the hardware tomorrow and ssh sees
+one name with two host keys, which is exactly what a man-in-the-middle
+looks like from where it is standing.
+
+Check the fingerprint against **Remote Shell -> This phone's key**, which
+prints it on the phone's own screen. If they match, clear the old entry:
+
+```sh
+ssh-keygen -R '[127.0.0.1]:2222'
+```
+
+To stop it happening again, give each phone its own name for host-key
+purposes with `HostKeyAlias`:
+
+```
+Host neodct-vps
+    HostName your.relay.example
+    User you
+    IdentityFile ~/.ssh/YOURKEY
+
+Host neodct-hw
+    HostName 127.0.0.1
+    Port 2222
+    User root
+    IdentityFile ~/.ssh/YOURKEY
+    HostKeyAlias neodct-hw
+    ProxyJump neodct-vps
+
+Host neodct-qemu
+    HostName 127.0.0.1
+    Port 2222
+    User root
+    IdentityFile ~/.ssh/YOURKEY
+    HostKeyAlias neodct-qemu
+    ProxyJump neodct-vps
+```
+
+Now the keys are filed under `neodct-hw` and `neodct-qemu` instead of
+fighting over `[127.0.0.1]:2222`. Worth doing early: without it the
+warning fires every time you switch between emulator and hardware, and a
+warning you see constantly is a warning you stop reading.
+
+`ssh-add ~/.ssh/YOURKEY` is also worth it -- ProxyJump makes two
+connections, so a passphrase-protected key is asked for twice per session
+otherwise.
+
 ## 7. On QEMU
 
 The same thing works, and is easier, because a QEMU phone is not behind
