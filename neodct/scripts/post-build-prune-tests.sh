@@ -42,6 +42,34 @@ if [ -n "$OVERLAY_ROOT" ]; then
     done
 fi
 
+# Editor droppings. The overlay is a live working tree -- somebody has
+# CHANGELOG.txt open in an editor while the release builds -- and whatever
+# is sitting in it gets copied into the image and signed along with
+# everything else. A LibreOffice lock file shipped to a phone this way
+# once already.
+find "$TARGET_DIR/NeoDCT" \
+    \( -name '.~lock.*#' -o -name '*.swp' -o -name '*~' -o -name '.#*' \) \
+    -type f -print -delete 2>/dev/null || true
+
+# Apps the build was told to leave out.
+#
+#     NEODCT_EXCLUDE_APPS="Tube Foo" make
+#
+# The overlay is a live working tree and may hold an app somebody is still
+# experimenting with. It has to stay in the tree for them to work on, and
+# it must not be in a signed release built from that same tree. Naming it
+# here keeps it out of the image without anyone moving directories around
+# under a colleague mid-edit.
+for name in ${NEODCT_EXCLUDE_APPS:-}; do
+    for apps_rel in NeoDCT/System/apps NeoDCT/System/engineering/apps; do
+        path="$TARGET_DIR/$apps_rel/$name"
+        if [ -e "$path" ]; then
+            echo "[post-build] excluding app: $apps_rel/$name"
+            rm -rf "$path"
+        fi
+    done
+done
+
 # Host-built .pyc files are useless on the target (host python != target
 # python) and a read-only rootfs cannot replace them. Drop them; the
 # runtime caches to /NeoDCT/User/.pycache instead (see run_neodct.sh).

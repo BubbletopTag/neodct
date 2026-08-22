@@ -26,7 +26,9 @@
 #   NEODCT_MODEM=1 ...                        pass the SIM7600 through
 #   NEODCT_NET=1 ...                          add a virtio NIC (browser testing)
 #   NEODCT_AUDIO=none ...                     no audio device
-#   NEODCT_DISPLAY=none ...                   headless, serial only
+#   NEODCT_DISPLAY=none ...                   no panel at all (the UI cannot
+#                                             boot; serial/recovery only)
+#   NEODCT_DISPLAY=offscreen ...              panel present, no window
 #
 # Persistence matters for update testing: SystemUpdate stages an update, the
 # phone reboots and the initramfs applies it. With NEODCT_SNAPSHOT=1 that
@@ -113,6 +115,18 @@ fi
 case "$DISPLAY_MODE" in
     none)
         set -- "$@" -nographic
+        ;;
+    offscreen)
+        # A panel with nobody watching. Same devices as a windowed run --
+        # the UI opens /dev/fb0 on the way up and dies without one, so
+        # "none" cannot boot the phone at all -- but no window and no need
+        # for a desktop, which is what smoke-testing a build wants.
+        set -- "$@" \
+            -device virtio-gpu-pci \
+            -device virtio-keyboard-pci \
+            -display none \
+            -serial stdio
+        APPEND="$APPEND video=Virtual-1:240x175M"
         ;;
     *)
         set -- "$@" \
