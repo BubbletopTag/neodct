@@ -48,6 +48,14 @@ API_ALL = "https://api.github.com/repos/%s/releases?per_page=%d"
 USER_AGENT = "NeoDCT-Update/1.0 (+https://github.com/BubbletopTag/neodct)"
 
 CONNECT_TIMEOUT = 20
+# Reading the package is not the same job as reaching GitHub. This phone
+# is on a carrier, through an antenna glued inside a plastic back cover,
+# fetching 53MB. A gap between packets is normal there; treating it as a
+# failure after 20 seconds is what made a slow download an impossible one.
+DOWNLOAD_TIMEOUT = 120
+# How many times to pick the download back up before giving up on it. Each
+# attempt resumes, so these are not restarts -- five is a lot of rope.
+DOWNLOAD_ATTEMPTS = 5
 CHUNK = 64 * 1024
 
 # Leave the card room to breathe rather than filling it exactly.
@@ -71,11 +79,14 @@ def repo():
     return os.environ.get(REPO_ENV) or DEFAULT_REPO
 
 
-def _open(url, timeout=CONNECT_TIMEOUT):
-    request = urllib.request.Request(url, headers={
+def _open(url, timeout=CONNECT_TIMEOUT, headers=None):
+    fields = {
         "User-Agent": USER_AGENT,
         "Accept": "application/vnd.github+json",
-    })
+    }
+    if headers:
+        fields.update(headers)
+    request = urllib.request.Request(url, headers=fields)
     # Default context: verified against the ca-certificates bundle the
     # image ships. An unverified fetch would make the signature check the
     # only thing standing between the phone and a hostile package, and one
@@ -189,22 +200,29 @@ def enough_space(directory, size):
     return stat.f_bavail * stat.f_frsize >= size + SPACE_MARGIN
 
 
-def download(url, destination, size=0, progress=None):
-    """Stream a package to destination. Returns the bytes written.
+def _fetch_into(url, partial, have, size, progress):
+    """One attempt. Appends to `partial` from byte `have`. Returns the total.
 
-    Written to a .part file and renamed only once complete, so a download
-    cut off by a dropped carrier -- which on this phone is the expected
-    case, not the exception -- never leaves something that looks like an
-    installable package.
+    Raises NetworkError on anything that leaves the file short -- the
+    caller decides whether to try again, and the bytes already on the card
+    stay where they are.
     """
-    directory = os.path.dirname(destination) or "."
-    if size and not enough_space(directory, size):
-        raise UpdateError("not enough room on the card for %d bytes" % size)
+    headers = {}
+    if have:
+        # Ask for the rest. A server that honours this answers 206 and we
+        # append; one that ignores it answers 200 with the whole file, and
+        # appending *that* would produce a package with the first N bytes
+        # written twice -- which fails its hash later with nothing to say
+        # why. So check the status and start over rather than guess.
+        headers["Range"] = "bytes=%d-" % have
 
-    partial = destination + ".part"
-    done = 0
-    try:
-        with _open(url) as response, open(partial, "wb") as handle:
+    with _open(url, timeout=DOWNLOAD_TIMEOUT, headers=headers) as response:
+        resuming = have and getattr(response, "status", None) == 206
+        if have and not resuming:
+            have = 0            # server sent the lot; take it from the top
+        mode = "ab" if resuming else "wb"
+        done = have
+        with open(partial, mode) as handle:
             while True:
                 chunk = response.read(CHUNK)
                 if not chunk:
@@ -215,19 +233,70 @@ def download(url, destination, size=0, progress=None):
                     progress(done, size)
             handle.flush()
             os.fsync(handle.fileno())
-    except NetworkError:
-        _discard(partial)
-        raise
-    except OSError as exc:
-        _discard(partial)
-        raise UpdateError("could not write the download: %s" % exc)
-
-    if size and done != size:
-        _discard(partial)
-        raise NetworkError("download stopped early (%d of %d bytes)"
-                           % (done, size))
-    os.replace(partial, destination)
     return done
+
+
+def download(url, destination, size=0, progress=None,
+             attempts=DOWNLOAD_ATTEMPTS):
+    """Stream a package to destination. Returns the bytes written.
+
+    Resumes. This phone downloads 53MB over a carrier, through an antenna
+    glued inside a plastic back cover, and the connection does not always
+    survive that. The old version deleted its partial file on any network
+    error, so every attempt began at zero and a link that could not carry
+    the whole package in one run could never carry it at all -- it did not
+    matter how many times you pressed the button.
+
+    Now the partial file survives, each attempt asks for the rest with a
+    Range header, and progress accumulates across dropped connections. It
+    is thrown away only when it turns out to be wrong: the wrong length at
+    the end, or a server that ignored the Range.
+
+    Written as `.part` and renamed only once complete, so a half-finished
+    download is never mistaken for an installable package.
+    """
+    directory = os.path.dirname(destination) or "."
+    partial = destination + ".part"
+
+    have = 0
+    try:
+        have = os.path.getsize(partial)
+    except OSError:
+        have = 0
+    if size and have > size:
+        _discard(partial)       # longer than the package: not ours
+        have = 0
+
+    # Only the part still to come needs room.
+    if size and not enough_space(directory, max(0, size - have)):
+        raise UpdateError("not enough room on the card for %d bytes" % size)
+
+    last = None
+    for attempt in range(max(1, attempts)):
+        try:
+            done = _fetch_into(url, partial, have, size, progress)
+        except NetworkError as exc:
+            last = exc
+            try:
+                have = os.path.getsize(partial)
+            except OSError:
+                have = 0
+            continue
+        except OSError as exc:
+            _discard(partial)
+            raise UpdateError("could not write the download: %s" % exc)
+
+        if size and done != size:
+            # Short, but the bytes are good as far as they go. Pick it up.
+            last = NetworkError("download stopped early (%d of %d bytes)"
+                                % (done, size))
+            have = done
+            continue
+
+        os.replace(partial, destination)
+        return done
+
+    raise last or NetworkError("download did not finish")
 
 
 def _discard(path):

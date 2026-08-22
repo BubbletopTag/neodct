@@ -15,7 +15,13 @@ from System.core.UpdateService import UpdateError
 
 
 class _Response(io.BytesIO):
-    """Minimal stand-in for what urlopen returns."""
+    """Minimal stand-in for what urlopen returns.
+
+    `status` matters: download() only appends to a partial file when the
+    server answers 206, because a 200 means it ignored the Range and is
+    sending the whole package again."""
+
+    status = 200
 
     def __enter__(self):
         return self
@@ -56,7 +62,7 @@ def fake_open(monkeypatch):
     calls = []
 
     def install(payload):
-        def _open(url, timeout=remote.CONNECT_TIMEOUT):
+        def _open(url, timeout=remote.CONNECT_TIMEOUT, headers=None):
             calls.append(url)
             if isinstance(payload, Exception):
                 raise payload
@@ -154,18 +160,34 @@ def test_a_download_lands_at_its_final_name_only_when_complete(tmp_path, fake_op
     assert not (tmp_path / "UPDATE.ndsw.part").exists()
 
 
-def test_a_truncated_download_is_discarded_rather_than_left_installable(tmp_path, fake_open):
+def test_a_truncated_download_never_looks_installable(tmp_path, fake_open):
     """A dropped carrier mid-download is the expected case on this phone.
-    What must never happen is a short file sitting there looking like a
-    package the update flow would try to install."""
+    What must never happen is a short file sitting under the real name,
+    where the update flow would pick it up and try to install it."""
     fake_open(b"x" * 40)
     dest = tmp_path / "UPDATE.ndsw"
 
     with pytest.raises(remote.NetworkError, match="stopped early"):
-        remote.download("https://example/pkg", str(dest), size=100)
+        remote.download("https://example/pkg", str(dest), size=100, attempts=1)
 
     assert not dest.exists()
-    assert not (tmp_path / "UPDATE.ndsw.part").exists()
+
+
+def test_a_truncated_download_keeps_what_it_got(tmp_path, fake_open):
+    """The bytes on the card are good as far as they go, and this phone
+    fetches 53MB over a carrier. Deleting them meant every attempt began
+    at zero, so a link that could not carry the whole package in one run
+    could never carry it at all -- pressing the button again did nothing
+    but waste the same bandwidth."""
+    fake_open(b"x" * 40)
+    dest = tmp_path / "UPDATE.ndsw"
+
+    with pytest.raises(remote.NetworkError):
+        remote.download("https://example/pkg", str(dest), size=100, attempts=1)
+
+    partial = tmp_path / "UPDATE.ndsw.part"
+    assert partial.exists()
+    assert partial.stat().st_size == 40
 
 
 def test_progress_is_reported_as_it_goes(tmp_path, fake_open):
@@ -309,3 +331,121 @@ def test_a_release_carrying_another_platform_is_skipped_not_chosen(fake_open):
 def test_version_key_orders_the_way_the_phone_needs():
     assert remote.version_key("0.3.10a") > remote.version_key("0.3.9a")
     assert remote.version_key("0.4.0a") > remote.version_key("0.3.99a")
+
+
+# --- resuming a download over a carrier that keeps dropping -----------------
+#
+# The phone reported "download timed out" over and over on a 53MB package,
+# with an antenna glued inside a plastic back cover. The link was not the
+# whole problem: every failure deleted the partial file, so no amount of
+# retrying could ever finish. These pin the resume that fixes it.
+
+class _RangeServer:
+    """A server that honours Range, and can be told to drop the connection
+    after so many bytes -- which is what a carrier does."""
+
+    def __init__(self, body, cut=None):
+        self.body = body
+        self.cut = cut
+        self.ranges = []
+
+    def open(self, url, timeout=None, headers=None):
+        start = 0
+        headers = headers or {}
+        if "Range" in headers:
+            start = int(headers["Range"].split("=")[1].split("-")[0])
+            self.ranges.append(start)
+        piece = self.body[start:]
+        if self.cut is not None:
+            piece = piece[:self.cut]
+        response = _Response(piece)
+        response.status = 206 if start else 200
+        return response
+
+
+def test_a_download_picks_up_where_it_stopped(tmp_path, monkeypatch):
+    body = b"".join(bytes([i % 251]) for i in range(1000))
+    server = _RangeServer(body, cut=300)          # drops after 300 bytes
+    monkeypatch.setattr(remote, "_open", server.open)
+    dest = tmp_path / "UPDATE.ndsw"
+
+    written = remote.download("https://example/pkg", str(dest),
+                              size=len(body), attempts=10)
+
+    assert written == len(body)
+    assert dest.read_bytes() == body, "the reassembled package is wrong"
+    assert server.ranges == [300, 600, 900], server.ranges
+
+
+def test_resuming_asks_only_for_the_rest(tmp_path, monkeypatch):
+    """Not the whole file again. The point is to stop re-sending bytes the
+    phone already paid for."""
+    body = b"y" * 500
+    server = _RangeServer(body)
+    monkeypatch.setattr(remote, "_open", server.open)
+    dest = tmp_path / "UPDATE.ndsw"
+    (tmp_path / "UPDATE.ndsw.part").write_bytes(body[:200])
+
+    remote.download("https://example/pkg", str(dest), size=len(body))
+
+    assert server.ranges == [200]
+    assert dest.read_bytes() == body
+
+
+def test_a_server_that_ignores_range_is_started_over(tmp_path, monkeypatch):
+    """Answering 200 to a Range request means the whole file is coming.
+    Appending it would write the first bytes twice and produce a package
+    that fails its hash with nothing to explain why."""
+    body = b"z" * 400
+
+    def ignores_range(url, timeout=None, headers=None):
+        response = _Response(body)
+        response.status = 200            # "I am sending you everything"
+        return response
+
+    monkeypatch.setattr(remote, "_open", ignores_range)
+    dest = tmp_path / "UPDATE.ndsw"
+    (tmp_path / "UPDATE.ndsw.part").write_bytes(b"z" * 150)
+
+    remote.download("https://example/pkg", str(dest), size=len(body))
+
+    assert dest.read_bytes() == body
+    assert len(dest.read_bytes()) == 400, "the partial was appended to"
+
+
+def test_a_partial_longer_than_the_package_is_thrown_away(tmp_path, monkeypatch):
+    """Left over from a different, larger package. Resuming from past the
+    end would ask for a range the server cannot serve."""
+    body = b"w" * 300
+    server = _RangeServer(body)
+    monkeypatch.setattr(remote, "_open", server.open)
+    dest = tmp_path / "UPDATE.ndsw"
+    (tmp_path / "UPDATE.ndsw.part").write_bytes(b"old" * 500)
+
+    remote.download("https://example/pkg", str(dest), size=len(body))
+
+    assert dest.read_bytes() == body
+    assert server.ranges == []           # started clean, no Range asked
+
+
+def test_giving_up_still_leaves_the_progress(tmp_path, monkeypatch):
+    """Out of attempts is not the same as out of luck: the next time the
+    owner presses the button it carries on from here."""
+    body = b"q" * 1000
+    server = _RangeServer(body, cut=100)
+    monkeypatch.setattr(remote, "_open", server.open)
+    dest = tmp_path / "UPDATE.ndsw"
+
+    with pytest.raises(remote.NetworkError):
+        remote.download("https://example/pkg", str(dest),
+                        size=len(body), attempts=3)
+
+    assert not dest.exists()
+    assert (tmp_path / "UPDATE.ndsw.part").stat().st_size == 300
+
+
+def test_the_read_timeout_is_not_the_connect_timeout(tmp_path):
+    """Reaching GitHub and hauling 53MB off it are different jobs. Twenty
+    seconds is right for the first and absurd for the second on a phone
+    behind an antenna glued inside a plastic cover."""
+    assert remote.DOWNLOAD_TIMEOUT > remote.CONNECT_TIMEOUT

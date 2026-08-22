@@ -417,8 +417,12 @@ def _check_online(ui):
                             done, total or found["size"] or 1))
     except remote.NetworkError as exc:
         # Expected on this phone rather than exceptional: the carrier drops
-        # and a 60MB download is a long time to hold a weak bearer.
-        _refuse(ui, "Download failed.\n%s\n\nNothing was installed." % exc)
+        # and a 60MB download is a long time to hold a weak bearer. Say
+        # that the progress is kept -- otherwise trying again looks like
+        # starting again, and nobody presses a button for that twice.
+        _refuse(ui, "Download failed.\n%s\n\nWhat has downloaded so far "
+                    "is kept on the card. Choosing it again carries on "
+                    "from there." % exc)
         return None
     except UpdateError as exc:
         _refuse(ui, "Download failed.\n%s" % exc)
