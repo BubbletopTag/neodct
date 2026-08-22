@@ -301,3 +301,68 @@ def test_the_loop_waits_before_dialling_again(phone):
 
     assert "sleep %d" % RemoteShell.RETRY_SECONDS in open(
         RemoteShell.TUNNEL_SCRIPT).read()
+
+
+# --- nothing else may start an sshd -----------------------------------------
+
+def _target_dir():
+    """The built target tree, if there is one to look at."""
+    import glob
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for candidate in ("buildroot/output/target", "build-luckfox/target"):
+        path = os.path.join(os.path.dirname(here), candidate)
+        if os.path.isdir(os.path.join(path, "etc", "init.d")):
+            return path
+    return None
+
+
+def test_no_boot_script_starts_sshd():
+    """openssh ships /etc/init.d/S50sshd, which starts sshd at every boot
+    with the stock config -- and the stock config listens on every
+    interface. This phone has a public IPv6 address on mobile data, so that
+    is an sshd facing the internet whether or not anyone enabled Remote
+    Shell, on a phone whose root account has an empty password field.
+
+    RemoteShell decides when sshd runs. The prune script drops that file;
+    this is the check that it stayed dropped."""
+    target = _target_dir()
+    if target is None:
+        pytest.skip("no built target tree to inspect")
+
+    init_dir = os.path.join(target, "etc", "init.d")
+    offenders = []
+    for name in sorted(os.listdir(init_dir)):
+        path = os.path.join(init_dir, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            body = open(path, "r", errors="replace").read()
+        except OSError:
+            continue
+        # A script that launches the daemon, as opposed to one that merely
+        # mentions it (RemoteShell's own name appears in logs).
+        if "sshd" in body and ("start-stop-daemon" in body or "/usr/sbin/sshd" in body):
+            offenders.append(name)
+
+    assert not offenders, (
+        "these boot scripts start sshd outside RemoteShell's control: %s"
+        % ", ".join(offenders))
+
+
+def test_the_prune_script_drops_the_openssh_boot_script(tmp_path):
+    """Run the real prune script against a tree that has one."""
+    import subprocess
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    prune = os.path.join(here, "scripts", "post-build-prune-tests.sh")
+
+    target = tmp_path / "target"
+    (target / "etc" / "init.d").mkdir(parents=True)
+    (target / "etc" / "init.d" / "S50sshd").write_text("#!/bin/sh\nsshd\n")
+    (target / "etc" / "init.d" / "S40network").write_text("#!/bin/sh\n")
+    (target / "NeoDCT").mkdir()
+
+    subprocess.run(["sh", prune, str(target), "qemu-aarch64"],
+                   check=True, capture_output=True)
+
+    assert not (target / "etc" / "init.d" / "S50sshd").exists()
+    assert (target / "etc" / "init.d" / "S40network").exists()

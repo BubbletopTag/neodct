@@ -1,0 +1,34 @@
+#!/bin/sh
+# Bring up eth0, but only if there is an eth0.
+#
+# /etc/network/interfaces deliberately does not mark it "auto": on this
+# phone there is no ethernet, and buildroot's generated file spent fifteen
+# seconds of every boot waiting for an interface that never appears. But
+# QEMU does get one with NEODCT_NET=1, and without this nothing configures
+# it -- the emulator has working NAT to the internet and the phone sits
+# there unable to reach any of it.
+#
+# So: look first, and do nothing at all when there is nothing to do. No
+# wait, no timeout, no message on hardware.
+
+IFACE=eth0
+
+case "$1" in
+    start)
+        [ -e "/sys/class/net/$IFACE" ] || exit 0
+        printf '[NET] %s present; requesting an address\n' "$IFACE"
+        ifup "$IFACE" > /dev/null 2>&1 &
+        ;;
+    stop)
+        [ -e "/sys/class/net/$IFACE" ] || exit 0
+        ifdown "$IFACE" > /dev/null 2>&1
+        ;;
+    restart|reload)
+        "$0" stop
+        "$0" start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac

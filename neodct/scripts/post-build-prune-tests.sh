@@ -42,6 +42,20 @@ if [ -n "$OVERLAY_ROOT" ]; then
     done
 fi
 
+# openssh's own boot script.
+#
+# The package installs /etc/init.d/S50sshd, which starts sshd at every boot
+# with the stock config -- and the stock config listens on every interface.
+# This phone has a public IPv6 address on mobile data, so that is an sshd
+# facing the whole internet, always, whether or not anybody turned Remote
+# Shell on. It also runs `ssh-keygen -A`, which writes into /etc/ssh on a
+# read-only squashfs.
+#
+# System/core/RemoteShell decides when sshd runs, with a config it
+# generates: loopback only, keys only, reachable solely through a tunnel
+# the phone dialled out itself. Nothing else may start it.
+rm -f "$TARGET_DIR/etc/init.d/S50sshd"
+
 # Editor droppings. The overlay is a live working tree -- somebody has
 # CHANGELOG.txt open in an editor while the release builds -- and whatever
 # is sitting in it gets copied into the image and signed along with
