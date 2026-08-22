@@ -1,5 +1,22 @@
 # NeoDCT OS Changelog
 
+0.3.11a
+Added
+- Remote Shell, in the engineering tools: reach this phone over the
+  internet with ssh and sftp, from anywhere, without opening it up. The
+  phone calls out to a relay you run, so it works from behind a mobile
+  network that will not accept incoming connections. Off until you turn it
+  on. Set-up instructions are in docs/REMOTE_SHELL.md.
+
+Fixed
+- The phone reported the previous version number. It was running the right
+  software and saying the wrong thing about it.
+- Long titles no longer run underneath the number in the top right corner.
+
+Changed
+- Remote Shell sits next to Linux Shell in the engineering list, where it
+  belongs.
+
 0.3.10a
 Fixed
 - Updates install. The phone used to copy the whole system onto its own

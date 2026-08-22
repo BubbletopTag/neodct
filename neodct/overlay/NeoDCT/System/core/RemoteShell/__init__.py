@@ -56,6 +56,13 @@ KNOWN_HOSTS = os.path.join(USER_DIR, "known_hosts")
 # user partition at 0600 before it is used -- ssh refuses a private key the
 # world can read, and it is right to.
 CARD_DIR = "remote"
+
+# Optional, and the difference between a minute and a swear word: an IPv6
+# literal is 29 characters, and on this keypad the colon lives four presses
+# into the punctuation cycle. Nobody should type that on a phone when the
+# card is right there.
+CARD_CONF = "relay.conf"
+
 CARD_FILES = {
     "id_ed25519": RELAY_KEY,
     "authorized_keys": AUTHORIZED_KEYS,
@@ -172,6 +179,13 @@ def install_keys_from_card(card_root):
             os.close(handle)
         os.chmod(destination, 0o600)
         taken.append(name)
+
+    # The relay's address, if the card names it.
+    conf = _read_props(os.path.join(source, CARD_CONF))
+    if conf:
+        save_settings(host=conf.get("host"), user=conf.get("user"),
+                      port=conf.get("port"))
+        taken.append(CARD_CONF)
 
     if not taken:
         raise RemoteShellError("No keys in %s/ on the card." % CARD_DIR)

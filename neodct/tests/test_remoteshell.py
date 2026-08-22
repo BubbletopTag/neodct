@@ -445,3 +445,41 @@ def test_starting_leaves_a_log_even_when_it_fails(phone, monkeypatch):
         RemoteShell.start()
 
     assert os.path.exists(RemoteShell.LOG_FILE)
+
+
+# --- the relay address can come off the card too ----------------------------
+
+def test_the_card_can_name_the_relay(phone):
+    """An IPv6 literal is 29 characters and the colon is four presses into
+    the punctuation cycle. Nobody should type that on a keypad."""
+    (phone.card / "remote" / "id_ed25519").write_text("key\n")
+    (phone.card / "remote" / "relay.conf").write_text(
+        "host=2604:a880:400:d1:0:4:db14:1001\nuser=neodct\nport=2222\n")
+
+    RemoteShell.install_keys_from_card(phone.card)
+
+    settings = RemoteShell.settings()
+    assert settings["host"] == "2604:a880:400:d1:0:4:db14:1001"
+    assert settings["user"] == "neodct"
+    assert settings["port"] == "2222"
+
+
+def test_a_card_without_a_relay_conf_still_works(phone):
+    """It is optional; the app can still be told by hand."""
+    (phone.card / "remote" / "id_ed25519").write_text("key\n")
+    RemoteShell.save_settings(host="typed.example")
+
+    RemoteShell.install_keys_from_card(phone.card)
+
+    assert RemoteShell.settings()["host"] == "typed.example"
+
+
+def test_a_partial_relay_conf_only_sets_what_it_names(phone):
+    (phone.card / "remote" / "id_ed25519").write_text("key\n")
+    (phone.card / "remote" / "relay.conf").write_text("host=relay.example\n")
+
+    RemoteShell.install_keys_from_card(phone.card)
+
+    settings = RemoteShell.settings()
+    assert settings["host"] == "relay.example"
+    assert settings["user"] == RemoteShell.DEFAULT_RELAY_USER
