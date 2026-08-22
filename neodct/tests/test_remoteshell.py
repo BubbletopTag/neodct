@@ -366,3 +366,82 @@ def test_the_prune_script_drops_the_openssh_boot_script(tmp_path):
 
     assert not (target / "etc" / "init.d" / "S50sshd").exists()
     assert (target / "etc" / "init.d" / "S40network").exists()
+
+
+# --- pid files outlive the boot that wrote them -----------------------------
+#
+# The bug these exist for: Remote Shell left sshd.pid=244 and tunnel.pid=246
+# behind, the phone rebooted, those numbers belonged to something else, and
+# stop() sent SIGTERM to that process's whole group. The group was the
+# launcher's. The UI never started and the serial log stopped mid-boot with
+# no error anywhere, because a signal is not an exception.
+
+def test_a_stale_pid_is_not_signalled(phone, monkeypatch):
+    """The number is not enough. It has to be our process."""
+    signalled = []
+    monkeypatch.setattr(os, "killpg",
+                        lambda pgid, sig: signalled.append(pgid))
+    monkeypatch.setattr(os, "kill", lambda pid, sig: signalled.append(pid))
+    os.makedirs(RemoteShell.USER_DIR, exist_ok=True)
+    # Our own pid: alive, but plainly not an sshd.
+    with open(RemoteShell.SSHD_PID, "w") as handle:
+        handle.write("%d\n" % os.getpid())
+
+    RemoteShell.stop(remember=False)
+
+    assert signalled == [], "signalled a process that was not ours"
+
+
+def test_a_stale_pid_file_is_cleared_anyway(phone):
+    """Left behind, it would be re-examined on every start forever."""
+    os.makedirs(RemoteShell.USER_DIR, exist_ok=True)
+    with open(RemoteShell.SSHD_PID, "w") as handle:
+        handle.write("%d\n" % os.getpid())
+
+    RemoteShell.stop(remember=False)
+
+    assert not os.path.exists(RemoteShell.SSHD_PID)
+
+
+def test_status_does_not_believe_a_stale_pid(phone):
+    """Otherwise the app says "On" because some unrelated process happens
+    to hold the number, and the operator waits for a shell that is not
+    coming."""
+    os.makedirs(RemoteShell.USER_DIR, exist_ok=True)
+    for path in (RemoteShell.SSHD_PID, RemoteShell.TUNNEL_PID):
+        with open(path, "w") as handle:
+            handle.write("%d\n" % os.getpid())
+
+    state = RemoteShell.status()
+
+    assert state["sshd"] is False
+    assert state["tunnel"] is False
+
+
+def test_a_pid_belonging_to_nothing_is_harmless(phone, monkeypatch):
+    signalled = []
+    monkeypatch.setattr(os, "killpg", lambda p, s: signalled.append(p))
+    os.makedirs(RemoteShell.USER_DIR, exist_ok=True)
+    with open(RemoteShell.TUNNEL_PID, "w") as handle:
+        handle.write("999999\n")
+
+    RemoteShell.stop(remember=False)
+
+    assert signalled == []
+
+
+def test_starting_leaves_a_log_even_when_it_fails(phone, monkeypatch):
+    """The failed boot left no log at all, which is why it took a serial
+    capture and an offline fsck to work out where it stopped."""
+    RemoteShell.save_settings(host="relay.example")
+    for path in (RemoteShell.RELAY_KEY, RemoteShell.AUTHORIZED_KEYS,
+                 RemoteShell.KNOWN_HOSTS):
+        _touch(path)
+    monkeypatch.setattr(RemoteShell, "ensure_host_key", lambda: "x")
+    monkeypatch.setattr(RemoteShell.subprocess, "Popen",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("nope")))
+
+    with pytest.raises(RemoteShell.RemoteShellError):
+        RemoteShell.start()
+
+    assert os.path.exists(RemoteShell.LOG_FILE)

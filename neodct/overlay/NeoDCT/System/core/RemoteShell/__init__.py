@@ -341,23 +341,40 @@ def _pid_from(path):
         return None
 
 
-def _alive(pid):
+def _owns(pid, needle):
+    """True when `pid` is running *and* is the process we started.
+
+    A pid file outlives the boot that wrote it. On the next boot that
+    number belongs to whatever init happened to start in its place, and
+    signalling it -- or worse, its whole process group -- kills something
+    chosen at random.
+
+    That is not hypothetical. This phone left sshd.pid=244 and
+    tunnel.pid=246 behind, came back up, and Remote Shell killed the
+    process group those numbers had been handed to: its own launcher. The
+    UI never started and the serial log simply stopped mid-boot.
+
+    So the number is never enough. /proc says what the process actually
+    is, and only a match gets signalled.
+    """
     if not pid:
         return False
     try:
-        os.kill(pid, 0)
+        with open("/proc/%d/cmdline" % pid, "rb") as handle:
+            cmdline = handle.read().decode("utf-8", "replace")
     except OSError:
         return False
-    return True
+    return needle in cmdline
 
 
-def _stop_pid(path):
+def _stop_pid(path, needle):
+    """Stop the process named in `path`, if it is still the right one."""
     pid = _pid_from(path)
-    if _alive(pid):
+    if _owns(pid, needle):
         try:
-            # The tunnel is a shell loop, so signal the group: killing the
-            # script alone leaves the ssh it is waiting on connected, and
-            # "off" has to mean off.
+            # Both are started with start_new_session=True, so the group is
+            # ours alone and killing it takes the ssh the tunnel script is
+            # waiting on with it. "Off" has to mean off.
             os.killpg(os.getpgid(pid), signal.SIGTERM)
         except OSError:
             try:
@@ -373,8 +390,8 @@ def _stop_pid(path):
 def status():
     """What is actually running, not what was asked for."""
     return {
-        "sshd": _alive(_pid_from(SSHD_PID)),
-        "tunnel": _alive(_pid_from(TUNNEL_PID)),
+        "sshd": _owns(_pid_from(SSHD_PID), "sshd"),
+        "tunnel": _owns(_pid_from(TUNNEL_PID), "tunnel.sh"),
         "enabled": settings()["enabled"],
     }
 
@@ -386,16 +403,17 @@ def start():
     write_sshd_config()
     write_tunnel_script(current["host"], current["user"], current["port"])
 
-    stop(remember=False)          # never end up with two of either
-
+    # Open the log first: everything after this is worth a record, and a
+    # start that dies silently is a start nobody can debug.
     log = open(LOG_FILE, "ab", 0)
+    stop(remember=False)          # never end up with two of either
     try:
         subprocess.Popen(sshd_command(), stdout=log, stderr=log,
                          start_new_session=True)
         # sshd writes its own PidFile, but not instantly, and the app wants
         # to say "on" the moment it is. Give it a beat, then trust the file.
         for _ in range(20):
-            if _alive(_pid_from(SSHD_PID)):
+            if _owns(_pid_from(SSHD_PID), "sshd"):
                 break
             time.sleep(0.1)
 
@@ -413,8 +431,8 @@ def start():
 
 def stop(remember=True):
     """Take it down. Safe to call when it is already down."""
-    _stop_pid(TUNNEL_PID)
-    _stop_pid(SSHD_PID)
+    _stop_pid(TUNNEL_PID, "tunnel.sh")
+    _stop_pid(SSHD_PID, "sshd")
     if remember:
         save_settings(enabled=False)
     return status()
