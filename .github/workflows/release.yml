@@ -65,6 +65,31 @@ jobs:
             grab && /^[0-9]+\.[0-9]+\.[0-9]+[a-z]?$/ { exit }
             grab { print }
           ' "$CHANGELOG" | sed -e 's/[[:space:]]*$//' > notes.md
+          # Every release says who signed it. The phone checks packages
+          # against a public key baked into its image, so a package built
+          # by anyone else is refused -- that is the design working, not a
+          # fault, and whoever hits it deserves to know why in advance.
+          cat >> notes.md <<'FOOTER'
+
+---
+
+**Installing:** the phone finds this by itself — *Update* → *Look online*.
+It downloads the package for its own platform onto the SD card and
+installs it. Or copy the `.ndsw` into the `update` folder on the card by
+hand.
+
+**About the signature.** These packages are signed with the project's
+development key, and the matching public key is built into the images
+published here. That means:
+
+- On a phone running an image from this repository, the signature verifies
+  and the update installs normally.
+- On a phone built from your own tree, it will **not** verify. You will see
+  `BAD SIGNATURE! UPDATE MAY BE CORRUPT!!`. That is the phone doing its
+  job, not a bug — anyone holding a key matching the one in your image can
+  replace your entire root filesystem. Build and sign your own packages
+  with your own key (see `neodct/tools/devkey/README.md`).
+FOOTER
           if [ ! -s notes.md ]; then
             echo "No changelog section for $VERSION." > notes.md
             echo "::warning::CHANGELOG.txt has no section headed $VERSION"

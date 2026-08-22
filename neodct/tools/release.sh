@@ -62,5 +62,59 @@ fi
 git tag -a "$TAG" -m "NeoDCT OS $VERSION"
 say "tagged $TAG"
 git push origin "$TAG"
-say "pushed $TAG -- the Release workflow takes it from here"
-say "watch it: gh run watch"
+say "pushed $TAG -- the workflow is creating the release"
+
+# --- attach the packages --------------------------------------------------
+# Built here, not in CI. A runner would have to build the whole buildroot
+# tree, and it would need the signing key -- and an unsigned package
+# published as a release is worse than none, because the phone tells
+# whoever installs it "BAD SIGNATURE! UPDATE MAY BE CORRUPT!!".
+#
+# The asset name carries the platform: the phone downloads by that name
+# (UpdateService/remote.py asset_name), and one release holds a package
+# for each platform that was built.
+attach() {   # attach <images-dir>
+    pkg="$1/UPDATE.ndsw"
+    [ -f "$pkg" ] || return 0
+    plat=$(unzip -p "$pkg" manifest.json 2>/dev/null \
+           | sed -n 's/.*"platform"[^"]*"\([^"]*\)".*/\1/p' | head -n1)
+    ver=$(unzip -p "$pkg" manifest.json 2>/dev/null \
+          | sed -n 's/.*"version"[^"]*"\([^"]*\)".*/\1/p' | head -n1)
+    [ -n "$plat" ] || { say "cannot read the platform out of $pkg; skipping"; return 0; }
+    if [ "$ver" != "$VERSION" ]; then
+        say "SKIPPING $pkg: it is $ver, this release is $VERSION"
+        say "  rebuild it before releasing, or the phone downloads the wrong image"
+        return 0
+    fi
+    # Signed packages only. An unsigned one built without NEODCT_SIGN_KEY
+    # looks identical from the outside.
+    if ! unzip -l "$pkg" 2>/dev/null | grep -q "manifest.sig"; then
+        say "SKIPPING $pkg: unsigned (built without NEODCT_SIGN_KEY)"
+        return 0
+    fi
+    asset="UPDATE-$plat.ndsw"
+    cp "$pkg" "/tmp/$asset"
+    say "uploading $asset ($plat)"
+    gh release upload "$TAG" "/tmp/$asset" --clobber
+    rm -f "/tmp/$asset"
+}
+
+if command -v gh > /dev/null 2>&1; then
+    # Wait for the workflow to create the release before uploading into it.
+    tries=0
+    while [ "$tries" -lt 30 ] && ! gh release view "$TAG" > /dev/null 2>&1; do
+        sleep 4; tries=$((tries + 1))
+    done
+    if gh release view "$TAG" > /dev/null 2>&1; then
+        attach buildroot/output/images
+        attach build-luckfox/images
+        say "assets: $(gh release view "$TAG" --json assets \
+                       -q '[.assets[].name] | join(", ")' 2>/dev/null)"
+    else
+        say "the release did not appear; upload by hand:"
+        say "  gh release upload $TAG <file> --clobber"
+    fi
+else
+    say "no gh CLI -- attach the packages by hand"
+fi
+say "done: gh release view $TAG --web"
