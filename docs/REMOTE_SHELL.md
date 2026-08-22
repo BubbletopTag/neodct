@@ -166,6 +166,35 @@ The first connection asks you to trust the phone's host key. Check it
 against **Remote Shell → This phone's key**, which prints the same
 fingerprint on the phone's own screen.
 
+### FileZilla, WinSCP, and file managers
+
+Graphical clients do not understand `ProxyJump` -- it is an ssh idea, not
+an SFTP one. Give them a local port instead, and point them at your own
+machine. Leave this running while you use them:
+
+```sh
+ssh -i ~/.ssh/YOURKEY -N -L 2222:127.0.0.1:2222 you@your.relay.example
+```
+
+That opens `127.0.0.1:2222` on *your* machine and pipes it to the relay's
+loopback 2222, which is the mouth of the phone's tunnel. Then connect to
+`127.0.0.1` port `2222` as `root`, with your key:
+
+| FileZilla field | value |
+|---|---|
+| Protocol | SFTP - SSH File Transfer Protocol |
+| Host | `127.0.0.1` |
+| Port | `2222` |
+| Logon Type | Key file |
+| User | `root` |
+| Key file | your private key |
+
+FileZilla offers to convert an OpenSSH key to its own format. Let it; the
+original is untouched.
+
+Anything else that speaks SFTP works the same way, including most Linux
+file managers via `sftp://root@127.0.0.1:2222`.
+
 ## 7. On QEMU
 
 The same thing works, and is easier, because a QEMU phone is not behind
