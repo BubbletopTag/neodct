@@ -45,6 +45,7 @@ TAG_COLOURS = {
     "FB":       123,  # pale cyan
     "KERNEL":  244,   # grey          -- background noise
     "sdcard":  180,
+    "CLOCK":   129,   # violet        -- time, and what set it
     "Browser": 141,   # purple        -- netsurf and its noise
     "CRASH":   196,   # red           -- something broke
     "ERROR":   196,

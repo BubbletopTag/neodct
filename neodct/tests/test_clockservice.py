@@ -28,7 +28,8 @@ def phone(tmp_path, monkeypatch):
     monkeypatch.setattr(clock, "STATE_FILE", str(state))
     monkeypatch.setattr(clock, "VERSION_PROP", str(version))
     applied = []
-    monkeypatch.setattr(clock, "set_clock", lambda when: applied.append(int(when)) or True)
+    monkeypatch.setattr(clock, "set_clock",
+                        lambda when, reason="": applied.append(int(when)) or True)
     return type("Phone", (), {"applied": applied, "state": state,
                               "build": 1787359945})()
 
@@ -154,3 +155,36 @@ def test_a_successful_sync_is_remembered_for_next_boot(phone, monkeypatch):
     clock.sync(("a",))
 
     assert clock.last_known() == 1800000000
+
+
+# --- who gets told the phone exists ---
+
+def test_the_time_servers_are_the_volunteer_pool_only():
+    """An NTP query tells whoever answers that this device exists, roughly
+    where it is, and when it was switched on. That is not much, but it is
+    not worth handing to an advertising company for a clock reading -- so
+    the pool, which is volunteer-run and not any one company's."""
+    for server in clock.DEFAULT_SERVERS:
+        assert server.endswith("pool.ntp.org"), server
+        for unwanted in ("google", "amazon", "facebook", "apple", "microsoft"):
+            assert unwanted not in server.lower(), server
+
+
+def test_the_pool_is_asked_by_its_numbered_names():
+    """0/1/2.pool.ntp.org each resolve to a different rotating set, so a
+    retry reaches a different operator instead of the same one twice."""
+    assert len(set(clock.DEFAULT_SERVERS)) == len(clock.DEFAULT_SERVERS)
+    assert clock.DEFAULT_SERVERS[0].startswith("0.")
+
+
+def test_setting_the_clock_says_so(capsys, monkeypatch):
+    """A clock that jumps silently explains nothing later. Every change is
+    logged with where it came from."""
+    monkeypatch.setattr(clock.subprocess, "call", lambda *a, **k: 0)
+
+    clock.set_clock(1800000000, reason="NTP from 0.pool.ntp.org")
+
+    out = capsys.readouterr().out
+    assert "[CLOCK]" in out
+    assert "setting time" in out
+    assert "0.pool.ntp.org" in out

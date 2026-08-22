@@ -30,6 +30,7 @@ import struct
 import threading
 import time
 
+from System.hw import t9_engine
 from System.hw.t9_engine import KEY_HASH, T9Engine
 
 # linux/input-event-codes.h
@@ -289,13 +290,19 @@ class T9BrowserBridge(T9ShellBridge):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._pos = 0            # 0 = cursor, 1..n = engine.modes[pos - 1]
+        self._pos = 0            # 0 = cursor, 1..n = self._modes[pos - 1]
+        # Predictive is left out here. It answers a keypress with a list of
+        # candidate words, and netsurf wants characters -- there is no
+        # candidate UI on the other side of a uinput keyboard, so the mode
+        # would look like keys that do nothing.
+        self._modes = tuple(m for m in self.engine.modes
+                            if m != t9_engine.MODE_WORD)
 
     @property
     def mode(self):
         if self._pos == 0:
             return CURSOR_MODE
-        return self.engine.modes[self._pos - 1]
+        return self._modes[self._pos - 1]
 
     @property
     def cursor_mode(self):
@@ -304,9 +311,12 @@ class T9BrowserBridge(T9ShellBridge):
     def cycle_mode(self):
         """Advance the # cycle, treating cursor as the mode before abc."""
         self.engine.reset()
-        self._pos = (self._pos + 1) % (len(self.engine.modes) + 1)
+        self._pos = (self._pos + 1) % (len(self._modes) + 1)
         if self._pos:
-            self.engine.set_mode_index(self._pos - 1)
+            # Index into the engine's own list, which still has the mode we
+            # skip, so the engine ends up in the mode this bridge names.
+            self.engine.set_mode_index(
+                self.engine.modes.index(self._modes[self._pos - 1]))
         return self.mode
 
     def handle_code(self, code):

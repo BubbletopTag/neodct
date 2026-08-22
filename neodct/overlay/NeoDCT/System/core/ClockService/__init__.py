@@ -35,12 +35,19 @@ import time
 # Seconds between 1900-01-01 (NTP) and 1970-01-01 (Unix).
 NTP_EPOCH_OFFSET = 2208988800
 
-# pool.ntp.org resolves to whatever is close. The rest are fallbacks for a
-# carrier that hijacks or blocks the pool, which some mobile networks do.
+# The NTP pool, which is volunteer-operated and deliberately not run by
+# any single company. The numbered names are the pool's own recommended
+# form: each resolves to a different rotating set of servers, so trying
+# 0/1/2 in turn reaches different operators rather than retrying one.
+#
+# No corporate time server here on purpose. An NTP query tells whoever
+# answers that this device exists, roughly where it is, and when it was
+# switched on -- which is not much, but it is not nothing, and it is not
+# worth handing to an advertising company for a clock reading.
 DEFAULT_SERVERS = (
-    "pool.ntp.org",
-    "time.cloudflare.com",
-    "time.google.com",
+    "0.pool.ntp.org",
+    "1.pool.ntp.org",
+    "2.pool.ntp.org",
 )
 
 VERSION_PROP = "/NeoDCT/System/version.prop"
@@ -99,12 +106,22 @@ def remember(when):
         return False
 
 
-def set_clock(when):
+def set_clock(when, reason="unspecified"):
     """Set the system clock, and the RTC if the board has one.
+
+    Always logs. A clock that moves is the sort of thing that explains a
+    later mystery -- an SSL error, a file with a future timestamp, an
+    update that looks older than it is -- and none of that is diagnosable
+    if the jump happened silently.
 
     date -s rather than settimeofday: this runs as a plain script on a
     busybox system and shelling out is what everything else here does.
     """
+    previous = time.time()
+    print("[CLOCK] setting time (%s): %s -> %s"
+          % (reason,
+             time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(previous)),
+             time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(int(when)))))
     try:
         subprocess.call(["date", "-s", "@%d" % int(when)],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -131,7 +148,7 @@ def apply_floor():
         return None
     if time.time() >= floor:
         return None
-    set_clock(floor)
+    set_clock(floor, reason="floor: build date or last sync")
     return floor
 
 
@@ -169,7 +186,7 @@ def sync(servers=DEFAULT_SERVERS, timeout=QUERY_TIMEOUT):
             when = query(server, timeout=timeout)
         except (OSError, socket.error):
             continue
-        set_clock(when)
+        set_clock(when, reason="NTP from %s" % server)
         remember(when)
         return when
     return None
@@ -183,10 +200,7 @@ def start(background=True, servers=DEFAULT_SERVERS):
     depends on it. The sync is not, because it must never delay boot on a
     phone whose carrier may take a minute to attach, or never attach.
     """
-    floored = apply_floor()
-    if floored:
-        print("[CLOCK] clock was behind; set to %s"
-              % time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(floored)))
+    apply_floor()      # logs the change itself if it makes one
 
     def worker():
         # Wait for a route rather than hammering a nameserver that cannot

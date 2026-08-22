@@ -116,9 +116,13 @@ def test_reset_clears_pending_cycle():
 # --- mode cycling (# key) ---
 
 def test_hash_cycles_modes_any_filter():
+    """Typing starts in abc -- what every field has always done -- and #
+    walks all the way round, predictive included, back to it."""
     eng, _ = make()
+    assert eng.mode == "abc"
     assert eng.press(HASH) == ("mode", "ABC")
     assert eng.press(HASH) == ("mode", "123")
+    assert eng.press(HASH) == ("mode", "word")
     assert eng.press(HASH) == ("mode", "abc")
 
 
@@ -154,9 +158,13 @@ def test_123_mode_star_is_literal():
 # --- letters-only filter ---
 
 def test_letters_filter_has_no_123_mode():
+    """A letters-only field keeps predictive -- it is the same alphabet --
+    but must never offer the digit mode."""
     eng, _ = make("letters")
     assert eng.press(HASH) == ("mode", "ABC")
+    assert eng.press(HASH) == ("mode", "word")
     assert eng.press(HASH) == ("mode", "abc")
+    assert "123" not in eng.modes
 
 
 def test_letters_filter_cycle_has_no_digit():

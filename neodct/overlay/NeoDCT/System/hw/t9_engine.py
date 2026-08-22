@@ -7,7 +7,10 @@ and apply the edit operations it returns:
 
   ("append", ch)   add ch after the current text
   ("replace", ch)  replace the last emitted char (multi-tap cycling)
-  ("mode", label)  mode changed; label is "abc" / "ABC" / "123"
+  ("mode", label)  mode changed; label is "word" / "abc" / "ABC" / "123"
+  ("word", digits) predictive: the sequence typed so far -- look the
+                   candidates up and show the best one
+  ("next", digits) predictive: show the next candidate for `digits`
   None             key not handled here (nav keys, star in letter modes)
 
 Cycling needs no timers: a press of the same key within `timeout` seconds
@@ -17,6 +20,10 @@ the pending letter implicitly and starts fresh.
 
 import time
 
+# Predictive. Displayed as a pencil next to "abc" rather than as its own
+# word, because it is the same alphabet -- what changes is that the phone
+# guesses the word instead of you tapping each letter out.
+MODE_WORD = "word"
 MODE_ABC = "abc"
 MODE_UPPER = "ABC"
 MODE_123 = "123"
@@ -47,8 +54,8 @@ PUNCT_CYCLE = ".,?!'\"1-()@/:_;+#*=<>"
 PUNCT_CYCLE_LETTERS = "".join(c for c in PUNCT_CYCLE if not c.isdigit())
 
 _MODES_BY_FILTER = {
-    FILTER_ANY: (MODE_ABC, MODE_UPPER, MODE_123),
-    FILTER_LETTERS: (MODE_ABC, MODE_UPPER),
+    FILTER_ANY: (MODE_WORD, MODE_ABC, MODE_UPPER, MODE_123),
+    FILTER_LETTERS: (MODE_WORD, MODE_ABC, MODE_UPPER),
     FILTER_NUMBERS: (MODE_123,),
 }
 
@@ -74,9 +81,15 @@ class T9Engine:
         self.timeout = float(timeout)
         self._clock = clock or time.monotonic
         self._modes = _MODES_BY_FILTER[input_filter]
-        self._mode_idx = 0
+        # Predictive sits before "abc" in the cycle but is not where typing
+        # starts. Multi-tap is what every existing field expects and what
+        # someone who has never opened this phone before will understand;
+        # predictive is a mode you choose, one # press away.
+        self._mode_idx = (self._modes.index(MODE_ABC)
+                          if MODE_ABC in self._modes else 0)
         self._pending_digit = None
         self._pending_idx = 0
+        self._word_digits = ""
         self._last_press = 0.0
 
     @property
@@ -88,6 +101,26 @@ class T9Engine:
         """The mode cycle for this filter, in the order # walks them."""
         return self._modes
 
+    @property
+    def word_digits(self):
+        """The sequence typed so far in predictive mode."""
+        return self._word_digits
+
+    def pop_word_digit(self):
+        """Drop the last digit of the predictive sequence.
+
+        Returns what is left (possibly ""), or None when there was nothing
+        to drop and the caller should treat the key as a normal backspace.
+        """
+        if not self._word_digits:
+            return None
+        self._word_digits = self._word_digits[:-1]
+        return self._word_digits
+
+    def clear_word(self):
+        """Start a new word. Called once a candidate is accepted."""
+        self._word_digits = ""
+
     def set_mode_index(self, index):
         """Jump straight to one mode. Used by callers that fold their own
         state into the # cycle (the browser bridge adds a cursor mode)."""
@@ -98,6 +131,7 @@ class T9Engine:
     def reset(self):
         """Commit any pending multi-tap cycle (e.g. after backspace)."""
         self._pending_digit = None
+        self._word_digits = ""
 
     def press(self, code):
         if code == KEY_HASH:
@@ -108,6 +142,11 @@ class T9Engine:
             return ("append", "#")  # numbers filter: literal
 
         if code == KEY_STAR:
+            if self.mode == MODE_WORD:
+                # Next candidate for what has been typed. Deliberately does
+                # not reset(): the digits typed so far ARE the word, and
+                # dropping them is what the clear key is for.
+                return ("next", self._word_digits) if self._word_digits else None
             self.reset()
             if self.mode == MODE_123:
                 return ("append", "*")
@@ -117,6 +156,21 @@ class T9Engine:
         if digit is None:
             self.reset()
             return None
+
+        if self.mode == MODE_WORD:
+            if digit not in LETTER_CYCLES:
+                # 0 and 1 carry no letters, so neither can be part of a
+                # word key: this is the end of the word. Fall through and
+                # let the ordinary space/punctuation cycles produce the
+                # character, which also tells the caller to commit.
+                self._word_digits = ""
+            else:
+                # Digits accumulate into a sequence; the caller asks the
+                # dictionary what they could spell. The engine does not do
+                # the lookup itself -- it has no business opening files,
+                # and the UI already knows how to show candidates.
+                self._word_digits += digit
+                return ("word", self._word_digits)
 
         if self.mode == MODE_123:
             self.reset()

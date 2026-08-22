@@ -32,6 +32,7 @@ nd_colour_for() {
         NOTIFY)         echo 201 ;;
         INPUT|KEYMAP)   echo 51  ;;
         SETUP)          echo 214 ;;
+        CLOCK)          echo 129 ;;
         Browser)        echo 141 ;;
         sdcard)         echo 180 ;;
         KERNEL)         echo 244 ;;

@@ -4,7 +4,11 @@
 Added
 - The phone sets its own clock. It starts from the date the software was
   built and corrects itself over the internet once there is a signal.
-- A dictionary of 315,000 words for faster typing.
+- Predictive typing. Press # until a pencil appears next to "abc", then
+  press each letter's key once and the phone guesses the word. Press * for
+  the next word the same keys could spell, and clear to take one key back.
+  The guess is underlined until you type a space, so you can see what is
+  still a guess. It knows 315,000 words.
 
 Fixed
 - Websites no longer report security warnings. The phone believed it was

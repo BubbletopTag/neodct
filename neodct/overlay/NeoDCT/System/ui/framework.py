@@ -8,12 +8,199 @@ import time
 from PIL import Image, ImageDraw
 
 from System.hw import t9_engine
+from System.hw import t9_dict
 
 
 def _t9_active(ui):
     """T9 multi-tap runs only on the real i2c keypad; a dev keyboard
     (QEMU) has full QWERTY so the DEV_KEYMAP path is used instead."""
     return getattr(ui, "matrix_input", None) is not None
+
+# --- predictive-mode indicator ---------------------------------------------
+#
+# The mode indicator is text ("abc" / "ABC" / "123") everywhere except
+# predictive, which shows a pencil in front of "abc": it is the same
+# alphabet, and what changes is that the phone guesses the word instead of
+# you tapping each letter out. The pencil is drawn rather than typed
+# because DejaVu has no glyph for it -- U+270F comes out as a blank box.
+
+T9_PENCIL_GAP = 4
+
+
+def _draw_pencil(draw, x, y, size, fill="white"):
+    """A pencil in a `size` box, point at the bottom-left, eraser top-right.
+
+    Plotted per pixel rather than with line()/polygon(), because at the
+    ~15px this actually renders at, a polygon's edges land wherever the
+    rounding puts them and the barrel comes out either a hairline or twice
+    the weight of the font next to it. Walking the diagonal gives the
+    barrel an exact number of pixels across, which is what pixel art on a
+    240x240 panel needs.
+    """
+    end = size - 1
+    half = max(1, round(size / 4.0))     # cells either side of the centreline
+    point = max(4, round(size * 0.55))   # length of the sharpened end
+    gap = 2                              # background between point and barrel
+
+    for row in range(size):
+        for col in range(size):
+            # Distance along the pencil's axis, and off its centreline,
+            # both measured from the point in the bottom-left corner.
+            along = col + (end - row)
+            across = abs(col - (end - row))
+            if along > 2 * end:
+                continue
+            if along <= point:
+                width = along * half // point      # taper to the point
+            elif along <= point + gap:
+                continue                           # the collar
+            else:
+                width = half
+            if across <= width:
+                draw.point((x + col, y + row), fill=fill)
+
+
+def t9_indicator_size(ui, t9):
+    """(width, label, pencil_size) for the mode indicator, or None."""
+    if not _t9_active(ui):
+        return None
+    mode = t9.mode
+    if mode != t9_engine.MODE_WORD:
+        return (ui.get_text_size(mode, ui.font_n)[0], mode, 0)
+    label = t9_engine.MODE_ABC
+    tw, th = ui.get_text_size(label, ui.font_n)
+    size = max(8, int(th * 0.85))
+    return (size + T9_PENCIL_GAP + tw, label, size)
+
+
+def draw_t9_indicator(ui, right, y, t9):
+    """Draw the indicator with its right edge at `right`. Returns its width."""
+    sized = t9_indicator_size(ui, t9)
+    if sized is None:
+        return 0
+    width, label, pencil = sized
+    x = right - width
+    if pencil:
+        text_h = ui.get_text_size(label, ui.font_n)[1]
+        # Sit the pencil on the text's baseline rather than its box top,
+        # or it floats above short lowercase letters.
+        _draw_pencil(ui.draw, x, y + max(0, text_h - pencil), pencil)
+        x += pencil + T9_PENCIL_GAP
+    ui.draw.text((x, y), label, font=ui.font_n, fill="white")
+    return width
+
+
+class PredictiveText:
+    """The pending word in predictive mode, shared by both text widgets.
+
+    The provisional word lives in `self.text` like any other typed
+    characters, and `_pending_len` records how much of the tail is still
+    provisional. Keeping it in the text rather than beside it means
+    confirm, backup, wrapping and every caller that reads .text keep
+    working without knowing predictive exists -- the only difference is
+    that those characters are underlined, and that another key can replace
+    them wholesale.
+    """
+
+    def _predict_reset(self):
+        """Forget the pending word, in the widget and in the engine.
+
+        Both halves or neither: leaving the digits behind in the engine
+        makes the next key continue a word the field has already thrown
+        away, and the sequence then matches nothing.
+        """
+        self._pending_len = 0
+        self._candidates = []
+        self._candidate_idx = 0
+        self.t9.clear_word()
+
+    def _insert_at(self):
+        """Where the provisional word ends. TextInputLong types at a
+        cursor; TextInput has no cursor and always types at the end."""
+        return getattr(self, "cursor", len(self.text))
+
+    @property
+    def pending_word(self):
+        end = self._insert_at()
+        return self.text[end - self._pending_len:end] if self._pending_len else ""
+
+    def _show_word(self, word):
+        """Put `word` where the provisional tail is."""
+        end = self._insert_at()
+        start = end - self._pending_len
+        self.text = self.text[:start] + word + self.text[end:]
+        self._pending_len = len(word)
+        if hasattr(self, "cursor"):
+            self.cursor = start + len(word)
+
+    def _commit_word(self):
+        """Accept what is on screen. The characters are already in .text,
+        so this only stops them being replaced by the next keypress."""
+        self._predict_reset()
+
+    def _predict(self, digits):
+        """A digit was typed in predictive mode."""
+        if not digits:
+            self._show_word("")
+            self._candidates = []
+            return
+        self._candidates = t9_dict.shared().suggest(digits)
+        self._candidate_idx = 0
+        # No match (or no dictionary installed): show the digits, so the
+        # keypresses are visible and * / clear still behave sensibly,
+        # rather than the field silently ignoring the key.
+        self._show_word(self._candidates[0] if self._candidates else digits)
+
+    def _next_candidate(self):
+        """* was pressed: show the next word these digits could spell."""
+        if len(self._candidates) < 2:
+            return False
+        self._candidate_idx = (self._candidate_idx + 1) % len(self._candidates)
+        self._show_word(self._candidates[self._candidate_idx])
+        return True
+
+    def _predict_key(self, op):
+        """Apply one engine op to the pending word.
+
+        Returns the widget action, or None to mean "not a predictive op,
+        handle it normally" -- after committing, because any other key
+        ends the word.
+        """
+        kind, value = op
+        if kind == "word":
+            self._predict(value)
+            return "typed"
+        if kind == "next":
+            return "typed" if self._next_candidate() else None
+        self._commit_word()
+        return None
+
+    def _predict_backspace(self):
+        """Clear pressed. True when it was spent on the pending word."""
+        if not self._pending_len:
+            return False
+        left = self.t9.pop_word_digit()
+        if left is None:
+            return False
+        self._predict(left)
+        if not left:
+            self._predict_reset()
+        return True
+
+
+def _underline_tail(ui, x, y, line, tail_len, font):
+    """Underline the last `tail_len` characters of `line` drawn at (x, y).
+
+    Predictive words are provisional until another key commits them, and
+    the underline is how every phone that has ever done this says so.
+    """
+    if not tail_len or len(line) < tail_len:
+        return
+    head_w = ui.get_text_size(line[:-tail_len], font)[0] if len(line) > tail_len else 0
+    full_w, height = ui.get_text_size(line, font)
+    ui.draw.line((x + head_w, y + height + 1, x + full_w, y + height + 1),
+                 fill="white")
+
 
 DEFAULT_UI_W = 240
 DEFAULT_UI_H = 175
@@ -438,7 +625,7 @@ class VerticalList:
 TextInput is a basic text form to allow for short inputs like a phone number, name, date, time etc.
 
 """
-class TextInput:
+class TextInput(PredictiveText):
     def __init__(self, ui, title, prompt, initial_text="", input_filter="any"):
         self.ui = ui
         self.title = title   # Header Title (e.g. "Add Entry")
@@ -447,6 +634,7 @@ class TextInput:
         # "any" / "letters" / "numbers" -- what the field accepts
         self.input_filter = input_filter
         self.t9 = t9_engine.T9Engine(input_filter=input_filter)
+        self._predict_reset()
 
         # Development Key Map (PC Keyboard -> Char)
         self.DEV_KEYMAP = {
@@ -476,11 +664,7 @@ class TextInput:
         self.ui.draw.text((10, prompt_y), self.prompt, font=self.ui.font_n, fill="white")
 
         # 3b. T9 mode indicator ("abc"/"ABC"/"123"), right of the prompt
-        if _t9_active(self.ui):
-            label = self.t9.mode
-            w = self.ui.get_text_size(label, self.ui.font_n)[0]
-            self.ui.draw.text((screen_w - 12 - w, prompt_y), label,
-                              font=self.ui.font_n, fill="white")
+        draw_t9_indicator(self.ui, screen_w - 12, prompt_y, self.t9)
 
         # 4. Input Box Container
         box_y = prompt_y + 30
@@ -493,7 +677,9 @@ class TextInput:
         text_h = self.ui.get_text_size(display_text or "A", self.ui.font_n)[1]
         text_y = box_y + max(0, (box_h - text_h) // 2)
         self.ui.draw.text((15, text_y), display_text, font=self.ui.font_n, fill="white")
-        
+        _underline_tail(self.ui, 15, text_y, self.text, self._pending_len,
+                        self.ui.font_n)
+
         self.ui.fb.update(self.ui.canvas)
 
     def handle_key(self, key):
@@ -503,8 +689,12 @@ class TextInput:
         if key in (28, 96):
             return "confirm"
 
-        # BACKSPACE / C BUTTON
+        # BACKSPACE / C BUTTON -- takes a digit off the predictive word
+        # first, so a mistyped word can be corrected without losing it.
         if key == 14:
+            if self._predict_backspace():
+                return "backspace"
+            self._commit_word()
             self.t9.reset()
             if len(self.text) > 0:
                 self.text = self.text[:-1]
@@ -517,6 +707,9 @@ class TextInput:
             if op is None:
                 return None
             kind, value = op
+            handled = self._predict_key(op)
+            if handled is not None:
+                return handled
             if kind == "append":
                 self.text += value
                 return "typed"
@@ -569,7 +762,7 @@ class TextInput:
 TextInputLong is a long-form text entry widget for composing messages and notes.
 
 """
-class TextInputLong:
+class TextInputLong(PredictiveText):
     def __init__(self, ui, title, initial_text="", on_empty_backspace=None,
                  input_filter="any"):
         self.ui = ui
@@ -580,6 +773,7 @@ class TextInputLong:
         # "any" / "letters" / "numbers" -- what the field accepts
         self.input_filter = input_filter
         self.t9 = t9_engine.T9Engine(input_filter=input_filter)
+        self._predict_reset()
         self.font = getattr(ui, "font_s", None) or ui.font_n
         self.text_area_top = _header_divider_y(ui) + 10
         self.text_area_bottom = _content_bottom(ui) - 4
@@ -601,10 +795,12 @@ class TextInputLong:
     def set_text(self, text):
         self.text = text or ""
         self.cursor = len(self.text)
+        self._predict_reset()
 
     def clear_text(self):
         self.text = ""
         self.cursor = 0
+        self._predict_reset()
 
     def set_on_empty_backspace(self, callback):
         self.on_empty_backspace = callback
@@ -672,11 +868,7 @@ class TextInputLong:
         w, _ = self.ui.get_text_size(char_count, self.ui.font_n)
         self.ui.draw.text((screen_w - 5 - w, 5), char_count, font=self.ui.font_n, fill="white")
         # T9 mode indicator ("abc"/"ABC"/"123"), left of the char count
-        if _t9_active(self.ui):
-            label = self.t9.mode
-            lw, _ = self.ui.get_text_size(label, self.ui.font_n)
-            self.ui.draw.text((screen_w - 5 - w - 10 - lw, 5), label,
-                              font=self.ui.font_n, fill="white")
+        draw_t9_indicator(self.ui, screen_w - 5 - w - 10, 5, self.t9)
         self.ui.draw.line((0, header_y, screen_w, header_y), fill="white")
 
         lines = self._current_lines(blink_state)
@@ -686,14 +878,25 @@ class TextInputLong:
         start = max(0, len(lines) - max_lines)
 
         y = self.text_area_top
-        for line in lines[start:start + max_lines]:
+        shown = lines[start:start + max_lines]
+        for index, line in enumerate(shown):
             self.ui.draw.text((10, y), line, font=self.font, fill="white")
+            if self._pending_len and index == len(shown) - 1:
+                # The provisional word is always at the end of the text, so
+                # it is on the last line -- minus the blinking cursor, which
+                # is not part of it.
+                body = line[:-1] if (blink_state and line.endswith("_")) else line
+                _underline_tail(self.ui, 10, y, body,
+                                min(self._pending_len, len(body)), self.font)
             y += line_h
 
         self.ui.fb.update(self.ui.canvas)
 
     def handle_key(self, key):
         if key == 14: # Backspace
+            if self._predict_backspace():
+                return "backspace"
+            self._commit_word()
             self.t9.reset()
             if len(self.text) == 0:
                 if callable(self.on_empty_backspace):
@@ -711,6 +914,9 @@ class TextInputLong:
             if op is None:
                 return None
             kind, value = op
+            handled = self._predict_key(op)
+            if handled is not None:
+                return handled
             if kind == "append":
                 self.text = self.text[:self.cursor] + value + self.text[self.cursor:]
                 self.cursor += 1
