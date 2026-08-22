@@ -257,6 +257,24 @@ def main(argv=None):
     print("mkupdate: %s (%s %s, %.1f MiB, %s)"
           % (output, version, platform, os.path.getsize(output) / 1048576.0,
              "signed" if args.key else "UNSIGNED -- set NEODCT_SIGN_KEY"))
+
+    # Keep a copy under its own name. UPDATE.ndsw is a fixed path, so every
+    # build silently destroys the last one -- which is how several releases'
+    # packages were lost before anyone thought to archive them. The archived
+    # name is also the name a release asset wants, so uploading is a copy
+    # rather than a rebuild.
+    if not args.output:
+        archive_dir = os.path.join(images_dir, "packages")
+        archive = os.path.join(archive_dir,
+                               "UPDATE-%s-%s.ndsw" % (platform, version))
+        try:
+            os.makedirs(archive_dir, exist_ok=True)
+            shutil.copy2(output, archive)
+            print("mkupdate: archived %s" % archive)
+        except OSError as exc:
+            # Not fatal: the package itself is built and the archive is a
+            # convenience. Say so rather than failing the build over it.
+            print("mkupdate: could not archive (%s)" % exc, file=sys.stderr)
     return 0
 
 

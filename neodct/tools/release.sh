@@ -74,7 +74,11 @@ say "pushed $TAG -- the workflow is creating the release"
 # (UpdateService/remote.py asset_name), and one release holds a package
 # for each platform that was built.
 attach() {   # attach <images-dir>
-    pkg="$1/UPDATE.ndsw"
+    # Prefer the archived copy for this exact version: UPDATE.ndsw is a
+    # fixed path that the next build overwrites, so it may already be a
+    # different version by the time a release is cut.
+    pkg="$1/packages/UPDATE-$2-$VERSION.ndsw"
+    [ -f "$pkg" ] || pkg="$1/UPDATE.ndsw"
     [ -f "$pkg" ] || return 0
     plat=$(unzip -p "$pkg" manifest.json 2>/dev/null \
            | sed -n 's/.*"platform"[^"]*"\([^"]*\)".*/\1/p' | head -n1)
@@ -106,8 +110,8 @@ if command -v gh > /dev/null 2>&1; then
         sleep 4; tries=$((tries + 1))
     done
     if gh release view "$TAG" > /dev/null 2>&1; then
-        attach buildroot/output/images
-        attach build-luckfox/images
+        attach buildroot/output/images qemu-aarch64
+        attach build-luckfox/images luckfox-armv7
         say "assets: $(gh release view "$TAG" --json assets \
                        -q '[.assets[].name] | join(", ")' 2>/dev/null)"
     else
