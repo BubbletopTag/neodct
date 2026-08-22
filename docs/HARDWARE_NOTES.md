@@ -6,7 +6,19 @@ CLK  -> pin 7  (SPI0_CLK_M0)
 SDA  -> pin 8  (SPI0_MOSI_M0)  -- NOT pin 9 (MISO)!
 RST  -> pin 12 (GPIO1_D0 / gpio56)
 DC   -> pin 13 (GPIO1_D1 / gpio57)
-BL   -> 3.3V direct
+BL   -> pin 11 (GPIO1_C5_d / PWM9_M1 / gpio53)
+        Was 3V3 direct. On a GPIO now so the screen can be switched off,
+        which is most of what a backlight costs. Dimming needs pwm9 in the
+        device tree -- that lives in the boot partition, so it arrives on
+        a reflash, not an update. System/hw/backlight.py uses the PWM when
+        it is there and falls back to on/off through /sys/class/gpio,
+        which is the same interface neodct_displayd uses for RST and DC.
+
+        Pin state before software runs decides what a failed boot looks
+        like. Default it ON (pull-up on the enable) so "no software yet"
+        and "software broken" both show a lit screen -- the initramfs
+        draws the boot logo and the recovery sad-face, and those are the
+        screens you need when the rootfs is the thing that is wrong.
 
 ## Display driver: userspace, not fbtft
 fbtft (kernel driver) never worked on 5.10 despite correct DT + wiring -
