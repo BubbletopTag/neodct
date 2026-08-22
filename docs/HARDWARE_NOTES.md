@@ -20,6 +20,80 @@ BL   -> pin 11 (GPIO1_C5_d / PWM9_M1 / gpio53)
         draws the boot logo and the recovery sad-face, and those are the
         screens you need when the rootfs is the thing that is wrong.
 
+## SDK patches for the backlight (not in this repo -- reapply after a re-clone)
+
+The wire is only half of it. Two files in `luckfox-pico/` have to change,
+and that tree is not version controlled here, so this is the record.
+Backups are written alongside as `*.bak-neodct-<date>`.
+
+**1. `sysdrv/source/kernel/arch/arm/boot/dts/rv1103g-luckfox-pico-mini.dts`**
+
+In the root node:
+
+```dts
+backlight: backlight {
+    compatible = "pwm-backlight";
+    pwms = <&pwm9 0 25000 0>;
+    brightness-levels = <0 1 2 4 8 16 32 48 64 80 100>;
+    default-brightness-level = <10>;
+    status = "okay";
+};
+```
+
+and at the end, beside the other PWM overrides:
+
+```dts
+&pwm9 {
+    pinctrl-names = "active";
+    pinctrl-0 = <&pwm9m1_pins>;
+    status = "okay";
+};
+```
+
+`"active"`, not `"default"` -- that is the state name the rockchip pwm
+driver looks for, and what the `pwm9` node in `rv1106.dtsi` declares.
+PWM9_M1 shares pin 11 with UART4_TX_M1, which this board file already
+disables, so nothing collides.
+
+**2. `sysdrv/source/kernel/arch/arm/configs/luckfox_rv1106_linux_defconfig`**
+
+```
+CONFIG_BACKLIGHT_CLASS_DEVICE=y
+CONFIG_BACKLIGHT_PWM=y        # was =m
+```
+
+It has to be built in. The stock defconfig has `CONFIG_BACKLIGHT_PWM=m`,
+and the SDK kernel's modules never reach this rootfs -- buildroot builds
+the rootfs, and its `/lib/modules` is a different kernel version
+entirely. A module here is a file that does not exist on the phone.
+
+`CONFIG_PWM=y` and `CONFIG_PWM_ROCKCHIP=y` are already set upstream.
+
+### Rebuilding and flashing just this
+
+A device tree change only touches the boot partition, so there is no need
+to rewrite the whole device:
+
+```sh
+# regenerate the initramfs first -- build.sh bakes in whatever
+# CONFIG_INITRAMFS_SOURCE points at, and luckfox's make never rebuilds it
+neodct/scripts/mkinitramfs.py --target-dir build-luckfox/target \
+    --init neodct/initramfs --output build-luckfox/images/initramfs.cpio.gz
+gzip -dc build-luckfox/images/initramfs.cpio.gz > build-luckfox/images/initramfs.cpio
+
+distrobox enter luckfox -- bash -lc 'cd luckfox-pico && ./build.sh kernel'
+cd ../luckfox-pico && sudo ./rkflash.sh boot
+```
+
+`rkflash.sh boot` runs `upgrade_tool di -b boot.img` and nothing else, so
+rootfs and userdata survive -- settings, contacts and the Remote Shell
+keys all stay put. `rkflash.sh update` would rewrite every partition and
+take them with it.
+
+Afterwards `/sys/class/backlight/backlight/` should exist.
+`System/hw/backlight.py` finds it on its own and moves from on/off to
+real dimming with no change to the rootfs.
+
 ## Display driver: userspace, not fbtft
 fbtft (kernel driver) never worked on 5.10 despite correct DT + wiring -
 root cause never fully isolated (suspect: 5.10 gpiod reset polarity bug).
