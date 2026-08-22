@@ -82,6 +82,18 @@ def show_boot_logo(fb):
 def main():
     _redirect_stdio_to_serial()
 
+    # Before anything else that might reach the network. A phone with no
+    # battery-backed RTC boots at the epoch, and every TLS certificate has
+    # a "not valid before" date -- so a clock reading 1970 fails validation
+    # on every HTTPS site at once, which is what the browser's privacy
+    # warnings were. The floor is applied synchronously here because it
+    # needs no network; the NTP sync waits for a route on its own thread.
+    try:
+        from System.core import ClockService
+        ClockService.start()
+    except Exception as exc:
+        print(f"[CLOCK] clock service unavailable: {exc}")
+
     # 1. Init Hardware
     print("[Launcher] Initializing Hardware...")
     fb = ui_engine.Framebuffer() # We reuse the driver from main.py

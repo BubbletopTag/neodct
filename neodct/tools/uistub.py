@@ -246,7 +246,12 @@ def stage_overlay(dest=None):
         shutil.rmtree(root)
     shutil.copytree(
         REPO_NEODCT, root,
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        # t9.dict is nearly 3MB of read-only word list. Copying it into
+        # every staged phone put ~3MB per test into /tmp for no benefit --
+        # nothing here types predictively, and t9_dict falls back to no
+        # suggestions when the file is absent, which is exactly the
+        # behaviour a phone without one has.
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "t9.dict"),
     )
     return root
 
@@ -264,7 +269,15 @@ class StubUI:
     def __init__(self, wallpaper=None, settings=None, keys=(),
                  engineering=True, root=None, skip_notice=True,
                  idle_budget=60):
-        self.root = root or stage_overlay()
+        # Remember whether we staged this ourselves: only then is it ours
+        # to delete. stage_overlay returns <tmpdir>/NeoDCT, so the
+        # directory to remove is its parent.
+        self._staged_dir = None
+        if root:
+            self.root = root
+        else:
+            self.root = stage_overlay()
+            self._staged_dir = os.path.dirname(self.root)
         self.remap = PathRemap(self.root)
         self.fb = CapturingFramebuffer()
         self.keys = KeyScript(keys, idle_budget=idle_budget)
@@ -297,7 +310,29 @@ class StubUI:
 
     def __exit__(self, exc_type, exc, tb):
         self.remap.__exit__(exc_type, exc, tb)
+        self._cleanup()
         return False
+
+    def _cleanup(self):
+        """Remove the staged phone.
+
+        stage_overlay() used mkdtemp and nothing ever removed the result,
+        so every test left ~16MB in /tmp for the life of the machine. One
+        full run leaks a gigabyte; enough runs exceed the tmpfs quota and
+        every later test fails in copytree with "Disk quota exceeded",
+        which looks nothing like a leak and sends you hunting elsewhere.
+
+        Only directories this instance created are removed -- a caller who
+        passed its own root keeps it.
+        """
+        staged = getattr(self, "_staged_dir", None)
+        if not staged:
+            return
+        self._staged_dir = None
+        try:
+            shutil.rmtree(staged, ignore_errors=True)
+        except Exception:
+            pass
 
     def _prepare_user_dir(self):
         user = os.path.join(self.root, "User")
