@@ -11,6 +11,12 @@ import os
 import pytest
 
 from System.core.UpdateService import remote
+
+
+@pytest.fixture(autouse=True)
+def no_waiting(monkeypatch):
+    """Backoff is real on the phone and pointless in a test suite."""
+    monkeypatch.setattr(remote, "_sleep", lambda seconds: None)
 from System.core.UpdateService import UpdateError
 
 
@@ -449,3 +455,73 @@ def test_the_read_timeout_is_not_the_connect_timeout(tmp_path):
     seconds is right for the first and absurd for the second on a phone
     behind an antenna glued inside a plastic cover."""
     assert remote.DOWNLOAD_TIMEOUT > remote.CONNECT_TIMEOUT
+
+
+# --- a bearer that drops entirely -------------------------------------------
+#
+# The owner's report: "It'll say it timed out then lose internet completely.
+# Temporary failure in name resolution. But it's still able to make calls."
+# The data session goes while voice stays up, and DNS goes with it. Retrying
+# instantly through that is five failures in under a second.
+
+def test_attempts_wait_longer_each_time(tmp_path, monkeypatch):
+    waits = []
+    monkeypatch.setattr(remote, "_sleep", lambda s: waits.append(s))
+    monkeypatch.setattr(remote, "_open", lambda *a, **k: (_ for _ in ()).throw(
+        remote.NetworkError("cannot reach GitHub: [Errno -3] Temporary "
+                            "failure in name resolution")))
+
+    with pytest.raises(remote.NetworkError, match="name resolution"):
+        remote.download("https://example/pkg", str(tmp_path / "U.ndsw"),
+                        size=100, attempts=4)
+
+    assert waits == [5, 10, 20], waits
+
+
+def test_the_wait_is_capped(tmp_path, monkeypatch):
+    """Doubling forever means a phone that looks hung rather than patient."""
+    waits = []
+    monkeypatch.setattr(remote, "_sleep", lambda s: waits.append(s))
+    monkeypatch.setattr(remote, "_open", lambda *a, **k: (_ for _ in ()).throw(
+        remote.NetworkError("down")))
+
+    with pytest.raises(remote.NetworkError):
+        remote.download("https://example/pkg", str(tmp_path / "U.ndsw"),
+                        size=100, attempts=8)
+
+    assert max(waits) <= remote.RETRY_BACKOFF_MAX
+    assert waits[-1] == remote.RETRY_BACKOFF_MAX
+
+
+def test_the_first_attempt_does_not_wait(tmp_path, fake_open, monkeypatch):
+    """Nothing has failed yet. Making the owner wait five seconds before
+    the first byte would be punishing them for the carrier."""
+    waits = []
+    monkeypatch.setattr(remote, "_sleep", lambda s: waits.append(s))
+    fake_open(b"k" * 50)
+
+    remote.download("https://example/pkg", str(tmp_path / "U.ndsw"), size=50)
+
+    assert waits == []
+
+
+def test_a_dns_failure_is_retried_not_fatal(tmp_path, monkeypatch):
+    """The bearer comes back. The phone should still be trying when it
+    does, rather than having given up in the first second."""
+    body = b"m" * 200
+    attempts = {"n": 0}
+
+    def flaky(url, timeout=None, headers=None):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise remote.NetworkError(
+                "cannot reach GitHub: Temporary failure in name resolution")
+        return _Response(body)
+
+    monkeypatch.setattr(remote, "_open", flaky)
+    dest = tmp_path / "U.ndsw"
+
+    written = remote.download("https://example/pkg", str(dest), size=len(body))
+
+    assert written == len(body)
+    assert dest.read_bytes() == body

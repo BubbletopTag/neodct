@@ -457,6 +457,17 @@ setup_dns() {
     for ns in $CARRIER_DNS $MODEM_DNS; do
         grep -qs "nameserver $ns" "$RESOLV" || echo "nameserver $ns" >> "$RESOLV"
     done
+
+    # Resolver behaviour on a bearer that comes and goes.
+    #
+    # The default is a 5 second timeout and 2 tries against each server in
+    # turn, so one unreachable nameserver costs 10 seconds before the
+    # second is even asked -- long enough that everything above it has
+    # already reported "Temporary failure in name resolution". Shorter
+    # timeouts and rotation get to a server that answers while the caller
+    # is still waiting.
+    grep -qs '^options ' "$RESOLV" || \
+        echo "options timeout:2 attempts:2 rotate" >> "$RESOLV"
 }
 
 verify_net() {

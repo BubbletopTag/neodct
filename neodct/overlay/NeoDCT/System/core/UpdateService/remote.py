@@ -33,6 +33,7 @@ import json
 import os
 import re
 import ssl
+import time
 import urllib.error
 import urllib.request
 
@@ -56,6 +57,15 @@ DOWNLOAD_TIMEOUT = 120
 # How many times to pick the download back up before giving up on it. Each
 # attempt resumes, so these are not restarts -- five is a lot of rope.
 DOWNLOAD_ATTEMPTS = 5
+# Wait between attempts, doubling. Retrying instantly is worse than not
+# retrying: when the bearer drops the whole thing goes -- DNS included,
+# hence "Temporary failure in name resolution" -- and five immediate
+# attempts are five failures in under a second, after which the phone
+# gives up on a connection that would have come back on its own.
+RETRY_BACKOFF = 5
+RETRY_BACKOFF_MAX = 60
+# Overridable so the tests do not actually sleep.
+_sleep = time.sleep
 CHUNK = 64 * 1024
 
 # Leave the card room to breathe rather than filling it exactly.
@@ -272,7 +282,12 @@ def download(url, destination, size=0, progress=None,
         raise UpdateError("not enough room on the card for %d bytes" % size)
 
     last = None
-    for attempt in range(max(1, attempts)):
+    total = max(1, attempts)
+    for attempt in range(total):
+        if attempt:
+            # Give the bearer a chance to come back before asking again.
+            _sleep(min(RETRY_BACKOFF * (2 ** (attempt - 1)),
+                       RETRY_BACKOFF_MAX))
         try:
             done = _fetch_into(url, partial, have, size, progress)
         except NetworkError as exc:
