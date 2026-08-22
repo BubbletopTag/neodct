@@ -270,3 +270,34 @@ def _touch(path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as handle:
         handle.write("x\n")
+
+
+# --- things a real boot found ----------------------------------------------
+
+def test_the_config_has_no_option_this_sshd_rejects(phone):
+    """sshd logged "Unsupported option UsePAM" on the first real boot: this
+    build has no PAM. It carried on, but a warning in a log that is meant to
+    be worth reading is a warning that trains you to skim it."""
+    RemoteShell.write_sshd_config()
+
+    assert "UsePAM" not in open(RemoteShell.SSHD_CONFIG).read()
+
+
+def test_the_retry_message_carries_the_exit_code(phone):
+    """It read "connection ended (%s); retrying 255" on the first boot --
+    echo is not printf, so the code landed after the sentence instead of in
+    it, and the placeholder was printed literally."""
+    RemoteShell.write_tunnel_script("relay.example", "neodct", "2222")
+
+    script = open(RemoteShell.TUNNEL_SCRIPT).read()
+    assert "%s" not in script
+    assert "($?)" in script
+
+
+def test_the_loop_waits_before_dialling_again(phone):
+    """No relay means this runs forever. Without the sleep it is a phone
+    that spends its battery failing to connect as fast as it can."""
+    RemoteShell.write_tunnel_script("relay.example", "neodct", "2222")
+
+    assert "sleep %d" % RemoteShell.RETRY_SECONDS in open(
+        RemoteShell.TUNNEL_SCRIPT).read()

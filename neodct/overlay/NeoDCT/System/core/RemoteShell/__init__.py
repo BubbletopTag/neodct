@@ -231,7 +231,10 @@ def write_sshd_config():
         "KbdInteractiveAuthentication no",
         "ChallengeResponseAuthentication no",
         "PermitEmptyPasswords no",
-        "UsePAM no",
+        # No UsePAM line. This openssh is built without PAM, so sshd warns
+        # "Unsupported option" and carries on -- noise in a log that should
+        # be worth reading. Its own default is no, and the two directives
+        # above already refuse every non-key path.
         "PubkeyAuthentication yes",
         "X11Forwarding no",
         "AllowAgentForwarding no",
@@ -315,7 +318,8 @@ def write_tunnel_script(host, user, port):
         "while :; do",
         "    echo \"[RSHELL] dialling %s@%s\"" % (user, host),
         "    " + command,
-        "    echo \"[RSHELL] connection ended (%s); retrying\" \"$?\"",
+        "    echo \"[RSHELL] connection ended ($?); retrying in %d\""
+        % RETRY_SECONDS,
         "    sleep %d" % RETRY_SECONDS,
         "done",
         "",

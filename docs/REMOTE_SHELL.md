@@ -174,7 +174,14 @@ only want a shell into your own QEMU instance, you do not need Remote Shell
 at all: run the emulator with a port forward and reach `sshd` directly.
 Remote Shell exists for the hardware problem.
 
-## 8. What this does not protect against
+## 8. Known limits
+
+- **The relay's own ssh port is assumed to be 22.** The Port setting in the
+  app is the port the *relay listens on for you*, not the port the phone
+  dials. If you move sshd on the relay off 22, the phone cannot reach it
+  and there is no setting for that yet.
+
+## 9. What this does not protect against
 
 Worth being plain about, because "it uses ssh" invites more confidence than
 is earned:
@@ -191,7 +198,7 @@ is earned:
 - **This is alpha software with a root shell on the far end.** It is a
   development tool. Turn it off when you are not using it.
 
-## 9. Where the code is
+## 10. Where the code is
 
 | what | where |
 |---|---|
