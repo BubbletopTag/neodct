@@ -298,3 +298,47 @@ def test_a_dev_keyboard_shows_no_indicator_at_all():
     ui.matrix_input = None
 
     assert framework.t9_indicator_size(ui, t9_engine.T9Engine()) is None
+
+
+# --- the header row is shared between a title and a counter -----------------
+
+def test_a_long_title_does_not_run_under_the_counter():
+    """"Remote Shell" against a "9007-7" breadcrumb rendered as
+    "Remote Sh<overlap>7-7" on the phone: the counter is right-aligned on
+    the same row and nothing stopped the title reaching it."""
+    ui = FakeUI()
+
+    fitted = framework.fit_text(ui, "Remote Shell", ui.font_n, 60)
+
+    assert ui.get_text_size(fitted, ui.font_n)[0] <= 60
+    assert fitted.endswith("...")
+
+
+def test_a_title_that_fits_is_left_alone():
+    ui = FakeUI()
+
+    assert framework.fit_text(ui, "Remote", ui.font_n, 200) == "Remote"
+
+
+def test_no_room_means_no_title_rather_than_a_broken_one():
+    ui = FakeUI()
+
+    assert framework.fit_text(ui, "Remote", ui.font_n, 0) == ""
+
+
+def test_the_ellipsis_is_three_dots_not_a_glyph():
+    """This font has no U+2026 and draws a blank box for it, which is worse
+    than the thing being cut off."""
+    ui = FakeUI()
+
+    fitted = framework.fit_text(ui, "Remote Shell", ui.font_n, 60)
+
+    assert "…" not in fitted
+
+
+def test_the_counter_reports_the_room_it_needs():
+    """The title has no other way to know where it must stop."""
+    ui = FakeUI()
+    header = framework.HeaderWidget(ui, 9990)
+
+    assert header.width(7) > ui.get_text_size("9990-7", ui.font_n)[0]

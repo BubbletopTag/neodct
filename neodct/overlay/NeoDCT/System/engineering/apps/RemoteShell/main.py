@@ -20,8 +20,11 @@ from System.core import Storage
 from System.ui.framework import (MessageDialog, SoftKeyBar, TextInput,
                                  VerticalList)
 
-APP_ID = 9007
-TITLE = "Remote Shell"
+APP_ID = 9990
+# Short enough to sit beside the breadcrumb counter without the
+# framework having to trim it. "Remote Shell" is 189px against 136
+# available; this is 111.
+TITLE = "Remote"
 
 KEY_ENTER = 28
 

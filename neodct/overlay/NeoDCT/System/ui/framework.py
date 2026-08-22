@@ -188,6 +188,23 @@ class PredictiveText:
         return True
 
 
+def fit_text(ui, text, font, max_width):
+    """`text`, shortened until it fits `max_width`, with "..." if trimmed.
+
+    Three dots rather than an ellipsis: this font has no U+2026 and would
+    draw a blank box, which is worse than the thing being cut off.
+    """
+    if max_width <= 0 or not text:
+        return ""
+    if ui.get_text_size(text, font)[0] <= max_width:
+        return text
+    for end in range(len(text) - 1, 0, -1):
+        candidate = text[:end].rstrip() + "..."
+        if ui.get_text_size(candidate, font)[0] <= max_width:
+            return candidate
+    return ""
+
+
 def _underline_tail(ui, x, y, line, tail_len, font):
     """Underline the last `tail_len` characters of `line` drawn at (x, y).
 
@@ -487,17 +504,27 @@ class HeaderWidget:
         self.ui = ui
         self.root_id = root_id # The "1" in "1-2"
         
+    def text_for(self, sub_index=None):
+        if sub_index is not None:
+            return "%s-%s" % (self.root_id, sub_index)
+        return "%s" % self.root_id
+
+    def width(self, sub_index=None):
+        """How much of the header row this takes, including its margin.
+
+        Callers draw a title on the same row and have no other way to know
+        where it has to stop.
+        """
+        return 5 + self.ui.get_text_size(
+            self.text_for(sub_index), self.ui.font_n)[0]
+
     def draw(self, sub_index=None):
         """
         Draws the breadcrumb index at top right.
         sub_index: The list item number (e.g. 2 for Pizza Hut).
         If None, just draws the root ID.
         """
-        if sub_index is not None:
-            text = f"{self.root_id}-{sub_index}"
-        else:
-            text = f"{self.root_id}"
-            
+        text = self.text_for(sub_index)
         w, h = self.ui.get_text_size(text, self.ui.font_n)
         x = _ui_width(self.ui) - 5 - w
         y = 5 
@@ -531,7 +558,15 @@ class VerticalList:
         self.ui.draw.rectangle((0, 0, screen_w, content_bottom), fill="black")
         
         # 2. Draw Title and Header
-        self.ui.draw.text((5, 0), self.title, font=self.ui.font_xl, fill="white")
+        #
+        # The breadcrumb is right-aligned on the same row, and nothing used
+        # to stop the title running underneath it -- "Remote Shell" against
+        # a "9007-7" counter came out as "Remote Sh<overlap>7-7". Reserve
+        # the counter's width and trim the title to what is left.
+        reserved = self.header.width(self.selected_index + 1)
+        title = fit_text(self.ui, self.title, self.ui.font_xl,
+                         screen_w - 5 - reserved - 6)
+        self.ui.draw.text((5, 0), title, font=self.ui.font_xl, fill="white")
         self.header.draw(self.selected_index + 1)
         
         # 3. Draw Divider Line

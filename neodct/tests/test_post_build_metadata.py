@@ -113,3 +113,45 @@ def test_a_target_tree_with_no_version_is_an_error(tmp_path):
 
     assert result.returncode != 0
     assert "VERSION_ID" in result.stderr
+
+
+# --- os-release says one version, in three places ---------------------------
+
+def test_os_release_agrees_with_itself():
+    """VERSION_ID, VERSION and PRETTY_NAME are three copies of one fact.
+
+    0.3.10a shipped with VERSION_ID bumped and the other two left at
+    0.3.9a, because the bump was a sed for one line. Everything that
+    matters reads VERSION_ID -- version.prop, the banner, /etc/issue, the
+    release workflow's tag check -- so the image was correct and told the
+    owner it was the previous version anyway.
+    """
+    import os
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(here, "overlay", "etc", "os-release")
+
+    values = {}
+    for line in open(path):
+        if "=" in line:
+            key, value = line.strip().split("=", 1)
+            values[key] = value.strip('"')
+
+    version_id = values["VERSION_ID"]
+    assert values["VERSION"] == "v" + version_id, values
+    assert values["PRETTY_NAME"] == "NeoDCT v" + version_id, values
+
+
+def test_os_release_matches_the_changelog():
+    """A release with no changelog section is a release with no notes: the
+    workflow builds them from the section headed exactly this version."""
+    import os
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    version = None
+    for line in open(os.path.join(here, "overlay", "etc", "os-release")):
+        if line.startswith("VERSION_ID="):
+            version = line.split("=", 1)[1].strip().strip('"')
+    assert version
+
+    changelog = os.path.join(here, "overlay", "NeoDCT", "CHANGELOG.txt")
+    headings = [l.strip() for l in open(changelog) if l.strip() == version]
+    assert headings, "CHANGELOG.txt has no section headed exactly %s" % version
