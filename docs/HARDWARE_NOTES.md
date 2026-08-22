@@ -156,6 +156,15 @@ exposes it as `/dev/ubiblock0_0`; userdata follows as ubi1. The generated
 ```sh
 make -C buildroot O=../build-lf BR2_DEFCONFIG=.../luckfox_pico_mini_defconfig defconfig
 make -C buildroot O=../build-lf
+
+# Build the initramfs. This is not optional and nothing else does it: the
+# luckfox defconfig's post-image hook is board/qemu/post-image.sh alone, so
+# `make` leaves whatever initramfs.cpio.gz was there last time. Skip this
+# and you flash a fresh rootfs under a stale boot path -- which is how you
+# end up with an update applier that does not match the system it installs.
+neodct/scripts/mkinitramfs.py --target-dir ../build-lf/target \
+    --init neodct/initramfs --output ../build-lf/images/initramfs.cpio.gz
+
 neodct/tools/mknand.sh ../build-lf/images ../build-lf/target ../build-lf/host
 gzip -dc ../build-lf/images/initramfs.cpio.gz > ../build-lf/images/initramfs.cpio
 
