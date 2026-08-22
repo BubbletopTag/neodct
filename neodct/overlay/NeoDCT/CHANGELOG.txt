@@ -2,6 +2,9 @@
 
 0.3.7a
 Added
+- The phone can update itself over the internet. Update now offers to look
+  online when there is nothing on the card, downloads the release built for
+  this phone, and installs it the same way a card update is installed.
 - The browser reports itself in purple, and says what it is doing: the
   pages it opens, how much memory and processor it is using together, and
   any security warnings about a site, in red.
