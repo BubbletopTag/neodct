@@ -245,6 +245,19 @@ def write_sshd_config():
         "KbdInteractiveAuthentication no",
         "ChallengeResponseAuthentication no",
         "PermitEmptyPasswords no",
+        # authorized_keys lives on the user partition, not in a home
+        # directory, because / and /NeoDCT/System are read-only squashfs
+        # and there is nowhere else to put a writable file. StrictModes
+        # walks every directory above it and refuses the file if any of
+        # them is group- or world-writable -- and /NeoDCT/User is the root
+        # of a filesystem whose mode is whatever mkfs left, which a
+        # reflash resets. It refuses silently, reporting nothing but
+        # "Permission denied (publickey)" to the person trying to log in.
+        #
+        # What StrictModes protects against is another user editing your
+        # authorized_keys. This phone has one user and it is root, so
+        # there is no other user to protect against.
+        "StrictModes no",
         # No UsePAM line. This openssh is built without PAM, so sshd warns
         # "Unsupported option" and carries on -- noise in a log that should
         # be worth reading. Its own default is no, and the two directives
@@ -413,6 +426,17 @@ def status():
 def start():
     """Bring it up. Raises RemoteShellError with something worth reading."""
     current = check_ready()
+    # The user partition's root arrives with whatever mode mkfs gave it,
+    # and a reflash resets it. sshd will not read an authorized_keys file
+    # under a group- or world-writable directory. StrictModes is off in
+    # the config below, but fixing the mode costs nothing and means a
+    # phone is not relying on that one line.
+    try:
+        parent = os.path.dirname(USER_DIR)
+        if os.path.isdir(parent) and (os.stat(parent).st_mode & 0o022):
+            os.chmod(parent, 0o755)
+    except OSError:
+        pass
     ensure_host_key()
     write_sshd_config()
     write_tunnel_script(current["host"], current["user"], current["port"])

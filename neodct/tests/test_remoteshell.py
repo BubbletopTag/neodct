@@ -483,3 +483,42 @@ def test_a_partial_relay_conf_only_sets_what_it_names(phone):
     settings = RemoteShell.settings()
     assert settings["host"] == "relay.example"
     assert settings["user"] == RemoteShell.DEFAULT_RELAY_USER
+
+
+def test_strict_modes_is_off(phone):
+    """sshd walks every directory above authorized_keys and refuses the
+    file if any is group- or world-writable. Ours lives on the user
+    partition -- there is nowhere else, / is read-only squashfs -- and
+    that partition's root mode is whatever mkfs left, which a reflash
+    resets.
+
+    The phone reported exactly this: "Authentication refused: bad
+    ownership or modes for directory /NeoDCT/User", while telling the
+    person logging in only "Permission denied (publickey)". A correct key,
+    a correct config, and an hour of looking at the wrong thing.
+
+    StrictModes guards against another user editing your authorized_keys.
+    There is one user here and it is root."""
+    RemoteShell.write_sshd_config()
+
+    assert "StrictModes no" in open(RemoteShell.SSHD_CONFIG).read()
+
+
+def test_starting_tightens_a_loose_user_partition(phone, monkeypatch):
+    """Defence in depth for the same fault: even with StrictModes off, a
+    world-writable /NeoDCT/User is not something to leave alone."""
+    parent = os.path.dirname(RemoteShell.USER_DIR)
+    os.makedirs(parent, exist_ok=True)
+    os.chmod(parent, 0o777)
+    RemoteShell.save_settings(host="relay.example")
+    for path in (RemoteShell.RELAY_KEY, RemoteShell.AUTHORIZED_KEYS,
+                 RemoteShell.KNOWN_HOSTS):
+        _touch(path)
+    monkeypatch.setattr(RemoteShell, "ensure_host_key", lambda: "x")
+    monkeypatch.setattr(RemoteShell.subprocess, "Popen",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("stop")))
+
+    with pytest.raises(RemoteShell.RemoteShellError):
+        RemoteShell.start()
+
+    assert stat.S_IMODE(os.stat(parent).st_mode) & 0o022 == 0
