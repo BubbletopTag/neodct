@@ -89,3 +89,17 @@ Together they are what would make the jump to 0.4 mean something.
   nothing else, so any fix to the boot path or the applier needs a USB
   flash to take effect. Worth revisiting if the boot partition ever gets
   big enough to hold two of anything.
+
+  The consequence is a rule, not just an inconvenience: **the applier in
+  the field decides what a pending record may say.** A new rootfs can be
+  installed by an old initramfs, and that initramfs will never be updated
+  by the thing it is installing. 0.3.10a is the case in point -- its
+  Update app writes `package=` where earlier records said `image=`, and an
+  older applier handed one of those reads it as an incomplete record,
+  discards the update and reports a failure. Nothing is bricked, but
+  nothing installs either, which is why 0.3.10a has to be flashed.
+
+  So a change to `pending.prop` is only safe if either every phone that
+  might read it has already been flashed, or the old applier still
+  understands the new record. Adding fields is safe; changing what an
+  existing field means, or moving what a record points at, is not.
