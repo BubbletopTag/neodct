@@ -177,6 +177,65 @@ getprop() {
     sed -n "s/^$1=//p" "$2" 2>/dev/null | head -n1
 }
 
+# --- the SD card ---------------------------------------------------------
+#
+# Where an update actually lives. The applier needs it because a .ndsw is
+# installed straight off the card: the user partition is 8 MiB on the
+# Luckfox and a system image is 51 MiB, so there is nowhere on the phone to
+# put a copy, and making one was never necessary.
+
+: "${MNT_SDCARD:=/mnt/sdcard}"
+
+# The filesystems a card might carry, in the order it is likely to be.
+# Must stay in step with CARD_FSTYPES in System/hw/neodct-sdcard: for a
+# while this tried vfat alone, and every exFAT card -- which is what large
+# cards are formatted as from the factory -- read as "no SD card found"
+# while the running system had been mounting it happily all along.
+: "${NDSYS_CARD_FSTYPES:=vfat exfat ext4 ext3 ext2}"
+
+# Set when the card is already available at MNT_SDCARD and must not be
+# mounted or unmounted here. The host tests use it to point the applier at
+# a directory, the same way NDSYS_SCAN_GLOB points it at ordinary files.
+: "${NDSYS_CARD_PREMOUNTED:=}"
+
+# mount_card -- mount the first candidate that is not system or user.
+# Read-only: nothing at boot has any business writing to the card, and a
+# card pulled out mid-write is a card someone loses their messages from.
+mount_card() {
+    [ -n "$NDSYS_CARD_PREMOUNTED" ] && return 0
+    mkdir -p "$MNT_SDCARD" 2>/dev/null
+    mountpoint -q "$MNT_SDCARD" 2>/dev/null && return 0
+    for device in $(candidate_devices); do
+        [ "$device" = "$SYS_DEV" ] && continue
+        [ "$device" = "${USER_DEV:-}" ] && continue
+        is_squashfs "$device" && continue
+        for fstype in $NDSYS_CARD_FSTYPES; do
+            if mount -t "$fstype" -o ro "$device" "$MNT_SDCARD" 2>/dev/null; then
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+umount_card() {
+    [ -n "$NDSYS_CARD_PREMOUNTED" ] && return 0
+    umount "$MNT_SDCARD" 2>/dev/null
+    return 0
+}
+
+# find_package NAME -- echo the path to NAME on the card, if it is there.
+#
+# By name, never by the path the record carries: the card is mounted
+# somewhere else here than it was when the update was staged, which is the
+# same reason a staged image is resolved against STATE_DIR.
+find_package() {
+    for directory in "$MNT_SDCARD/update" "$MNT_SDCARD"; do
+        [ -f "$directory/$1" ] && echo "$directory/$1" && return 0
+    done
+    return 1
+}
+
 # Write a record atomically: temp file, rename, sync.
 putprop_file() {
     mkdir -p "$(dirname "$1")" 2>/dev/null
@@ -196,6 +255,17 @@ clear_pending() {
     rm -f "$STATE_DIR/pending.prop" "$STATE_DIR/pending.img" 2>/dev/null
     sync
     return 0
+}
+
+# sha256 of the image inside a .ndsw, read without unpacking it anywhere.
+package_image_sha() {
+    unzip -p "$1" rootfs.squashfs 2>/dev/null | sha256sum | cut -d' ' -f1
+}
+
+# The size of the image inside a .ndsw, from the zip's own listing.
+package_image_size() {
+    unzip -l "$1" rootfs.squashfs 2>/dev/null \
+        | awk '$NF == "rootfs.squashfs" {print $1; exit}'
 }
 
 # sha256 of the first $2 bytes of $1, which may be a file or a block device.
@@ -237,6 +307,7 @@ apply_pending() {
     # is mounted at /NeoDCT/User; here it is at /mnt/user. Resolve the image
     # next to the record instead of trusting the path it names, or a real
     # staged update disappears as "incomplete".
+    package="$(basename "$(getprop package "$PENDING")" 2>/dev/null)"
     image="$STATE_DIR/$(basename "$(getprop image "$PENDING")" 2>/dev/null)"
     image_bytes="$(getprop image_bytes "$PENDING")"
     want_sha="$(getprop sha256 "$PENDING")"
@@ -244,8 +315,29 @@ apply_pending() {
     attempts="$(getprop attempts "$PENDING")"
     [ -n "$attempts" ] || attempts=0
 
-    if [ -z "$image" ] || [ ! -f "$image" ] || [ -z "$image_bytes" ] \
-            || [ -z "$want_sha" ]; then
+    if [ -z "$image_bytes" ] || [ -z "$want_sha" ]; then
+        log "staged update is incomplete; discarding"
+        record_result failed "$version" "incomplete staging record"
+        clear_pending
+        return 0
+    fi
+
+    # A record naming a package installs from the card. Find it before
+    # anything else: a missing card is worth another boot, not a discarded
+    # update -- somebody may simply have taken it out.
+    if [ -n "$package" ]; then
+        if ! mount_card; then
+            log "update $version waits for the card it is on"
+            return 0
+        fi
+        image="$(find_package "$package")"
+        if [ -z "$image" ]; then
+            log "$package is not on this card; waiting"
+            umount_card
+            return 0
+        fi
+        log "installing $version from $image"
+    elif [ -z "$image" ] || [ ! -f "$image" ]; then
         log "staged update is incomplete; discarding"
         record_result failed "$version" "incomplete staging record"
         clear_pending
@@ -261,27 +353,52 @@ apply_pending() {
     sed "s/^attempts=.*/attempts=$((attempts + 1))/" "$PENDING" > "$PENDING.new" \
         && mv -f "$PENDING.new" "$PENDING" && sync
 
-    actual_size="$(wc -c < "$image" 2>/dev/null | tr -d ' ')"
+    if [ -n "$package" ]; then
+        actual_size="$(package_image_size "$image")"
+    else
+        actual_size="$(wc -c < "$image" 2>/dev/null | tr -d ' ')"
+    fi
     if [ "$actual_size" != "$image_bytes" ]; then
         log "staged image is $actual_size bytes, expected $image_bytes"
         record_result failed "$version" "staged image truncated"
+        umount_card
         clear_pending
         return 0
     fi
 
-    if [ "$(hash_prefix "$image" "$image_bytes")" != "$want_sha" ]; then
+    # Hash before writing, always. The running system checked the package's
+    # signature before recording it; this checks that the bytes about to be
+    # written are the ones that was said about. A card swapped between
+    # staging and reboot fails here rather than installing.
+    if [ -n "$package" ]; then
+        got_sha="$(package_image_sha "$image")"
+    else
+        got_sha="$(hash_prefix "$image" "$image_bytes")"
+    fi
+    if [ "$got_sha" != "$want_sha" ]; then
         log "staged image sha256 mismatch; refusing to install $version"
         record_result failed "$version" "image sha256 mismatch before write"
+        umount_card
         clear_pending
         return 0
     fi
 
     log "installing $version ($image_bytes bytes) to $SYS_DEV"
-    if ! dd if="$image" of="$SYS_DEV" bs=1M conv=fsync 2>/dev/null; then
+    if [ -n "$package" ]; then
+        # Straight from the zip to the partition. No copy is made anywhere:
+        # there is nowhere on this phone to put one.
+        if ! unzip -p "$image" rootfs.squashfs 2>/dev/null \
+                | dd of="$SYS_DEV" bs=1M conv=fsync 2>/dev/null; then
+            log "write to $SYS_DEV failed; retrying on the next boot"
+            umount_card
+            return 0
+        fi
+    elif ! dd if="$image" of="$SYS_DEV" bs=1M conv=fsync 2>/dev/null; then
         log "write to $SYS_DEV failed; retrying on the next boot"
         return 0
     fi
     sync
+    umount_card
 
     # Read it back off the device. A write that reported success but landed
     # badly is exactly what verity would trip over on every later boot, and

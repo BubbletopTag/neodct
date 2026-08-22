@@ -484,13 +484,13 @@ def test_user_data_is_backed_up_without_anyone_being_asked(env):
 
 
 def test_the_backup_is_part_of_the_progress_screen(env):
-    """No extra dialog: it is a step on the way, like copying."""
+    """No extra dialog: it is a step on the way, like preparing."""
     put_package(env)
 
     app.run(FakeUI())
 
     assert any("ack" in step for step in env.steps()), env.steps()
-    assert any("opying" in step for step in env.steps()), env.steps()
+    assert any("repar" in step for step in env.steps()), env.steps()
 
 
 def test_the_backup_goes_in_its_own_dated_folder(env):
@@ -644,15 +644,19 @@ def test_what_the_app_stages_is_what_the_applier_installs(env, tmp_path):
 
     device = tmp_path / "system.img"
     device.write_bytes(b"\x00" * (len(image) + 4096))
+    # The card stands in for a mounted one: the applier installs straight
+    # out of the .ndsw sitting on it, so the card has to be reachable at
+    # boot the way it is on the phone.
     script = (
         'STATE_DIR="%s"; MNT_USER="%s"; SYS_DEV="%s"; USER_MOUNTED=1\n'
+        'MNT_SDCARD="%s"; NDSYS_CARD_PREMOUNTED=1\n'
         '. "%s"\napply_pending\n'
-        % (env.state, tmp_path / "user", device, APPLY_SH)
+        % (env.state, tmp_path / "user", device, env.card, APPLY_SH)
     )
     result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
 
     assert result.returncode == 0, result.stderr
-    assert device.read_bytes()[:len(image)] == image
+    assert device.read_bytes()[:len(image)] == image, result.stderr
     assert staging.read_installed(env.state).version == "0.3.2a"
     assert staging.read_installed(env.state).verity_root_hash == tree.root_hash
     assert staging.read_pending(env.state) is None
@@ -686,3 +690,60 @@ def test_a_phone_with_no_carrier_is_not_offered_a_download_it_cannot_do(env, mon
 
     assert not asked
     assert env.pages, "it should still say what version it is on"
+
+
+# --- the user partition is 8 MiB and an update is 51 MiB --------------------
+#
+# The reason these exist: installing used to copy the whole system image to
+# /NeoDCT/User/.ndsys before rebooting. On the Luckfox that path is the
+# 8 MiB `userdata` partition, so a 51 MiB image could not be staged on any
+# phone, with any card in it. It went unseen for four releases because QEMU
+# builds `userdata` at 512 MiB and the tests inherited the build host's
+# free space, which is to say: nothing here ever ran out of room.
+
+def test_installing_does_not_need_room_for_a_second_copy(env, monkeypatch):
+    """The whole point. A user partition with almost nothing free must
+    still be able to install an update sitting on the card."""
+    put_package(env)
+    monkeypatch.setattr(os, "statvfs", _almost_full)
+
+    app.run(FakeUI())
+
+    pending = staging.read_pending(env.state)
+    assert pending is not None, env.dialogs
+    assert pending.from_package
+
+
+def test_nothing_the_size_of_an_image_is_written_to_the_user_partition(env):
+    """Not "less than before": nothing. The record is a few hundred bytes
+    and the image never leaves the card."""
+    package = put_package(env)
+    image_size = os.path.getsize(package)
+
+    app.run(FakeUI())
+
+    written = sum(os.path.getsize(os.path.join(root, name))
+                  for root, _, names in os.walk(env.state)
+                  for name in names)
+    assert written < 4096, "%d bytes landed in %s" % (written, env.state)
+    assert image_size > written * 4          # the package really is larger
+
+
+def test_the_record_names_the_package_not_a_copy(env):
+    put_package(env, name="UPDATE-qemu-aarch64.ndsw")
+
+    app.run(FakeUI())
+
+    pending = staging.read_pending(env.state)
+    assert pending.package == "UPDATE-qemu-aarch64.ndsw"
+    assert not os.path.exists(os.path.join(str(env.state), "pending.img"))
+
+
+def _almost_full(path):
+    """statvfs for a filesystem with under 2 MiB free, like the phone's."""
+    class Stat:
+        f_bavail = 470
+        f_frsize = 4096
+        f_blocks = 2048
+        f_bfree = 470
+    return Stat()

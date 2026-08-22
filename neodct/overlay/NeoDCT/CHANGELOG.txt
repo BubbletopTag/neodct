@@ -1,5 +1,24 @@
 # NeoDCT OS Changelog
 
+0.3.10a
+Fixed
+- Updates install. The phone used to copy the whole system onto its own
+  small storage before restarting, and there was never enough room for it
+  there, whatever size card was in the phone. It now installs the update
+  straight from the card and copies nothing.
+- Update can find updates again. "Look online" reported that nothing was
+  published no matter what had been released, because the phone asked for
+  the newest finished release and every NeoDCT release is marked as a
+  test build.
+- Recovery can read cards that are not FAT32. Large cards are usually
+  exFAT, and recovery said there was no card in the phone at all.
+
+Note
+- 0.3.9a could not be installed, so everything listed under it arrives
+  here: the clock, predictive typing, and the security-warning fix. This
+  version has to be flashed over USB. After it, updates work from the
+  phone.
+
 0.3.9a
 Added
 - The phone sets its own clock. It starts from the date the software was

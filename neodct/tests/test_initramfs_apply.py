@@ -463,3 +463,113 @@ def test_the_image_is_found_even_though_the_record_names_a_device_path(tmp_path)
     assert result.returncode == 0, result.stderr
     assert "incomplete" not in result.stderr
     assert device.read_bytes()[:len(image)] == image
+
+
+# --- installing from the card ----------------------------------------------
+#
+# The phone has nowhere to stage a copy: the Luckfox `userdata` partition is
+# 8 MiB and a system image is 51 MiB. So the applier installs the image
+# straight out of the .ndsw where it sits on the card, and these pin the
+# parts of that which can go wrong -- a card that is not in the phone, and
+# a card that is not the one the update was staged from.
+
+def stage_a_package(tmp_path, name="UPDATE.ndsw", **overrides):
+    """Stage a .ndsw on a card, the way the Update app does."""
+    image, tree = build_image(blocks=8)
+    card = tmp_path / "sdcard"
+    (card / "update").mkdir(parents=True, exist_ok=True)
+    package = card / "update" / name
+    body = make_ndsw(package, image=image, tree=tree, **overrides)
+    parsed = manifest_mod.parse(json.dumps(body).encode())
+    state = tmp_path / "user" / ".ndsys"
+    import zipfile
+    with zipfile.ZipFile(str(package)) as handle:
+        member = handle.getinfo("rootfs.squashfs").file_size
+    staging.stage_package(parsed, package, member, state)
+    return state, card, image, parsed
+
+
+def run_with_card(state, sys_dev, tmp_path, card, command="apply_pending"):
+    user = tmp_path / "user"
+    (user / "logs").mkdir(parents=True, exist_ok=True)
+    script = (
+        'STATE_DIR="%s"; MNT_USER="%s"; SYS_DEV="%s"; USER_MOUNTED=1\n'
+        'MNT_SDCARD="%s"; NDSYS_CARD_PREMOUNTED=1\n'
+        '. "%s"\n%s\n' % (state, user, sys_dev, card, APPLY_SH, command)
+    )
+    return subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+
+
+def test_the_image_is_installed_straight_from_the_package(tmp_path):
+    state, card, image, parsed = stage_a_package(tmp_path)
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\0" * (len(image) + 8192))
+
+    result = run_with_card(state, device, tmp_path, card)
+
+    assert result.returncode == 0, result.stderr
+    assert device.read_bytes()[:len(image)] == image, result.stderr
+    assert staging.read_installed(state).version == parsed.version
+
+
+def test_nothing_is_copied_onto_the_user_partition(tmp_path):
+    """The fault being fixed: a copy here needs 51 MiB on an 8 MiB
+    partition. There must not be one, not even a small one."""
+    state, card, image, _ = stage_a_package(tmp_path)
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\0" * (len(image) + 8192))
+
+    run_with_card(state, device, tmp_path, card)
+
+    assert not (state / "pending.img").exists()
+    for path in (tmp_path / "user").rglob("*"):
+        if path.is_file():
+            assert path.stat().st_size < 4096, path
+
+
+def test_a_missing_card_waits_rather_than_giving_up(tmp_path):
+    """Somebody took the card out between staging and rebooting. That is
+    not a failed update, it is an update that has not happened yet."""
+    state, card, image, _ = stage_a_package(tmp_path)
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\0" * (len(image) + 8192))
+    (card / "update" / "UPDATE.ndsw").unlink()
+
+    result = run_with_card(state, device, tmp_path, card)
+
+    assert result.returncode == 0, result.stderr
+    assert staging.read_pending(state) is not None, "the update was discarded"
+    assert device.read_bytes() == b"\0" * (len(image) + 8192)
+
+
+def test_the_update_installs_when_the_card_comes_back(tmp_path):
+    state, card, image, _ = stage_a_package(tmp_path)
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\0" * (len(image) + 8192))
+    kept = (card / "update" / "UPDATE.ndsw").read_bytes()
+    (card / "update" / "UPDATE.ndsw").unlink()
+    run_with_card(state, device, tmp_path, card)          # card absent
+
+    (card / "update" / "UPDATE.ndsw").write_bytes(kept)   # card back
+    result = run_with_card(state, device, tmp_path, card)
+
+    assert result.returncode == 0, result.stderr
+    assert device.read_bytes()[:len(image)] == image
+
+
+def test_a_different_package_under_the_same_name_is_refused(tmp_path):
+    """The card is removable, so the file named in the record is not
+    necessarily the file that was signed. The hash is what settles it --
+    the initramfs has no crypto and cannot check the signature itself."""
+    state, card, image, _ = stage_a_package(tmp_path)
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\0" * (len(image) + 8192))
+    other, other_tree = build_image(blocks=8, seed=b"different")
+    make_ndsw(card / "update" / "UPDATE.ndsw", image=other, tree=other_tree)
+
+    result = run_with_card(state, device, tmp_path, card)
+
+    assert result.returncode == 0, result.stderr
+    assert device.read_bytes() == b"\0" * (len(image) + 8192), "it installed!"
+    assert staging.read_pending(state) is None
+    assert staging.read_result(state)["result"] == "failed"

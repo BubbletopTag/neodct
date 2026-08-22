@@ -196,9 +196,15 @@ def _backup_user_data(progress):
 
 
 def _stage(ui, pkg, progress):
-    """Copy the image into place as the pending update. True on success."""
+    """Mark this package as the one to install on the next boot.
+
+    Nothing is copied. The applier reads the image straight out of the
+    .ndsw where it already sits on the card, because there is nowhere on
+    the phone to put a second copy of it: the user partition is 8 MiB on
+    the Luckfox and a system image is 51 MiB. Staging a copy there is what
+    this used to do, and it could not work on any card of any size.
+    """
     state_dir = staging.STATE_DIR
-    incoming = os.path.join(state_dir, "incoming.img")
     try:
         os.makedirs(state_dir, exist_ok=True)
     except OSError as exc:
@@ -206,20 +212,8 @@ def _stage(ui, pkg, progress):
         return False
 
     try:
-        pkg.extract_image(incoming, progress=progress.draw)
-    except package.NotEnoughSpace as exc:
-        _refuse(ui, "Not enough space for this update.\n%s" % exc)
-        return False
-    except InvalidUpdate:
-        # The hash is checked while copying, so this is a corrupt package.
-        _refuse(ui, "INVALID UPDATE! UPDATE MAY BE CORRUPT!!")
-        return False
-    except OSError as exc:
-        _refuse(ui, "Copying the update failed.\n%s" % exc)
-        return False
-
-    try:
-        staging.stage(pkg.manifest, incoming, state_dir)
+        staging.stage_package(pkg.manifest, pkg.path, pkg.image_size,
+                              state_dir)
     except OSError as exc:
         _refuse(ui, "Could not stage the update.\n%s" % exc)
         return False
@@ -312,8 +306,9 @@ def _install(ui, path):
         progress = ProgressScreen(ui, "Backing up data", header=HEADER,
                                   hint=COPY_HINT)
         backed_up = _backup_user_data(progress)
-        progress.set_step("Copying update")
-        progress.detail = _size_detail
+        # No copying step any more -- the image is installed from the card
+        # at boot, so all that happens here is a record being written.
+        progress.set_step("Preparing update")
         if _stage(ui, pkg, progress):
             _restart_page(ui, manifest, backed_up)
 

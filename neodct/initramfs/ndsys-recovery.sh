@@ -278,17 +278,12 @@ recovery_confirm() {
 
 # Mount the first FAT filesystem that is not the system or user partition.
 recovery_mount_card() {
-    mkdir -p "$MNT_SDCARD" 2>/dev/null
-    mountpoint -q "$MNT_SDCARD" 2>/dev/null && return 0
-    for device in $(candidate_devices); do
-        [ "$device" = "$SYS_DEV" ] && continue
-        [ "$device" = "$USER_DEV" ] && continue
-        is_squashfs "$device" && continue
-        if mount -t vfat -o ro "$device" "$MNT_SDCARD" 2>/dev/null; then
-            return 0
-        fi
-    done
-    return 1
+    # One mounter for recovery and for the boot-time applier, in
+    # ndsys-apply.sh. They used to be separate and disagreed: this one
+    # tried vfat alone, so every exFAT card -- which is what a large card
+    # is formatted as out of the box -- came up as "No SD card found" on a
+    # phone whose running system mounted the same card without trouble.
+    mount_card
 }
 
 recovery_find_packages() {

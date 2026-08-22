@@ -25,7 +25,10 @@ RESULT_RECORD = "last_result.prop"
 
 MAX_ATTEMPTS = 3
 
-_PENDING_REQUIRED = ("image", "image_bytes", "sha256", "version", "platform",
+# Common to both kinds of pending record. What names the bytes to install
+# differs: "image" for a copy on the user partition, "package" for a .ndsw
+# left on the card. See stage() and stage_package().
+_PENDING_REQUIRED = ("image_bytes", "sha256", "version", "platform",
                      "verity_root_hash", "verity_block_size",
                      "verity_image_blocks")
 
@@ -66,6 +69,21 @@ class Record:
             return recorded
         return os.path.join(str(self.state_dir),
                             os.path.basename(recorded) or PENDING_IMAGE)
+
+    @property
+    def package(self):
+        """The .ndsw this record installs from, or "" for a staged image.
+
+        A basename, never a path: the card is mounted somewhere different
+        in the initramfs than it was when the record was written, and the
+        applier searches for the file by name for the same reason it
+        resolves `image` against state_dir.
+        """
+        return os.path.basename(self.values.get("package", ""))
+
+    @property
+    def from_package(self):
+        return bool(self.package)
 
     @property
     def image_bytes(self):
@@ -176,6 +194,60 @@ def stage(parsed_manifest, image_path, state_dir=None):
     return read_pending(state_dir)
 
 
+def stage_package(parsed_manifest, package_path, image_bytes, state_dir=None):
+    """Make the .ndsw at `package_path` the pending update.
+
+    Nothing is copied. The record names the package by basename and the
+    applier streams the image out of it at boot, straight to the system
+    partition.
+
+    This exists because stage() cannot work on the hardware. It writes the
+    whole system image to the user partition first, and on the Luckfox that
+    partition is 8 MiB against a 51 MiB image -- there is no card large
+    enough to help, because the card is not where the copy goes. QEMU
+    builds userdata at 512 MiB, which is why the fault only ever appeared
+    on a real phone.
+
+    `image_bytes` is the size of the rootfs.squashfs member inside the
+    package, which the caller reads from the zip.
+
+    The signature is checked here, by the running system, before this is
+    called. The initramfs has no crypto and cannot repeat that, so the
+    record carries the sha256 the verified manifest gave, and the applier
+    checks the bytes it is about to write against it. Swapping the card
+    between staging and reboot therefore fails the hash rather than
+    installing something nobody signed.
+    """
+    state_dir = str(state_dir or STATE_DIR)
+    os.makedirs(state_dir, exist_ok=True)
+
+    # Drop any earlier attempt, record first, so a crash between the two
+    # cannot leave a record pointing at an image that has been deleted.
+    _unlink(os.path.join(state_dir, PENDING_RECORD))
+    _unlink(os.path.join(state_dir, PENDING_IMAGE))
+
+    verity = parsed_manifest.verity
+    _write_record(os.path.join(state_dir, PENDING_RECORD), {
+        "package": os.path.basename(str(package_path)),
+        # The whole rootfs.squashfs member: the squashfs and the verity
+        # tree appended to it. Not manifest.image_bytes, which is the
+        # squashfs alone -- the sha256 recorded below covers both, and the
+        # applier hashes that many bytes back off the device afterwards.
+        "image_bytes": int(image_bytes),
+        "sha256": parsed_manifest.sha256,
+        "version": parsed_manifest.version,
+        "buildtime": parsed_manifest.buildtime,
+        "platform": parsed_manifest.platform,
+        "verity_root_hash": verity["root_hash"],
+        "verity_block_size": verity["block_size"],
+        "verity_image_blocks": verity["image_blocks"],
+        "verity_salt": verity.get("salt", ""),
+        "attempts": 0,
+    })
+    _sync_dir(state_dir)
+    return read_pending(state_dir)
+
+
 def read_pending(state_dir=None):
     """The staged update, or None if there isn't a usable one."""
     state_dir = str(state_dir or STATE_DIR)
@@ -184,7 +256,14 @@ def read_pending(state_dir=None):
         return None
     if any(field not in values for field in _PENDING_REQUIRED):
         return None
+    if not values.get("image") and not values.get("package"):
+        return None
     record = Record(values, state_dir)
+    if record.from_package:
+        # The package lives on the card, which may not be mounted here and
+        # may not even be in the phone. Whether it is still there is the
+        # applier's question at boot; the record itself is usable.
+        return record
     if not os.path.exists(record.image):
         return None
     try:
