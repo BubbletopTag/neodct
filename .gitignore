@@ -49,3 +49,23 @@ netsurf-neodct/
 # Agent tooling (local only)
 ############################
 .claude/
+
+############################
+# Editor droppings in the overlay
+############################
+# Whatever sits in the overlay gets copied into the image and signed with
+# it. A LibreOffice lock file reached /NeoDCT that way once; the build
+# prunes them now (post-build-prune-tests.sh), and they must not be
+# committable either.
+.~lock.*#
+*.swp
+*~
+.#*
+
+############################
+# Apps still being experimented with
+############################
+# In the overlay so it can be worked on, ignored so it neither lands in a
+# commit nor blocks a release tag. The build leaves it out via
+# NEODCT_EXCLUDE_APPS=Tube. Remove this line when Tube is ready to ship.
+neodct/overlay/NeoDCT/System/apps/Tube/
