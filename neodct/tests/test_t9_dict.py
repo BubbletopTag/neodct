@@ -147,7 +147,7 @@ def test_the_shipped_dictionary_knows_the_phone_it_runs_on():
     import os
     shipped = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "overlay", "NeoDCT", "System", "ui", "resources", "t9.dict")
+        "overlay", "NeoDCT", "System", "core", "t9.dict")
     if not os.path.exists(shipped):
         pytest.skip("shipped dictionary not present")
 
@@ -161,7 +161,7 @@ def test_the_shipped_dictionary_is_sorted_by_key():
     import os
     shipped = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "overlay", "NeoDCT", "System", "ui", "resources", "t9.dict")
+        "overlay", "NeoDCT", "System", "core", "t9.dict")
     if not os.path.exists(shipped):
         pytest.skip("shipped dictionary not present")
 

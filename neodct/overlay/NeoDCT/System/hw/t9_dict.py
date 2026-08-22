@@ -19,7 +19,11 @@ each sequence, so the first suggestion is the likeliest one.
 
 import os
 
-DICT_PATH = "/NeoDCT/System/ui/resources/t9.dict"
+# In core, not ui/resources. ui/resources is what the screen draws with --
+# fonts, icons, the home layout -- and this is not drawn. Text entry is a
+# system service the whole phone types through, and the word list is the
+# larger half of it.
+DICT_PATH = "/NeoDCT/System/core/t9.dict"
 
 # Same mapping as t9_engine.LETTER_CYCLES, inverted. Kept here rather than
 # imported so a broken dictionary cannot take the multi-tap engine with it.
