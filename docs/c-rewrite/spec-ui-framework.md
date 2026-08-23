@@ -1,5 +1,11 @@
 # UI framework (widgets) — C port specification
 
+> **⚠ STALE: measured on a raqm host.** Any font advance / text-width table in this
+> document is wrong. Pillow on the phone is built `-Craqm=disable` and uses BASIC
+> layout: `getlength("Menu")@20` is **68**, not 65. Take all text metrics from
+> `neodct/tests/golden/font/fontref.json`, which was captured with BASIC forced.
+> See decision C-1 in `OPEN-QUESTIONS.md`.
+
 Source of truth: `neodct/overlay/NeoDCT/System/ui/framework.py` (1937 LOC),
 `neodct/overlay/NeoDCT/System/ui/Dialer/call_screen.py` (220 LOC),
 `neodct/overlay/NeoDCT/System/ui/Dialer/incoming_screen.py` (130 LOC),
