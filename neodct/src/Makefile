@@ -136,6 +136,10 @@ LIB     := $(LIBDIR)/$(LIBNAME)
 DESTDIR ?=
 PREFIX  ?= /NeoDCT/System
 
+# The reference set captured from the Python build. The oracle for every
+# rendering test; see neodct/tests/golden/README.md.
+GOLDEN := $(abspath ../tests/golden)
+
 # ------------------------------------------------------------------ #
 # Sources -- all globbed. See the note at the top.
 # ------------------------------------------------------------------ #
@@ -258,6 +262,15 @@ $(foreach d,$(APP_DIRS),$(eval $(call APP_RULE,$(patsubst apps/%/,%,$(d)))))
 # that writes settings.prop cannot touch a developer's real /NeoDCT -- and on
 # a machine that has no /NeoDCT at all, which is every machine this runs on,
 # the tests still exercise the real code paths.
+#
+# NEODCT_GOLDEN is the absolute path to the reference set, so a test can find
+# the oracle without knowing where it was invoked from. Prefer it over a
+# relative path, and note it is NOT under NEODCT_ROOT -- open it with plain
+# fopen, not nd_path_resolve().
+#
+# Every unit test must pass WITH NO ARGUMENTS. The acceptance gate
+# (neodct/tools/verify-c-build.sh) additionally runs some of them with an
+# explicit reference path; treat that as an override, not as the only way in.
 
 test: all $(TEST_BINS)
 	$(Q)if [ -z "$(strip $(TEST_BINS))" ]; then \
@@ -267,7 +280,8 @@ test: all $(TEST_BINS)
 	root=$$(mktemp -d); \
 	for t in $(TEST_BINS); do \
 	    printf '  %-7s %s\n' 'TEST' "$$t"; \
-	    if ! NEODCT_ROOT=$$root NEODCT_COLOR=1 LD_LIBRARY_PATH=$(LIBDIR) $$t; then fail=1; fi; \
+	    if ! NEODCT_ROOT=$$root NEODCT_GOLDEN=$(GOLDEN) NEODCT_COLOR=1 \
+	         LD_LIBRARY_PATH=$(LIBDIR) $$t; then fail=1; fi; \
 	done; \
 	rm -rf "$$root"; \
 	if [ $$fail -ne 0 ]; then echo "FAILED"; exit 1; fi; \
