@@ -62,6 +62,54 @@ TICK = 0.1
 SEED = 20240101
 
 
+class _TargetTextLayout:
+    """Force Pillow's BASIC text layout, which is what the phone has.
+
+    Pillow picks its layout engine at font-load time: RAQM (HarfBuzz +
+    FriBiDi) when the build has it, BASIC otherwise. Buildroot's
+    python-pillow passes `-Craqm=disable` unconditionally, so the phone
+    always uses BASIC -- but a pip-installed desktop Pillow bundles
+    HarfBuzz and defaults to RAQM.
+
+    The two disagree. Measured on the project's own font.ttf with a typical
+    status line, BASIC vs RAQM differ by 1340 px at 14pt, 1357 at 18pt and
+    1626 at 20pt, and `getlength("Messages")` comes out 85.0 vs 82.25. That
+    last part is the dangerous half: a different advance width moves every
+    centred, ellipsised and wrapped string on the screen, so the error is
+    not confined to the glyphs themselves.
+
+    A reference captured on a RAQM host therefore describes a phone that
+    does not exist. Pin the engine so the host renders what the target
+    renders.
+    """
+
+    def __init__(self):
+        self._saved = None
+
+    def __enter__(self):
+        from PIL import ImageFont
+
+        self._saved = ImageFont.truetype
+        real = self._saved
+        basic = ImageFont.Layout.BASIC
+
+        def truetype(font=None, size=10, index=0, encoding="",
+                     layout_engine=None):
+            # Honour an explicit choice; default to the target's engine.
+            return real(font, size, index, encoding,
+                        basic if layout_engine is None else layout_engine)
+
+        ImageFont.truetype = truetype
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        from PIL import ImageFont
+
+        if self._saved is not None:
+            ImageFont.truetype = self._saved
+        return False
+
+
 class VirtualClock:
     """A clock that only moves when a frame is drawn."""
 
@@ -179,7 +227,16 @@ class DeterministicUI:
 
         self.clock = VirtualClock()
         self._frozen = _Frozen(self.clock)
-        self._stub = cls._stub_cls(**kwargs)
+        self._layout = _TargetTextLayout()
+        # Text layout must be pinned before StubUI boots: core.main loads
+        # font.ttf during construction, and truetype() fixes the engine at
+        # load time, not at draw time.
+        self._layout.__enter__()
+        try:
+            self._stub = cls._stub_cls(**kwargs)
+        except BaseException:
+            self._layout.__exit__(*sys.exc_info())
+            raise
         self._ui = None
 
     def __enter__(self):
@@ -188,6 +245,7 @@ class DeterministicUI:
             self._ui = self._stub.__enter__()
         except BaseException:
             self._frozen.__exit__(*sys.exc_info())
+            self._layout.__exit__(*sys.exc_info())
             raise
         instrument(self._ui.fb, self.clock)
         return self._ui
@@ -197,6 +255,7 @@ class DeterministicUI:
             return self._stub.__exit__(exc_type, exc, tb)
         finally:
             self._frozen.__exit__(exc_type, exc, tb)
+            self._layout.__exit__(exc_type, exc, tb)
 
 
 # --- capture and comparison ------------------------------------------------
@@ -220,6 +279,9 @@ def write_manifest(out_dir, entries):
     with open(path, "w") as fh:
         json.dump({
             "epoch": EPOCH, "tick": TICK, "seed": SEED,
+            # Recorded so a capture made on a RAQM host cannot be mistaken
+            # for one that matches the phone. See _TargetTextLayout.
+            "text_layout": "BASIC",
             "frames": entries,
         }, fh, indent=2, sort_keys=True)
     return path
@@ -239,6 +301,13 @@ def compare(reference_dir, candidate_dir, verbose=True):
     cand_frames = {f["name"]: f for f in cand["frames"]}
 
     diffs = []
+    # A reference captured with RAQM describes a phone that does not exist.
+    # Catch it here rather than letting it look like 46 port bugs.
+    for label, m in (("reference", ref), ("candidate", cand)):
+        if m.get("text_layout", "RAQM") != "BASIC":
+            diffs.append((f"<{label} manifest>", "layout",
+                          f"text_layout={m.get('text_layout', 'unset')}, "
+                          "expected BASIC -- recapture, the phone has no raqm"))
     for name in sorted(set(ref_frames) | set(cand_frames)):
         r = ref_frames.get(name)
         c = cand_frames.get(name)
