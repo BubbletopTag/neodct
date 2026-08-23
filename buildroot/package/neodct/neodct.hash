@@ -1,0 +1,3 @@
+# No hash: NEODCT_SITE_METHOD = local builds straight from ../neodct/src, so
+# nothing is downloaded and there is nothing to verify. This file exists only
+# so that nobody adds a bogus hash for a tarball that does not exist.
