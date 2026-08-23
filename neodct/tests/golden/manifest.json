@@ -1,0 +1,399 @@
+{
+  "epoch": 1704112496.0,
+  "frames": [
+    {
+      "name": "app-calculator",
+      "sha256": "d6cd3ea301bf2ef04059aafb10761fa8ad57f655df7f2827480df326c1ef32c8",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "app-calculator-options",
+      "sha256": "6248b1ac7b6dbec8e5dba9e172c2cad79b78c9788cd0b41b22ea67d7dee64046",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "app-calllog",
+      "sha256": "07e1947102d2411b12f5ec24c5ec9a97ecbf8620b9eaa69973a996231bff49d1",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "app-clock",
+      "sha256": "e9dccc0c2f46c2ca519bf513a4f6755d507a9b2d3ed3a1e8dd03f6dee57e6d21",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "app-games",
+      "sha256": "912bea9ab1f177d54639feb3322a613fd413c02cb09f90644ef420ed5c5f9002",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "app-koki",
+      "sha256": "86e9bd2c6587cd3c8622c5b9e9b10574841a1b3a3d47b2d5db7630b1d8360df1",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "app-messages",
+      "sha256": "38c5a2eb44ecb0dccea77aa7fa2b3cbda6d0ec3ecc37b7b3597cef12cc89c52d",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "app-messages-inbox",
+      "sha256": "53c4dd0317e1648dac5011e2e72a6d93333f3c3ac601dfe8bcc1da02576c95c8",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "app-musicplayer",
+      "sha256": "d392bbfd3b713ca79b5c28f7a00c7999d5e1b621acd9b072c6a08f26b580cc60",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "app-phonebook",
+      "sha256": "d7bbbc8a76b81e7b7b3b676e8453c1b00b8d752485c381af0c0c55960744f4f2",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "app-settings",
+      "sha256": "aadc6a55a1fc0a7125d3f3b24dba7edcc7298224fd27bad5992f3ad3023703bc",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "app-settings-wallpaper",
+      "sha256": "4feb4c15667e23bdb387d6b8a9643ad768b7307504068b83c18e5359d9e4a3b4",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "app-tones",
+      "sha256": "997664e3cc8d2f062a1f71264ef883733767133d31ebb8e4aafaf245d89d8f4f",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "call-active",
+      "sha256": "a232adc49bf201c5764931b5257e3bf6ba75a79a87e507c49ff5622b3d5fe32b",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "call-incoming",
+      "sha256": "4572974973ca7e98b2b9086cba6adab02a79ca194fc6a68910f7f00332d58998",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "contacts-picker",
+      "sha256": "b0c64dcd66b599e5229f3fc94b91d90bb7a760db5831c3c1ea819e5ca3519a14",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "crash-screen",
+      "sha256": "1381e6dbd83794fc81cd04aa64c9cbf6863c4802ae00f2c8b1d092b18e33f408",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "eng-cubebench",
+      "sha256": "a4729594c9ce198dec30461b6c406dea8973b23a6c5476648e5a6216dde26ef4",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "eng-fuelgauge",
+      "sha256": "4e7286e28530b9c606b7621c4a9273157031ea8870272032cd82baa8ef96a3f2",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "eng-lcdtest",
+      "sha256": "73ffb08f6d62fb4272d9136d159dd1de2e4aa4d71999458b2dccdc6d15ddeff2",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "eng-modem",
+      "sha256": "f11f60c5b64d9994fa0cc072c5397190a1e106c28520d852d3aa90459553e5f1",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "eng-tests",
+      "sha256": "8876fdd9ccfed8cf8bceda6e050c7c6acae175a0ccfaa52a3420668651f2cd8f",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "game-memory",
+      "sha256": "24fa549f9b29e59868406695f40ed042e8de6a0def130ff2fd8307f91bb3cf01",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "game-snake",
+      "sha256": "a394f023443a2c42cc662bc0c5abbf0d9b51554563dd5ab9995dbc58877fddfc",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "home",
+      "sha256": "b5722825627dd6983628dd22ba3c4c8e01421eae389f246ee1361e8a730d758a",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "home-dialing",
+      "sha256": "40e9de0ad9b1f6045fbae61b43acfa8d063580e9583041a4acf03db84891a3cf",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "home-nowallpaper",
+      "sha256": "ee5247ce8ed7719ab926cb68394f869372f755d6c2a735da2e18de5cf67f7fb9",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "home-panel",
+      "sha256": "4724cf1681f79ebe5e2a6b005472be8a5e90a201e88cbce93a4a08cdb09662f2",
+      "size": [
+        240,
+        240
+      ]
+    },
+    {
+      "name": "home-simulation",
+      "sha256": "4ac1355c1ac4366cd64ce6066f9410ddd12b12678979c9dc33fa24d74870285b",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "home-sms-banner",
+      "sha256": "e29755986a2b61f8b0fb390813ae7b9d69052b063b7d2b3b33036bb8df739615",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "menu-browser",
+      "sha256": "f2c775880f86f78dd46556eb2dbc49f487bbeacb3cf8e4bd3edd20230b4170a7",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "menu-calculator",
+      "sha256": "b9d7526f9504d3494860df71a87c701f876ddf2cf91daa56e8f843b833c01b4b",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "menu-games",
+      "sha256": "438dffa1bfdac8b7adc8c3a7f75c96802dcbc3b520fac2508614e618bdce5675",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "menu-koki-mobile",
+      "sha256": "62b1046e2f359d47c188cde2491a585242a8f0d79ddcc72a8459e79256e8433a",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "menu-messages",
+      "sha256": "08a2923b1a1e87a2dfe36029794331efcbf22833733cc8ac31ca77834a4a95e8",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "menu-music",
+      "sha256": "083f3862b13be94da306c0a0e14a2dc8de596d04ef5756aebf07d30eb8da366a",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "menu-panel",
+      "sha256": "f5cdee4f397abbe9051a6456a5ca424ef9efddd09ba10a5292319aa5279f632d",
+      "size": [
+        240,
+        240
+      ]
+    },
+    {
+      "name": "menu-phone-book",
+      "sha256": "25b6b122a034bc9ab9c567363b0f4a25b7b7b0b5d9b4942ce1baec3203d7a9a6",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "menu-settings",
+      "sha256": "791a5057dfbf6aa410a7bde41f13324f2ad8ef72f65fe24d49bac02d6525803b",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "widget-infoscreen",
+      "sha256": "802c10769b9175f0dd0bf6c9bd4eb05f5b7d45dfffc86a30e71710c05d200fe5",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "widget-levelselector",
+      "sha256": "536e553fd1c6d12a50700988c1c30f0067619a3ea6683c544c81dc92d3487ce9",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "widget-messagedialog",
+      "sha256": "e9dccc0c2f46c2ca519bf513a4f6755d507a9b2d3ed3a1e8dd03f6dee57e6d21",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "widget-pagedlist",
+      "sha256": "38c5a2eb44ecb0dccea77aa7fa2b3cbda6d0ec3ecc37b7b3597cef12cc89c52d",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "widget-softkeybar",
+      "sha256": "0de80cef75345988d8337fadd9dbd8d5d34886ba6f060f9dedcb44873d4d0519",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "widget-textinput",
+      "sha256": "0f8eb2a65cecc4a2ff1d93b1f576f33fd4d3fa10e541708a0d4d9258baceec9e",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "widget-textinputlong",
+      "sha256": "a9e3bda3647db6416830243d8e41712c37e7beb1bc8f9284a46d66d3382ad786",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "widget-textscroller",
+      "sha256": "d92537e3abbcb2f8b799db0a8123292743ac7f8232515a4c1b081f1faece837d",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "widget-verticallist",
+      "sha256": "d7bbbc8a76b81e7b7b3b676e8453c1b00b8d752485c381af0c0c55960744f4f2",
+      "size": [
+        240,
+        175
+      ]
+    },
+    {
+      "name": "widget-verticallist-scrolled",
+      "sha256": "604abbbbd3e20c53838350a48e2def9356e9fe53c7dbbcd6e0e0c2e6d269e355",
+      "size": [
+        240,
+        175
+      ]
+    }
+  ],
+  "seed": 20240101,
+  "tick": 0.1
+}
