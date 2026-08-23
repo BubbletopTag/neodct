@@ -9,8 +9,9 @@
  *
  *   nd_draw_rect_fill(d, ND_RECT(2,3,6,8), c)
  *
- * lights x in [2,6] and y in [3,8] -- six columns and six rows. This is
- * Pillow's behaviour and every coordinate in every spec assumes it. A
+ * lights x in [2,6] and y in [3,8] -- five columns by six rows, thirty
+ * pixels. This is Pillow's behaviour and every coordinate in every spec
+ * assumes it. A
  * half-open implementation loses the right column and bottom row of every
  * box on the phone.
  *

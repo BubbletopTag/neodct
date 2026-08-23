@@ -12,7 +12,8 @@
  *      section 3.
  *   2. nd_rect is INCLUSIVE of both corners, because Pillow's
  *      ImageDraw.rectangle() is, and every coordinate in every spec was
- *      measured against Pillow. (2,3,6,8) covers six columns and six rows.
+ *      measured against Pillow. (2,3,6,8) covers x in [2,6] and y in [3,8]:
+ *      five columns by six rows, thirty pixels.
  *      A half-open rectangle here would move a pixel on almost every screen.
  */
 
