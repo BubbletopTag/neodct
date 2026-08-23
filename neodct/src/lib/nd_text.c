@@ -238,8 +238,7 @@ char *nd_text_fit(char *out, size_t out_sz, const char *text, const nd_font *f, 
     return out;
 }
 
-char *nd_text_ellipsize(char *out, size_t out_sz, const char *text, const nd_font *f,
-                        int32_t max_w)
+char *nd_text_ellipsize(char *out, size_t out_sz, const char *text, const nd_font *f, int32_t max_w)
 {
     char cand[ND_TEXT_LINE_MAX];
     const char *p;

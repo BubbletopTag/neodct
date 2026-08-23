@@ -83,8 +83,7 @@ static const fit_case FIT[] = {
     {"", 20, 100, ""},
     {"Phone Book", 24, 100, "Phon..."},
     {"Phone Book", 24, 200, "Phone Book"},
-    {"This application has not been implemented yet.", 14, 220,
-     "This application has no..."},
+    {"This application has not been implemented yet.", 14, 220, "This application has no..."},
     /* rstrip(): the prefix "A " loses its space before the dots. */
     {"A  B  C", 20, 50, "A..."},
     {"WWWWW", 20, 20, ""},
@@ -102,8 +101,7 @@ static const fit_case ELL[] = {
     {"Messages", 20, 0, "Messages"},
     {"", 20, 100, ""},
     {"Phone Book", 24, 100, "Phon..."},
-    {"This application has not been implemented yet.", 14, 220,
-     "This application has no..."},
+    {"This application has not been implemented yet.", 14, 220, "This application has no..."},
     {"WWWWW", 20, 20, "WWWWW"},
     {"A", 20, 1, "A"},
     {"Settings", 18, 200, "Settings"},
@@ -118,9 +116,15 @@ typedef struct {
 } wrap_case;
 
 static const wrap_case WRAP[] = {
-    {"This application has not been implemented yet.", 14, 220, 2,
+    {"This application has not been implemented yet.",
+     14,
+     220,
+     2,
      {"This application has not", "been implemented yet."}},
-    {"This application has not been implemented yet.", 20, 220, 4,
+    {"This application has not been implemented yet.",
+     20,
+     220,
+     4,
      {"This application", "has not been", "implemented", "yet."}},
     {"hello world", 20, 240, 1, {"hello world"}},
     {"", 20, 100, 0, {NULL}},
@@ -131,8 +135,7 @@ static const wrap_case WRAP[] = {
     {"  leading and trailing  ", 14, 220, 1, {"leading and trailing"}},
     /* Left over-wide: _wrap_lines never breaks a word. */
     {"supercalifragilisticexpialidocious", 20, 100, 1, {"supercalifragilisticexpialidocious"}},
-    {"short WWWWWWWWWWWWWWWWWWWW tail", 20, 100, 3,
-     {"short", "WWWWWWWWWWWWWWWWWWWW", "tail"}},
+    {"short WWWWWWWWWWWWWWWWWWWW tail", 20, 100, 3, {"short", "WWWWWWWWWWWWWWWWWWWW", "tail"}},
     {"one   two", 20, 240, 1, {"one two"}},
     {"\t", 20, 100, 0, {NULL}},
     {"word", 20, 1, 1, {"word"}},
@@ -140,9 +143,15 @@ static const wrap_case WRAP[] = {
 };
 
 static const wrap_case WRAPB[] = {
-    {"This application has not been implemented yet.", 14, 220, 2,
+    {"This application has not been implemented yet.",
+     14,
+     220,
+     2,
      {"This application has not", "been implemented yet."}},
-    {"This application has not been implemented yet.", 20, 220, 4,
+    {"This application has not been implemented yet.",
+     20,
+     220,
+     4,
      {"This application", "has not been", "implemented", "yet."}},
     {"hello world", 20, 240, 1, {"hello world"}},
     {"", 20, 100, 1, {""}},
@@ -152,9 +161,15 @@ static const wrap_case WRAPB[] = {
     {"a\r\nb", 20, 100, 2, {"a", "b"}},
     {"  leading and trailing  ", 14, 220, 1, {"leading and trailing"}},
     /* The trailing "" is the appended empty `cur` after the hard break. */
-    {"supercalifragilisticexpialidocious", 20, 100, 6,
+    {"supercalifragilisticexpialidocious",
+     20,
+     100,
+     6,
      {"superc", "alifragi", "listicex", "pialido", "cious", ""}},
-    {"short WWWWWWWWWWWWWWWWWWWW tail", 20, 100, 7,
+    {"short WWWWWWWWWWWWWWWWWWWW tail",
+     20,
+     100,
+     7,
      {"short", "WWWW", "WWWW", "WWWW", "WWWW", "WWWW", "tail"}},
     {"one   two", 20, 240, 1, {"one two"}},
     {"\t", 20, 100, 1, {"\t"}},
@@ -163,9 +178,15 @@ static const wrap_case WRAPB[] = {
 };
 
 static const wrap_case WRAPBP[] = {
-    {"This application has not been implemented yet.", 14, 220, 2,
+    {"This application has not been implemented yet.",
+     14,
+     220,
+     2,
      {"This application has not", "been implemented yet."}},
-    {"This application has not been implemented yet.", 20, 220, 4,
+    {"This application has not been implemented yet.",
+     20,
+     220,
+     4,
      {"This application", "has not been", "implemented", "yet."}},
     {"hello world", 20, 240, 1, {"hello world"}},
     {"", 20, 100, 0, {NULL}},
@@ -174,9 +195,15 @@ static const wrap_case WRAPBP[] = {
     {"a\n\n", 20, 100, 1, {"a"}},
     {"a\r\nb", 20, 100, 2, {"a", "b"}},
     {"  leading and trailing  ", 14, 220, 1, {"leading and trailing"}},
-    {"supercalifragilisticexpialidocious", 20, 100, 5,
+    {"supercalifragilisticexpialidocious",
+     20,
+     100,
+     5,
      {"superc", "alifragi", "listicex", "pialido", "cious"}},
-    {"short WWWWWWWWWWWWWWWWWWWW tail", 20, 100, 7,
+    {"short WWWWWWWWWWWWWWWWWWWW tail",
+     20,
+     100,
+     7,
      {"short", "WWWW", "WWWW", "WWWW", "WWWW", "WWWW", "tail"}},
     {"one   two", 20, 240, 1, {"one two"}},
     {"\t", 20, 100, 1, {"\t"}},
@@ -244,8 +271,8 @@ int main(int argc, char **argv)
         cut = strrchr(base, '/');
         if (cut)
             *cut = '\0';
-        snprintf(fontpath, sizeof fontpath,
-                 "%s/overlay/NeoDCT/System/ui/resources/fonts/font.ttf", base);
+        snprintf(fontpath, sizeof fontpath, "%s/overlay/NeoDCT/System/ui/resources/fonts/font.ttf",
+                 base);
     }
 
     for (i = 0; i < 4; i++) {
@@ -314,8 +341,7 @@ int main(int argc, char **argv)
         eq_ptr("fit_font picks 18", nd_fit_font("Messages", 110, ladder, n), fonts[1]);
         eq_ptr("fit_font picks 14", nd_fit_font("Messages", 90, ladder, n), fonts[0]);
         /* Nothing fits -> the LAST rung, over-wide. */
-        eq_ptr("fit_font falls back to the last", nd_fit_font("Messages", 10, ladder, n),
-               fonts[0]);
+        eq_ptr("fit_font falls back to the last", nd_fit_font("Messages", 10, ladder, n), fonts[0]);
     }
 
     /* ---- nd_lines bookkeeping ---- */

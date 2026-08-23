@@ -262,10 +262,7 @@ static void test_inclusive_rectangle(void)
     nd_draw_bind(&d, img);
 
     /* THE convention. ND_RECT(2,3,6,8) lights x in [2,6] and y in [3,8]:
-     * FIVE columns by SIX rows, thirty pixels. (nd_types.h and nd_draw.h both
-     * say "six columns and six rows" in prose while stating the correct
-     * ranges; the ranges are what the code implements and what Pillow does.
-     * Recorded rather than fixed, because the headers are frozen.)
+     * FIVE columns by SIX rows, thirty pixels, as nd_types.h says.
      * Half-open code loses column 6 and row 8 entirely. */
     nd_draw_rect_fill(&d, ND_RECT(2, 3, 6, 8), ND_WHITE);
     CHECK(count_white(img) == 30, "inclusive rect covers %d px, want 5*6=30", count_white(img));

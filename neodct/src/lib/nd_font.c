@@ -270,8 +270,7 @@ static bool slot_ink_box(const FT_Bitmap *bm, int32_t *bx0, int32_t *by0, int32_
 
 /* Fill everything in g except coverage, and report where in the slot's bitmap
  * the ink starts so the caller can copy it. */
-static void slot_measure(const nd_font *f, uint32_t cp, nd_glyph *g, int32_t *src_x,
-                         int32_t *src_y)
+static void slot_measure(const nd_font *f, uint32_t cp, nd_glyph *g, int32_t *src_x, int32_t *src_y)
 {
     const FT_GlyphSlot slot = f->face->glyph;
     int32_t bx0 = 0;
@@ -359,8 +358,7 @@ static nd_err ascii_fill(nd_font *f)
             g->coverage = NULL;
             continue;
         }
-        slot_copy_ink(&f->face->glyph->bitmap, sx, sy, g->ink_w, g->ink_h,
-                      f->ascii_arena + used);
+        slot_copy_ink(&f->face->glyph->bitmap, sx, sy, g->ink_w, g->ink_h, f->ascii_arena + used);
         g->coverage = f->ascii_arena + used;
         used += bytes;
     }

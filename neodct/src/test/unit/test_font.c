@@ -209,11 +209,26 @@ static bool jstr(jcur *c, char *out, size_t sz)
         }
         c->p++;
         switch (*c->p) {
-        case 'n': cp = '\n'; c->p++; break;
-        case 't': cp = '\t'; c->p++; break;
-        case 'r': cp = '\r'; c->p++; break;
-        case 'b': cp = '\b'; c->p++; break;
-        case 'f': cp = '\f'; c->p++; break;
+        case 'n':
+            cp = '\n';
+            c->p++;
+            break;
+        case 't':
+            cp = '\t';
+            c->p++;
+            break;
+        case 'r':
+            cp = '\r';
+            c->p++;
+            break;
+        case 'b':
+            cp = '\b';
+            c->p++;
+            break;
+        case 'f':
+            cp = '\f';
+            c->p++;
+            break;
         case 'u': {
             unsigned v = 0;
             int i;
@@ -235,7 +250,9 @@ static bool jstr(jcur *c, char *out, size_t sz)
             cp = v;
             break;
         }
-        default: cp = (uint32_t)(unsigned char)*c->p++; break;
+        default:
+            cp = (uint32_t)(unsigned char)*c->p++;
+            break;
         }
         if (cp < 0x80u) {
             if (n + 1 >= sz)
@@ -302,10 +319,17 @@ static bool jskip(jcur *c)
         } while (depth > 0);
         return true;
     }
-    case '"': return jstr(c, scratch, sizeof scratch);
-    case 't': c->p += 4; return true;
-    case 'f': c->p += 5; return true;
-    case 'n': c->p += 4; return true;
+    case '"':
+        return jstr(c, scratch, sizeof scratch);
+    case 't':
+        c->p += 4;
+        return true;
+    case 'f':
+        c->p += 5;
+        return true;
+    case 'n':
+        c->p += 4;
+        return true;
     default: {
         double d;
 
@@ -535,8 +559,7 @@ static void check_glyphs(nd_font *f, int32_t px, jcur arr)
 
             for (i = 0; i < g->ink_w * g->ink_h; i++)
                 got_sum += g->coverage[i];
-            snprintf(what, sizeof what, "%dpx U+%04X coverage_sum", (int)px,
-                     (unsigned)codepoint);
+            snprintf(what, sizeof what, "%dpx U+%04X coverage_sum", (int)px, (unsigned)codepoint);
             eq_i32(what, got_sum, sum);
 
             snprintf(what, sizeof what, "%dpx U+%04X coverage sha256", (int)px,
@@ -555,8 +578,7 @@ static void check_glyphs(nd_font *f, int32_t px, jcur arr)
 
         /* nd_font_advance must agree with the cached glyph, and the single
          * character's bbox must be the recorded one. */
-        snprintf(what, sizeof what, "%dpx U+%04X nd_font_advance", (int)px,
-                 (unsigned)codepoint);
+        snprintf(what, sizeof what, "%dpx U+%04X nd_font_advance", (int)px, (unsigned)codepoint);
         eq_i32(what, nd_font_advance(f, (uint32_t)codepoint), advance);
 
         if (!jskip(&arr))
@@ -766,8 +788,8 @@ int main(int argc, char **argv)
         cut = strrchr(base, '/');
         if (cut)
             *cut = '\0'; /* .../neodct        */
-        snprintf(fontpath, sizeof fontpath,
-                 "%s/overlay/NeoDCT/System/ui/resources/fonts/font.ttf", base);
+        snprintf(fontpath, sizeof fontpath, "%s/overlay/NeoDCT/System/ui/resources/fonts/font.ttf",
+                 base);
     }
 
     json = slurp(refpath, &json_len);
