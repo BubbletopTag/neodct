@@ -23,9 +23,11 @@
 #include <string.h>
 
 #include "nd_draw.h"
+#include "nd_font.h"
 #include "nd_image.h"
 
 #include "draw_ref.inc"
+#include "text_ref.inc"
 
 static int failures;
 
@@ -41,10 +43,10 @@ static void fail(const char *fmt, ...)
     failures++;
 }
 
-#define CHECK(cond, ...)          \
-    do {                          \
-        if (!(cond))              \
-            fail(__VA_ARGS__);    \
+#define CHECK(cond, ...)       \
+    do {                       \
+        if (!(cond))           \
+            fail(__VA_ARGS__); \
     } while (0)
 
 /* ------------------------------------------------------------------ *
@@ -53,73 +55,217 @@ static void fail(const char *fmt, ...)
 
 typedef void (*draw_case)(nd_draw *d);
 
-static void c_rect_fill_2_3_6_8(nd_draw *d) { nd_draw_rect_fill(d, ND_RECT(2, 3, 6, 8), ND_WHITE); }
-static void c_rect_fill_0_0_9_9(nd_draw *d) { nd_draw_rect_fill(d, ND_RECT(0, 0, 9, 9), ND_WHITE); }
-static void c_rect_fill_clip_topleft(nd_draw *d) { nd_draw_rect_fill(d, ND_RECT(-5, -5, 4, 4), ND_WHITE); }
-static void c_rect_fill_clip_botright(nd_draw *d) { nd_draw_rect_fill(d, ND_RECT(20, 20, 40, 40), ND_WHITE); }
-static void c_rect_fill_single_px(nd_draw *d) { nd_draw_rect_fill(d, ND_RECT(5, 5, 5, 5), ND_WHITE); }
-static void c_rect_out_w1(nd_draw *d) { nd_draw_rect_outline(d, ND_RECT(2, 2, 18, 15), ND_WHITE, 1); }
-static void c_rect_out_w3(nd_draw *d) { nd_draw_rect_outline(d, ND_RECT(2, 2, 18, 15), ND_WHITE, 3); }
-static void c_rect_out_full(nd_draw *d) { nd_draw_rect_outline(d, ND_RECT(0, 0, 23, 23), ND_WHITE, 1); }
-static void c_rect_out_2x2(nd_draw *d) { nd_draw_rect_outline(d, ND_RECT(4, 4, 5, 5), ND_WHITE, 1); }
-static void c_rect_out_1x1(nd_draw *d) { nd_draw_rect_outline(d, ND_RECT(4, 4, 4, 4), ND_WHITE, 1); }
-static void c_rect_out_w2(nd_draw *d) { nd_draw_rect_outline(d, ND_RECT(3, 3, 12, 12), ND_WHITE, 2); }
+static void c_rect_fill_2_3_6_8(nd_draw *d)
+{
+    nd_draw_rect_fill(d, ND_RECT(2, 3, 6, 8), ND_WHITE);
+}
+static void c_rect_fill_0_0_9_9(nd_draw *d)
+{
+    nd_draw_rect_fill(d, ND_RECT(0, 0, 9, 9), ND_WHITE);
+}
+static void c_rect_fill_clip_topleft(nd_draw *d)
+{
+    nd_draw_rect_fill(d, ND_RECT(-5, -5, 4, 4), ND_WHITE);
+}
+static void c_rect_fill_clip_botright(nd_draw *d)
+{
+    nd_draw_rect_fill(d, ND_RECT(20, 20, 40, 40), ND_WHITE);
+}
+static void c_rect_fill_single_px(nd_draw *d)
+{
+    nd_draw_rect_fill(d, ND_RECT(5, 5, 5, 5), ND_WHITE);
+}
+static void c_rect_out_w1(nd_draw *d)
+{
+    nd_draw_rect_outline(d, ND_RECT(2, 2, 18, 15), ND_WHITE, 1);
+}
+static void c_rect_out_w3(nd_draw *d)
+{
+    nd_draw_rect_outline(d, ND_RECT(2, 2, 18, 15), ND_WHITE, 3);
+}
+static void c_rect_out_full(nd_draw *d)
+{
+    nd_draw_rect_outline(d, ND_RECT(0, 0, 23, 23), ND_WHITE, 1);
+}
+static void c_rect_out_2x2(nd_draw *d)
+{
+    nd_draw_rect_outline(d, ND_RECT(4, 4, 5, 5), ND_WHITE, 1);
+}
+static void c_rect_out_1x1(nd_draw *d)
+{
+    nd_draw_rect_outline(d, ND_RECT(4, 4, 4, 4), ND_WHITE, 1);
+}
+static void c_rect_out_w2(nd_draw *d)
+{
+    nd_draw_rect_outline(d, ND_RECT(3, 3, 12, 12), ND_WHITE, 2);
+}
 
-static void c_line_h_w1(nd_draw *d) { nd_draw_line(d, 2, 2, 20, 2, ND_WHITE, 1); }
-static void c_line_v_w1(nd_draw *d) { nd_draw_line(d, 2, 2, 2, 20, ND_WHITE, 1); }
-static void c_line_v_w2(nd_draw *d) { nd_draw_line(d, 10, 2, 10, 20, ND_WHITE, 2); }
-static void c_line_h_w2(nd_draw *d) { nd_draw_line(d, 2, 10, 20, 10, ND_WHITE, 2); }
-static void c_line_diag_w1(nd_draw *d) { nd_draw_line(d, 2, 2, 20, 20, ND_WHITE, 1); }
-static void c_line_antidiag_w1(nd_draw *d) { nd_draw_line(d, 2, 20, 20, 2, ND_WHITE, 1); }
-static void c_line_shallow_w1(nd_draw *d) { nd_draw_line(d, 3, 3, 20, 10, ND_WHITE, 1); }
-static void c_line_shallow_rev_w1(nd_draw *d) { nd_draw_line(d, 20, 10, 3, 3, ND_WHITE, 1); }
-static void c_line_diag_w2(nd_draw *d) { nd_draw_line(d, 2, 2, 20, 20, ND_WHITE, 2); }
-static void c_line_antidiag_w2(nd_draw *d) { nd_draw_line(d, 2, 20, 20, 2, ND_WHITE, 2); }
-static void c_line_degenerate_w1(nd_draw *d) { nd_draw_line(d, 5, 5, 5, 5, ND_WHITE, 1); }
-static void c_line_degenerate_w3(nd_draw *d) { nd_draw_line(d, 5, 5, 5, 5, ND_WHITE, 3); }
-static void c_line_h_w3(nd_draw *d) { nd_draw_line(d, 1, 12, 22, 12, ND_WHITE, 3); }
-static void c_line_v_w3(nd_draw *d) { nd_draw_line(d, 12, 1, 12, 22, ND_WHITE, 3); }
-static void c_line_full_w1(nd_draw *d) { nd_draw_line(d, 0, 10, 23, 10, ND_WHITE, 1); }
-static void c_line_musicflag_w2(nd_draw *d) { nd_draw_line(d, 4, 4, 18, 7, ND_WHITE, 2); }
-static void c_line_v_w4(nd_draw *d) { nd_draw_line(d, 10, 2, 10, 20, ND_WHITE, 4); }
-static void c_line_h_rev_w2(nd_draw *d) { nd_draw_line(d, 20, 10, 2, 10, ND_WHITE, 2); }
+static void c_line_h_w1(nd_draw *d)
+{
+    nd_draw_line(d, 2, 2, 20, 2, ND_WHITE, 1);
+}
+static void c_line_v_w1(nd_draw *d)
+{
+    nd_draw_line(d, 2, 2, 2, 20, ND_WHITE, 1);
+}
+static void c_line_v_w2(nd_draw *d)
+{
+    nd_draw_line(d, 10, 2, 10, 20, ND_WHITE, 2);
+}
+static void c_line_h_w2(nd_draw *d)
+{
+    nd_draw_line(d, 2, 10, 20, 10, ND_WHITE, 2);
+}
+static void c_line_diag_w1(nd_draw *d)
+{
+    nd_draw_line(d, 2, 2, 20, 20, ND_WHITE, 1);
+}
+static void c_line_antidiag_w1(nd_draw *d)
+{
+    nd_draw_line(d, 2, 20, 20, 2, ND_WHITE, 1);
+}
+static void c_line_shallow_w1(nd_draw *d)
+{
+    nd_draw_line(d, 3, 3, 20, 10, ND_WHITE, 1);
+}
+static void c_line_shallow_rev_w1(nd_draw *d)
+{
+    nd_draw_line(d, 20, 10, 3, 3, ND_WHITE, 1);
+}
+static void c_line_diag_w2(nd_draw *d)
+{
+    nd_draw_line(d, 2, 2, 20, 20, ND_WHITE, 2);
+}
+static void c_line_antidiag_w2(nd_draw *d)
+{
+    nd_draw_line(d, 2, 20, 20, 2, ND_WHITE, 2);
+}
+static void c_line_degenerate_w1(nd_draw *d)
+{
+    nd_draw_line(d, 5, 5, 5, 5, ND_WHITE, 1);
+}
+static void c_line_degenerate_w3(nd_draw *d)
+{
+    nd_draw_line(d, 5, 5, 5, 5, ND_WHITE, 3);
+}
+static void c_line_h_w3(nd_draw *d)
+{
+    nd_draw_line(d, 1, 12, 22, 12, ND_WHITE, 3);
+}
+static void c_line_v_w3(nd_draw *d)
+{
+    nd_draw_line(d, 12, 1, 12, 22, ND_WHITE, 3);
+}
+static void c_line_full_w1(nd_draw *d)
+{
+    nd_draw_line(d, 0, 10, 23, 10, ND_WHITE, 1);
+}
+static void c_line_musicflag_w2(nd_draw *d)
+{
+    nd_draw_line(d, 4, 4, 18, 7, ND_WHITE, 2);
+}
+static void c_line_v_w4(nd_draw *d)
+{
+    nd_draw_line(d, 10, 2, 10, 20, ND_WHITE, 4);
+}
+static void c_line_h_rev_w2(nd_draw *d)
+{
+    nd_draw_line(d, 20, 10, 2, 10, ND_WHITE, 2);
+}
 
-#define POLY(d, ...)                                          \
-    do {                                                      \
-        static const nd_point pts[] = {__VA_ARGS__};          \
+#define POLY(d, ...)                                            \
+    do {                                                        \
+        static const nd_point pts[] = {__VA_ARGS__};            \
         nd_draw_polygon((d), pts, ND_ARRAY_LEN(pts), ND_WHITE); \
     } while (0)
 
-static void c_poly_diamond(nd_draw *d) { POLY(d, {11, 2}, {21, 11}, {11, 21}, {2, 11}); }
-static void c_poly_tri_up(nd_draw *d) { POLY(d, {11, 2}, {21, 21}, {2, 21}); }
-static void c_poly_tri_down(nd_draw *d) { POLY(d, {2, 2}, {21, 2}, {11, 21}); }
-static void c_poly_bowtie(nd_draw *d) { POLY(d, {2, 2}, {21, 2}, {2, 21}, {21, 21}); }
-static void c_poly_arrow(nd_draw *d) { POLY(d, {21, 11}, {11, 2}, {11, 21}); }
-static void c_poly_house(nd_draw *d) { POLY(d, {2, 8}, {21, 8}, {11, 21}); }
-static void c_poly_square(nd_draw *d) { POLY(d, {4, 4}, {19, 4}, {19, 19}, {4, 19}); }
-static void c_poly_line(nd_draw *d) { POLY(d, {2, 2}, {21, 2}); }
+static void c_poly_diamond(nd_draw *d)
+{
+    POLY(d, {11, 2}, {21, 11}, {11, 21}, {2, 11});
+}
+static void c_poly_tri_up(nd_draw *d)
+{
+    POLY(d, {11, 2}, {21, 21}, {2, 21});
+}
+static void c_poly_tri_down(nd_draw *d)
+{
+    POLY(d, {2, 2}, {21, 2}, {11, 21});
+}
+static void c_poly_bowtie(nd_draw *d)
+{
+    POLY(d, {2, 2}, {21, 2}, {2, 21}, {21, 21});
+}
+static void c_poly_arrow(nd_draw *d)
+{
+    POLY(d, {21, 11}, {11, 2}, {11, 21});
+}
+static void c_poly_house(nd_draw *d)
+{
+    POLY(d, {2, 8}, {21, 8}, {11, 21});
+}
+static void c_poly_square(nd_draw *d)
+{
+    POLY(d, {4, 4}, {19, 4}, {19, 19}, {4, 19});
+}
+static void c_poly_line(nd_draw *d)
+{
+    POLY(d, {2, 2}, {21, 2});
+}
 
 static void c_poly_star8(nd_draw *d)
 {
     /* Memory's eight-point star, at the coordinates memory.py computes. */
     const int32_t x0 = 2, y0 = 2, x1 = 21, y1 = 21;
     const int32_t cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, q = (x1 - x0) / 5;
-    const nd_point pts[] = {{cx, y0},      {cx + q, cy - q}, {x1, cy},      {cx + q, cy + q},
-                            {cx, y1},      {cx - q, cy + q}, {x0, cy},      {cx - q, cy - q}};
+    const nd_point pts[] = {{cx, y0}, {cx + q, cy - q}, {x1, cy}, {cx + q, cy + q},
+                            {cx, y1}, {cx - q, cy + q}, {x0, cy}, {cx - q, cy - q}};
     nd_draw_polygon(d, pts, ND_ARRAY_LEN(pts), ND_WHITE);
 }
 
-static void c_ell_fill_even(nd_draw *d) { nd_draw_ellipse_fill(d, ND_RECT(2, 2, 21, 21), ND_WHITE); }
-static void c_ell_fill_odd(nd_draw *d) { nd_draw_ellipse_fill(d, ND_RECT(2, 2, 20, 20), ND_WHITE); }
-static void c_ell_fill_wide(nd_draw *d) { nd_draw_ellipse_fill(d, ND_RECT(4, 8, 19, 15), ND_WHITE); }
-static void c_ell_out_w1(nd_draw *d) { nd_draw_ellipse_outline(d, ND_RECT(2, 2, 21, 21), ND_WHITE, 1); }
-static void c_ell_out_small_w1(nd_draw *d) { nd_draw_ellipse_outline(d, ND_RECT(5, 5, 18, 18), ND_WHITE, 1); }
-static void c_ell_out_small_w3(nd_draw *d) { nd_draw_ellipse_outline(d, ND_RECT(5, 5, 18, 18), ND_WHITE, 3); }
-static void c_ell_out_w2(nd_draw *d) { nd_draw_ellipse_outline(d, ND_RECT(2, 2, 21, 21), ND_WHITE, 2); }
-static void c_ell_fill_2x2(nd_draw *d) { nd_draw_ellipse_fill(d, ND_RECT(3, 3, 4, 4), ND_WHITE); }
-static void c_ell_fill_1x1(nd_draw *d) { nd_draw_ellipse_fill(d, ND_RECT(10, 10, 10, 10), ND_WHITE); }
-static void c_ell_fill_musicplayer(nd_draw *d) { nd_draw_ellipse_fill(d, ND_RECT(4, 10, 13, 19), ND_WHITE); }
-static void c_ell_fill_tall(nd_draw *d) { nd_draw_ellipse_fill(d, ND_RECT(9, 2, 14, 21), ND_WHITE); }
+static void c_ell_fill_even(nd_draw *d)
+{
+    nd_draw_ellipse_fill(d, ND_RECT(2, 2, 21, 21), ND_WHITE);
+}
+static void c_ell_fill_odd(nd_draw *d)
+{
+    nd_draw_ellipse_fill(d, ND_RECT(2, 2, 20, 20), ND_WHITE);
+}
+static void c_ell_fill_wide(nd_draw *d)
+{
+    nd_draw_ellipse_fill(d, ND_RECT(4, 8, 19, 15), ND_WHITE);
+}
+static void c_ell_out_w1(nd_draw *d)
+{
+    nd_draw_ellipse_outline(d, ND_RECT(2, 2, 21, 21), ND_WHITE, 1);
+}
+static void c_ell_out_small_w1(nd_draw *d)
+{
+    nd_draw_ellipse_outline(d, ND_RECT(5, 5, 18, 18), ND_WHITE, 1);
+}
+static void c_ell_out_small_w3(nd_draw *d)
+{
+    nd_draw_ellipse_outline(d, ND_RECT(5, 5, 18, 18), ND_WHITE, 3);
+}
+static void c_ell_out_w2(nd_draw *d)
+{
+    nd_draw_ellipse_outline(d, ND_RECT(2, 2, 21, 21), ND_WHITE, 2);
+}
+static void c_ell_fill_2x2(nd_draw *d)
+{
+    nd_draw_ellipse_fill(d, ND_RECT(3, 3, 4, 4), ND_WHITE);
+}
+static void c_ell_fill_1x1(nd_draw *d)
+{
+    nd_draw_ellipse_fill(d, ND_RECT(10, 10, 10, 10), ND_WHITE);
+}
+static void c_ell_fill_musicplayer(nd_draw *d)
+{
+    nd_draw_ellipse_fill(d, ND_RECT(4, 10, 13, 19), ND_WHITE);
+}
+static void c_ell_fill_tall(nd_draw *d)
+{
+    nd_draw_ellipse_fill(d, ND_RECT(9, 2, 14, 21), ND_WHITE);
+}
 
 static void c_points_diagonal(nd_draw *d)
 {
@@ -153,19 +299,58 @@ static void c_memory_h_glyph(nd_draw *d)
 /* Order must match draw_ref.inc exactly; the loop asserts the names line up
  * so an insertion in one list and not the other is caught immediately. */
 static const draw_case ND_DRAW_CASE[] = {
-    c_rect_fill_2_3_6_8, c_rect_fill_0_0_9_9,   c_rect_fill_clip_topleft, c_rect_fill_clip_botright,
-    c_rect_fill_single_px, c_rect_out_w1,       c_rect_out_w3,            c_rect_out_full,
-    c_rect_out_2x2,      c_rect_out_1x1,        c_rect_out_w2,            c_line_h_w1,
-    c_line_v_w1,         c_line_v_w2,           c_line_h_w2,              c_line_diag_w1,
-    c_line_antidiag_w1,  c_line_shallow_w1,     c_line_shallow_rev_w1,    c_line_diag_w2,
-    c_line_antidiag_w2,  c_line_degenerate_w1,  c_line_degenerate_w3,     c_line_h_w3,
-    c_line_v_w3,         c_line_full_w1,        c_line_musicflag_w2,      c_line_v_w4,
-    c_line_h_rev_w2,     c_poly_diamond,        c_poly_tri_up,            c_poly_tri_down,
-    c_poly_bowtie,       c_poly_arrow,          c_poly_house,             c_poly_square,
-    c_poly_line,         c_poly_star8,          c_ell_fill_even,          c_ell_fill_odd,
-    c_ell_fill_wide,     c_ell_out_w1,          c_ell_out_small_w1,       c_ell_out_small_w3,
-    c_ell_out_w2,        c_ell_fill_2x2,        c_ell_fill_1x1,           c_ell_fill_musicplayer,
-    c_ell_fill_tall,     c_points_diagonal,     c_rect_fill_then_outline, c_memory_h_glyph,
+    c_rect_fill_2_3_6_8,
+    c_rect_fill_0_0_9_9,
+    c_rect_fill_clip_topleft,
+    c_rect_fill_clip_botright,
+    c_rect_fill_single_px,
+    c_rect_out_w1,
+    c_rect_out_w3,
+    c_rect_out_full,
+    c_rect_out_2x2,
+    c_rect_out_1x1,
+    c_rect_out_w2,
+    c_line_h_w1,
+    c_line_v_w1,
+    c_line_v_w2,
+    c_line_h_w2,
+    c_line_diag_w1,
+    c_line_antidiag_w1,
+    c_line_shallow_w1,
+    c_line_shallow_rev_w1,
+    c_line_diag_w2,
+    c_line_antidiag_w2,
+    c_line_degenerate_w1,
+    c_line_degenerate_w3,
+    c_line_h_w3,
+    c_line_v_w3,
+    c_line_full_w1,
+    c_line_musicflag_w2,
+    c_line_v_w4,
+    c_line_h_rev_w2,
+    c_poly_diamond,
+    c_poly_tri_up,
+    c_poly_tri_down,
+    c_poly_bowtie,
+    c_poly_arrow,
+    c_poly_house,
+    c_poly_square,
+    c_poly_line,
+    c_poly_star8,
+    c_ell_fill_even,
+    c_ell_fill_odd,
+    c_ell_fill_wide,
+    c_ell_out_w1,
+    c_ell_out_small_w1,
+    c_ell_out_small_w3,
+    c_ell_out_w2,
+    c_ell_fill_2x2,
+    c_ell_fill_1x1,
+    c_ell_fill_musicplayer,
+    c_ell_fill_tall,
+    c_points_diagonal,
+    c_rect_fill_then_outline,
+    c_memory_h_glyph,
 };
 
 static void dump_side_by_side(const nd_image *got, const nd_draw_ref *ref)
@@ -180,8 +365,7 @@ static void dump_side_by_side(const nd_image *got, const nd_draw_ref *ref)
             line[x] = (c.r == 255u) ? '#' : (c.r == 0u ? '.' : '?');
         }
         line[ND_REF_W] = '\0';
-        printf("  %s   %s%s\n", line, ref->rows[y],
-               strcmp(line, ref->rows[y]) == 0 ? "" : "   <<");
+        printf("  %s   %s%s\n", line, ref->rows[y], strcmp(line, ref->rows[y]) == 0 ? "" : "   <<");
     }
 }
 
@@ -220,8 +404,8 @@ static void run_corpus(void)
                 /* Shapes are hard-edged: any intermediate value at all means
                  * something is antialiasing that should not be. */
                 if (c.r != expect || c.g != expect || c.b != expect) {
-                    fail("%s: first difference at (%d,%d): got %u want %u",
-                         ND_DRAW_REF[i].name, (int)x, (int)y, c.r, expect);
+                    fail("%s: first difference at (%d,%d): got %u want %u", ND_DRAW_REF[i].name,
+                         (int)x, (int)y, c.r, expect);
                     dump_side_by_side(img, &ND_DRAW_REF[i]);
                     ok = false;
                     break;
@@ -429,6 +613,169 @@ static void test_draws_into_l8(void)
     nd_image_free(img);
 }
 
+/* ------------------------------------------------------------------ *
+ * Text
+ * ------------------------------------------------------------------ *
+ *
+ * nd_draw_text() is the one primitive whose output is not hard-edged, so it
+ * is checked as a hash of the whole canvas rather than as ASCII art: the
+ * greys FreeType produces are the point, and nd_blend8() has to put them in
+ * the right place with the right value. Between them the cases below cover
+ * the "la" anchor, the pen advance, a missing glyph that still costs its
+ * advance (U+2026), descenders, and every combination of light ink on dark
+ * and dark ink on light -- the two directions the blend is NOT symmetric in.
+ */
+
+#define FONT_REL "overlay/NeoDCT/System/ui/resources/fonts/font.ttf"
+
+static bool try_font(char *out, size_t sz, const char *cand)
+{
+    FILE *f = fopen(cand, "rb");
+    if (!f)
+        return false;
+    fclose(f);
+    snprintf(out, sz, "%.900s", cand);
+    return true;
+}
+
+/* The same search test_font.c performs, and for the same reason: `make test`
+ * supplies NEODCT_GOLDEN and no arguments, the acceptance gate supplies
+ * neither. font.ttf is never under NEODCT_ROOT, so it is opened with plain
+ * fopen and not through nd_path_resolve(). */
+static bool resolve_font(char *out, size_t sz)
+{
+    const char *env = getenv("NEODCT_FONT");
+    const char *golden = getenv("NEODCT_GOLDEN");
+    char base[512];
+    char cand[1024];
+    char *cut;
+
+    if (env && *env) {
+        snprintf(out, sz, "%.900s", env);
+        return true;
+    }
+    if (golden && *golden) {
+        snprintf(base, sizeof base, "%.480s", golden);
+        cut = strrchr(base, '/'); /* .../neodct/tests */
+        if (cut)
+            *cut = '\0';
+        cut = strrchr(base, '/'); /* .../neodct       */
+        if (cut)
+            *cut = '\0';
+        snprintf(cand, sizeof cand, "%.400s/" FONT_REL, base);
+        if (try_font(out, sz, cand))
+            return true;
+    }
+    if (try_font(out, sz, "../" FONT_REL))
+        return true;
+    if (try_font(out, sz, "neodct/" FONT_REL))
+        return true;
+    return try_font(out, sz, "/NeoDCT/System/ui/resources/fonts/font.ttf");
+}
+
+static uint64_t hash_image(const nd_image *img)
+{
+    size_t n = (size_t)img->w * (size_t)img->h * img->bpp;
+    uint8_t *buf = malloc(n);
+    uint64_t h = 0xCBF29CE484222325ULL;
+    size_t i;
+
+    if (!buf)
+        return 0u;
+    if (nd_image_tobytes(img, buf, n) != ND_OK) {
+        free(buf);
+        return 0u;
+    }
+    for (i = 0; i < n; i++) {
+        h ^= buf[i];
+        h *= 0x100000001B3ULL;
+    }
+    free(buf);
+    return h;
+}
+
+static void run_text_corpus(void)
+{
+    static const int32_t SIZES[4] = {14, 18, 20, 24};
+    char path[1024];
+    nd_font *fonts[4] = {NULL, NULL, NULL, NULL};
+    size_t i;
+    int32_t k;
+
+    if (!resolve_font(path, sizeof path)) {
+        fail("cannot find font.ttf; set NEODCT_FONT or NEODCT_GOLDEN");
+        return;
+    }
+    for (k = 0; k < 4; k++) {
+        fonts[k] = nd_font_load(path, SIZES[k]);
+        if (!fonts[k]) {
+            fail("nd_font_load(%s, %d) failed", path, (int)SIZES[k]);
+            goto done;
+        }
+    }
+
+    for (i = 0; i < ND_ARRAY_LEN(ND_TEXT_REF); i++) {
+        const nd_text_ref *r = &ND_TEXT_REF[i];
+        nd_image *img;
+        nd_draw d;
+        nd_font *f = NULL;
+
+        for (k = 0; k < 4; k++)
+            if (SIZES[k] == r->px)
+                f = fonts[k];
+        if (!f) {
+            fail("no font loaded at %d px", (int)r->px);
+            continue;
+        }
+
+        img = nd_image_new_filled(ND_TEXT_REF_W, ND_TEXT_REF_H, ND_PIXFMT_RGB888, r->bg);
+        if (!img) {
+            fail("%d/%s: out of memory", (int)r->px, r->tag);
+            continue;
+        }
+        nd_draw_bind(&d, img);
+        if (nd_draw_text(&d, r->x, r->y, r->text, f, r->ink) != ND_OK)
+            fail("%d/%s: nd_draw_text returned an error", (int)r->px, r->tag);
+        else if (hash_image(img) != r->hash)
+            fail("%d/%s: drawn text differs from Pillow", (int)r->px, r->tag);
+        nd_image_free(img);
+    }
+
+    /* textbbox is Pillow's, so right and bottom are EXCLUSIVE -- the one
+     * place in this module where a rectangle is not inclusive. */
+    {
+        nd_rect box;
+        int32_t w = 0, h = 0;
+        CHECK(nd_draw_textbbox(fonts[2], "Ag", &box) == ND_OK, "textbbox failed");
+        nd_text_size(fonts[2], "Ag", &w, &h);
+        CHECK(box.x1 - box.x0 == w && box.y1 - box.y0 == h,
+              "textbbox extent must equal nd_text_size, got %dx%d against %dx%d",
+              (int)(box.x1 - box.x0), (int)(box.y1 - box.y0), (int)w, (int)h);
+        CHECK(nd_draw_textbbox(NULL, "Ag", &box) == ND_ERR_INVAL, "textbbox(NULL font)");
+        CHECK(nd_draw_textbbox(fonts[2], "Ag", NULL) == ND_ERR_INVAL, "textbbox(NULL out)");
+    }
+
+    /* An empty string and a NULL surface must not reach the glyph loop. */
+    {
+        nd_image *img = nd_image_new_filled(16, 16, ND_PIXFMT_RGB888, ND_BLACK);
+        nd_draw d;
+        if (img) {
+            nd_draw_bind(&d, img);
+            CHECK(nd_draw_text(&d, 0, 0, "", fonts[0], ND_WHITE) == ND_OK, "empty text is a no-op");
+            CHECK(count_white(img) == 0, "empty text must draw nothing");
+            CHECK(nd_draw_text(&d, 0, 0, NULL, fonts[0], ND_WHITE) == ND_ERR_INVAL,
+                  "NULL text is invalid");
+            CHECK(nd_draw_text(&d, 0, 0, "x", NULL, ND_WHITE) == ND_ERR_INVAL,
+                  "NULL font is invalid");
+            nd_image_free(img);
+        }
+    }
+
+done:
+    for (k = 0; k < 4; k++)
+        nd_font_free(fonts[k]);
+}
+
 int main(void)
 {
     run_corpus();
@@ -441,12 +788,13 @@ int main(void)
     test_clipping_never_faults();
     test_bad_arguments();
     test_draws_into_l8();
+    run_text_corpus();
 
     if (failures) {
         printf("test_draw: %d failure(s)\n", failures);
         return 1;
     }
-    printf("test_draw: %zu Pillow reference shapes + convention checks OK\n",
-           ND_ARRAY_LEN(ND_DRAW_REF));
+    printf("test_draw: %zu Pillow reference shapes, %zu drawn strings, conventions OK\n",
+           ND_ARRAY_LEN(ND_DRAW_REF), ND_ARRAY_LEN(ND_TEXT_REF));
     return 0;
 }

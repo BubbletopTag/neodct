@@ -149,8 +149,7 @@ done:
 }
 
 /* Horizontal pass: reads rows [y_off, y_off + out->h) of src. */
-static void resample_horizontal(nd_image *dst, const nd_image *src, int32_t y_off,
-                                const coeffs *c)
+static void resample_horizontal(nd_image *dst, const nd_image *src, int32_t y_off, const coeffs *c)
 {
     int32_t yy, xx, x;
     uint8_t bands = nd_img_bands(src->fmt);
@@ -198,7 +197,92 @@ static void resample_vertical(nd_image *dst, const nd_image *src, const coeffs *
     }
 }
 
+static nd_image *lanczos_core(const nd_image *src, int32_t w, int32_t h);
+
+/* Pillow's MULDIV255: (a*b + 128) with the classic "+ (x>>8) then >>8" divide,
+ * which is NOT the +127 rounding nd_blend8() uses. Both appear in Pillow and
+ * they are used in different places on purpose. */
+static uint8_t muldiv255(uint32_t a, uint32_t b)
+{
+    uint32_t t = a * b + 128u;
+    return (uint8_t)(((t >> 8) + t) >> 8);
+}
+
+/* Image.resize() on an RGBA image does NOT resample the stored channels. It
+ * converts to "RGBa" -- premultiplied alpha -- resamples that, and converts
+ * back. Skipping the round trip leaves a halo of the fully transparent
+ * pixels' colour around every icon's edge, and both conversions are lossy in
+ * their own right, so the result differs even where the alpha is opaque.
+ * This applies to LANCZOS and not to NEAREST, which Pillow excludes. */
+static void premultiply(nd_image *img)
+{
+    int32_t x, y;
+
+    for (y = 0; y < img->h; y++) {
+        uint8_t *p = nd_img_row(img, y);
+        for (x = 0; x < img->w; x++, p += 4) {
+            uint32_t a = p[3];
+            p[0] = muldiv255(p[0], a);
+            p[1] = muldiv255(p[1], a);
+            p[2] = muldiv255(p[2], a);
+        }
+    }
+}
+
+static void unpremultiply(nd_image *img)
+{
+    int32_t x, y;
+
+    for (y = 0; y < img->h; y++) {
+        uint8_t *p = nd_img_row(img, y);
+        for (x = 0; x < img->w; x++, p += 4) {
+            uint32_t a = p[3];
+            uint32_t c;
+
+            /* Fully opaque and fully transparent are passed through
+             * untouched -- dividing by 255 is not exactly the identity, and
+             * dividing by 0 is not anything at all. */
+            if (a == 255u || a == 0u)
+                continue;
+            c = 255u * p[0] / a;
+            p[0] = (uint8_t)(c > 255u ? 255u : c);
+            c = 255u * p[1] / a;
+            p[1] = (uint8_t)(c > 255u ? 255u : c);
+            c = 255u * p[2] / a;
+            p[2] = (uint8_t)(c > 255u ? 255u : c);
+        }
+    }
+}
+
 nd_image *nd_image_resize_lanczos(const nd_image *src, int32_t w, int32_t h)
+{
+    nd_image *pre = NULL;
+    nd_image *out = NULL;
+
+    if (!src || w <= 0 || h <= 0)
+        return NULL;
+
+    /* Image.resize() short-circuits an unchanged size to a plain copy, which
+     * matters here because it also skips the lossy premultiply round trip. */
+    if (w == src->w && h == src->h)
+        return nd_image_copy(src);
+
+    if (src->fmt != ND_PIXFMT_RGBA8888)
+        return lanczos_core(src, w, h);
+
+    /* freed before returning; only the resampled result escapes */
+    pre = nd_image_copy(src);
+    if (!pre)
+        return NULL;
+    premultiply(pre);
+    out = lanczos_core(pre, w, h);
+    nd_image_free(pre);
+    if (out)
+        unpremultiply(out);
+    return out;
+}
+
+static nd_image *lanczos_core(const nd_image *src, int32_t w, int32_t h)
 {
     coeffs cv = {0, NULL, NULL};
     coeffs ch = {0, NULL, NULL};
@@ -258,46 +342,49 @@ done:
 nd_image *nd_image_resize_nearest(const nd_image *src, int32_t w, int32_t h)
 {
     nd_image *out = NULL;
-    int32_t a0, a4, a2, a5;
+    double sx, sy, xo, yo;
     int32_t x, y;
 
     if (!src || w <= 0 || h <= 0 || w > ND_IMAGE_MAX_DIM || h > ND_IMAGE_MAX_DIM)
         return NULL;
+    if (w == src->w && h == src->h)
+        return nd_image_copy(src);
 
     /* owned by the caller; free with nd_image_free() */
     out = nd_image_new(w, h, src->fmt);
     if (!out)
         return NULL;
 
-    /* Pillow's affine_fixed(): 16.16 with the half-pixel offset folded into
-     * the starting accumulator, and the STEP rounded once rather than the
-     * position recomputed per column. FIX() is floor(v * 65536 + 0.5). */
-#define ND_FIX(v) ((int32_t)floor((v) * 65536.0 + 0.5))
-    a0 = ND_FIX((double)src->w / (double)w);
-    a4 = ND_FIX((double)src->h / (double)h);
-    a2 = ND_FIX(0.5 * (double)src->w / (double)w);
-    a5 = ND_FIX(0.5 * (double)src->h / (double)h);
-#undef ND_FIX
+    /* Pillow routes a NEAREST resize through ImagingScaleAffine, which is a
+     * DOUBLE accumulation and not the 16.16 fixed-point path next door in the
+     * same file: the source coordinate starts half a step in and then has the
+     * step ADDED once per output pixel, so its rounding error accumulates
+     * along the row rather than being recomputed. Substituting
+     * (int)((x + 0.5) * sw / dw) gets a different pixel on about one column
+     * in fifty at Koki's costume sizes. */
+    sx = (double)src->w / (double)w;
+    sy = (double)src->h / (double)h;
 
+    yo = sy * 0.5;
     for (y = 0; y < h; y++) {
         uint8_t *dp = nd_img_row(out, y);
-        int32_t yin = a5 >> 16;
-        int32_t xx = a2;
+        int32_t yin = (yo < 0.0) ? -1 : (int32_t)yo;
 
-        /* Pillow memsets the destination row first and only overwrites where
-         * the source coordinate is in range, so an accumulator that runs one
-         * step past the last row leaves black rather than repeating it. */
+        /* Rows and columns whose source coordinate falls outside stay black,
+         * because Pillow zeroes the destination row and then only copies
+         * where the coordinate is in range. */
         memset(dp, 0, out->stride);
         if (yin >= 0 && yin < src->h) {
             const uint8_t *sp = nd_img_row(src, yin);
+            xo = sx * 0.5;
             for (x = 0; x < w; x++, dp += out->bpp) {
-                int32_t xin = xx >> 16;
+                int32_t xin = (xo < 0.0) ? -1 : (int32_t)xo;
                 if (xin >= 0 && xin < src->w)
                     memcpy(dp, sp + (size_t)xin * src->bpp, out->bpp);
-                xx += a0;
+                xo += sx;
             }
         }
-        a5 += a4;
+        yo += sy;
     }
     return out;
 }

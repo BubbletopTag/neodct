@@ -73,10 +73,22 @@ if ! command -v musl-gcc >/dev/null 2>&1; then
 else
     MUSL_FAILED=0
     : > "$OUT/musl.log"
+    # jconfig.h and asm/types.h live in the multiarch directory, not
+    # /usr/include proper. Same -idirafter reasoning as below.
+    MULTIARCH=$(gcc -print-multiarch 2>/dev/null)
+    MA_INC=""
+    [ -n "$MULTIARCH" ] && [ -d "/usr/include/$MULTIARCH" ] && \
+        MA_INC="-idirafter /usr/include/$MULTIARCH"
     for c in $(find "$SRC/lib" "$SRC/core" "$SRC/apprun" "$SRC/apps" "$SRC/tools" \
                     -name '*.c' 2>/dev/null); do
+        # -idirafter, NOT -I: musl's own headers must win every lookup, so a
+        # glibc-only libc call still fails here -- that is the entire point of
+        # the check. /usr/include is searched only as a last resort, for
+        # third-party headers musl does not ship (jpeglib.h, sqlite3.h) and
+        # kernel UAPI headers (linux/fb.h, linux/input.h).
         if ! musl-gcc -std=c11 -c "$c" -o /dev/null -I"$SRC/include" \
-             $(pkg-config --cflags freetype2 libpng sqlite3 2>/dev/null) \
+             $(pkg-config --cflags freetype2 libpng sqlite3 libjpeg 2>/dev/null) \
+             -idirafter /usr/include $MA_INC \
              -D_GNU_SOURCE -Wall -Wextra >> "$OUT/musl.log" 2>&1; then
             MUSL_FAILED=$((MUSL_FAILED + 1))
             echo "  ^^ in $c" >> "$OUT/musl.log"

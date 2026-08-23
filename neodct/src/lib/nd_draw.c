@@ -127,8 +127,7 @@ static void hline(nd_image *img, int32_t x0, int32_t y, int32_t x1, const ink *k
 
 /* Pillow's line8()/line32(). NOTE THE LOOP BOUND: it plots n points, not
  * n + 1, so the far endpoint is left to the caller. See convention 3. */
-static void line_open(nd_image *img, int32_t x0, int32_t y0, int32_t x1, int32_t y1,
-                      const ink *k)
+static void line_open(nd_image *img, int32_t x0, int32_t y0, int32_t x1, int32_t y1, const ink *k)
 {
     int32_t i, n, e, dx, dy, xs, ys;
 
@@ -403,8 +402,8 @@ nd_err nd_draw_rect_outline(nd_draw *d, nd_rect box, nd_color c, int32_t width)
  * width perpendicular to its direction, and that quadrilateral is filled by
  * the same scanline code polygons use. ROUND_UP on one side and ROUND_DOWN on
  * the other is where the asymmetry in convention 4 comes from. */
-static void wide_line(nd_image *img, int32_t x0, int32_t y0, int32_t x1, int32_t y1,
-                      int32_t width, const ink *k)
+static void wide_line(nd_image *img, int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t width,
+                      const ink *k)
 {
     double big, small, ratio_max, ratio_min;
     int32_t dx, dy, dxmin, dxmax, dymin, dymax;
@@ -631,8 +630,7 @@ static bool ellipse_next(ellipse_state *s, int32_t *ret_x0, int32_t *ret_y, int3
         l = s->pl;
         r = s->pr;
 
-        while ((more = quarter_next(&s->st_o, &cx, &cy)) && cy <= y) {
-        }
+        while ((more = quarter_next(&s->st_o, &cx, &cy)) && cy <= y) {}
         if (!more)
             s->finished = true;
         else {

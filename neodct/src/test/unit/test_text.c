@@ -89,6 +89,13 @@ static const fit_case FIT[] = {
     {"WWWWW", 20, 20, ""},
     {"iiiii", 14, 12, ""},
     {"Koki Mobile", 18, 80, "Koki..."},
+    /* Leading spaces rstrip away, so the surviving candidate is a bare
+     * "..." -- 24 px at 20 px type -- and fit_text returns it. */
+    {"  Messages", 20, 25, "..."},
+    {"  Messages", 20, 24, "..."},
+    {"  Messages", 20, 23, ""},
+    {" x", 20, 25, " x"},
+    {"   ", 20, 5, ""},
 };
 
 static const fit_case ELL[] = {
@@ -105,6 +112,10 @@ static const fit_case ELL[] = {
     {"WWWWW", 20, 20, "WWWWW"},
     {"A", 20, 1, "A"},
     {"Settings", 18, 200, "Settings"},
+    /* _ellipsize never rstrips, so the same inputs come back untouched. */
+    {"  Messages", 20, 25, "  Messages"},
+    {"  Messages", 20, 23, "  Messages"},
+    {"   ", 20, 5, "   "},
 };
 
 typedef struct {
@@ -245,6 +256,58 @@ static void run_wrap(const char *name, nd_font *fonts[4], const wrap_case *cases
     }
 }
 
+/* The TTF, found the same way test_font finds it: NEODCT_FONT, then two
+ * levels above $NEODCT_GOLDEN, then the real device path. The oracle and the
+ * font it was captured from are never under NEODCT_ROOT. */
+/* Copy path into out if it names a readable file. */
+static bool try_font(char *out, size_t sz, const char *path)
+{
+    FILE *fh = fopen(path, "rb");
+
+    if (!fh)
+        return false;
+    fclose(fh);
+    snprintf(out, sz, "%.900s", path);
+    return true;
+}
+
+#define FONT_REL "overlay/NeoDCT/System/ui/resources/fonts/font.ttf"
+
+/* The TTF, found the way test_font finds it: NEODCT_FONT, then two levels
+ * above $NEODCT_GOLDEN, then the tree relative to the usual working
+ * directories, then the real device path. None of these is under
+ * NEODCT_ROOT. */
+static bool resolve_font(char *out, size_t sz)
+{
+    const char *env = getenv("NEODCT_FONT");
+    const char *golden = getenv("NEODCT_GOLDEN");
+    char cand[1024];
+    char base[512];
+    char *cut;
+
+    if (env && *env) {
+        snprintf(out, sz, "%.900s", env);
+        return true;
+    }
+    if (golden && *golden) {
+        snprintf(base, sizeof base, "%.480s", golden);
+        cut = strrchr(base, '/');
+        if (cut)
+            *cut = '\0';
+        cut = strrchr(base, '/');
+        if (cut)
+            *cut = '\0';
+        snprintf(cand, sizeof cand, "%.400s/" FONT_REL, base);
+        if (try_font(out, sz, cand))
+            return true;
+    }
+    if (try_font(out, sz, "../" FONT_REL))
+        return true;
+    if (try_font(out, sz, "neodct/" FONT_REL))
+        return true;
+    return try_font(out, sz, "/NeoDCT/System/ui/resources/fonts/font.ttf");
+}
+
 int main(int argc, char **argv)
 {
     static const int32_t SIZES[4] = {14, 18, 20, 24};
@@ -255,24 +318,10 @@ int main(int argc, char **argv)
 
     if (argc > 1) {
         snprintf(fontpath, sizeof fontpath, "%s", argv[1]);
-    } else {
-        const char *golden = getenv("NEODCT_GOLDEN");
-        char base[512];
-        char *cut;
-
-        if (!golden || !*golden) {
-            fprintf(stderr, "test_text: no font; set NEODCT_GOLDEN or pass a path\n");
-            return 1;
-        }
-        snprintf(base, sizeof base, "%s", golden);
-        cut = strrchr(base, '/');
-        if (cut)
-            *cut = '\0';
-        cut = strrchr(base, '/');
-        if (cut)
-            *cut = '\0';
-        snprintf(fontpath, sizeof fontpath, "%s/overlay/NeoDCT/System/ui/resources/fonts/font.ttf",
-                 base);
+    } else if (!resolve_font(fontpath, sizeof fontpath)) {
+        fprintf(stderr, "test_text: cannot find font.ttf; set NEODCT_GOLDEN, NEODCT_FONT,"
+                        " or pass a path\n");
+        return 1;
     }
 
     for (i = 0; i < 4; i++) {

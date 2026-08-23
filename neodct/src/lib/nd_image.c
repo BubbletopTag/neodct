@@ -348,8 +348,7 @@ nd_err nd_image_blit_region(nd_image *dst, const nd_image *src, nd_rect src_rect
  * byte inside the mask surface that carries coverage: byte 0 of an L8 mask,
  * byte 3 of an RGBA source used as its own mask. */
 static void blit_blended(nd_image *dst, const nd_image *src, const uint8_t *mask_base,
-                         size_t mask_stride, uint8_t mask_bpp, uint8_t mask_off,
-                         const blit_span *s)
+                         size_t mask_stride, uint8_t mask_bpp, uint8_t mask_off, const blit_span *s)
 {
     int32_t iy, ix;
 

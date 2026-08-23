@@ -189,6 +189,7 @@ char *nd_text_fit(char *out, size_t out_sz, const char *text, const nd_font *f, 
     size_t best = 0;
     size_t n_chars = 0;
     size_t index = 0;
+    bool found = false;
 
     if (!out || out_sz == 0)
         return out;
@@ -226,10 +227,15 @@ char *nd_text_fit(char *out, size_t out_sz, const char *text, const nd_font *f, 
         memcpy(cand + keep, "...", 4);
         if (text_w(f, cand) > max_w)
             break;
+        /* keep can legitimately be zero: a leading-space prefix rstrips away
+         * and the candidate is bare "...", which the Python happily returns.
+         * A separate flag, not best != 0, is what distinguishes that from
+         * "nothing fits at all". */
         best = keep;
+        found = true;
     }
 
-    if (best == 0)
+    if (!found)
         return out; /* nothing fits -> "" */
 
     memcpy(cand, text, best);

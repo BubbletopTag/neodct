@@ -751,6 +751,84 @@ done:
     return buf;
 }
 
+/* Where the TTF lives, given where the oracle lives.
+ *
+ * The acceptance gate runs this binary with an explicit reference path and no
+ * environment at all, while `make test` runs it with no arguments and
+ * NEODCT_GOLDEN set, so neither one alone can be relied on. Both name the
+ * same tree: fontref.json records the font as neodct/overlay/... relative to
+ * the repository root and the golden directory is neodct/tests/golden, two
+ * levels below the same neodct/. None of this goes through nd_path_resolve()
+ * -- the oracle is never under NEODCT_ROOT.
+ *
+ * The last candidate is the real device path, so this test is also runnable
+ * on the phone. */
+/* Copy path into out if it names a readable file. */
+static bool try_font(char *out, size_t sz, const char *path)
+{
+    FILE *fh = fopen(path, "rb");
+
+    if (!fh)
+        return false;
+    fclose(fh);
+    snprintf(out, sz, "%.900s", path);
+    return true;
+}
+
+#define FONT_REL "overlay/NeoDCT/System/ui/resources/fonts/font.ttf"
+
+/* Where the TTF lives.
+ *
+ * The acceptance gate runs this binary with an explicit reference path and
+ * nothing in the environment, while `make test` runs it with no arguments and
+ * NEODCT_GOLDEN set, so neither source alone can be relied on. Both name the
+ * same tree: fontref.json records the font as neodct/overlay/... relative to
+ * the repository root, and the golden directory is neodct/tests/golden, two
+ * levels below the same neodct/. None of this goes through nd_path_resolve()
+ * -- the oracle and the font it was captured from are never under
+ * NEODCT_ROOT. The last candidate is the real device path, so the test is
+ * also runnable on the phone. */
+static bool resolve_font(char *out, size_t sz, const char *golden, const char *refpath)
+{
+    const char *env = getenv("NEODCT_FONT");
+    char cand[1024];
+    char base[512];
+    char *cut;
+
+    if (env && *env) {
+        snprintf(out, sz, "%.900s", env);
+        return true;
+    }
+
+    if (golden && *golden) {
+        snprintf(base, sizeof base, "%.480s", golden);
+    } else {
+        /* .../golden/font/fontref.json -> .../golden */
+        snprintf(base, sizeof base, "%.480s", refpath ? refpath : "");
+        cut = strrchr(base, '/');
+        if (cut)
+            *cut = '\0';
+        cut = strrchr(base, '/');
+        if (cut)
+            *cut = '\0';
+    }
+    cut = strrchr(base, '/'); /* .../neodct/tests */
+    if (cut)
+        *cut = '\0';
+    cut = strrchr(base, '/'); /* .../neodct       */
+    if (cut)
+        *cut = '\0';
+
+    snprintf(cand, sizeof cand, "%.400s/" FONT_REL, base);
+    if (try_font(out, sz, cand))
+        return true;
+    if (try_font(out, sz, "../" FONT_REL))
+        return true;
+    if (try_font(out, sz, "neodct/" FONT_REL))
+        return true;
+    return try_font(out, sz, "/NeoDCT/System/ui/resources/fonts/font.ttf");
+}
+
 int main(int argc, char **argv)
 {
     static const int32_t SIZES[4] = {14, 18, 20, 24};
@@ -774,22 +852,9 @@ int main(int argc, char **argv)
 
     if (argc > 2) {
         snprintf(fontpath, sizeof fontpath, "%s", argv[2]);
-    } else {
-        /* fontref.json records the TTF as neodct/overlay/... relative to the
-         * repository root, and NEODCT_GOLDEN is neodct/tests/golden. This is
-         * NOT under NEODCT_ROOT -- the oracle never is. */
-        char base[512];
-        char *cut;
-
-        snprintf(base, sizeof base, "%s", golden ? golden : "");
-        cut = strrchr(base, '/');
-        if (cut)
-            *cut = '\0'; /* .../neodct/tests */
-        cut = strrchr(base, '/');
-        if (cut)
-            *cut = '\0'; /* .../neodct        */
-        snprintf(fontpath, sizeof fontpath, "%s/overlay/NeoDCT/System/ui/resources/fonts/font.ttf",
-                 base);
+    } else if (!resolve_font(fontpath, sizeof fontpath, golden, refpath)) {
+        fprintf(stderr, "test_font: cannot find font.ttf; set NEODCT_FONT or pass a path\n");
+        return 1;
     }
 
     json = slurp(refpath, &json_len);

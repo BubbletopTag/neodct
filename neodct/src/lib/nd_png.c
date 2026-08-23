@@ -90,7 +90,8 @@ static nd_image *png_decode(FILE *f, mem_reader *mem)
     png_read_info(png, info);
     png_get_IHDR(png, info, &w, &h, &bit_depth, &colour_type, NULL, NULL, NULL);
 
-    if (w == 0u || h == 0u || w > (png_uint_32)ND_IMAGE_MAX_DIM || h > (png_uint_32)ND_IMAGE_MAX_DIM)
+    if (w == 0u || h == 0u || w > (png_uint_32)ND_IMAGE_MAX_DIM ||
+        h > (png_uint_32)ND_IMAGE_MAX_DIM)
         goto fail;
 
     /* Storage-format normalisation only. No gamma, no background. */
