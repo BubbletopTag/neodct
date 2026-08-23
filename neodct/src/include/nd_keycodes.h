@@ -7,8 +7,8 @@
  * both games and every app agree on them.
  */
 
-#ifndef ND_KEYCODES_H
-#define ND_KEYCODES_H
+#ifndef ND_KEYCODES_H_INCLUDED
+#define ND_KEYCODES_H_INCLUDED
 
 #include "nd_types.h"
 
@@ -24,37 +24,37 @@ extern "C" {
  * raised IncomingCall. Only the core ever sees it -- an app gets SIGTERM. */
 #define ND_KEY_INCOMING_CALL (-2)
 
-#define ND_KEY_MINUS     12
-#define ND_KEY_CLEAR     14 /* KEY_BACKSPACE; "clear" and "back" both map here */
-#define ND_KEY_BACK      14
-#define ND_KEY_ENTER     28 /* KEY_ENTER; "navikey" and "enter" both map here  */
-#define ND_KEY_NAVIKEY   28
-#define ND_KEY_C         46 /* KEY_C -- a CrashHandler continue key            */
-#define ND_KEY_MENU      50 /* KEY_M, doubling as the menu key                 */
-#define ND_KEY_M         50
-#define ND_KEY_COMMA     51
-#define ND_KEY_DOT       52
-#define ND_KEY_SPACE     57
-#define ND_KEY_KPENTER   96
-#define ND_KEY_UP       103
-#define ND_KEY_LEFT     105
-#define ND_KEY_RIGHT    106
-#define ND_KEY_DOWN     108
+#define ND_KEY_MINUS   12
+#define ND_KEY_CLEAR   14 /* KEY_BACKSPACE; "clear" and "back" both map here */
+#define ND_KEY_BACK    14
+#define ND_KEY_ENTER   28 /* KEY_ENTER; "navikey" and "enter" both map here  */
+#define ND_KEY_NAVIKEY 28
+#define ND_KEY_C       46 /* KEY_C -- a CrashHandler continue key            */
+#define ND_KEY_MENU    50 /* KEY_M, doubling as the menu key                 */
+#define ND_KEY_M       50
+#define ND_KEY_COMMA   51
+#define ND_KEY_DOT     52
+#define ND_KEY_SPACE   57
+#define ND_KEY_KPENTER 96
+#define ND_KEY_UP      103
+#define ND_KEY_LEFT    105
+#define ND_KEY_RIGHT   106
+#define ND_KEY_DOWN    108
 
-#define ND_KEY_STAR      42 /* KEY_LEFTSHIFT, used as '*'  */
-#define ND_KEY_HASH      43 /* KEY_BACKSLASH, used as '#'  */
+#define ND_KEY_STAR 42 /* KEY_LEFTSHIFT, used as '*'  */
+#define ND_KEY_HASH 43 /* KEY_BACKSLASH, used as '#'  */
 
 /* The number row. Note 0 is 11, after 9 -- evdev's layout, not arithmetic. */
-#define ND_KEY_1          2
-#define ND_KEY_2          3
-#define ND_KEY_3          4
-#define ND_KEY_4          5
-#define ND_KEY_5          6
-#define ND_KEY_6          7
-#define ND_KEY_7          8
-#define ND_KEY_8          9
-#define ND_KEY_9         10
-#define ND_KEY_0         11
+#define ND_KEY_1 2
+#define ND_KEY_2 3
+#define ND_KEY_3 4
+#define ND_KEY_4 5
+#define ND_KEY_5 6
+#define ND_KEY_6 7
+#define ND_KEY_7 8
+#define ND_KEY_8 9
+#define ND_KEY_9 10
+#define ND_KEY_0 11
 
 /* True for ND_KEY_1..ND_KEY_0, i.e. codes 2..11 inclusive. VerticalList's
  * digit shortcut uses 2..10 only (1..9); check that range explicitly there. */
@@ -98,4 +98,4 @@ int32_t nd_keycode_for_name(const char *name);
 }
 #endif
 
-#endif /* ND_KEYCODES_H */
+#endif /* ND_KEYCODES_H_INCLUDED */

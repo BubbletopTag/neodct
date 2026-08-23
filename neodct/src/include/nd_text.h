@@ -24,8 +24,8 @@
  * declared on its own stack.
  */
 
-#ifndef ND_TEXT_H
-#define ND_TEXT_H
+#ifndef ND_TEXT_H_INCLUDED
+#define ND_TEXT_H_INCLUDED
 
 #include "nd_font.h"
 #include "nd_types.h"
@@ -59,12 +59,12 @@ typedef struct {
     char (*buf)[ND_TEXT_LINE_MAX];
     size_t cap;
     size_t n;
-    bool   truncated;
+    bool truncated;
 } nd_lines;
 
-void        nd_lines_init(nd_lines *l, char (*storage)[ND_TEXT_LINE_MAX], size_t cap);
-void        nd_lines_clear(nd_lines *l);
-bool        nd_lines_push(nd_lines *l, const char *s);
+void nd_lines_init(nd_lines *l, char (*storage)[ND_TEXT_LINE_MAX], size_t cap);
+void nd_lines_clear(nd_lines *l);
+bool nd_lines_push(nd_lines *l, const char *s);
 const char *nd_lines_at(const nd_lines *l, size_t i); /* "" when out of range */
 
 /* ------------------------------------------------------------------ *
@@ -139,4 +139,4 @@ void nd_underline_tail(struct nd_draw *d, int32_t x, int32_t y, const char *line
 }
 #endif
 
-#endif /* ND_TEXT_H */
+#endif /* ND_TEXT_H_INCLUDED */

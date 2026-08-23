@@ -34,8 +34,8 @@
  * kernel's own layout depends on how the device was created.
  */
 
-#ifndef ND_INPUT_H
-#define ND_INPUT_H
+#ifndef ND_INPUT_H_INCLUDED
+#define ND_INPUT_H_INCLUDED
 
 #include "nd_keycodes.h"
 #include "nd_types.h"
@@ -44,18 +44,13 @@
 extern "C" {
 #endif
 
-typedef enum {
-    ND_INPUT_NONE = 0,
-    ND_INPUT_EVDEV,
-    ND_INPUT_MATRIX,
-    ND_INPUT_PIPE
-} nd_input_backend;
+typedef enum { ND_INPUT_NONE = 0, ND_INPUT_EVDEV, ND_INPUT_MATRIX, ND_INPUT_PIPE } nd_input_backend;
 
 /* One key transition. `pressed` false is a release -- the thing the Python
  * never reported and Koki had to go behind its back to find out. */
 typedef struct {
-    int32_t  code;
-    bool     pressed;
+    int32_t code;
+    bool pressed;
     uint64_t time_us; /* CLOCK_MONOTONIC microseconds, for repeat timing */
 } nd_key_event;
 
@@ -113,7 +108,7 @@ bool nd_input_read_event(nd_input *in, double timeout_s, nd_key_event *out);
 
 /* Held state, derived from the press/release stream. Cheap -- it is a
  * bitmap-ish scan of at most ND_INPUT_HELD_MAX entries, no syscall. */
-bool   nd_input_is_held(const nd_input *in, int32_t code);
+bool nd_input_is_held(const nd_input *in, int32_t code);
 size_t nd_input_held(const nd_input *in, int32_t *out, size_t max);
 
 /* Discard everything pending without blocking. The Browser does this before
@@ -153,8 +148,8 @@ void nd_input_channel_close_write(nd_input_channel *ch);
 
 /* _discover_keypad_path(), in the Python's exact priority order:
  *   1. $NEODCT_KEYPAD_DEVICE if it is set AND the path exists (realpath'd)
- *   2. sorted /dev/input/by-path/*-kbd
- *   3. sorted /dev/input/by-id/*-kbd
+ *   2. sorted "/dev/input/by-path" entries ending in "-kbd"
+ *   3. sorted "/dev/input/by-id" entries ending in "-kbd"
  *   4. /dev/input/event0 if it exists
  * Sort with strcmp, not strcoll -- Python's sorted() is code-point order and a
  * locale must never reorder the device list. */
@@ -179,18 +174,18 @@ int32_t nd_evdev_read_key(int fd, double timeout_s);
 #define ND_KEYMAP_MAX_COLS 16
 
 typedef struct {
-    char    path[128];
-    char    format[48];
-    char    driver[32]; /* "pcf8575-i2c" or the gpiozero form */
+    char path[128];
+    char format[48];
+    char driver[32]; /* "pcf8575-i2c" or the gpiozero form */
     uint8_t row_pins[ND_KEYMAP_MAX_ROWS];
-    size_t  n_rows;
+    size_t n_rows;
     uint8_t col_pins[ND_KEYMAP_MAX_COLS];
-    size_t  n_cols;
+    size_t n_cols;
     /* -1 where a position is unmapped. 1 KB flat, which removes every hash
      * lookup from the scan path. */
     int32_t matrix_to_code[ND_KEYMAP_MAX_ROWS][ND_KEYMAP_MAX_COLS];
-    int     i2c_bus;
-    int     i2c_addr;
+    int i2c_bus;
+    int i2c_addr;
 } nd_keymap;
 
 /* ND_ERR_NOTFOUND means "no matrix keypad on this device", which is the normal
@@ -203,20 +198,20 @@ nd_err nd_keymap_load(const char *path, nd_keymap *out);
  * ------------------------------------------------------------------ */
 
 typedef struct {
-    int  fd;
+    int fd;
     bool owns_device;
 } nd_uinput_kbd;
 
 nd_err nd_uinput_open(nd_uinput_kbd *k, const char *path, const char *name);
 nd_err nd_uinput_attach(nd_uinput_kbd *k, int fd); /* tests: no ioctls issued */
 nd_err nd_uinput_send_key(nd_uinput_kbd *k, uint16_t code, bool shift);
-bool   nd_uinput_type_char(nd_uinput_kbd *k, char c); /* false = untypeable */
+bool nd_uinput_type_char(nd_uinput_kbd *k, char c); /* false = untypeable */
 nd_err nd_uinput_backspace(nd_uinput_kbd *k);
-void   nd_uinput_close(nd_uinput_kbd *k);
-bool   nd_uinput_char_to_keypress(char c, uint16_t *code, bool *shift);
+void nd_uinput_close(nd_uinput_kbd *k);
+bool nd_uinput_char_to_keypress(char c, uint16_t *code, bool *shift);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* ND_INPUT_H */
+#endif /* ND_INPUT_H_INCLUDED */

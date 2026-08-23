@@ -61,19 +61,33 @@ else
     done
 fi
 
-head2 "3. Builds under musl (the target's libc)"
+head2 "3. Compiles under musl (the target's libc)"
+# COMPILE, not link. musl-gcc supplies libc only; freetype, libpng, libjpeg
+# and sqlite on this host are glibc builds, so a musl *link* can never
+# succeed here and failing on it would be noise. Compiling is what catches
+# the thing we actually care about -- glibc-only functions and headers -- at
+# the moment they are written rather than at the first cross-build.
+# Real musl linking is verified by the Buildroot cross-build. See MUSL.md.
 if ! command -v musl-gcc >/dev/null 2>&1; then
     skip "musl-gcc not installed"
-elif make -C "$SRC" clean >/dev/null 2>&1 && \
-     make -C "$SRC" CC=musl-gcc -j"$(nproc)" > "$OUT/musl.log" 2>&1; then
-    pass "make CC=musl-gcc"
-    make -C "$SRC" clean >/dev/null 2>&1
-    make -C "$SRC" -j"$(nproc)" >/dev/null 2>&1     # restore the glibc build
 else
-    fail "make CC=musl-gcc -- see $OUT/musl.log"
-    tail -15 "$OUT/musl.log" | sed 's/^/        /'
-    make -C "$SRC" clean >/dev/null 2>&1
-    make -C "$SRC" -j"$(nproc)" >/dev/null 2>&1
+    MUSL_FAILED=0
+    : > "$OUT/musl.log"
+    for c in $(find "$SRC/lib" "$SRC/core" "$SRC/apprun" "$SRC/apps" "$SRC/tools" \
+                    -name '*.c' 2>/dev/null); do
+        if ! musl-gcc -std=c11 -c "$c" -o /dev/null -I"$SRC/include" \
+             $(pkg-config --cflags freetype2 libpng sqlite3 2>/dev/null) \
+             -D_GNU_SOURCE -Wall -Wextra >> "$OUT/musl.log" 2>&1; then
+            MUSL_FAILED=$((MUSL_FAILED + 1))
+            echo "  ^^ in $c" >> "$OUT/musl.log"
+        fi
+    done
+    if [ "$MUSL_FAILED" -eq 0 ]; then
+        pass "all sources compile under musl-gcc"
+    else
+        fail "$MUSL_FAILED source(s) fail under musl -- see $OUT/musl.log"
+        grep -B2 "\^\^ in" "$OUT/musl.log" | head -30 | sed 's/^/        /'
+    fi
 fi
 fi
 
@@ -110,7 +124,7 @@ fi
 
 if want all || want frames; then
 head2 "6. Rendered frames match the Python reference"
-SHOOT="$SRC/build/nd-shoot"
+SHOOT="$SRC/build/default/bin/nd-shoot"
 if [ ! -x "$SHOOT" ]; then
     skip "nd-shoot not built yet"
 else
@@ -133,7 +147,7 @@ else
 fi
 
 head2 "7. Glyph rendering matches Pillow"
-GLYPH="$SRC/build/test_font"
+GLYPH="$SRC/build/default/test/test_font"
 if [ ! -x "$GLYPH" ]; then
     skip "test_font not built yet"
 elif "$GLYPH" "$GOLDEN/font/fontref.json" > "$OUT/font.log" 2>&1; then
@@ -148,7 +162,7 @@ fi
 
 if want all || want rss; then
 head2 "8. Idle memory (the entire point of the exercise)"
-CORE="$SRC/build/nd-core"
+CORE="$SRC/build/default/bin/nd-core"
 if [ ! -x "$CORE" ]; then
     skip "nd-core not built yet"
 else

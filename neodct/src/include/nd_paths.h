@@ -13,8 +13,8 @@
  * later means auditing every fopen in the project.
  */
 
-#ifndef ND_PATHS_H
-#define ND_PATHS_H
+#ifndef ND_PATHS_H_INCLUDED
+#define ND_PATHS_H_INCLUDED
 
 #include "nd_types.h"
 
@@ -23,27 +23,27 @@ extern "C" {
 #endif
 
 /* ---- the read-only system image ---------------------------------- */
-#define ND_PATH_SYSTEM        "/NeoDCT/System"
-#define ND_PATH_BIN_DIR       "/NeoDCT/System/bin"
-#define ND_PATH_LIB_DIR       "/NeoDCT/System/lib"
-#define ND_PATH_ND_CORE       "/NeoDCT/System/bin/nd-core"
-#define ND_PATH_ND_APPRUN     "/NeoDCT/System/bin/nd-apprun"
-#define ND_PATH_APPS_DIR      "/NeoDCT/System/apps"
-#define ND_PATH_ENG_APPS_DIR  "/NeoDCT/System/engineering/apps"
-#define ND_PATH_VERSION_PROP  "/NeoDCT/System/version.prop"
-#define ND_PATH_DISPLAYD      "/NeoDCT/System/hw/neodct_displayd"
+#define ND_PATH_SYSTEM       "/NeoDCT/System"
+#define ND_PATH_BIN_DIR      "/NeoDCT/System/bin"
+#define ND_PATH_LIB_DIR      "/NeoDCT/System/lib"
+#define ND_PATH_ND_CORE      "/NeoDCT/System/bin/nd-core"
+#define ND_PATH_ND_APPRUN    "/NeoDCT/System/bin/nd-apprun"
+#define ND_PATH_APPS_DIR     "/NeoDCT/System/apps"
+#define ND_PATH_ENG_APPS_DIR "/NeoDCT/System/engineering/apps"
+#define ND_PATH_VERSION_PROP "/NeoDCT/System/version.prop"
+#define ND_PATH_DISPLAYD     "/NeoDCT/System/hw/neodct_displayd"
 
-#define ND_PATH_FONT          "/NeoDCT/System/ui/resources/fonts/font.ttf"
-#define ND_PATH_HOME_LAYOUT   "/NeoDCT/System/ui/resources/ui_home.json"
-#define ND_PATH_ENVELOPE      "/NeoDCT/System/ui/resources/img/envelope.png"
-#define ND_PATH_CRASH_IMAGE   "/NeoDCT/System/ui/resources/CRASH.jpg"
-#define ND_PATH_WARNING_ICON  "/NeoDCT/System/ui/resources/img/errorscreen/warning.png"
+#define ND_PATH_FONT             "/NeoDCT/System/ui/resources/fonts/font.ttf"
+#define ND_PATH_HOME_LAYOUT      "/NeoDCT/System/ui/resources/ui_home.json"
+#define ND_PATH_ENVELOPE         "/NeoDCT/System/ui/resources/img/envelope.png"
+#define ND_PATH_CRASH_IMAGE      "/NeoDCT/System/ui/resources/CRASH.jpg"
+#define ND_PATH_WARNING_ICON     "/NeoDCT/System/ui/resources/img/errorscreen/warning.png"
 #define ND_PATH_PLACEHOLDER_ICON "/NeoDCT/System/ui/resources/img/appselector/placeholder_icon.png"
 
-#define ND_PATH_TONES_DIR     "/NeoDCT/System/tones"
-#define ND_PATH_DTMF_DIR      "/NeoDCT/System/tones/dtmf"
-#define ND_PATH_SMS_TONE      "/NeoDCT/System/tones/sms.wav"
-#define ND_PATH_T9_DICT       "/NeoDCT/System/core/t9.dict"
+#define ND_PATH_TONES_DIR "/NeoDCT/System/tones"
+#define ND_PATH_DTMF_DIR  "/NeoDCT/System/tones/dtmf"
+#define ND_PATH_SMS_TONE  "/NeoDCT/System/tones/sms.wav"
+#define ND_PATH_T9_DICT   "/NeoDCT/System/core/t9.dict"
 
 /* ---- the writable user partition --------------------------------- */
 #define ND_PATH_USER          "/NeoDCT/User"
@@ -64,23 +64,23 @@ extern "C" {
 #define ND_PATH_REMOTE_DIR    "/NeoDCT/User/.remote"
 
 /* ---- volatile state ---------------------------------------------- */
-#define ND_PATH_SDCARD_STATE  "/run/neodct/sdcard.prop"
-#define ND_PATH_MODEM_LOCK    "/tmp/neodct-modem.lock"
-#define ND_PATH_BANNER        "/etc/neodct-banner"
-#define ND_PATH_COLORS_SH     "/etc/neodct-colors.sh"
+#define ND_PATH_SDCARD_STATE "/run/neodct/sdcard.prop"
+#define ND_PATH_MODEM_LOCK   "/tmp/neodct-modem.lock"
+#define ND_PATH_BANNER       "/etc/neodct-banner"
+#define ND_PATH_COLORS_SH    "/etc/neodct-colors.sh"
 
 /* ---- devices ------------------------------------------------------ */
-#define ND_PATH_FB            "/dev/fb0"
-#define ND_PATH_KEYPAD        "/dev/input/event0"
-#define ND_PATH_SERIAL_FIQ    "/dev/ttyFIQ0"
-#define ND_PATH_SERIAL_AMA    "/dev/ttyAMA0"
+#define ND_PATH_FB         "/dev/fb0"
+#define ND_PATH_KEYPAD     "/dev/input/event0"
+#define ND_PATH_SERIAL_FIQ "/dev/ttyFIQ0"
+#define ND_PATH_SERIAL_AMA "/dev/ttyAMA0"
 
 /* ---- environment overrides the Python already honours ------------- */
-#define ND_ENV_ROOT           "NEODCT_ROOT"
-#define ND_ENV_KEYPAD_DEVICE  "NEODCT_KEYPAD_DEVICE"
-#define ND_ENV_SERIAL_DEVICE  "NEODCT_SERIAL_DEVICE"
-#define ND_ENV_COLOR          "NEODCT_COLOR"
-#define ND_ENV_NO_COLOR       "NO_COLOR"
+#define ND_ENV_ROOT          "NEODCT_ROOT"
+#define ND_ENV_KEYPAD_DEVICE "NEODCT_KEYPAD_DEVICE"
+#define ND_ENV_SERIAL_DEVICE "NEODCT_SERIAL_DEVICE"
+#define ND_ENV_COLOR         "NEODCT_COLOR"
+#define ND_ENV_NO_COLOR      "NO_COLOR"
 
 #define ND_PATH_MAX 512
 
@@ -113,4 +113,4 @@ bool nd_path_is_file(const char *path);
 }
 #endif
 
-#endif /* ND_PATHS_H */
+#endif /* ND_PATHS_H_INCLUDED */

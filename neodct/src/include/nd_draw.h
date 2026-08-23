@@ -37,8 +37,8 @@
  * forbids allocating in it.
  */
 
-#ifndef ND_DRAW_H
-#define ND_DRAW_H
+#ifndef ND_DRAW_H_INCLUDED
+#define ND_DRAW_H_INCLUDED
 
 #include "nd_font.h"
 #include "nd_image.h"
@@ -126,4 +126,4 @@ nd_err nd_draw_textbbox(const nd_font *f, const char *utf8, nd_rect *out);
 }
 #endif
 
-#endif /* ND_DRAW_H */
+#endif /* ND_DRAW_H_INCLUDED */

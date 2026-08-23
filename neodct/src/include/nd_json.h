@@ -26,8 +26,8 @@
  * value from it becomes invalid at once. That is the only ownership rule.
  */
 
-#ifndef ND_JSON_H
-#define ND_JSON_H
+#ifndef ND_JSON_H_INCLUDED
+#define ND_JSON_H_INCLUDED
 
 #include "nd_types.h"
 
@@ -88,11 +88,11 @@ const nd_json_val *nd_json_get(const nd_json_val *v, const char *key);
 
 /* Array access. nd_json_len() is 0 for anything that is not an array or an
  * object; for an object it is the number of members. */
-size_t             nd_json_len(const nd_json_val *v);
+size_t nd_json_len(const nd_json_val *v);
 const nd_json_val *nd_json_at(const nd_json_val *v, size_t i);
 
 /* Object iteration, in document order after duplicate resolution. */
-const char        *nd_json_key_at(const nd_json_val *v, size_t i);
+const char *nd_json_key_at(const nd_json_val *v, size_t i);
 const nd_json_val *nd_json_member_at(const nd_json_val *v, size_t i);
 
 /* Typed readers. Each returns false and leaves *out alone when the value is
@@ -106,8 +106,8 @@ bool nd_json_str(const nd_json_val *v, const char **out);
 /* The convenience forms every manifest reader wants: look up a key and read
  * it in one step, with a default. Absent, wrong type or malformed all give
  * the default -- which is the Python's data.get("x", default) behaviour. */
-bool        nd_json_get_bool(const nd_json_val *obj, const char *key, bool dflt);
-int64_t     nd_json_get_int(const nd_json_val *obj, const char *key, int64_t dflt);
+bool nd_json_get_bool(const nd_json_val *obj, const char *key, bool dflt);
+int64_t nd_json_get_int(const nd_json_val *obj, const char *key, int64_t dflt);
 const char *nd_json_get_str(const nd_json_val *obj, const char *key, const char *dflt);
 
 /* ------------------------------------------------------------------ *
@@ -123,7 +123,7 @@ const char *nd_json_get_str(const nd_json_val *obj, const char *key, const char 
 typedef struct nd_json_writer nd_json_writer;
 
 nd_json_writer *nd_json_writer_new(int indent);
-void            nd_json_writer_free(nd_json_writer *w);
+void nd_json_writer_free(nd_json_writer *w);
 
 nd_err nd_json_begin_object(nd_json_writer *w);
 nd_err nd_json_end_object(nd_json_writer *w);
@@ -147,4 +147,4 @@ nd_err nd_json_writer_save(const nd_json_writer *w, const char *path);
 }
 #endif
 
-#endif /* ND_JSON_H */
+#endif /* ND_JSON_H_INCLUDED */

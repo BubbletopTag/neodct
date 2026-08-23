@@ -1,0 +1,63 @@
+# NeoDCT C formatting -- docs/c-rewrite/CODING-STANDARDS.md section 2.
+#
+#   4 spaces, no tabs
+#   braces on the same line for control flow, on their own line for functions
+#   100-column soft limit
+#
+# Run before committing:  clang-format -i $(git ls-files 'neodct/src/**/*.[ch]')
+---
+Language: Cpp
+BasedOnStyle: LLVM
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+ContinuationIndentWidth: 4
+
+# Linux style is exactly the rule the standards doc states: functions get a
+# brace on their own line, everything else keeps it on the same line.
+BreakBeforeBraces: Linux
+
+PointerAlignment: Right
+DerivePointerAlignment: false
+ReferenceAlignment: Right
+
+AlignAfterOpenBracket: Align
+# Off, both of them. Aligning assignments and declarations across neighbouring
+# lines makes every unrelated edit reflow its neighbours, which with ten agents
+# in the tree turns into merge conflicts in code nobody touched. Macros are
+# aligned because constant tables genuinely read better that way and they
+# change rarely.
+AlignConsecutiveAssignments: None
+AlignConsecutiveDeclarations: None
+AlignConsecutiveMacros: Consecutive
+AlignEscapedNewlines: Left
+AlignTrailingComments: true
+
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+# A single-statement if with no braces is idiomatic here and appears
+# throughout the standards doc's own examples, so do not add braces.
+InsertBraces: false
+
+BinPackArguments: true
+BinPackParameters: true
+BreakStringLiterals: false
+IndentCaseLabels: false
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+SpaceAfterCStyleCast: false
+SpacesBeforeTrailingComments: 1
+
+# Project headers first and grouped, then system headers. Sorting is on so a
+# merge cannot reorder two agents' includes differently.
+SortIncludes: CaseSensitive
+IncludeBlocks: Preserve
+
+# Comments carry the reasoning in this project; never reflow them.
+ReflowComments: false

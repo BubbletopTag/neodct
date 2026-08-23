@@ -32,8 +32,8 @@
  * Logged in OPEN-QUESTIONS.md.
  */
 
-#ifndef ND_FONT_H
-#define ND_FONT_H
+#ifndef ND_FONT_H_INCLUDED
+#define ND_FONT_H_INCLUDED
 
 #include "nd_types.h"
 
@@ -56,12 +56,12 @@ typedef struct nd_font nd_font;
  * The bitmap is 8-bit coverage, ink_w * ink_h, row-major, owned by the font's
  * cache -- valid until the font is freed, never freed by the caller. */
 typedef struct {
-    uint32_t       codepoint;
-    int32_t        advance; /* whole pixels; see fact 2 above           */
-    int32_t        ink_w;
-    int32_t        ink_h;
-    int32_t        ink_dx; /* pen x + ink_dx == left edge of the ink    */
-    int32_t        ink_dy; /* ascender line + ink_dy == top of the ink  */
+    uint32_t codepoint;
+    int32_t advance; /* whole pixels; see fact 2 above           */
+    int32_t ink_w;
+    int32_t ink_h;
+    int32_t ink_dx;          /* pen x + ink_dx == left edge of the ink    */
+    int32_t ink_dy;          /* ascender line + ink_dy == top of the ink  */
     const uint8_t *coverage; /* ink_w * ink_h bytes, or NULL when blank */
 } nd_glyph;
 
@@ -131,4 +131,4 @@ uint32_t nd_utf8_next(const char **p);
 }
 #endif
 
-#endif /* ND_FONT_H */
+#endif /* ND_FONT_H_INCLUDED */

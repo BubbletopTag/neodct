@@ -32,8 +32,8 @@
  * nd_rect is inclusive of both corners, because Pillow's is. See nd_types.h.
  */
 
-#ifndef ND_IMAGE_H
-#define ND_IMAGE_H
+#ifndef ND_IMAGE_H_INCLUDED
+#define ND_IMAGE_H_INCLUDED
 
 #include "nd_types.h"
 
@@ -55,16 +55,16 @@ typedef enum {
  * exactly as the Python reads img.width and img.height. Do not reach into
  * pixels from widget code -- use the functions below, which clip. */
 typedef struct nd_image {
-    int32_t   w;
-    int32_t   h;
+    int32_t w;
+    int32_t h;
     nd_pixfmt fmt;
-    uint8_t   bpp;      /* bytes per pixel: 3, 4 or 1. Derived from fmt.     */
-    size_t    stride;   /* bytes per row. Rows are tightly packed (w * bpp)  */
-                        /* for images we allocate, but a borrowed view may   */
-                        /* have padding, so always step by stride.           */
-    uint8_t  *pixels;   /* row-major, top row first                          */
-    bool      borrowed; /* true == pixels belong to someone else; free()     */
-                        /* releases only the header                          */
+    uint8_t bpp;     /* bytes per pixel: 3, 4 or 1. Derived from fmt.     */
+    size_t stride;   /* bytes per row. Rows are tightly packed (w * bpp)  */
+                     /* for images we allocate, but a borrowed view may   */
+                     /* have padding, so always step by stride.           */
+    uint8_t *pixels; /* row-major, top row first                          */
+    bool borrowed;   /* true == pixels belong to someone else; free()     */
+                     /* releases only the header                          */
 } nd_image;
 
 static inline uint8_t nd_pixfmt_bpp(nd_pixfmt fmt) ND_UNUSED_FN;
@@ -150,7 +150,7 @@ nd_err nd_image_tobytes(const nd_image *img, uint8_t *out, size_t out_sz);
  * that genuinely plot one pixel. Out-of-range reads return transparent black;
  * out-of-range writes are dropped. */
 nd_color nd_image_get_px(const nd_image *img, int32_t x, int32_t y);
-void     nd_image_set_px(nd_image *img, int32_t x, int32_t y, nd_color c);
+void nd_image_set_px(nd_image *img, int32_t x, int32_t y, nd_color c);
 
 /* ------------------------------------------------------------------ *
  * Compositing -- PIL Image.paste
@@ -262,7 +262,7 @@ nd_err nd_image_brightness(nd_image *img, double factor);
 typedef struct nd_imgcache nd_imgcache;
 
 nd_imgcache *nd_imgcache_new(size_t max_entries);
-void         nd_imgcache_free(nd_imgcache *c);
+void nd_imgcache_free(nd_imgcache *c);
 
 /* Look up, decoding on a miss. Exactly one of max_size and scale may be
  * non-zero; pass 0 and 0.0 for the plain form.
@@ -281,4 +281,4 @@ void nd_imgcache_clear(nd_imgcache *c);
 }
 #endif
 
-#endif /* ND_IMAGE_H */
+#endif /* ND_IMAGE_H_INCLUDED */

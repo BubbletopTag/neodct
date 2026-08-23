@@ -29,8 +29,8 @@
  * again.
  */
 
-#ifndef ND_FB_H
-#define ND_FB_H
+#ifndef ND_FB_H_INCLUDED
+#define ND_FB_H_INCLUDED
 
 #include "nd_image.h"
 #include "nd_types.h"
@@ -54,13 +54,13 @@ typedef struct nd_fb nd_fb;
 /* Open, query, map, zero. Returns ND_ERR_IO with a logged reason on failure.
  * *out is owned by the caller; release with nd_fb_close(). */
 nd_err nd_fb_open(nd_fb **out, const char *path);
-void   nd_fb_close(nd_fb *fb);
+void nd_fb_close(nd_fb *fb);
 
 /* Geometry, as the driver reported it. */
-int32_t    nd_fb_xres(const nd_fb *fb);
-int32_t    nd_fb_yres(const nd_fb *fb);
-int32_t    nd_fb_bpp(const nd_fb *fb);
-size_t     nd_fb_line_length(const nd_fb *fb);
+int32_t nd_fb_xres(const nd_fb *fb);
+int32_t nd_fb_yres(const nd_fb *fb);
+int32_t nd_fb_bpp(const nd_fb *fb);
+size_t nd_fb_line_length(const nd_fb *fb);
 nd_fb_path nd_fb_pixel_path(const nd_fb *fb);
 
 /* Present one frame. The source is centred both ways when it is smaller than
@@ -100,14 +100,14 @@ nd_err nd_fb_pack_rgb565(const nd_image *src, uint8_t *out, size_t out_sz);
 typedef enum { ND_BL_PWM = 0, ND_BL_GPIO, ND_BL_NONE } nd_bl_mode;
 
 nd_bl_mode nd_backlight_mode(void);
-bool       nd_backlight_available(void);
-bool       nd_backlight_set_percent(int32_t percent);
-int32_t    nd_backlight_get_percent(void); /* -1 when unreadable */
-bool       nd_backlight_off(void);
-bool       nd_backlight_on(int32_t percent);
+bool nd_backlight_available(void);
+bool nd_backlight_set_percent(int32_t percent);
+int32_t nd_backlight_get_percent(void); /* -1 when unreadable */
+bool nd_backlight_off(void);
+bool nd_backlight_on(int32_t percent);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* ND_FB_H */
+#endif /* ND_FB_H_INCLUDED */

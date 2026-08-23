@@ -22,8 +22,8 @@
  * same palette; a tag is the same colour whoever printed it.
  */
 
-#ifndef ND_LOG_H
-#define ND_LOG_H
+#ifndef ND_LOG_H_INCLUDED
+#define ND_LOG_H_INCLUDED
 
 #include "nd_types.h"
 
@@ -101,8 +101,9 @@ extern "C" {
  * Python's print("[TAG] ...") produced once logstyle's stdout wrapper had run,
  * including the space after the bracket belonging to the unpainted remainder.
  *
- * Thread-safe: one line is written with a single write(2) so two threads
- * cannot interleave halves of a line. */
+ * Thread-safe: the whole line, newline included, goes out in a single
+ * fwrite(), so two threads cannot interleave halves of a line on the serial
+ * console. */
 void nd_log(const char *tag, const char *fmt, ...) ND_PRINTF(2, 3);
 void nd_logv(const char *tag, const char *fmt, va_list ap);
 
@@ -181,4 +182,4 @@ nd_err nd_log_redirect_serial(char *chosen_out, size_t chosen_sz);
 }
 #endif
 
-#endif /* ND_LOG_H */
+#endif /* ND_LOG_H_INCLUDED */

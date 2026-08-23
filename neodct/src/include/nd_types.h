@@ -16,8 +16,8 @@
  *      A half-open rectangle here would move a pixel on almost every screen.
  */
 
-#ifndef ND_TYPES_H
-#define ND_TYPES_H
+#ifndef ND_TYPES_H_INCLUDED
+#define ND_TYPES_H_INCLUDED
 
 #include <stdarg.h>
 #include <stdbool.h>
@@ -34,8 +34,8 @@ extern "C" {
 
 #if defined(__GNUC__)
 #define ND_PRINTF(fmt_idx, first_arg) __attribute__((format(printf, fmt_idx, first_arg)))
-#define ND_UNUSED_FN __attribute__((unused))
-#define ND_WARN_UNUSED __attribute__((warn_unused_result))
+#define ND_UNUSED_FN                  __attribute__((unused))
+#define ND_WARN_UNUSED                __attribute__((warn_unused_result))
 #else
 #define ND_PRINTF(fmt_idx, first_arg)
 #define ND_UNUSED_FN
@@ -108,8 +108,8 @@ static inline int32_t nd_rect_h(nd_rect r)
     return r.y1 - r.y0 + 1;
 }
 
-#define ND_RECT(X0, Y0, X1, Y1)                                                                    \
-    ((nd_rect){ (int32_t)(X0), (int32_t)(Y0), (int32_t)(X1), (int32_t)(Y1) })
+#define ND_RECT(X0, Y0, X1, Y1) \
+    ((nd_rect){(int32_t)(X0), (int32_t)(Y0), (int32_t)(X1), (int32_t)(Y1)})
 
 /* ------------------------------------------------------------------ *
  * Colour
@@ -124,9 +124,8 @@ typedef struct {
     uint8_t a;
 } nd_color;
 
-#define ND_RGB(R, G, B) ((nd_color){ (uint8_t)(R), (uint8_t)(G), (uint8_t)(B), (uint8_t)255 })
-#define ND_RGBA(R, G, B, A)                                                                        \
-    ((nd_color){ (uint8_t)(R), (uint8_t)(G), (uint8_t)(B), (uint8_t)(A) })
+#define ND_RGB(R, G, B)     ((nd_color){(uint8_t)(R), (uint8_t)(G), (uint8_t)(B), (uint8_t)255})
+#define ND_RGBA(R, G, B, A) ((nd_color){(uint8_t)(R), (uint8_t)(G), (uint8_t)(B), (uint8_t)(A)})
 
 /* Pillow's named colours, which is what the Python source actually writes.
  * "gray" is 128,128,128 -- not 127, and not 0x808080 rounded from anything. */
@@ -189,4 +188,4 @@ nd_err nd_snprintf(char *dst, size_t dst_sz, const char *fmt, ...) ND_PRINTF(3, 
 }
 #endif
 
-#endif /* ND_TYPES_H */
+#endif /* ND_TYPES_H_INCLUDED */
