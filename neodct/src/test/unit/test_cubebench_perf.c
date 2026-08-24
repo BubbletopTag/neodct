@@ -71,14 +71,21 @@
 #endif
 #endif
 
+/* Every figure is the MINIMUM over REPEATS runs, not the mean. Several agents
+ * build in this tree at once and a mean would be a measurement of whoever else
+ * was compiling; the minimum is the closest this can get to the cost with the
+ * machine to itself, and it can only ever be an over-estimate of the true
+ * speed of the code, never an under-estimate. */
+#define REPEATS 5
+
 #ifdef SANITIZED
-#define FRAME_ITERS  60
-#define PART_ITERS   200
-#define BENCH_NOTE   " (SANITIZER BUILD -- these numbers are not comparable)"
+#define FRAME_ITERS 60
+#define PART_ITERS  200
+#define BENCH_NOTE  " (SANITIZER BUILD -- these numbers are not comparable)"
 #else
-#define FRAME_ITERS  2000
-#define PART_ITERS   20000
-#define BENCH_NOTE   ""
+#define FRAME_ITERS 2000
+#define PART_ITERS  20000
+#define BENCH_NOTE  ""
 #endif
 
 static int g_checks;
@@ -283,6 +290,7 @@ static void bench_whole_frame(void)
     void (*shutdown)(void);
     double t0;
     double t1;
+    int32_t rep;
 
     if (!fx_init(&fx, 2u)) {
         CHECK(false, "fixture");
@@ -306,18 +314,31 @@ static void bench_whole_frame(void)
         return;
     }
 
-    nd_capture_set_budget(fx.cap, FRAME_ITERS);
-    t0 = nd_time_monotonic();
-    (void)run(&fx.ui);
-    t1 = nd_time_monotonic();
-    nd_capture_clear_budget(fx.cap);
+    for (rep = 0; rep < REPEATS; rep++) {
+        double ms;
+        uint64_t before = nd_capture_frames_drawn(fx.cap);
+
+        nd_capture_set_budget(fx.cap, FRAME_ITERS);
+        t0 = nd_time_monotonic();
+        (void)run(&fx.ui);
+        t1 = nd_time_monotonic();
+
+        /* nd_capture_clear_budget() resets the exhausted flag, so the claim
+         * that the budget -- and not a key or an error -- ended the loop has
+         * to be made before it. frames_drawn counts the capture's whole life,
+         * not the budget, so the run's own total is the difference. */
+        CHECK_INT(nd_capture_frames_drawn(fx.cap) - before, FRAME_ITERS,
+                  "every budgeted frame was committed");
+        CHECK(nd_capture_exhausted(fx.cap), "the loop ended on the budget, not on a key");
+        CHECK(t1 > t0, "the monotonic clock moved");
+        nd_capture_clear_budget(fx.cap);
+
+        ms = (t1 - t0) * 1000.0 / (double)FRAME_ITERS;
+        if (rep == 0 || ms < g_frame_ms)
+            g_frame_ms = ms;
+    }
     shutdown();
 
-    CHECK_INT(nd_capture_frames_drawn(fx.cap), FRAME_ITERS, "every budgeted frame was committed");
-    CHECK(nd_capture_exhausted(fx.cap), "the loop ended on the budget, not on a key");
-    CHECK(t1 > t0, "the monotonic clock moved");
-
-    g_frame_ms = (t1 - t0) * 1000.0 / (double)FRAME_ITERS;
     printf("  whole frame          %8.4f ms   %9.0f fps%s\n", g_frame_ms,
            g_frame_ms > 0.0 ? 1000.0 / g_frame_ms : 0.0, BENCH_NOTE);
 
@@ -352,10 +373,11 @@ static void bench_parts(double *text_ms_out)
     double t1;
     int32_t i;
     int32_t j;
-    double clear_ms;
-    double lines_ms;
-    double text_ms;
-    double blit_ms;
+    int32_t rep;
+    double clear_ms = 0.0;
+    double lines_ms = 0.0;
+    double text_ms = 0.0;
+    double blit_ms = 0.0;
 
     *text_ms_out = 0.0;
     if (!fx_init(&fx, 2u)) {
@@ -364,42 +386,54 @@ static void bench_parts(double *text_ms_out)
         return;
     }
 
-    /* Pillow: draw.rectangle((0, 0, 240, 145), fill="black"). */
-    t0 = nd_time_monotonic();
-    for (i = 0; i < PART_ITERS; i++)
-        (void)nd_draw_rect_fill(fx.ui.draw, ND_RECT(0, 0, ND_UI_W, ND_UI_H - ND_SOFTKEY_H),
-                                ND_BLACK);
-    t1 = nd_time_monotonic();
-    clear_ms = ms_per(t0, t1, PART_ITERS);
+    for (rep = 0; rep < REPEATS; rep++) {
+        double ms;
 
-    /* Pillow: twelve draw.line(..., width=1). */
-    t0 = nd_time_monotonic();
-    for (i = 0; i < PART_ITERS; i++) {
-        for (j = 0; j < 12; j++) {
-            int32_t a = EDGES[j][0];
-            int32_t b = EDGES[j][1];
+        /* Pillow: draw.rectangle((0, 0, 240, 145), fill="black"). */
+        t0 = nd_time_monotonic();
+        for (i = 0; i < PART_ITERS; i++)
+            (void)nd_draw_rect_fill(fx.ui.draw, ND_RECT(0, 0, ND_UI_W, ND_UI_H - ND_SOFTKEY_H),
+                                    ND_BLACK);
+        t1 = nd_time_monotonic();
+        ms = ms_per(t0, t1, PART_ITERS);
+        if (rep == 0 || ms < clear_ms)
+            clear_ms = ms;
 
-            (void)nd_draw_line(fx.ui.draw, PROJ[a][0], PROJ[a][1], PROJ[b][0], PROJ[b][1], ND_WHITE,
-                               1);
+        /* Pillow: twelve draw.line(..., width=1). */
+        t0 = nd_time_monotonic();
+        for (i = 0; i < PART_ITERS; i++) {
+            for (j = 0; j < 12; j++) {
+                int32_t a = EDGES[j][0];
+                int32_t b = EDGES[j][1];
+
+                (void)nd_draw_line(fx.ui.draw, PROJ[a][0], PROJ[a][1], PROJ[b][0], PROJ[b][1],
+                                   ND_WHITE, 1);
+            }
         }
+        t1 = nd_time_monotonic();
+        ms = ms_per(t0, t1, PART_ITERS);
+        if (rep == 0 || ms < lines_ms)
+            lines_ms = ms;
+
+        /* Pillow: draw.text((x, 16), "FPS 60.0", font=font_s). THE 75%. */
+        t0 = nd_time_monotonic();
+        for (i = 0; i < PART_ITERS; i++)
+            (void)nd_draw_text(fx.ui.draw, 170, 16, FPS_LABEL, fx.ui.font_s, ND_WHITE);
+        t1 = nd_time_monotonic();
+        ms = ms_per(t0, t1, PART_ITERS);
+        if (rep == 0 || ms < text_ms)
+            text_ms = ms;
+
+        /* Pillow: canvas.tobytes() and the write into the mmap. Here it is
+         * nd_capture's row-by-row copy, the same 126,000 bytes moved. */
+        t0 = nd_time_monotonic();
+        for (i = 0; i < PART_ITERS; i++)
+            (void)nd_fb_update(fx.ui.fb, fx.canvas);
+        t1 = nd_time_monotonic();
+        ms = ms_per(t0, t1, PART_ITERS);
+        if (rep == 0 || ms < blit_ms)
+            blit_ms = ms;
     }
-    t1 = nd_time_monotonic();
-    lines_ms = ms_per(t0, t1, PART_ITERS);
-
-    /* Pillow: draw.text((x, 16), "FPS 60.0", font=font_s). THE 75%. */
-    t0 = nd_time_monotonic();
-    for (i = 0; i < PART_ITERS; i++)
-        (void)nd_draw_text(fx.ui.draw, 170, 16, FPS_LABEL, fx.ui.font_s, ND_WHITE);
-    t1 = nd_time_monotonic();
-    text_ms = ms_per(t0, t1, PART_ITERS);
-
-    /* Pillow: canvas.tobytes() and the write into the mmap. Here it is
-     * nd_capture's row-by-row copy, which is the same 126,000 bytes moved. */
-    t0 = nd_time_monotonic();
-    for (i = 0; i < PART_ITERS; i++)
-        (void)nd_fb_update(fx.ui.fb, fx.canvas);
-    t1 = nd_time_monotonic();
-    blit_ms = ms_per(t0, t1, PART_ITERS);
 
     printf("  clear content rect   %8.4f ms\n", clear_ms);
     printf("  12 wireframe lines   %8.4f ms\n", lines_ms);
@@ -437,8 +471,9 @@ static void bench_glyph_cache(double cached_text_ms)
     FT_Face face = NULL;
     double t0;
     double t1;
-    double raster_ms;
+    double raster_ms = 0.0;
     int32_t i;
+    int32_t rep;
     const char *p;
 
     if (FT_Init_FreeType(&lib) != 0) {
@@ -457,18 +492,24 @@ static void bench_glyph_cache(double cached_text_ms)
         return;
     }
 
-    t0 = nd_time_monotonic();
-    for (i = 0; i < PART_ITERS; i++) {
-        for (p = FPS_LABEL; *p != '\0'; p++) {
-            FT_UInt idx = FT_Get_Char_Index(face, (FT_ULong)(unsigned char)*p);
+    for (rep = 0; rep < REPEATS; rep++) {
+        double ms;
 
-            if (FT_Load_Glyph(face, idx, FT_LOAD_DEFAULT) != 0)
-                continue;
-            (void)FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL);
+        t0 = nd_time_monotonic();
+        for (i = 0; i < PART_ITERS; i++) {
+            for (p = FPS_LABEL; *p != '\0'; p++) {
+                FT_UInt idx = FT_Get_Char_Index(face, (FT_ULong)(unsigned char)*p);
+
+                if (FT_Load_Glyph(face, idx, FT_LOAD_DEFAULT) != 0)
+                    continue;
+                (void)FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL);
+            }
         }
+        t1 = nd_time_monotonic();
+        ms = ms_per(t0, t1, PART_ITERS);
+        if (rep == 0 || ms < raster_ms)
+            raster_ms = ms;
     }
-    t1 = nd_time_monotonic();
-    raster_ms = ms_per(t0, t1, PART_ITERS);
 
     printf("  \"%s\" FreeType per call:\n", FPS_LABEL);
     printf("    rasterise 8 glyphs %8.4f ms\n", raster_ms);
