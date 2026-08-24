@@ -2882,3 +2882,254 @@ here it is the right answer, because the reference frame **is** the first screen
 draws. `shoot_stock_apps()` was also restructured to build a fresh `nd_ui` and a fresh
 virtual clock per case, which is what `with StubUI(...)` does per case in the recipe and
 what it did not do before.
+
+---
+
+## Messages (`apps/Messages/`, work package MSG)
+
+Landed as `apps/Messages/main.c`, `apps/Messages/msg_db.c` and
+`apps/Messages/messages.h`, with `test/unit/test_messages.c` (150 checks) and the two
+golden frames `app-messages` and `app-messages-inbox` now rendered by `nd-shoot`. Both
+match the reference byte for byte: **0 differing pixels each**, confirmed by the SHA-256
+over raw RGB inside `test_messages.c` and again by `goldenframe.py --compare`.
+
+### MSG-1. Sending an SMS from an app process cannot reach the modem
+
+**Found in:** `Messages/main.py:246-266`, `_send_message_flow()`.
+
+```python
+modem = getattr(ui, "modem", None)
+if modem is None:
+    MessageDialog(ui, "ModemService is not running.").show()
+    return False
+...
+ok, detail = modem.send_sms(number, text)
+```
+
+The Python branch exists and is never taken, because Messages runs **inside the core
+process**, where `ui.modem` is the live `ModemService`. With process-per-app it is always
+taken: `nd_app.h` is explicit that the modem, battery and notify handles "live in the
+core and are NULL in an app's context", and `nd_ui_init_app()` leaves `ui->modem` NULL.
+
+**Ported exactly.** `nd_msg_send_flow()` tests `ui->modem == NULL`, shows that dialog,
+and otherwise calls `nd_modem_send_sms(ui->modem, number, body, detail, sizeof detail)` —
+the corpus-tested CMGS `>` prompt + Ctrl-Z + `+CMGS` ack path, not a second serial
+implementation. So the code is 1:1 and the *outcome* is not: on the phone today, Write
+Message -> Options -> Send gets as far as the number field and then says
+"ModemService is not running."
+
+This is the same shape as PB-5 ("Call" does not call) and has the same fix: a route from
+an app to the core's services. **Question for the owner:** should that route be a small
+request/response protocol over the existing app pipe (the core already owns the modem
+thread and would do the CMGS transaction on the app's behalf), or should Messages move
+back into the core the way `nd_contacts.c` did? A send takes up to 30 s
+(`ND_SMS_SEND_TIMEOUT_S`), so whichever it is has to be asynchronous or the core stops
+polling the modem while an app is texting.
+
+Until it is answered, `test_send_flow_without_a_modem` pins the current behaviour so the
+day it changes, it changes deliberately.
+
+### MSG-2. The list screens read at most 128 rows
+
+**Found in:** `Messages/main.py:88-105`, `_fetch_inbox_messages()` / `_fetch_outbox_messages()`.
+
+Both return every row in the table and `_show_inbox` puts every one of them on a
+`VerticalList`. `CODING-STANDARDS.md` section 1.5 will not have an array sized by the
+database, so `ND_MSG_LIST_MAX` is 128 and a list screen shows the newest 128.
+`sizeof(nd_msg_rec)` is 1,112 bytes, so the three arrays together are about 139 KB,
+`calloc`ed when the screen opens and freed before it returns — one live allocation per
+list screen and never one per frame.
+
+A SIM holds about 30 SMS slots and `nd_modem_read_stored_sms()` sweeps them into the
+inbox one at a time, so 128 is well above what the hardware can put there in one go. It
+is *not* above what years of texts would accumulate, and the Python has no purge. Same
+question as PB-2: is silently showing the newest 128 acceptable, or should the inbox
+paginate?
+
+### MSG-3. None of the seven statements has any exception handling
+
+**Found in:** `Messages/main.py:88-171`.
+
+Every query is a bare `sqlite3.connect(...)` / `execute` / `close` with no `try`. A
+locked database or a full filesystem therefore raises out of the app and reaches the
+crash screen. The C logs nothing and carries on, which is the same deliberate divergence
+`PB-6` records for `delete_contact_action()`: crashing the messaging app over a transient
+sqlite error is worse than the "Erased!" dialog being slightly wrong. `nd_msg_save_outbox()`
+is the one that returns an `nd_err`, and its only caller ignores it — as the Python does,
+whose `_save_outbox_message()` returns nothing and whose caller shows "Saved!"
+unconditionally.
+
+### MSG-4. `if result == "deleted": continue` is a no-op, and the spec says otherwise
+
+**Found in:** `Messages/main.py:352-372` (`_show_inbox`) and `:374-394` (`_show_outbox`).
+
+```python
+        result = _show_message_detail(...)
+        if result == "deleted":
+            continue
+```
+
+That `continue` is the **last statement in the `while True` body**, so the loop repeats
+whether the detail screen returned `"deleted"` or `None`. Backing out of a message
+returns to the inbox list, and only Back *on the list* leaves Messages.
+
+`spec-apps-core.md` section 7 reads it the other way round — *"Note the loop only
+continues on `"deleted"`; a normal Back out of the detail screen ends `_show_inbox`
+entirely"* — and that is wrong. The Python is the oracle, so the C loops.
+`test_inbox_marks_read_on_open` needs three Back presses to leave, which is what pins it.
+
+**Action for the owner:** the spec paragraph should be corrected, or the behaviour
+changed on purpose. They currently disagree.
+
+### MSG-5. How `nd-shoot` stops each of the two frames
+
+**Found in:** `neodct/tools/shoot_docs.py:104-105`.
+
+```python
+("Messages", [],      "app-messages",       -1, 240),
+("Messages", [ENTER], "app-messages-inbox", -1, 240),
+```
+
+Both recipes end the screen with `ScriptExhausted`, which C cannot raise out of a
+blocking read.
+
+`app-messages` is straightforward and is done the way `app-phonebook` is done: a **held
+Back**. `nd_pagedlist_show()` drains the channel before its first draw (the 0.01 s poll
+`nd_input.h` insists on keeping distinct from MessageDialog's 0.0), so a queued key would
+be eaten; the held press survives the drain and its first repeat arrives after the frame
+is committed. `run()` returns, and the frame already on the canvas is the one saved.
+
+`app-messages-inbox` could not be done that way. Enter picks "Inbox", the empty inbox
+paints `_show_empty_state`, and **that screen exits on key 14 alone** — so the only key
+that gets out of it also sends the app back to the root menu, which redraws and becomes
+the last frame. The alternatives were both worse: freezing the recording with
+`nd_capture_set_budget()` means hardcoding a frame count, and saving `nd_capture_recent(cap, 1)`
+means hardcoding how many frames a PagedList redraw commits.
+
+So that frame is captured through **`app_open_inbox()`** — the entry point the core
+really calls when the notification banner is opened with several unread messages
+(`nd_app.h`, `spec-apps-core.md` section C3). It is `_show_inbox(ui, 2, 1)`: the same
+function with the same arguments that the root menu's `sel == 0` branch calls, so the
+pixels are the same screen by construction, the app is genuinely launched and genuinely
+draws it, and the one entry point that had no coverage anywhere (X-23 noted exactly that)
+now has some. `test_messages.c` renders the frame both ways — through `app_open_inbox()`
+and through `nd_msg_show_empty_state()` directly — and both digests match the reference.
+
+**Question for the owner:** is that substitution acceptable, or should `nd-shoot` grow a
+general "stop the app at frame N" mechanism so every remaining app can be shot exactly
+along the recipe's path?
+
+### MSG-6. `_show_stub_screen()` is dead code and is not ported
+
+**Found in:** `Messages/main.py:32-51`.
+
+No caller anywhere in the tree. `spec-apps-core.md` already says so; recorded here so
+that "the C is missing a function the Python has" is a known answer rather than a bug
+report.
+
+### MSG-7. `_wrap_text()` is the fifth word-wrapper, and it is not any of the other four
+
+**Found in:** `Messages/main.py:53-86`.
+
+`nd_text.h` already documents four that disagree, and `nd_widgets.h` adds PagedList's as
+a fifth. This is a sixth. What makes it its own function:
+
+* `text.split()` with no argument, so runs of whitespace collapse and **newlines are
+  lost** — a multi-line SMS renders as one paragraph.
+* an empty or whitespace-only string returns **one empty line**, not zero.
+* a word too wide for the column is trimmed until `word + "..."` fits and gets that
+  `"..."` **unconditionally**, including when it is the last word. `nd_pagedlist_wrap()`
+  deliberately does not, and `nd_widgets.h` says that difference is visible on the Call
+  Log.
+* after such a word, `current` is reset to `""`, so the next word starts a fresh line
+  rather than joining the trimmed one.
+
+It is `nd_msg_wrap_text()` in `apps/Messages/main.c`, not in `nd_text.c`: it belongs to
+this app, and moving it next to the other five would invite exactly the merge that
+`nd_text.h`'s header warns against.
+
+One deviation, and it is a correctness one: Python's `word[:-1]` drops one **character**,
+so the C drops one whole UTF-8 code point rather than one byte. Dropping a byte would
+leave a truncated sequence that the font cannot measure or draw. No golden frame contains
+non-ASCII, so nothing observable changes.
+
+### MSG-8. Two small things that are reproduced rather than fixed
+
+1. **The outbox is re-created without the WAL pragma.** `init_databases()` in the core
+   creates `sms_outbox.db` with `PRAGMA journal_mode=WAL`; `_save_outbox_message()`
+   re-issues a bare `CREATE TABLE IF NOT EXISTS outbox`. On a phone the core has booted
+   this is invisible, because `journal_mode` lives in the file header. On one whose
+   outbox was deleted, this app brings it back in rollback-journal mode. Same asymmetry
+   `nd_db.h` records for the call log, and reproduced for the same reason.
+   The CREATE text in `msg_db.c` is the app's own indentation, deliberately **not**
+   `ND_SCHEMA_OUTBOX`: sqlite stores the statement verbatim in `sqlite_master`, so the
+   two are different bytes in a `.dump` depending on which one ran first.
+
+2. **No softkey is set before the detail page's Options list.** `_show_message_detail()`
+   opens a `VerticalList` without touching the bar, and `VerticalList.draw()` clears only
+   rows 0..145 — so the "Options" the detail screen painted is still there above the
+   options menu. Reproduced; it is what the phone shows.
+
+3. **The composer capitalises the first character.** `TextInputLong.handle_key()` does
+   `if len(self.text) == 0: char = char.upper()` (framework.py:762 and 973-975), so a
+   draft saved to the outbox starts with a capital. Not a Messages behaviour at all, but
+   it surprised this port's first test and is worth having written down.
+
+---
+
+### MSG-W. `test_messages.c:752` asserts the wrong wrap result — the C is right
+
+**Status: verified against the Python. Fix the TEST, not `nd_msg_wrap_text`.**
+
+The assertion is:
+
+```c
+g_api.wrap_text(&lines, &fx.ui, "aaa bbb ccc ddd", 60, fx.font_n);
+CHECK_STR(nd_lines_at(&lines, 0), "aaa bbb");   /* <- wrong */
+```
+
+Measured on the shipped `font.ttf` at `font_n` (size 20), BASIC layout:
+
+| string | advance |
+| --- | --- |
+| `"aaa"` | 48 px |
+| `"aaa bbb"` | **104 px** |
+
+The column is 60 px, so `"aaa bbb"` cannot fit and the greedy fill is right to
+break after `"aaa"`. Confirmed by running the real Python:
+
+```
+Messages._wrap_text("aaa bbb ccc ddd", 60, font_n)  ->  ['aaa', 'bbb', 'ccc', 'ddd']
+```
+
+`nd_msg_wrap_text` returns `"aaa"` for line 0, which matches. The expectation
+was written without measuring.
+
+**Do not make the C produce `"aaa bbb"`.** That would diverge Messages'
+wrapping from the Python for every narrow column on the phone, to satisfy an
+assertion that was never true.
+
+#### While confirming this: the line above it is right for a non-obvious reason
+
+```c
+g_api.wrap_text(&lines, &fx.ui, "hello\nthere", 220, fx.font_n);
+CHECK_INT(lines.n, 1);
+CHECK_STR(nd_lines_at(&lines, 0), "hello there");
+```
+
+That looks wrong — the framework's `_wrap_lines` splits on `\n` and would give
+two lines — but Messages does **not** use `_wrap_lines`. Its own `_wrap_text`
+starts with `(text or "").split()`, which splits on *all* whitespace including
+newlines and then rejoins the words with single spaces. So one line
+`"hello there"` is genuinely correct here:
+
+```
+Messages._wrap_text("hello\nthere", 220, font_n)  ->  ['hello there']
+```
+
+This is exactly the trap `nd_text.h` warns about at the top of the file: there
+are **six** text-fitting routines in the Python and they deliberately disagree.
+Checking `nd_msg_wrap_text` against `_wrap_lines` gives the wrong answer in both
+directions. Check every text routine against *its own* Python original.
+
+**Answer:** _(no owner decision needed — this is a test fix)_
