@@ -1,6 +1,14 @@
 BR2_arm=y
 BR2_cortex_a7=y
-BR2_ARM_FPU_NEON=y
+# The RV1103's Cortex-A7 really does have VFPv4 and NEON with Fused-MAC:
+# the displayd binary that ran on the board reports Tag_FP_arch VFPv4 and
+# Tag_Advanced_SIMD_arch "NEONv1 with Fused-MAC". Plain -mfpu=neon is the
+# VFPv3-era setting and leaves both unused.
+BR2_ARM_FPU_NEON_VFPV4=y
+# Thumb-2 is roughly 30% denser than ARM for the same code. On a part with
+# 32 KB of L1 instruction cache that density buys more than the occasional
+# extra instruction costs.
+BR2_ARM_INSTRUCTIONS_THUMB2=y
 BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_12=y
 BR2_JLEVEL=8
 BR2_GLOBAL_PATCH_DIR="board/qemu/patches"
