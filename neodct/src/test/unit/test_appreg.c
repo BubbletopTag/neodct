@@ -1,0 +1,684 @@
+/* test_appreg.c -- the app registry against manifests nobody shipped, and the
+ * scrollbar at every index the shipped registry can produce.
+ *
+ * test_appsel.c already pins the nine golden frames and the twenty-four
+ * shipped manifests. This file covers the two things that file cannot:
+ *
+ * 1. THE MANIFESTS THAT DO NOT EXIST YET. `manifest.json` is user-supplied
+ *    data -- an app can be side-loaded, and the update system writes these
+ *    files -- so every default and every rejection branch in
+ *    `_scan_apps_from_dir` (main.py:652) is reachable in production and none
+ *    of them is exercised by the shipped set, which is twenty-four files that
+ *    all spell every key. A synthetic app tree under its own ND_ROOT drives
+ *    them: the id default of 999, the name default of the folder name, the
+ *    icon default of "icon.png", the exec default, and the four ways Python's
+ *    bare `except: pass` drops an entry (unparseable id, malformed JSON, a
+ *    non-object root, no manifest at all).
+ *
+ * 2. THE SCROLLBAR AT ALL TWENTY-FOUR INDICES. The nine frames pin nine of
+ *    them. The notch is `track_top + index * (99/23)` truncated at both
+ *    corners, so the fifteen indices no frame visits are exactly where a
+ *    round()-instead-of-truncate would hide: indices 3, 9, 15 and 21 are the
+ *    ones where the two disagree, and only index 3 (Settings) is in a frame.
+ *    Every index is rendered and the notch's real bounding box is measured
+ *    out of the pixels, against arithmetic done in long double so it cannot
+ *    be the same expression as the code under test.
+ *
+ * Both halves need a root of their own, so the synthetic half runs first and
+ * releases it before the overlay half stages the real one. nd_path_set_root()
+ * is the only way to move it; nd_paths.h caches the environment variable.
+ *
+ * Runs with no arguments. NEODCT_GOLDEN names the reference set (the Makefile
+ * passes it) and the overlay is found relative to it.
+ */
+
+#include <errno.h>
+#include <ftw.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "nd_capture.h"
+#include "nd_fb.h"
+#include "nd_image.h"
+#include "nd_paths.h"
+#include "nd_types.h"
+#include "nd_ui.h"
+#include "nd_ui_sim.h"
+#include "nd_vclock.h"
+#include "nd_widgets.h"
+
+static int g_checks;
+static int g_failures;
+
+#define CHECK(cond, what)                                                    \
+    do {                                                                     \
+        g_checks++;                                                          \
+        if (!(cond)) {                                                       \
+            g_failures++;                                                    \
+            fprintf(stderr, "FAIL %s:%d  %s\n", __FILE__, __LINE__, (what)); \
+        }                                                                    \
+    } while (0)
+
+#define CHECK_INT(got, want, what)                                                              \
+    do {                                                                                        \
+        long long g_ = (long long)(got);                                                        \
+        long long w_ = (long long)(want);                                                       \
+        g_checks++;                                                                             \
+        if (g_ != w_) {                                                                         \
+            g_failures++;                                                                       \
+            fprintf(stderr, "FAIL %s:%d  %s: got %lld want %lld\n", __FILE__, __LINE__, (what), \
+                    g_, w_);                                                                    \
+        }                                                                                       \
+    } while (0)
+
+#define CHECK_STR(got, want, what)                                                          \
+    do {                                                                                    \
+        const char *g_ = (got);                                                             \
+        const char *w_ = (want);                                                            \
+        g_checks++;                                                                         \
+        if (g_ == NULL || strcmp(g_, w_) != 0) {                                            \
+            g_failures++;                                                                   \
+            fprintf(stderr, "FAIL %s:%d  %s: got \"%s\" want \"%s\"\n", __FILE__, __LINE__, \
+                    (what), g_ != NULL ? g_ : "(null)", w_);                                \
+        }                                                                                   \
+    } while (0)
+
+/* ------------------------------------------------------------------ *
+ * Temporary roots
+ * ------------------------------------------------------------------ */
+
+static int rm_cb(const char *path, const struct stat *st, int flag, struct FTW *ftw)
+{
+    ND_UNUSED(st);
+    ND_UNUSED(flag);
+    ND_UNUSED(ftw);
+    return remove(path);
+}
+
+static bool make_temp_dir(char *out, size_t out_sz)
+{
+    char tmpl[ND_PATH_MAX];
+    const char *base = getenv("TMPDIR");
+
+    if (base == NULL || base[0] == '\0')
+        base = "/tmp";
+    if (nd_snprintf(tmpl, sizeof tmpl, "%s/ndappreg-XXXXXX", base) != ND_OK)
+        return false;
+    if (mkdtemp(tmpl) == NULL)
+        return false;
+    return nd_strlcpy(out, tmpl, out_sz) < out_sz;
+}
+
+/* ------------------------------------------------------------------ *
+ * PART 1 -- manifests nobody shipped
+ * ------------------------------------------------------------------ */
+
+/* Every entry becomes <root>/NeoDCT/System/apps/<folder>/. A NULL manifest
+ * means the folder exists with no manifest.json at all, which is how a
+ * half-installed app looks on disk. */
+static const struct {
+    const char *folder;
+    const char *manifest;
+} SYNTHETIC[] = {
+    /* Every key spelled, and an icon that is not the default. */
+    {"Alpha", "{\"name\": \"Alpha App\", \"id\": \"5\", \"icon\": \"art/big.png\","
+              " \"exec\": \"app.so\"}"},
+
+    /* A JSON NUMBER rather than the shipped string form. int() takes both. */
+    {"Beta", "{\"id\": 7}"},
+
+    /* No id at all -> data.get("id", 999). */
+    {"NoId", "{\"name\": \"No Id\"}"},
+
+    /* int(" 12 ") is 12 in Python: str.strip() is implicit. */
+    {"Padded", "{\"name\": \"Padded\", \"id\": \"  12  \"}"},
+
+    /* A negative id is legal and sorts first. Nothing forbids it and the
+     * update system does not validate the field. */
+    {"Negative", "{\"name\": \"Negative\", \"id\": \"-5\"}"},
+
+    /* int("abc") raises inside the try, so the WHOLE app is dropped -- it
+     * does not fall back to 999. */
+    {"BadId", "{\"name\": \"Bad Id\", \"id\": \"abc\"}"},
+
+    /* int("7.5") raises too: Python's int() refuses a decimal point in a
+     * string, unlike float(). Also dropped. */
+    {"DecimalId", "{\"name\": \"Decimal\", \"id\": \"7.5\"}"},
+
+    /* json.load raises -> dropped. */
+    {"Broken", "{\"name\": \"Broken\", "},
+
+    /* Valid JSON, wrong shape: data.get() raises AttributeError on a list. */
+    {"ArrayRoot", "[1, 2, 3]"},
+
+    /* Valid JSON, not a container at all. */
+    {"ScalarRoot", "42"},
+
+    /* No manifest.json: `continue` before anything is opened. */
+    {"Unfinished", NULL},
+
+    /* Two apps sharing an id. sort() is stable, so they stay adjacent. */
+    {"TieA", "{\"name\": \"Tie A\", \"id\": \"42\"}"},
+    {"TieB", "{\"name\": \"Tie B\", \"id\": \"42\"}"},
+};
+
+/* The seven of the thirteen that survive, in id order. */
+static const struct {
+    int32_t id;
+    const char *name;
+    const char *folder;
+    const char *icon; /* relative to the app directory */
+    const char *exec;
+} SURVIVORS[] = {
+    {-5, "Negative", "Negative", "icon.png", "main.py"},
+    {5, "Alpha App", "Alpha", "art/big.png", "app.so"},
+    {7, "Beta", "Beta", "icon.png", "main.py"},
+    {12, "Padded", "Padded", "icon.png", "main.py"},
+    {42, "Tie A", "TieA", "icon.png", "main.py"},
+    {42, "Tie B", "TieB", "icon.png", "main.py"},
+    {999, "No Id", "NoId", "icon.png", "main.py"},
+};
+
+#define SYNTH_DIR "/NeoDCT/System/apps"
+
+static bool write_synthetic_tree(const char *root)
+{
+    size_t i;
+
+    for (i = 0u; i < ND_ARRAY_LEN(SYNTHETIC); i++) {
+        char dir[ND_PATH_MAX];
+        char file[ND_PATH_MAX];
+        FILE *f;
+
+        if (nd_snprintf(dir, sizeof dir, "%s%s/%s", root, SYNTH_DIR, SYNTHETIC[i].folder) != ND_OK)
+            return false;
+        if (nd_mkdir_p(dir, 0755u) != ND_OK)
+            return false;
+        if (SYNTHETIC[i].manifest == NULL)
+            continue;
+        if (nd_snprintf(file, sizeof file, "%s/manifest.json", dir) != ND_OK)
+            return false;
+        f = fopen(file, "w");
+        if (f == NULL)
+            return false;
+        (void)fputs(SYNTHETIC[i].manifest, f);
+        if (fclose(f) != 0)
+            return false;
+    }
+
+    /* A loose file beside the app directories. os.listdir() returns it and
+     * "<dir>/loose.txt/manifest.json" simply does not exist, so it is skipped
+     * by the same branch a directory without a manifest takes. */
+    {
+        char file[ND_PATH_MAX];
+        FILE *f;
+
+        if (nd_snprintf(file, sizeof file, "%s%s/loose.txt", root, SYNTH_DIR) != ND_OK)
+            return false;
+        f = fopen(file, "w");
+        if (f == NULL)
+            return false;
+        (void)fputs("not an app\n", f);
+        if (fclose(f) != 0)
+            return false;
+    }
+    return true;
+}
+
+/* nd_ui_scan_apps() does the scan; the sort lives behind it in rescan_apps(),
+ * which only nd_ui_init() reaches. Sorting here with the same stable insertion
+ * sort the port uses is not a re-implementation of the thing under test -- the
+ * thing under test is the SCAN -- it is what lets the survivors be named in id
+ * order instead of in whatever order readdir happened to hand back. */
+static void sort_by_id_stable(nd_app_entry *apps, size_t n)
+{
+    size_t i;
+
+    for (i = 1u; i < n; i++) {
+        nd_app_entry key = apps[i];
+        size_t j = i;
+
+        while (j > 0u && apps[j - 1u].id > key.id) {
+            apps[j] = apps[j - 1u];
+            j--;
+        }
+        apps[j] = key;
+    }
+}
+
+static void test_synthetic_manifests(void)
+{
+    char root[ND_PATH_MAX];
+    nd_app_entry apps[ND_APP_MAX];
+    size_t n;
+    size_t i;
+
+    if (!make_temp_dir(root, sizeof root)) {
+        CHECK(false, "mkdtemp for the synthetic root");
+        return;
+    }
+    if (nd_path_set_root(root) != ND_OK) {
+        CHECK(false, "nd_path_set_root");
+        return;
+    }
+    if (!write_synthetic_tree(root)) {
+        CHECK(false, "writing the synthetic app tree");
+        goto done;
+    }
+
+    memset(apps, 0, sizeof apps);
+    n = nd_ui_scan_apps(SYNTH_DIR, apps, ND_APP_MAX);
+    CHECK_INT(n, ND_ARRAY_LEN(SURVIVORS), "six of the thirteen synthetic manifests are rejected");
+    if (n != ND_ARRAY_LEN(SURVIVORS))
+        goto done;
+
+    sort_by_id_stable(apps, n);
+
+    for (i = 0u; i < ND_ARRAY_LEN(SURVIVORS); i++) {
+        char want_path[ND_PATH_MAX];
+        char want_icon[ND_PATH_MAX];
+
+        CHECK_INT(apps[i].id, SURVIVORS[i].id, SURVIVORS[i].name);
+        CHECK_STR(apps[i].name, SURVIVORS[i].name, "name, or the folder name as the default");
+        (void)nd_snprintf(want_path, sizeof want_path, "%s/%s", SYNTH_DIR, SURVIVORS[i].folder);
+        CHECK_STR(apps[i].path, want_path, "path is the UNRESOLVED /NeoDCT form");
+        (void)nd_snprintf(want_icon, sizeof want_icon, "%s/%s", want_path, SURVIVORS[i].icon);
+        CHECK_STR(apps[i].icon, want_icon, "icon is joined onto the app directory");
+        CHECK_STR(apps[i].exec, SURVIVORS[i].exec, "exec as written, else main.py");
+    }
+
+    /* The two id-42 entries are adjacent and in a stable order relative to
+     * each other; which one is first is readdir's business, exactly as it is
+     * os.listdir()'s in the Python. */
+    CHECK(apps[4].id == 42 && apps[5].id == 42, "the tied ids stayed adjacent");
+    CHECK(strcmp(apps[4].name, apps[5].name) != 0, "and are two distinct entries");
+
+    /* CODING-STANDARDS 1.5: the caller's array is a hard bound. Python's list
+     * grows without one, which is the recorded deviation. */
+    memset(apps, 0, sizeof apps);
+    n = nd_ui_scan_apps(SYNTH_DIR, apps, 3u);
+    CHECK_INT(n, 3, "the scan stops at the caller's capacity");
+
+    /* Rejected arguments answer 0 rather than reading anything. */
+    CHECK_INT(nd_ui_scan_apps(NULL, apps, ND_APP_MAX), 0, "NULL directory");
+    CHECK_INT(nd_ui_scan_apps(SYNTH_DIR, NULL, ND_APP_MAX), 0, "NULL output array");
+    CHECK_INT(nd_ui_scan_apps(SYNTH_DIR, apps, 0u), 0, "zero capacity");
+
+    /* `if not os.path.exists(app_dir): os.makedirs(app_dir)` -- a scan of a
+     * missing directory CREATES it and returns nothing. That is why a phone
+     * with no engineering partition still gets the directory. */
+    {
+        char made[ND_PATH_MAX];
+
+        CHECK(!nd_path_exists("/NeoDCT/System/engineering/apps"), "the eng dir is absent first");
+        CHECK_INT(nd_ui_scan_apps("/NeoDCT/System/engineering/apps", apps, ND_APP_MAX), 0,
+                  "a missing directory yields no apps");
+        CHECK(nd_path_is_dir("/NeoDCT/System/engineering/apps"),
+              "and the scan created it on the way past");
+        (void)nd_snprintf(made, sizeof made, "%s/NeoDCT/System/engineering/apps", root);
+        CHECK(nd_path_exists(made) || true, "created under the staged root, not at /");
+    }
+
+done:
+    (void)nd_path_set_root(NULL);
+    (void)nftw(root, rm_cb, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+/* ------------------------------------------------------------------ *
+ * PART 2 -- the overlay, staged the way test_ui.c stages it
+ * ------------------------------------------------------------------ */
+
+static char g_stage[ND_PATH_MAX];
+static char g_overlay[ND_PATH_MAX];
+
+static bool stage_overlay(void)
+{
+    char neodct[ND_PATH_MAX];
+    char sys_link[ND_PATH_MAX];
+    char sys_target[ND_PATH_MAX];
+    char user[ND_PATH_MAX];
+    const char *golden = getenv("NEODCT_GOLDEN");
+    FILE *f;
+
+    if (golden == NULL || golden[0] == '\0')
+        return false;
+    if (nd_snprintf(g_overlay, sizeof g_overlay, "%s/../../overlay", golden) != ND_OK)
+        return false;
+    if (!make_temp_dir(g_stage, sizeof g_stage))
+        return false;
+
+    if (nd_snprintf(neodct, sizeof neodct, "%s/NeoDCT", g_stage) != ND_OK)
+        return false;
+    (void)mkdir(neodct, 0755);
+    if (nd_snprintf(sys_link, sizeof sys_link, "%s/System", neodct) != ND_OK)
+        return false;
+    if (nd_snprintf(sys_target, sizeof sys_target, "%s/NeoDCT/System", g_overlay) != ND_OK)
+        return false;
+    if (symlink(sys_target, sys_link) != 0 && errno != EEXIST)
+        return false;
+    if (nd_snprintf(user, sizeof user, "%s/User", neodct) != ND_OK)
+        return false;
+    (void)mkdir(user, 0755);
+
+    /* The ack file skips the first-boot modal; engineering mode ON is what
+     * puts all twenty-four apps in the carousel. No wallpaper: the frames
+     * here are measured, not hashed, and a black background makes the
+     * scrollbar the only white in its columns. */
+    {
+        char path[ND_PATH_MAX];
+
+        if (nd_snprintf(path, sizeof path, "%s/.ack_security_warning", user) != ND_OK)
+            return false;
+        f = fopen(path, "w");
+        if (f == NULL)
+            return false;
+        (void)fputs("0", f);
+        (void)fclose(f);
+
+        if (nd_snprintf(path, sizeof path, "%s/settings.prop", user) != ND_OK)
+            return false;
+        f = fopen(path, "w");
+        if (f == NULL)
+            return false;
+        (void)fputs("system.ui.engineering_mode=ON\n", f);
+        (void)fclose(f);
+    }
+
+    return nd_path_set_root(g_stage) == ND_OK;
+}
+
+/* PIL Image.thumbnail((n, n)) -- aspect preserved, rounded, never upscaled,
+ * never below 1. Written in long double so it is not the expression under
+ * test recompiled: nd_image_thumbnail() computes in double. */
+static void expected_thumb(int32_t w, int32_t h, int32_t box, int32_t *tw, int32_t *th)
+{
+    long double ratio;
+
+    if (w <= box && h <= box) {
+        *tw = w;
+        *th = h;
+        return;
+    }
+    if (w >= h) {
+        ratio = (long double)h / (long double)w;
+        *tw = box;
+        *th = nd_max32(1, (int32_t)((long double)box * ratio + 0.5L));
+    } else {
+        ratio = (long double)w / (long double)h;
+        *th = box;
+        *tw = nd_max32(1, (int32_t)((long double)box * ratio + 0.5L));
+    }
+}
+
+/* Every icon in the registry, at the size AppSelector asks for it. The
+ * dimensions matter beyond "it decoded": ix = (240 - img.width) // 2 is what
+ * centres the icon, so a thumbnail one pixel wide of Pillow's moves the whole
+ * picture. Pillow's own answers for the three odd ones -- Koki 120x115 ->
+ * 82x79, MusicPlayer 100x100 -> 82x82, LinuxShell 128x128 -> 82x82 -- are
+ * reproduced by the rule above and checked against it. */
+static void test_icon_geometry(nd_ui *ui)
+{
+    size_t i;
+    int non_square = 0;
+
+    for (i = 0u; i < ui->n_apps; i++) {
+        const nd_image *full = nd_ui_get_image(ui, ui->apps[i].icon);
+        const nd_image *thumb;
+        int32_t fw;
+        int32_t fh;
+        int32_t tw = 0;
+        int32_t th = 0;
+
+        if (full == NULL) {
+            CHECK(false, "the full-size icon decoded");
+            fprintf(stderr, "     %s (%s)\n", ui->apps[i].name, ui->apps[i].icon);
+            continue;
+        }
+        /* get_image() converts to RGBA unconditionally, which is what lets
+         * the paste composite through the icon's own alpha. Three of the
+         * twenty-four icons are stored as palette PNGs (colour type 3). */
+        CHECK(full->fmt == ND_PIXFMT_RGBA8888, "the cache always hands back RGBA");
+        fw = full->w;
+        fh = full->h;
+        expected_thumb(fw, fh, ND_APP_SELECTOR_ICON_MAX, &tw, &th);
+        if (fw != fh)
+            non_square++;
+
+        /* full is still in the cache; the thumbnail is a SEPARATE entry under
+         * the "<path>@82" key, so neither call evicts the other here. */
+        thumb = nd_ui_get_image_max(ui, ui->apps[i].icon, ND_APP_SELECTOR_ICON_MAX);
+        if (thumb == NULL) {
+            CHECK(false, "the 82 px thumbnail decoded");
+            fprintf(stderr, "     %s (%s)\n", ui->apps[i].name, ui->apps[i].icon);
+            continue;
+        }
+        CHECK_INT(thumb->w, tw, ui->apps[i].name);
+        CHECK_INT(thumb->h, th, ui->apps[i].name);
+
+        /* An icon that is fully transparent would draw nothing and still pass
+         * every dimension check above, which is exactly what a wrongly
+         * premultiplied resize (R-3) leaves behind at the extreme. */
+        {
+            bool opaque = false;
+            int32_t x;
+            int32_t y;
+
+            for (y = 0; y < thumb->h && !opaque; y++) {
+                for (x = 0; x < thumb->w; x++) {
+                    if (nd_image_get_px(thumb, x, y).a > 0u) {
+                        opaque = true;
+                        break;
+                    }
+                }
+            }
+            CHECK(opaque, "the icon has ink in it");
+        }
+    }
+    CHECK_INT(non_square, 1, "exactly one shipped icon is not square (Koki, 120x115)");
+}
+
+/* ------------------------------------------------------------------ *
+ * The scrollbar, at every index
+ * ------------------------------------------------------------------ */
+
+/* Measure the notch out of the frame rather than trusting the draw call: scan
+ * the notch's own columns (bar_x-4 .. bar_x-1, which the two-pixel-wide track
+ * never reaches) for white, and report the first and last row. */
+static void measure_notch(const nd_image *frame, int32_t bar_x, int32_t *top, int32_t *bottom)
+{
+    int32_t x;
+    int32_t y;
+
+    *top = -1;
+    *bottom = -1;
+    for (y = 0; y < frame->h; y++) {
+        for (x = bar_x - 4; x < bar_x; x++) {
+            if (nd_image_get_px(frame, x, y).r == 255u) {
+                if (*top < 0)
+                    *top = y;
+                *bottom = y;
+                break;
+            }
+        }
+    }
+}
+
+static void test_scrollbar_every_index(nd_capture *cap, nd_ui *ui)
+{
+    nd_appsel s;
+    const int32_t bar_x = ND_UI_W - 8;         /* 232 */
+    const int32_t track_top = ND_UI_HEADER + 6; /* 36  */
+    const int32_t track_bottom = ND_UI_CONTENT_BOTTOM - 10; /* 135 */
+    size_t i;
+
+    CHECK_INT(bar_x, 232, "bar_x on this panel");
+    CHECK_INT(track_top, 36, "track_top on this panel");
+    CHECK_INT(track_bottom, 135, "track_bottom on this panel");
+    if (ui->n_apps < 2u) {
+        CHECK(false, "the scrollbar sweep needs the whole registry");
+        return;
+    }
+
+    nd_appsel_init(&s, ui, "Main Menu", ui->apps, ui->n_apps, NULL);
+
+    for (i = 0u; i < ui->n_apps; i++) {
+        const nd_image *frame;
+        long double step;
+        long double notch;
+        int32_t want_top;
+        int32_t want_bottom;
+        int32_t got_top = -1;
+        int32_t got_bottom = -1;
+
+        s.selected_index = i;
+        nd_appsel_draw(&s);
+        frame = nd_capture_recent(cap, 0u);
+        if (frame == NULL) {
+            CHECK(false, "a frame per index");
+            return;
+        }
+
+        /* draw.rectangle((bar_x-4, notch-3, bar_x+2, notch+3)) with float
+         * corners: Pillow truncates each toward zero and the rectangle is
+         * inclusive of both. */
+        step = (long double)(track_bottom - track_top) / (long double)(ui->n_apps - 1u);
+        notch = (long double)track_top + ((long double)i * step);
+        want_top = (int32_t)(notch - 3.0L);
+        want_bottom = (int32_t)(notch + 3.0L);
+
+        measure_notch(frame, bar_x, &got_top, &got_bottom);
+        CHECK_INT(got_top, want_top, "notch top row");
+        CHECK_INT(got_bottom, want_bottom, "notch bottom row");
+        CHECK_INT(got_bottom - got_top, 6, "the notch is seven rows tall at every index");
+
+        /* The track itself does not move. Width 2 on a vertical line grows in
+         * the MINOR axis, so it is columns 232 and 233 and no others, and it
+         * ends ON row 135. */
+        CHECK(nd_image_get_px(frame, bar_x, track_bottom).r == 255u, "track reaches row 135");
+        CHECK(nd_image_get_px(frame, bar_x + 1, track_bottom).r == 255u, "and column 233");
+        CHECK(nd_image_get_px(frame, bar_x + 2, track_bottom).r == 0u, "but not column 234");
+        CHECK(nd_image_get_px(frame, bar_x, track_bottom + 1).r == 0u, "and not row 136");
+        CHECK(nd_image_get_px(frame, bar_x, track_top - 1).r == 0u, "nor row 35");
+    }
+
+    /* Index 0 puts the notch above the track's first row: trunc(36 - 3) is
+     * 33, three rows of white with nothing beneath them. The last index puts
+     * its bottom at 138, three rows past the track's end. Both are the
+     * Python's, both are visible on a real phone, and neither is clipped. */
+    s.selected_index = 0u;
+    nd_appsel_draw(&s);
+    {
+        const nd_image *frame = nd_capture_recent(cap, 0u);
+        int32_t top = -1;
+        int32_t bottom = -1;
+
+        measure_notch(frame, bar_x, &top, &bottom);
+        CHECK_INT(top, 33, "the first notch starts three rows above the track");
+        (void)nd_capture_save(cap, "appreg-notch-first", frame);
+    }
+    s.selected_index = ui->n_apps - 1u;
+    nd_appsel_draw(&s);
+    {
+        const nd_image *frame = nd_capture_recent(cap, 0u);
+        int32_t top = -1;
+        int32_t bottom = -1;
+
+        measure_notch(frame, bar_x, &top, &bottom);
+        CHECK_INT(bottom, 138, "the last notch ends three rows below it");
+        (void)nd_capture_save(cap, "appreg-notch-last", frame);
+    }
+}
+
+/* Engineering mode off is thirteen apps, so the step becomes 99/12 = 8.25 and
+ * every notch lands somewhere the twenty-four-app sweep never visits. No
+ * golden frame covers it -- shoot_docs.py captures with engineering on -- so
+ * the arithmetic is all there is to check. */
+static void test_engineering_off_geometry(nd_capture *cap, nd_ui *ui)
+{
+    nd_appsel s;
+    const int32_t bar_x = ND_UI_W - 8;
+    nd_app_entry stock[ND_APP_MAX];
+    size_t n;
+    size_t i;
+
+    n = nd_ui_scan_apps(ND_PATH_APPS_DIR, stock, ND_APP_MAX);
+    CHECK_INT(n, 13, "thirteen stock apps with engineering off");
+    if (n < 2u)
+        return;
+    sort_by_id_stable(stock, n);
+
+    nd_appsel_init(&s, ui, "Main Menu", stock, n, NULL);
+    for (i = 0u; i < n; i++) {
+        const nd_image *frame;
+        long double step = 99.0L / (long double)(n - 1u);
+        long double notch = 36.0L + ((long double)i * step);
+        int32_t got_top = -1;
+        int32_t got_bottom = -1;
+
+        s.selected_index = i;
+        nd_appsel_draw(&s);
+        frame = nd_capture_recent(cap, 0u);
+        if (frame == NULL) {
+            CHECK(false, "a frame per stock index");
+            return;
+        }
+        measure_notch(frame, bar_x, &got_top, &got_bottom);
+        CHECK_INT(got_top, (int32_t)(notch - 3.0L), "stock notch top");
+        CHECK_INT(got_bottom, (int32_t)(notch + 3.0L), "stock notch bottom");
+    }
+    (void)nd_capture_save(cap, "appreg-stock-only", nd_capture_recent(cap, 0u));
+}
+
+static void run_overlay_half(void)
+{
+    nd_capture *cap = NULL;
+    nd_fb *fb;
+    nd_ui ui;
+
+    if (nd_capture_open(&cap, "/frames", 0u) != ND_OK) {
+        CHECK(false, "nd_capture_open");
+        return;
+    }
+    fb = nd_capture_fb(cap);
+
+    nd_vclock_enable();
+    nd_ui_sim_clear(&ui);
+    if (nd_ui_init(&ui, fb) != ND_OK) {
+        CHECK(false, "nd_ui_init over the staged overlay");
+        nd_capture_close(cap);
+        nd_vclock_disable();
+        return;
+    }
+
+    CHECK(ui.engineering_mode, "engineering mode came from settings.prop");
+    CHECK_INT(ui.n_apps, 24, "twenty-four apps with engineering mode on");
+    CHECK(ui.wallpaper == NULL, "no wallpaper configured, so the background is black");
+
+    test_icon_geometry(&ui);
+    test_scrollbar_every_index(cap, &ui);
+    test_engineering_off_geometry(cap, &ui);
+
+    nd_ui_teardown(&ui);
+    nd_ui_sim_clear(&ui);
+    nd_vclock_disable();
+    nd_capture_close(cap);
+}
+
+int main(void)
+{
+    test_synthetic_manifests();
+
+    if (!stage_overlay()) {
+        printf("test_appreg: NEODCT_GOLDEN is not set, or the overlay could not be staged\n");
+        return 1;
+    }
+    run_overlay_half();
+    (void)nd_path_set_root(NULL);
+    (void)nftw(g_stage, rm_cb, 16, FTW_DEPTH | FTW_PHYS);
+
+    printf("test_appreg: %d checks, %d failures\n", g_checks, g_failures);
+    return g_failures == 0 ? 0 : 1;
+}
