@@ -13,11 +13,13 @@
  *  2. The exit set is (46, 28, 50) -- C, ENTER and MENU -- and nothing else.
  *     14 is NOT in it: Clear leaves the MessageDialog, not the app.
  *
- *  3. TWO KEYS LEAVE THIS SCREEN, NOT ONE. `warningmsg.show()` returns the
- *     key that dismissed it and the Python throws it away, so the loop's own
- *     wait_for_key() needs a second press. Press ENTER once and the dialog is
- *     simply redrawn. That is what the phone does today; OPEN-QUESTIONS.md
- *     X-18 recorded that the stub did not reproduce it, and this closes it.
+ *  3. THE `while True:` IS REPRODUCED. `warningmsg.show()` returns the key
+ *     that dismissed it and the Python throws it away, so leaving takes two
+ *     presses and a CLEAR never leaves at all -- the dialog cancels and the
+ *     loop draws it again. OPEN-QUESTIONS.md X-18 recorded that the stub did
+ *     not reproduce that, and this closes it. It is observed here through
+ *     nd_app_should_exit(), which is the only bounded way out of a loop no
+ *     key ends.
  *
  *  4. THE GOLDEN FRAME. app-clock is byte-identical to
  *     widget-messagedialog (spec-build-test.md section 3.6) and this app is
@@ -33,9 +35,13 @@
  * Runs with no arguments. NEODCT_GOLDEN names the reference set.
  */
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+#include "nd_app.h"
 
 #include "smallapp_test.h"
 
@@ -159,11 +165,21 @@ static void test_golden_frame_and_two_keys(void)
     root_restore();
 }
 
-/* One press is NOT enough: show() eats it and the loop asks again. Driven
- * with a queued press rather than a held one, so the channel really does run
- * dry -- and then app_run must still be inside its loop, which is checked by
- * it never returning within the frames it would need to. */
-static void test_one_key_is_not_enough(void)
+/* THE SIGTERM TEARDOWN CONTRACT (nd_app.h), which is also the only bounded
+ * way to observe the loop.
+ *
+ * CLEAR is not an exit key here: MessageDialog treats it as cancel and
+ * returns, the app's own wait_for_key() then gets the NEXT repeat, which is
+ * also CLEAR, which `key in (46, 28, 50)` rejects -- so the dialog is drawn
+ * again and the app keeps going. Nothing a key can do ends that, which is
+ * exactly why nd_app.h requires the poll.
+ *
+ * The flag is raised BEFORE app_run() rather than from a thread, so the test
+ * is deterministic: the first time the loop reaches its poll, it returns.
+ *
+ * MUST RUN LAST. There is no way to lower g_should_exit again; it is a
+ * volatile sig_atomic_t with no reset, by design. */
+static void test_sigterm_leaves_the_loop(void)
 {
     sa_fixture fx;
     int rc;
@@ -178,17 +194,6 @@ static void test_one_key_is_not_enough(void)
         root_restore();
         return;
     }
-
-    /* Hold C (46) instead of ENTER. MessageDialog's accept set is (28,) and
-     * its cancel set is (14,), so 46 is ignored INSIDE the dialog and the
-     * dialog never returns -- which is the other half of the same quirk: the
-     * only keys that reach the app's own loop are the two the dialog itself
-     * answers to. Give it CLEAR, which the dialog treats as cancel, and the
-     * loop then sees the NEXT repeat, which is also CLEAR, which is not an
-     * exit key -- so the dialog is redrawn instead of the app returning.
-     *
-     * The budget is what ends the run: three frames is the flush, the first
-     * dialog and the redraw, and the fourth is refused. */
     if (!sa_hold(&fx, ND_KEY_CLEAR)) {
         CHECK(false, "held key");
         sa_fx_free(&fx);
@@ -196,14 +201,22 @@ static void test_one_key_is_not_enough(void)
         return;
     }
 
-    nd_vclock_enable();
-    nd_capture_set_budget(fx.cap, 3);
-    rc = api.run(&fx.ui);
-    CHECK_INT(rc, 0, "app_run still returns 0 when it is stopped by the budget");
-    CHECK(nd_capture_exhausted(fx.cap), "CLEAR redraws the dialog instead of leaving");
-    nd_capture_clear_budget(fx.cap);
+    CHECK_INT(nd_app_install_signal_handlers(), ND_OK, "handlers install");
+    CHECK(!nd_app_should_exit(), "not yet");
+    if (kill(getpid(), SIGTERM) != 0) {
+        CHECK(false, "raise SIGTERM");
+        sa_fx_free(&fx);
+        root_restore();
+        return;
+    }
+    CHECK(nd_app_should_exit(), "the handler set the flag");
 
+    nd_vclock_enable();
+    rc = api.run(&fx.ui);
+    CHECK_INT(rc, 0, "app_run returns 0 rather than looping on a key that is not an exit key");
+    CHECK_INT(nd_capture_frames_drawn(fx.cap), 2, "still the flush and one dialog");
     nd_vclock_disable();
+
     sa_fx_free(&fx);
     root_restore();
 }
@@ -229,8 +242,9 @@ int main(void)
     RUN(test_message);
     RUN(test_exit_keys);
     RUN(test_golden_frame_and_two_keys);
-    RUN(test_one_key_is_not_enough);
     RUN(test_null_safety);
+    /* Last: nd_app_should_exit() cannot be lowered again. */
+    RUN(test_sigterm_leaves_the_loop);
 
     return sa_end(h, "test_clock_app");
 }
