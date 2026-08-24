@@ -618,6 +618,33 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    /* Say when the panel is actually usable.
+     *
+     * Everything above this line is the setup a caller has to wait out
+     * before it can put a pixel on the screen: reset_display(), panel_init(),
+     * the blanking fill, and init_framebuffer() forcing fb0 to 32bpp. The
+     * initramfs used to wait for it by sleeping two seconds and hoping --
+     * two seconds of an eleven-second boot, spent on a guess, on hardware
+     * where it is far too long and on QEMU where there is no panel at all.
+     *
+     * Opt-in, so nothing changes for anyone who does not set it: with
+     * NEODCT_DISPLAYD_READY pointing at a path, that path exists from here
+     * on, and the caller can poll for it instead of guessing. Failing to
+     * write it is not worth refusing to run over -- the caller falls back to
+     * its timeout, which is the old behaviour. */
+    {
+        const char *ready = getenv("NEODCT_DISPLAYD_READY");
+
+        if (ready != NULL && ready[0] != '\0') {
+            FILE *rf = fopen(ready, "w");
+
+            if (rf != NULL) {
+                (void)fputs("1\n", rf);
+                (void)fclose(rf);
+            }
+        }
+    }
+
     const double frame_ms = 1000.0 / opt_fps;
     long frames = 0;
     double stats_t0 = now_ms();
