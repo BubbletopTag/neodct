@@ -79,6 +79,30 @@
 #define TOLERANCE_FRAME     "eng-cubebench"
 #define TOLERANCE_PIXEL_CAP 9
 
+/* The same policy's `recut` class: a reference re-captured from the C build
+ * because no amount of correct porting could reproduce it. There is exactly
+ * one -- game-snake, whose food cell comes out of a generator decision 4
+ * refused to reimplement. It is compared like any other frame and must be
+ * EXACT against its reference; the list exists only so the summary line
+ * below does not claim it is byte-identical to the Python, which it is not.
+ *
+ * game-memory is deliberately NOT here. Memory's shuffle differs from the
+ * Python's too, but every card in that frame is face down, so the shuffle
+ * reaches no pixel and the frame is byte-identical to the Python's after
+ * all. It kept its original reference. */
+static const char *const RECUT[] = {"game-snake"};
+
+static bool is_recut(const char *name)
+{
+    size_t i;
+
+    for (i = 0u; i < ND_ARRAY_LEN(RECUT); i++) {
+        if (strcmp(name, RECUT[i]) == 0)
+            return true;
+    }
+    return false;
+}
+
 extern char **environ;
 
 static int g_checks;
@@ -529,11 +553,16 @@ static void test_against_golden(const char *out_dir, const nd_json_val *ours,
             if (strcmp(name, TOLERANCE_FRAME) == 0) {
                 /* Worth saying out loud: the budget was not needed. */
                 printf("test_shoot: %s is BYTE-EXACT (0 differing pixels)\n", name);
+            } else if (is_recut(name)) {
+                printf("test_shoot: %s is exact against its RECUT reference "
+                       "(OPEN-QUESTIONS.md decision 4)\n",
+                       name);
             }
         }
     }
-    printf("test_shoot: %zu of %zu rendered frames are byte-identical to the Python\n", exact,
-           nd_json_len(ours));
+    printf("test_shoot: %zu of %zu rendered frames match their reference exactly "
+           "(%zu of them recut from C)\n",
+           exact, nd_json_len(ours), ND_ARRAY_LEN(RECUT));
 }
 
 /* ------------------------------------------------------------------ *

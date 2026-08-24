@@ -187,11 +187,12 @@
     },
     {
       "name": "game-snake",
-      "sha256": "a394f023443a2c42cc662bc0c5abbf0d9b51554563dd5ab9995dbc58877fddfc",
+      "sha256": "769aa98e6b4fb00a0e5e2b6aed35b116d7760ebb077a4ba1f46eb27186845e95",
       "size": [
         240,
         175
-      ]
+      ],
+      "tolerance": "recut"
     },
     {
       "name": "home",

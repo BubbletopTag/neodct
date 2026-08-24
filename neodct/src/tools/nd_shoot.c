@@ -132,19 +132,17 @@ static const shoot_skip SKIPPED[] = {
      * app-clock is NOT here: the Clock app IS that dialog (section 3.6
      * records app-clock as byte-identical to widget-messagedialog), so the
      * stub renders it for real. */
-    {"app-calllog", "CallLog is stubbed this session (SESSION-SCOPE.md)"},
     {"app-settings", "Settings is stubbed this session (SESSION-SCOPE.md)"},
     {"app-settings-wallpaper", "Settings is stubbed this session (SESSION-SCOPE.md)"},
-    {"app-games", "Games is stubbed this session (SESSION-SCOPE.md)"},
     {"app-musicplayer", "Music is stubbed this session (SESSION-SCOPE.md)"},
     {"app-koki", "Koki is out of scope this session (SESSION-SCOPE.md)"},
 
-    /* Group 4 -- shoot_games. Both are launched through the Games app, which
-     * is stubbed; and both are `recut` class anyway (OPEN-QUESTIONS.md frame
-     * tolerance policy), so their references will be re-captured from C
-     * rather than matched against the Python's MT19937. */
-    {"game-snake", "Games is stubbed this session; snake.py not ported (recut class)"},
-    {"game-memory", "Games is stubbed this session; memory.py not ported (recut class)"},
+    /* Group 4 -- shoot_games. Both are rendered now: apps/Games is a real
+     * port and shoot_games() below launches it. They are the frame set's two
+     * `recut` names (OPEN-QUESTIONS.md frame tolerance policy) -- their
+     * references were re-captured from this build because both games seed
+     * `random` from the clock and decision 4 refused to reimplement CPython's
+     * MT19937 to chase the Python's food cell and card order. */
 
     /* Group 5 -- shoot_telephony. home-sms-banner and crash-screen ARE
      * rendered; these three need modules that do not exist in neodct/src. */
@@ -186,10 +184,15 @@ static const char *const RENDERED[] = {
     "app-phonebook",
     "app-messages",
     "app-messages-inbox",
+    "app-calllog",
+    "app-games",
     "app-calculator",
     "app-calculator-options",
     "app-clock",
     "app-tones",
+    /* shoot_games */
+    "game-snake",
+    "game-memory",
     /* shoot_telephony */
     "home-sms-banner",
     "contacts-picker",
@@ -1239,6 +1242,12 @@ static const struct {
     {"Phone book", 240, "app-phonebook", NULL, 0u, ND_KEY_CLEAR, ND_APP_SYM_RUN},
     {"Messages", 240, "app-messages", NULL, 0u, ND_KEY_CLEAR, ND_APP_SYM_RUN},
     {"Messages", 240, "app-messages-inbox", NULL, 0u, ND_KEY_CLEAR, ND_APP_SYM_OPEN_INBOX},
+    /* CallLog's root PagedList drains the channel before it draws, so its
+     * way out is a held key like Tones'; Games' root VerticalList does not
+     * drain, but a held Back reaches its wait_for_key() just the same and
+     * ends the app on the frame the reference holds. */
+    {"Call Log", 240, "app-calllog", NULL, 0u, ND_KEY_CLEAR, ND_APP_SYM_RUN},
+    {"Games", 240, "app-games", NULL, 0u, ND_KEY_CLEAR, ND_APP_SYM_RUN},
     {"Calculator", CALC_FRAMES, "app-calculator", CALC_KEYS, ND_ARRAY_LEN(CALC_KEYS), ND_KEY_NONE,
      ND_APP_SYM_RUN},
     {"Calculator", CALC_OPT_FRAMES, "app-calculator-options", CALC_OPT_KEYS,
@@ -1257,7 +1266,7 @@ static void shoot_stock_apps(nd_capture *cap)
     nd_ui ui;
     size_t i;
 
-    printf("[shoot] stock apps (6 of 13 -- the other seven are not ported)\n");
+    printf("[shoot] stock apps (8 of 13 -- the other five are not ported)\n");
 
     for (i = 0u; i < ND_ARRAY_LEN(STOCK_CASES); i++) {
         /* A fresh WP + STATUS UI per case, as every `with StubUI(...)` block
@@ -1276,6 +1285,103 @@ static void shoot_stock_apps(nd_capture *cap)
         run_app_inproc(cap, &ui, STOCK_CASES[i].manifest_name, STOCK_CASES[i].budget,
                        STOCK_CASES[i].slug, STOCK_CASES[i].keys, STOCK_CASES[i].n_keys,
                        STOCK_CASES[i].hold, STOCK_CASES[i].entry);
+
+        nd_ui_teardown(&ui);
+        nd_ui_sim_clear(&ui);
+        nd_vclock_disable();
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * Group 4 -- shoot_games, both frames, both `recut`
+ * ------------------------------------------------------------------ *
+ *
+ * shoot_docs.py's recipe:
+ *
+ *     ([DOWN, ENTER, ENTER], "game-snake",  300)
+ *     ([ENTER, ENTER],       "game-memory", 300)
+ *     with StubUI() as ui:                       # NO wallpaper
+ *         ui.stub.simulate_status(4, 4, "Tello")
+ *         frames = run_app(ui, "Games", keys=keys, frame_budget=budget)
+ *         save_frame(frames, slug, out)          # frames[-1]
+ *
+ * The Games menu lists Memory then Snake, which is why Snake needs a Down
+ * first and Memory does not.
+ *
+ * ============ 300 IS NOT WHAT PICKS EITHER FRAME ============
+ *
+ * Both games poll `read_keypress` rather than blocking, so in the Python it
+ * is uistub's idle_budget that ends them: once the script is exhausted the
+ * 61st idle poll raises ScriptExhausted. And because the virtual clock only
+ * advances when a frame is COMMITTED, an idle poll moves no time -- so the
+ * first tick never falls due, the snake never takes a step and the board is
+ * never touched. `frames[-1]` is therefore the game's own opening render,
+ * and the 300-frame budget never bites.
+ *
+ * C has no exception to raise out of a read, so the same end state is
+ * reached the way CubeBench's is (OPEN-QUESTIONS.md CB-2): the frame budget
+ * stops the recording at the opening render, and a HELD Back lets the app
+ * out afterwards. The budgets below are therefore exact frame counts, and
+ * the count is what test_games.c pins:
+ *
+ *   game-snake   Games menu, the Down redraw, the Snake menu, the board = 4
+ *   game-memory  Games menu, the Memory menu, the board               = 3
+ *
+ * Everything the held Back draws after that -- the menu each game returns
+ * to, and the one above it -- is refused by nd_capture with ND_ERR_BUSY,
+ * which records nothing and does not tick the clock.
+ *
+ * ============ WHY THESE TWO ARE ALLOWED TO DIFFER FROM THE PYTHON =======
+ *
+ * OPEN-QUESTIONS.md decision 4. Snake seeds `random` from the clock and then
+ * calls `random.choice` for the food cell; Memory seeds it and calls
+ * `random.shuffle`. Reimplementing CPython's MT19937 to reproduce those two
+ * draws was refused, so libneodct's pinned LCG runs instead and the two
+ * reference PNGs were re-captured from this build. They are `recut` class:
+ * exact against their own reference from now on, and a change to either
+ * game's geometry still fails the comparison the way any other frame would.
+ */
+
+static const int32_t SNAKE_KEYS[] = {ND_KEY_DOWN, ND_KEY_ENTER, ND_KEY_ENTER};
+static const int32_t MEMORY_KEYS[] = {ND_KEY_ENTER, ND_KEY_ENTER};
+
+#define SNAKE_FRAMES  4
+#define MEMORY_FRAMES 3
+
+static const struct {
+    int64_t budget;
+    const char *slug;
+    const int32_t *keys;
+    size_t n_keys;
+} GAME_CASES[] = {
+    {SNAKE_FRAMES, "game-snake", SNAKE_KEYS, ND_ARRAY_LEN(SNAKE_KEYS)},
+    {MEMORY_FRAMES, "game-memory", MEMORY_KEYS, ND_ARRAY_LEN(MEMORY_KEYS)},
+};
+
+static void shoot_games(nd_capture *cap)
+{
+    nd_fb *fb = nd_capture_fb(cap);
+    nd_ui ui;
+    size_t i;
+
+    printf("[shoot] games (2 frames, both recut -- OPEN-QUESTIONS.md decision 4)\n");
+
+    for (i = 0u; i < ND_ARRAY_LEN(GAME_CASES); i++) {
+        /* A fresh `with StubUI()` per case: no wallpaper, and a fresh
+         * virtual clock, which is what the games seed the generator from. */
+        write_settings(NULL);
+        nd_vclock_enable();
+        nd_ui_sim_clear(&ui);
+        if (nd_ui_init(&ui, fb) != ND_OK) {
+            nd_log_err(ND_LOG_UI, "shoot: nd_ui_init failed (%s)", GAME_CASES[i].slug);
+            g_failed++;
+            nd_vclock_disable();
+            return;
+        }
+        nd_ui_sim_status(&ui, 4, 4, "Tello");
+
+        run_app_inproc(cap, &ui, "Games", GAME_CASES[i].budget, GAME_CASES[i].slug,
+                       GAME_CASES[i].keys, GAME_CASES[i].n_keys, ND_KEY_CLEAR, ND_APP_SYM_RUN);
 
         nd_ui_teardown(&ui);
         nd_ui_sim_clear(&ui);
@@ -1672,6 +1778,7 @@ int main(int argc, char **argv)
     shoot_home(cap);
     shoot_app_selector(cap);
     shoot_stock_apps(cap);
+    shoot_games(cap);
     shoot_telephony(cap);
     shoot_engineering_apps(cap);
     shoot_widgets(cap);
