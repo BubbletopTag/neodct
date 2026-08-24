@@ -249,8 +249,8 @@ void nd_snake_render(nd_snake *g)
     (void)nd_draw_text(g->ui->draw, 4, 1, score, g->ui->font_md, ND_WHITE);
 
     (void)nd_draw_rect_outline(g->ui->draw,
-                               ND_RECT(g->board_x - 2, g->board_y - 2,
-                                       g->board_x + g->board_w + 1, g->board_y + g->board_h + 1),
+                               ND_RECT(g->board_x - 2, g->board_y - 2, g->board_x + g->board_w + 1,
+                                       g->board_y + g->board_h + 1),
                                ND_WHITE, 1);
 
     if (g->has_food) {

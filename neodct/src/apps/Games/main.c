@@ -400,6 +400,4 @@ int app_run(nd_ui *ui)
 
 /* Nothing is held: no sound card, no child process, no allocation that
  * outlives a screen. Both games live on app_run()'s stack. */
-void app_shutdown(void)
-{
-}
+void app_shutdown(void) {}

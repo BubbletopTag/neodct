@@ -175,10 +175,10 @@ void nd_memory_draw_glyph(nd_draw *d, nd_rect box, int32_t kind, nd_color c)
         for (i = 0, yy = y0; yy < y1; yy += step, i++) {
             for (j = 0, xx = x0; xx < x1; xx += step, j++) {
                 if ((i + j) % 2 == 0) {
-                    (void)nd_draw_rect_fill(d,
-                                            ND_RECT(xx, yy, nd_min32(xx + step - 1, x1),
-                                                    nd_min32(yy + step - 1, y1)),
-                                            c);
+                    (void)nd_draw_rect_fill(
+                        d,
+                        ND_RECT(xx, yy, nd_min32(xx + step - 1, x1), nd_min32(yy + step - 1, y1)),
+                        c);
                 }
             }
         }
@@ -309,8 +309,8 @@ void nd_memory_render(nd_memory *g)
 
     idx = g->cursor_row * ND_MEMORY_COLS + g->cursor_col;
     if (g->state[idx] == ND_MEMORY_DOWN) {
-        (void)nd_draw_rect_outline(g->ui->draw, nd_memory_card_rect(g, g->cursor_col, g->cursor_row),
-                                   ND_BLACK, 1);
+        (void)nd_draw_rect_outline(
+            g->ui->draw, nd_memory_card_rect(g, g->cursor_col, g->cursor_row), ND_BLACK, 1);
     }
 
     (void)nd_ui_present(g->ui);
@@ -351,8 +351,8 @@ void nd_memory_flip(nd_memory *g)
     nd_memory_render(g);
 
     if (g->cards[first] == g->cards[idx]) {
-        g->score += nd_max32(ND_MEMORY_PAIR_MIN,
-                             ND_MEMORY_PAIR_BASE - ND_MEMORY_MISS_PENALTY * g->misses);
+        g->score +=
+            nd_max32(ND_MEMORY_PAIR_MIN, ND_MEMORY_PAIR_BASE - ND_MEMORY_MISS_PENALTY * g->misses);
         g->misses = 0;
         nd_games_dwell(0.25);
         g->state[first] = ND_MEMORY_GONE;
