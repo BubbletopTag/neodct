@@ -1,0 +1,134 @@
+/* nd_app.c -- the app side of the process boundary.
+ *
+ * Three small things an app process needs and the core does not:
+ *
+ *   1. the SIGTERM flag. In Python an incoming call raised IncomingCall and
+ *      the unwinding ran every app's `finally:` on the way out -- which is
+ *      what released ALSA before the ringtone played. C has no unwinding, so
+ *      the core sends SIGTERM, the handler here sets a flag, and nd-apprun
+ *      calls app_shutdown() from ordinary code once the app returns. An app
+ *      loop that runs longer than a frame polls nd_app_should_exit().
+ *
+ *   2. the app's own directory, so an asset ships beside the manifest and is
+ *      opened without the app knowing where it was installed.
+ *
+ *   3. the inherited framebuffer. The whole point of NEODCT_FB_FD is that an
+ *      app process needs no /dev/fb0 permission (SECURITY.md); wrapping the
+ *      descriptor rather than reopening the device is what makes that true.
+ *
+ * Everything here is a no-op in the core process: nd_app_dir() answers "" and
+ * nd_app_should_exit() stays false, because the core installs no handler.
+ */
+
+#include <errno.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "nd_app.h"
+#include "nd_fb.h"
+#include "nd_log.h"
+#include "nd_paths.h"
+#include "nd_types.h"
+
+/* Written from a signal handler, read from everywhere. sig_atomic_t is the
+ * only type C11 promises is safe to touch from both. */
+static volatile sig_atomic_t g_should_exit;
+
+/* The app's directory, argv[1]. Static rather than allocated: there is exactly
+ * one per process and it must survive an allocator that has run out. */
+static char g_app_dir[ND_PATH_MAX];
+
+static void on_term(int signo)
+{
+    ND_UNUSED(signo);
+    g_should_exit = 1;
+}
+
+bool nd_app_should_exit(void)
+{
+    return g_should_exit != 0;
+}
+
+nd_err nd_app_install_signal_handlers(void)
+{
+    struct sigaction sa;
+
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_term;
+    (void)sigemptyset(&sa.sa_mask);
+    /* NO SA_RESTART, deliberately. The Browser wrapper sits in a blocking
+     * read() for a whole browsing session; with SA_RESTART that read would
+     * resume and the app would never learn the phone was ringing. EINTR is
+     * the notification. */
+    sa.sa_flags = 0;
+
+    if (sigaction(SIGTERM, &sa, NULL) != 0) {
+        nd_log_err(ND_LOG_OS, "sigaction(SIGTERM): %s", strerror(errno));
+        return ND_ERR_IO;
+    }
+    if (sigaction(SIGINT, &sa, NULL) != 0) {
+        nd_log_err(ND_LOG_OS, "sigaction(SIGINT): %s", strerror(errno));
+        return ND_ERR_IO;
+    }
+    /* A child that writes to a framebuffer or a closed key channel must see
+     * the error, not die on it. */
+    (void)signal(SIGPIPE, SIG_IGN);
+    return ND_OK;
+}
+
+nd_err nd_app_set_dir(const char *dir)
+{
+    if (dir == NULL) {
+        g_app_dir[0] = '\0';
+        return ND_OK;
+    }
+    if (nd_strlcpy(g_app_dir, dir, sizeof g_app_dir) >= sizeof g_app_dir) {
+        g_app_dir[0] = '\0';
+        return ND_ERR_TOOLONG;
+    }
+    return ND_OK;
+}
+
+const char *nd_app_dir(void)
+{
+    return g_app_dir;
+}
+
+nd_err nd_app_asset_path(char *out, size_t out_sz, const char *name)
+{
+    if (out == NULL || out_sz == 0u || name == NULL)
+        return ND_ERR_INVAL;
+    if (g_app_dir[0] == '\0') {
+        out[0] = '\0';
+        return ND_ERR_NOTFOUND;
+    }
+    return nd_path_join(out, out_sz, g_app_dir, name);
+}
+
+/* ------------------------------------------------------------------ *
+ * The inherited framebuffer
+ * ------------------------------------------------------------------ */
+
+nd_err nd_app_fb_from_env(nd_fb **out)
+{
+    const char *s;
+    char *end = NULL;
+    long fd;
+
+    if (out == NULL)
+        return ND_ERR_INVAL;
+    *out = NULL;
+
+    s = getenv(ND_ENV_FB_FD);
+    if (s == NULL || s[0] == '\0')
+        return nd_fb_open(out, ND_PATH_FB);
+
+    errno = 0;
+    fd = strtol(s, &end, 10);
+    if (errno != 0 || end == s || *end != '\0' || fd < 0 || fd > 1000000L) {
+        nd_log_err(ND_LOG_FB, "%s=%s is not a descriptor", ND_ENV_FB_FD, s);
+        return nd_fb_open(out, ND_PATH_FB);
+    }
+    return nd_fb_adopt_fd(out, (int)fd);
+}

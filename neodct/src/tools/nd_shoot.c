@@ -598,8 +598,7 @@ static void shoot_app_selector(nd_capture *cap)
         size_t idx = app_index_of(&ui, MENU_WANTED[i][0]);
 
         if (idx == (size_t)-1) {
-            nd_log_err(ND_LOG_UI, "shoot: no app named '%s' in the registry",
-                       MENU_WANTED[i][0]);
+            nd_log_err(ND_LOG_UI, "shoot: no app named '%s' in the registry", MENU_WANTED[i][0]);
             g_failed++;
             continue;
         }
@@ -888,32 +887,50 @@ static nd_err write_skip_list(void)
 
 static void usage(FILE *out)
 {
-    (void)fprintf(out,
-                  "usage: nd-shoot --out DIR [--overlay DIR] [--keep-stage]\n"
-                  "\n"
-                  "Renders the golden reference screens this tree can draw and writes\n"
-                  "them, a manifest.json goldenframe.py accepts, and a list of the\n"
-                  "frames that were skipped and why.\n"
-                  "\n"
-                  "  --out DIR       where the PNGs and manifest.json go (required)\n"
-                  "  --overlay DIR   the NeoDCT overlay; default: found near the binary,\n"
-                  "                  or $NEODCT_OVERLAY, or $NEODCT_GOLDEN/../../overlay\n"
-                  "  --keep-stage    do not delete the staged /NeoDCT root on exit\n"
-                  "  --list          print the frame names this build renders and skips\n"
-                  "\n"
-                  "$NEODCT_ROOT, when set, is used as the staged root as-is.\n");
+    (void)fprintf(out, "usage: nd-shoot --out DIR [--overlay DIR] [--keep-stage]\n"
+                       "\n"
+                       "Renders the golden reference screens this tree can draw and writes\n"
+                       "them, a manifest.json goldenframe.py accepts, and a list of the\n"
+                       "frames that were skipped and why.\n"
+                       "\n"
+                       "  --out DIR       where the PNGs and manifest.json go (required)\n"
+                       "  --overlay DIR   the NeoDCT overlay; default: found near the binary,\n"
+                       "                  or $NEODCT_OVERLAY, or $NEODCT_GOLDEN/../../overlay\n"
+                       "  --keep-stage    do not delete the staged /NeoDCT root on exit\n"
+                       "  --list          print the frame names this build renders and skips\n"
+                       "\n"
+                       "$NEODCT_ROOT is used as the staged root only when it already contains\n"
+                       "NeoDCT/System; otherwise a temporary one is staged.\n");
 }
 
 static void print_list(void)
 {
     static const char *const RENDERED[] = {
-        "home",           "home-panel",       "home-dialing",   "home-nowallpaper",
-        "home-simulation", "menu-phone-book", "menu-panel",     "menu-messages",
-        "menu-games",     "menu-settings",    "menu-calculator", "menu-koki-mobile",
-        "menu-browser",   "menu-music",       "home-sms-banner", "widget-verticallist",
-        "widget-verticallist-scrolled",       "widget-pagedlist", "widget-textinput",
-        "widget-textinputlong",               "widget-messagedialog", "widget-textscroller",
-        "widget-levelselector",               "widget-infoscreen", "widget-softkeybar",
+        "home",
+        "home-panel",
+        "home-dialing",
+        "home-nowallpaper",
+        "home-simulation",
+        "menu-phone-book",
+        "menu-panel",
+        "menu-messages",
+        "menu-games",
+        "menu-settings",
+        "menu-calculator",
+        "menu-koki-mobile",
+        "menu-browser",
+        "menu-music",
+        "home-sms-banner",
+        "widget-verticallist",
+        "widget-verticallist-scrolled",
+        "widget-pagedlist",
+        "widget-textinput",
+        "widget-textinputlong",
+        "widget-messagedialog",
+        "widget-textscroller",
+        "widget-levelselector",
+        "widget-infoscreen",
+        "widget-softkeybar",
     };
     size_t i;
 
@@ -1002,8 +1019,8 @@ int main(int argc, char **argv)
     if (write_skip_list() != ND_OK)
         goto done;
 
-    printf("[shoot] wrote %zu frames, skipped %zu, %zu failed\n", g_saved,
-           ND_ARRAY_LEN(SKIPPED), g_failed);
+    printf("[shoot] wrote %zu frames, skipped %zu, %zu failed\n", g_saved, ND_ARRAY_LEN(SKIPPED),
+           g_failed);
     printf("[shoot] compare with:\n"
            "  python3 neodct/tools/goldenframe.py --compare neodct/tests/golden %s\n",
            g_out);

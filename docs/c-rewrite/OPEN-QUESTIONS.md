@@ -1222,3 +1222,212 @@ mode drives it deterministically.
 `ND_KEY_NONE` (which `wait_for_key` never yields) and `ND_KEY_INCOMING_CALL`, which an
 app process never sees — it gets SIGTERM instead. Treating both as "keep waiting"
 matches what `nd_vlist_show()` already does with them.
+
+---
+
+## The capture tool: nd-shoot (WP nd-shoot)
+
+`neodct/src/tools/nd_shoot.c` plus `neodct/src/test/unit/test_shoot.c`. It renders
+**25 of the 49** reference screens and refuses to invent the other 24. Nothing here is
+blocking; the numbered items are decisions a reviewer should be able to see and
+overrule.
+
+### S-1. Twenty-four frames are declared missing rather than drawn
+
+`spec-build-test.md` §3.6 defines 49 shots. Twenty-four of them launch an app, and
+`neodct/src/apps/` is empty — no `app.so` exists, the Dialer and `CrashHandler` are not
+ported, and Snake and Memory are reached through the Games app. The task's rule was
+"never emit a frame you cannot justify", so `nd-shoot` writes no PNG for those names
+and `goldenframe.py --compare` reports each as `missing -- not rendered by candidate`.
+That is the truth and it is also the next agent's work list.
+
+Three of the twenty-four are byte-identical to widget frames that ARE rendered
+(`app-clock` ≡ `widget-messagedialog`, `app-messages` ≡ `widget-pagedlist`,
+`app-phonebook` ≡ `widget-verticallist`; §3.6 lists the digests). Copying the pixels
+across would have made the count read 28 and would have been a lie — nothing launched
+an app. They are skipped with the rest.
+
+### S-2. The skip list is a separate file, not a manifest key
+
+`goldenframe.write_manifest()`'s schema is fixed and `compare()` parses it. Adding a
+`"skipped"` key would be ignored today and could collide with a future revision, and
+`nd_capture_write_manifest()` belongs to `lib/nd_capture.c`, which is not this module's
+to change. So the reasons go in `<out>/nd-shoot-skipped.json`, alongside the manifest:
+
+```json
+{ "skipped": [ { "name": "app-clock", "reason": "app not implemented: ..." } ] }
+```
+
+`test_shoot.c` asserts rendered ∪ skipped == the 49 reference names, exactly once each,
+and that no skipped name left a PNG behind.
+
+### S-3. `home-sms-banner` is reproduced with two throwaway frame commits
+
+`shoot_telephony()` draws `call-active` and `call-incoming` from the SAME `StubUI`
+before it, so the banner is that block's **third** frame — and the envelope's
+`int(time.time() * 2) % 2` blink phase is decided by the two ticks those screens spent.
+Their pixels cannot be reproduced yet; their ticks can. `nd-shoot` commits two
+throwaway frames and asserts `nd_vclock_frame() == 2` before drawing the banner. This
+is `test_ui.c`'s group D, and the frame comes out byte-identical.
+
+If the Dialer lands and its two screens are drawn for real, the throwaways must be
+deleted, not left in — two extra commits would move the blink phase.
+
+### S-4. `--out` is deliberately outside `ND_ROOT`
+
+F-2 predicted this: `nd_capture_open()` and `nd_capture_save()` resolve through
+`nd_path_resolve()`, so with the staged root in force `--out DIR` would land inside the
+staging directory and be deleted on exit. `nd-shoot` clears the root for the duration
+of every capture call and restores it afterwards. `nd_capture` is the one API whose
+paths belong to the developer's filesystem rather than the phone's.
+
+### S-5. `NEODCT_ROOT` is honoured only when it looks like a phone root
+
+The Makefile points `NEODCT_ROOT` at one shared empty scratch directory for every unit
+test. Taking it at face value would have `nd-shoot` render a home screen with no fonts,
+no wallpaper and no apps — a plausible-looking picture that is wrong. So the variable is
+used as-is only when `$NEODCT_ROOT/NeoDCT/System` exists; otherwise `nd-shoot` logs that
+it is staging its own root and does so. `--overlay` / `$NEODCT_OVERLAY` name the overlay
+to symlink `System` at; with neither set it is found relative to the binary.
+
+Like `test_ui.c`, only `/NeoDCT/User` is real — `/NeoDCT/System` is a symlink onto
+`neodct/overlay/NeoDCT/System`, so nothing under `neodct/overlay/` can be written to and
+a full run costs 0.25 s rather than `uistub.py`'s four 16 MB copytrees.
+
+### S-6. `test_shoot.c` spawns the binary instead of linking a helper
+
+`nd-shoot` has no library surface: the thing that can be wrong is the output directory.
+The test forks and `execve`s the real binary (`CODING-STANDARDS.md` §1.1 — `execve` is
+the first statement in the child, `_exit` the only other call) and then judges what came
+out, which covers the argument parsing, the root staging, the exit status and the output
+layout as well as the pixels. It finds the tool at `../bin/nd-shoot` relative to
+`/proc/self/exe`, so an ASan test run drives the ASan tool rather than a stale default
+one.
+
+### S-7. The two 240×240 frames stay centred, not bottom-aligned
+
+`home-panel` and `menu-panel` come from `nd_capture_device_frame()`, which centres the
+band at y=32 the way `uistub.CapturingFramebuffer.device_frame()` does. The hardware
+daemon bottom-aligns at y=65. §3.7 is explicit that the two panel names are
+documentation aids reproducing the *stub*, and that "fixing" them would break the oracle
+and change nothing on the phone. Not changed.
+
+### S-8. The InfoScreen key script uses the core's press/release channel
+
+`widget-infoscreen` is the only blocking screen in the renderable set;
+`shoot_docs.py` dismisses it with `ui.keys.push(BACK)`. `nd_input_channel_send()`
+already writes native `struct input_event` pairs, so a `KeyScript` is just a channel
+with nobody on the far end. Auto-repeat is switched off on it
+(`nd_input_set_repeat(in, 0, 0)`): repeat is new behaviour (I-1) and the reference
+frames were captured without it, so a script must never synthesise a key the Python did
+not deliver.
+
+---
+
+## AppSelector, the app registry and the icons (WP app-menu)
+
+`lib/nd_appsel.c`, the scan behind `nd_ui_scan_apps()`, `test/unit/test_appsel.c`,
+`test/unit/test_appreg.c`.
+
+**All nine golden frames this package can reach are byte-identical to the reference:**
+`menu-phone-book`, `menu-panel`, `menu-messages`, `menu-games`, `menu-settings`,
+`menu-calculator`, `menu-koki-mobile`, `menu-browser` and `menu-music` — **0 differing
+pixels each**, confirmed three ways: SHA-256 inside `test_appsel.c`, `goldenframe.py
+--compare` against frames rendered by `nd-shoot`, and a per-pixel count over the raw
+RGB. All twenty-four shipped `icon.png` files decode and thumbnail to the size the
+widget asks for. Nothing below blocks.
+
+### A-1. Nine frames pin nine indices; the notch is checked at all twenty-four
+
+The notch is `track_top + i * (99/23)` with both rectangle corners truncated. The step's
+fractional part is `(7i mod 23)/23`, so `round()` and `trunc()` disagree at **eleven** of
+the twenty-four indices — 2, 3, 5, 6, 9, 12, 13, 15, 16, 19 and 22 — and the golden
+frames visit only three of them (3 Settings, 5 Calculator, 9 Browser). Eight indices
+where the wrong rounding rule is invisible to the oracle: 2, 6, 12, 13, 15, 16, 19, 22.
+
+`test_appreg.c` therefore renders every index of the 24-app carousel and of the 13-app
+one engineering mode off produces, measures the notch's real bounding box out of the
+pixels in columns 228–231, and compares against the same arithmetic done in `long double`
+so that it is not the expression under test recompiled.
+
+Two consequences of the Python's arithmetic are reproduced rather than clamped: at index
+0 the notch starts at row **33**, three rows *above* the track's first row, and at the
+last index it ends at row **138**, three rows *below* the track's last. Both are
+visible on a real phone and neither is clipped.
+
+### A-2. An app name wider than the panel centres to a negative x
+
+Python's `//` floors and C's `/` truncates, and they differ for a negative numerator —
+which `(screen_w - w) // 2` produces the moment a manifest carries a name wider than
+240 px. Nothing shipped reaches it (the widest, "Remote Shell" at 24 px, is 138 px), but
+a manifest is user-supplied data and a side-loaded app can. `nd_appsel.c` uses a
+`floordiv2()` helper rather than `/` so the centring cannot shift by a pixel depending on
+the sign. `test_appsel.c` pins the branch: the title is clipped at both screen edges, not
+wrapped, not ellipsised and not dropped.
+
+### A-3. Six ways a manifest is rejected, and none of them is a 999
+
+`_scan_apps_from_dir` (main.py:652) wraps the whole per-app body in `try: … except:
+pass`, so an id `int()` cannot parse **drops the entire app** — it does not fall back to
+the 999 default, which only applies when the `id` key is absent. The C reproduces all
+six rejections and `test_appreg.c` drives each with a synthetic manifest: a non-numeric
+id, a decimal-point id (Python's `int()` refuses `"7.5"` in a string), malformed JSON, a
+JSON array root, a scalar root, and a directory with no `manifest.json` at all. The
+three defaults that *do* fire — `name` → the folder name, `icon` → `icon.png`, `id` →
+999 — are driven too, along with `int("  12  ")`'s implicit strip and a negative id.
+
+One place the C is stricter than the Python and no shipped manifest reaches: a **float**
+id. `int(7.5)` is 7 in Python; `nd_json.h` is explicit that an integer is not a float, so
+`nd_json_int()` refuses it and the app is dropped. Recorded rather than papered over,
+because "it worked in Python" is how somebody will find it.
+
+### A-4. `nd_ui_scan_apps()` caps where Python's list does not
+
+`ND_APP_MAX` is 64 and the caller's capacity is a hard bound (CODING-STANDARDS §1.5);
+Python appends without one. Twenty-four apps ship, so the cap is not within a factor of
+two of anything real. The `max` argument is honoured exactly — a scan asked for three
+entries returns three — and the four rejected-argument cases answer 0 without opening
+anything.
+
+### A-5. The scan CREATES a directory that is missing, and that is load-bearing
+
+`if not os.path.exists(app_dir): os.makedirs(app_dir)` runs before the listing, so a
+phone with no `/NeoDCT/System/engineering/apps` gets one on the first menu open. It is
+easy to read as defensive clutter and delete. It is not: `test_appreg.c` asserts the
+directory appears, under the staged root rather than at `/`.
+
+### A-6. The icon cap is 82, and `ND_APP_SELECTOR_ICON_MAX` is not it
+
+`ND_APP_SELECTOR_ICON_MAX` is **175** — the whole panel height — and it is the *outer*
+`min()`. The number that actually reaches `get_image(max_size=…)` is
+`max(24, content_bottom - icon_y - 8)` = `145 - 55 - 8` = **82**, and `icon_y` is
+`30 + max(24, int(115 * 0.22))` = 55 because `0.22 * 115` is `25.299999999999997` in
+IEEE754 and `int()` takes 25. Anyone reading the constant as "the icon size" will size
+the cache wrong; `test_appreg.c` asserts both 55 and 82 so a wrong `icon_y` is caught
+here rather than as an unexplained one-pixel shift in a frame.
+
+The thumbnail's dimensions are also what centres the icon — `ix = (240 - img.width) //
+2` — so they are checked against Pillow's rule per icon, not just bounded. Twenty-three
+of the twenty-four are square and land on 82×82; **Koki's is 120×115 and lands on
+82×79**, which `menu-koki-mobile` matching to the pixel confirms.
+
+### A-7. The `exec` field still says `main.py`, and still launches nothing
+
+Unchanged from U-6, restated here because this is the module that reads it: the scan
+ports `data.get("exec", "main.py")` literally, all twenty-four shipped manifests spell
+`main.py`, and nothing launches from the field — `nd_proc.h`'s `entry` is an entry-point
+*name* and the code always lives in `ND_APP_SO_NAME` beside the manifest. The default
+mechanism is kept so that rewriting the manifests to `"exec": "app.so"` is a change to
+data and not to code; `test_appreg.c` drives a synthetic manifest that already says
+`app.so` and checks it arrives verbatim. **Still owed: a decision on whether the
+manifests get rewritten or the field is retired.**
+
+### A-8. The empty carousel is a real state and has no golden frame
+
+A failed scan gives `AppSelector` zero items, where the Python would divide by zero on
+Down and index past the end on Enter. Both sources guard it before anything else: only
+Enter and Clear respond and both mean "back". The `No Apps` frame draws no scrollbar at
+all — `test_appsel.c` asserts column 232 is black — and `nd_appsel_draw()` additionally
+resets an out-of-range `selected_index` to 0 where the Python would raise `IndexError`.
+That last one is a C-only guard with no Python spelling, added because the field is
+public in `nd_widgets.h` and a caller can set it.

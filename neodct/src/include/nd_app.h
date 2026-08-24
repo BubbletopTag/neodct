@@ -84,6 +84,7 @@
 #ifndef ND_APP_H_INCLUDED
 #define ND_APP_H_INCLUDED
 
+#include "nd_fb.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 
@@ -138,6 +139,28 @@ const char *nd_app_dir(void);
 /* "<app dir>/<name>", the correct way to open an asset that ships with the
  * app. Honours ND_ROOT like everything else. */
 nd_err nd_app_asset_path(char *out, size_t out_sz, const char *name);
+
+/* ---- ADDITIVE, and only nd-apprun calls these -------------------- *
+ *
+ * Three declarations the frozen header set implies but never spells. Nothing
+ * above changed; see the P-section of OPEN-QUESTIONS.md.
+ */
+
+/* Record argv[1] so nd_app_dir() and nd_app_asset_path() can answer. Called
+ * once, before the .so is loaded. */
+nd_err nd_app_set_dir(const char *dir);
+
+/* Wrap the framebuffer descriptor the core passed in NEODCT_FB_FD, so the app
+ * process needs no /dev/fb0 permission -- that is the entire reason the
+ * descriptor is inherited (SECURITY.md). Falls back to opening the device
+ * when the variable is absent, which is what a hand-run nd-apprun does. */
+nd_err nd_app_fb_from_env(nd_fb **out);
+
+/* The mechanism underneath it: an nd_fb over a descriptor somebody else
+ * opened. Declared here rather than in nd_fb.h because it exists solely for
+ * the process boundary this header describes, and nd_fb.h is another work
+ * package's contract. The mapping is NOT re-zeroed; see nd_fb_adopt.c. */
+nd_err nd_fb_adopt_fd(nd_fb **out, int fd);
 
 #ifdef __cplusplus
 }

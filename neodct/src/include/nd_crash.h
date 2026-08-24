@@ -85,6 +85,32 @@ nd_err nd_crash_install_child(int report_fd);
  * which is the normal case for a clean exit. */
 bool nd_crash_read_report(int report_fd, nd_crash_info *out);
 
+/* Name the entry point that is about to run, so a report says which one was
+ * on the stack. Copied into the pre-built record; safe to call before the app
+ * is loaded and never from a handler. */
+void nd_crash_set_entry(const char *entry);
+
+/* ---- ADDITIVE: three helpers the Python has as separate functions ----
+ *
+ * spec-build-test.md section 3.6's crash-screen recipe calls
+ * CrashHandler._draw_engineering_crash_screen() DIRECTLY, without the wait --
+ * so the C has to expose the same split or nd-shoot cannot reproduce the
+ * frame. Nothing above changed. See the P-section of OPEN-QUESTIONS.md.
+ */
+
+/* _draw_engineering_crash_screen(ui, summary): CRASH.jpg resized to the whole
+ * screen, a black strip with a one-line summary at (2,2) in font_s, a
+ * "Continue" softkey, and exactly one present. Does not wait. */
+void nd_crash_draw_engineering(struct nd_ui *ui, const char *summary);
+
+/* _exc_summary()'s C equivalent: the child's detail when there is one, else a
+ * line built from the signal or the exit status. Capped at 90 characters with
+ * "..." at 87, exactly as the Python caps it. Returns the wanted length. */
+size_t nd_crash_summary(const nd_crash_info *info, char *out, size_t out_sz);
+
+/* "SIGSEGV", "SIGBUS", ... A string literal; never NULL. */
+const char *nd_crash_signal_name(int signo);
+
 #ifdef __cplusplus
 }
 #endif
