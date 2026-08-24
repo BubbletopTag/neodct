@@ -132,8 +132,6 @@ static const shoot_skip SKIPPED[] = {
      * app-clock is NOT here: the Clock app IS that dialog (section 3.6
      * records app-clock as byte-identical to widget-messagedialog), so the
      * stub renders it for real. */
-    {"app-settings", "Settings is stubbed this session (SESSION-SCOPE.md)"},
-    {"app-settings-wallpaper", "Settings is stubbed this session (SESSION-SCOPE.md)"},
     {"app-musicplayer", "Music is stubbed this session (SESSION-SCOPE.md)"},
     {"app-koki", "Koki is out of scope this session (SESSION-SCOPE.md)"},
 
@@ -185,6 +183,8 @@ static const char *const RENDERED[] = {
     "app-messages",
     "app-messages-inbox",
     "app-calllog",
+    "app-settings",
+    "app-settings-wallpaper",
     "app-games",
     "app-calculator",
     "app-calculator-options",
@@ -1243,6 +1243,17 @@ static const int32_t CALC_OPT_KEYS[] = {ND_KEY_7, ND_KEY_ENTER, ND_KEY_CLEAR, ND
 #define CALC_FRAMES     4
 #define CALC_OPT_FRAMES 3
 
+/* shoot_docs.py's ("Settings", [ENTER], "app-settings-wallpaper", -1, 240).
+ * The Enter is the recipe's; the frame count is this file's stand-in for
+ * ScriptExhausted, and it is an exact count, not a guess:
+ *
+ *   1  run()'s VerticalList, "Settings"
+ *   2  _wallpaper_menu_once()'s VerticalList, "Wallpaper"   <- the reference
+ *   3  run()'s VerticalList again, after Back unwinds the picker  <- refused
+ */
+static const int32_t SETTINGS_WP_KEYS[] = {ND_KEY_ENTER};
+#define SETTINGS_WP_FRAMES 2
+
 static const struct {
     const char *manifest_name;
     int64_t budget;
@@ -1260,6 +1271,18 @@ static const struct {
      * drain, but a held Back reaches its wait_for_key() just the same and
      * ends the app on the frame the reference holds. */
     {"Call Log", 240, "app-calllog", NULL, 0u, ND_KEY_CLEAR, ND_APP_SYM_RUN},
+    /* Settings' root VerticalList does not drain the channel either, so a
+     * held Back reaches its wait_for_key() with the reference frame already
+     * committed. app-settings-wallpaper is shoot_docs.py's keys=[ENTER]: the
+     * Enter is queued ahead of the held Back, so the root list draws (frame
+     * 1), Enter opens the wallpaper picker, the picker draws (frame 2) and
+     * the held Back leaves it. Back then returns the app to its root menu,
+     * which redraws -- THE BUDGET OF 2 IS WHAT REFUSES THAT THIRD FRAME, the
+     * same way it picks the Calculator's, and the repeat that follows lets
+     * the app out of the redrawn root list. */
+    {"Settings", 240, "app-settings", NULL, 0u, ND_KEY_CLEAR, ND_APP_SYM_RUN},
+    {"Settings", SETTINGS_WP_FRAMES, "app-settings-wallpaper", SETTINGS_WP_KEYS,
+     ND_ARRAY_LEN(SETTINGS_WP_KEYS), ND_KEY_CLEAR, ND_APP_SYM_RUN},
     {"Games", 240, "app-games", NULL, 0u, ND_KEY_CLEAR, ND_APP_SYM_RUN},
     {"Calculator", CALC_FRAMES, "app-calculator", CALC_KEYS, ND_ARRAY_LEN(CALC_KEYS), ND_KEY_NONE,
      ND_APP_SYM_RUN},
