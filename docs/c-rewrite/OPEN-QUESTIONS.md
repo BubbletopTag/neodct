@@ -2523,3 +2523,362 @@ until it started being built from source. The prune script now closes it with a 
 pass over `/NeoDCT` that honours `BR2_STRIP_none`, refuses to run without a cross strip
 out of the buildroot host tree, checks ELF magic per file and cannot fail the build.
 Package-installed binaries are already stripped by then, so it is a no-op on those.
+
+---
+
+## nd-shoot: wiring CubeBench and Browser in, and measuring (WP nd-shoot-apps)
+
+### SA-1. `eng-cubebench` renders with **0 differing pixels of 42,000**
+
+`nd-shoot` now launches `Cube Bench` for real, through the same `dlopen` +
+`app_run()` path that already drew `app-clock`, and its frame is byte-identical to
+`golden/eng-cubebench.png` — SHA-256
+`4dc887d233374e143e9f8cfffdfeef857ba7ed97b8ac8500d055b15e1c04c6b9` on both sides.
+The whole set is **28 rendered, 28 byte-exact, 21 skipped**; the 27 frames that
+were exact before are unchanged.
+
+The `tolerance` class stays as it is. CB-1 already explains why the zero is
+expected rather than lucky — CPython's `math.sin` is the platform libm's, so the
+Python capture and the C port ran the same glibc code on the same `double`s — and
+the budget exists for **musl on the device**, which has not been measured. Nothing
+here changes that argument; it only confirms it on this host a second time, from
+inside the capture tool rather than from `test_cubebench.c`.
+
+`test_shoot.c` now handles the tolerance class rather than requiring the digest:
+a mismatch on `eng-cubebench` alone is measured against the stored PNG and checked
+against the nine-pixel cap, with the count and the bounding box printed either
+way. No other name gets that path, and a byte-exact run says so out loud
+(`eng-cubebench is BYTE-EXACT (0 differing pixels)`) so the budget cannot quietly
+start being used.
+
+### SA-2. The engineering apps are in `System/engineering/apps`, not `System/apps`
+
+This is why `eng-cubebench` could not have been rendered by removing it from the
+skip table alone. `nd-shoot` stages `/NeoDCT/System` as a real directory whose
+entries are symlinks onto the read-only overlay, expanding only `apps/` so each
+app can gain an `app.so`. `engineering/` was a plain symlink into the overlay, and
+nothing can be written under there — so `engineering/apps/CubeBench/app.so` had
+nowhere to exist. `engineering/` is now expanded the same way, with `tools/` left
+as a symlink.
+
+Two things follow that a reader should not have to rediscover:
+
+* **The manifest name has a space and the directory name does not.**
+  `engineering/apps/CubeBench/manifest.json` says `"name": "Cube Bench"`.
+  `uistub.run_app()` matches on the manifest name (`if app["name"] == name`) and
+  so does `nd-shoot`'s `app_index_of()`, so the recipe's string is used verbatim.
+* **`rescan_apps()` scans both directories into one list**, sorted by id, so an
+  engineering app is an ordinary entry of `ui->apps` once
+  `system.ui.engineering_mode` is ON — which `write_settings()` already set.
+
+### SA-3. Which `app.so` a staged app directory gets is now resolved per app
+
+It was always `apps/Stub/app.so`. It is now `build/<variant>/apps/<Name>/app.so`
+if this build produced one, and the stub otherwise, matched on the overlay's
+directory name. CubeBench and Browser line up today and an app a later work
+package adds lines up without touching `tools/nd_shoot.c`.
+
+Staging a real `.so` is not the same as rendering with it: only the frames that
+call `run_app_inproc()` `dlopen` anything. Everything else reads the manifest and
+the icon, which are the overlay's own files either way.
+
+### SA-4. CubeBench must be launched with NO held key, unlike app-clock
+
+`run_app_inproc()` takes the key to hold as a parameter now. `app-clock` needs a
+held `ND_KEY_ENTER` because `MessageDialog.show()` blocks and C has no
+`ScriptExhausted` to raise out of a read. CubeBench must be given `ND_KEY_NONE`:
+`main.py`'s `EXIT_KEYS = {14, 28, 46, 50}` contains 28, so a held ENTER would end
+the run at frame 1 with a blank screen that still looked plausible. It gets an
+empty key channel instead — `uistub`'s empty `KeyScript` — so `read_keypress(0)`
+polls and returns `ND_KEY_NONE` without depending on whether the host has a
+`/dev/input/event0`.
+
+The budget is **60**, not `shoot_docs.py`'s `frame_budget=240`. CB-2 has the
+reasoning: `uistub.StubUI`'s `idle_budget=60` is what actually ends the Python's
+run, and the C reaches the same end state through the frame budget.
+
+### SA-5. The skip table's reasons were a single blanket string, and it had gone stale
+
+Every entry said `"app not implemented: neodct/src/apps/ is empty"`. That was true
+when it was written and had not been true since `apps/CubeBench` and `apps/Browser`
+landed — which is how `eng-cubebench` stayed skipped while the app that draws it
+was sitting in the build directory. Each frame now carries the reason for that
+frame, and "nobody has written this app" is worded differently from "the app
+exists and something else is in the way".
+
+`RENDERED[]` had drifted the same way, in the other direction: it was missing
+`app-clock` and `crash-screen`, so `--list` under-reported by two. Both tables are
+now checked rather than trusted:
+
+* `nd-shoot` fails its own run if the number of frames it saved is not
+  `ND_ARRAY_LEN(RENDERED)`.
+* `test_shoot.c` runs `--list`, and requires every name it calls rendered to be in
+  the manifest that run wrote, every name it calls skipped to be in the skip file,
+  and the counts to match both ways.
+
+### SA-6. There is no reference frame that launches the Browser
+
+`apps/Browser` is a real port and is staged with its real `app.so`, but none of
+the 49 names in spec-build-test.md section 3.6 runs it: `menu-browser` is the
+app-selector tile, rendered from the manifest and the icon, and it was already
+byte-exact. So there was nothing to un-skip on the Browser's account. Recorded
+because "the Browser is missing from nd-shoot" is the obvious wrong conclusion
+from the frame list, and because a future `app-browser` recipe would need a
+reference frame captured from the Python first.
+
+### SA-7. `0.2419 ms` is not the Python's CubeBench frame time
+
+`PERFORMANCE.md`'s pre-port table decomposes five things and sums to 0.2419 ms.
+CubeBench's frame draws **four** strings — `"3D Cube"` (7 chars), `"FPS %.1f"`
+(8), `"BACK/OK to exit"` (15) and the softkey label — and calls `get_text_size()`
+twice, which in Pillow is `font.getbbox()` and rasterises the string again to
+measure it. The five-part sum leaves out about 6/7 of the frame.
+
+Measured properly on this host, both sides back to back in one window, driving the
+real `main.py` through `uistub`: the Python frame is **1.6333 ms (612 fps)** and
+the C frame is **0.1025 ms (9,752 fps)** — **15.9×**, or 16× allowing for the
+run-to-run spread on a machine several agents are compiling in. The full
+side-by-side table is in `PERFORMANCE.md`.
+
+The prediction was right about the *mechanism*: text was 75% of the frame as
+decomposed then, is 79.5% of it as decomposed properly now, and is 8.0% in C.
+
+**No question for the owner here** — the pre-port number is not wrong, it is a
+decomposition being read as a total. `PERFORMANCE.md` now says so at the top of
+the file so the two halves are read together.
+
+### SA-8. The glyph cache is worth 11.9× on a text call and 1.82× on the frame
+
+Measured by doing what a per-call renderer does — FreeType directly, with
+`nd_font.c`'s own `FT_Set_Pixel_Sizes` / `FT_LOAD_DEFAULT` / `FT_RENDER_MODE_NORMAL`
+— and adding the compositing both paths pay. `"FPS 60.0"` costs 0.0020 ms cached
+and 0.0242 ms uncached (11.2–12.7× across runs). Per glyph that is 0.0028 ms of
+FreeType work avoided; CubeBench draws 30 glyphs a frame, so a naive port would
+spend 0.083 ms a frame re-rasterising characters it rasterised on the previous
+frame: **0.1850 ms instead of 0.1019 ms, 1.82× on the whole frame**.
+
+Against *Pillow's* text the figure is 138×, because Pillow pays the per-call
+FreeType cost AND the interpreter's per-call overhead. 11.9× is the cache on its
+own. The gap between "11.9× on the call" and "1.82× on the frame" is the useful
+part of the result: once text is nearly free, the frame is whatever is left, and
+here that is one fill loop.
+
+`test_cubebench_perf.c` also asserts the cache is *free* rather than a trade — all
+95 printable ASCII glyphs at all four sizes, byte-compared against a freshly
+rasterised FreeType bitmap. If they ever differed, every golden frame would be a
+coin toss.
+
+### SA-9. CB-8 revisited: `nd_draw_rect_fill` is 5× SLOWER than Pillow, not 1.6×
+
+CB-8 recorded the content-rectangle clear at 0.0305 ms against Pillow's 0.0189 ms,
+calling it 1.6× slower. Measured back to back today it is **0.0718 ms against
+Pillow's 0.0145 ms**, and it is **70% of the whole C frame**. The absolute numbers
+moved because this tree now has several agents compiling in it and CB-8's were
+taken on a quiet machine; **the 5× ratio is the robust figure**, because both
+sides of it were measured in the same window under the same load.
+
+The cause is in `lib/nd_draw.c`'s `hline()`: Pillow stores an RGB image as 4 bytes
+per pixel internally and fills a run with 32-bit stores, while `hline()` issues a
+3-byte `memcpy` per pixel, 35,040 times.
+
+```c
+if (k->bpp == 1) {
+    memset(p, k->bytes[0], (size_t)(x1 - x0 + 1));
+    return;
+}
+for (x = x0; x <= x1; x++, p += k->bpp)
+    memcpy(p, k->bytes, k->bpp);
+```
+
+**Not touched**, for CB-8's reasons, which have not changed: `lib/nd_draw.c` is
+another work package's, this is the most pixel-critical function in the project,
+and every frame is byte-exact as it stands.
+
+**Question for the owner:** there is a one-line version of the fix that cannot
+change a pixel — when a colour's `bpp` bytes are all equal (black and white, which
+is all CubeBench draws), take the `memset` path that the 8-bit case already takes.
+That is a strictly narrower condition than the existing branch and is provably
+byte-identical. Is that worth doing inside the port, or does anything touching
+`nd_draw.c` wait for the 1:1 guarantee to be signed off? The larger fix — filling a
+row at a time for the general case — should certainly wait.
+
+---
+
+## PhoneBook and the shared contact picker (WP apps-phonebook)
+
+`System/apps/PhoneBook/main.py` (214 lines) and `System/apps/PhoneBook/shared/list_ui.py`
+(72 lines), ported to `apps/PhoneBook/{main.c,pb_db.c}` and `lib/nd_contacts.c`.
+Golden frames `app-phonebook` and `contacts-picker` are both **byte-exact, 0 differing
+pixels**, and nothing else in the set moved.
+
+### PB-1. One header was added: `nd_contacts.h`
+
+**Found in:** `lib/nd_ui.c:135`, and U-4 above.
+
+U-4 recorded that nothing in `include/` named the shared picker, and that `nd_ui.c`
+declares it locally and weakly:
+
+```c
+bool nd_contacts_show_selector(nd_ui *ui, const char *title, const char *btn_text,
+                               nd_contact *out);
+```
+
+`include/nd_contacts.h` is that declaration, in the frozen-header namespace, plus the
+full-argument form the apps need:
+
+```c
+bool nd_contacts_pick(nd_ui *ui, const char *title, const char *btn_text,
+                      const char *search_query, const char *header_root,
+                      nd_contact *out, size_t *out_index);
+```
+
+**`nd_ui.c` was not touched.** The name it already picked is the name that shipped, so
+the weak reference resolves and the home screen's Up/Down key now opens the picker. The
+`nd_contact` row type and `nd_contacts_query()` were already in `nd_db.h`; nothing was
+duplicated.
+
+**Placement: `lib/nd_contacts.c`, in `libneodct.so`, not in `apps/PhoneBook/app.so`.**
+`list_ui.py` has three importers in two processes — `core/main.py:1268`,
+`apps/PhoneBook/main.py` and `apps/Messages/main.py`. `nd-core` forks and execve's
+`nd-apprun` and never `dlopen`s an app itself, so a definition inside an app's `.so` is
+one the core process could never call. `spec-apps-core.md` C2 reached the same
+conclusion. Messages and the Dialer link it the same way.
+
+One consequence worth knowing about: Up/Down on the home screen was a no-op for as long
+as the symbol was missing, and now opens the picker for real. What happens after a row is
+picked is still partly weak — `nd_ui.c:1344` calls `nd_modem_dial()` and then
+`nd_dialer_show_calling()`, and the Dialer screens are not ported, so the call is placed
+with no call screen behind it. That is the Dialer work package's, not this one's.
+
+### PB-2. `get_all_contacts()` is unbounded; the C reads at most 256 rows
+
+**Found in:** `shared/list_ui.py:20-30`.
+
+The Python `fetchall()`s the whole table and puts every name on a `VerticalList`.
+`CODING-STANDARDS.md` §1.5 forbids an array sized by input, so `ND_CONTACTS_PICK_MAX`
+is 256: two heap allocations totalling ~55 KB, made when the picker opens and freed
+before it returns. A SIM holds 250 contacts, so the cap is above anything the phone can
+reach by importing, but a database with more rows shows only the first 256 by name
+order. Same class of bound as P-2.
+
+### PB-3. `time.sleep()` is skipped while the virtual clock is running
+
+**Found in:** `shared/list_ui.py:52` (1.5 s), `PhoneBook/main.py:40` (1.0 s) and
+`main.py:180` (2.0 s).
+
+`goldenframe._Frozen` patches nine attributes of `time` and `sleep` is **not** one of
+them, so under capture the Python really does sleep. In C, `dwell()` returns immediately
+when `nd_vclock_enabled()`. The reasoning: under capture, time is a frame counter by the
+project's own decision (`nd_vclock.h`), a real sleep advances neither the clock nor a
+pixel, and the only thing it changes is how long the oracle and the unit tests take. On
+the phone the sleeps are real and the durations are the Python's.
+
+No golden frame passes through a sleep — the picker's empty state is unreachable with
+the seeded contact, and `_draw_center_message` has no reference frame.
+
+### PB-4. A missing `phonebook.db` is an empty phone book, not a crash
+
+**Found in:** `shared/list_ui.py:16-30` — no `try`/`except` anywhere in the file.
+
+`sqlite3.connect()` on a missing path **creates an empty file**, and the `SELECT` against
+the table that is not in it then raises `sqlite3.OperationalError` straight out of the
+app and into the crash screen. `nd_contacts_query()` (`lib/nd_db.c`, another work
+package) returns zero rows instead, which lands in the picker's ordinary empty state and
+draws "No Contacts". `spec-apps-core.md` §6b asked for exactly this and asked for the
+deviation to be noted; this is the note.
+
+### PB-5. "Call" does not call — the bug README.md line 144 advertises
+
+**Found in:** `PhoneBook/main.py:170-181`, `run_contact_options()` item 0.
+
+```python
+if sel == 0: # Call
+    ui.draw.rectangle((0, 0, screen_w, content_bottom), fill="black")
+    y = max(12, int(content_bottom * 0.30))
+    ui.draw.text((10, y),      "Calling...",  font=ui.font_xl, fill="white")
+    ui.draw.text((10, y + 35), contact[1],    font=ui.font_n,  fill="white")
+    ui.draw.text((10, y + 60), contact[2],    font=ui.font_s,  fill="white")
+    ui.fb.update(ui.canvas)
+    time.sleep(2)
+```
+
+That is the whole branch. **The modem is never touched**: no `dial()`, no
+`Dialer/call_screen`, no hang-up key, no call-log entry. The screen says "Calling..." for
+two seconds and returns to the contact's menu. `README.md` line 144 has listed it since
+0.3.0 — *"Phonebook (SQLite-backed; calling action is buggy)"*.
+
+**Ported exactly, and pinned by a test.** `nd_phonebook_calling_screen()` draws those
+three strings at those three coordinates and does nothing else;
+`test_phonebook.c::test_calling_screen_does_not_dial` composes the same frame by hand and
+compares digests, so both "it stopped drawing the number" and "it started dialling" fail
+the test.
+
+**Question for the owner:** the fix is four lines — `nd_modem_dial(ui->modem, ...)` then
+`nd_dialer_show_calling(ui, number, name)`, which is what `nd_ui.c:1342` already does for
+the home screen's Up/Down picker. It is deliberately **not** applied. Two things stop it
+being a free win: an app process has `ui->modem == NULL` by `nd_app.h`'s rules, so
+dialling from inside PhoneBook needs a route to the core that does not exist yet; and
+`y = max(12, int(content_bottom * 0.30))` with its hard 35/60 line spacing is a
+hand-drawn screen that the real `call_screen` would replace outright, which changes
+pixels. Should this wait for the Dialer work package, or is the intended behaviour "hand
+the number back to the core and let it dial"?
+
+### PB-6. `delete_contact_action()` has no exception handling at all
+
+**Found in:** `PhoneBook/main.py:147-157`.
+
+`add_entry_action` and `edit_contact_action` each wrap their statement in
+`try/except Exception as e: print(f"[PB] ... Error: {e}")`, and — because the
+`_draw_center_message` call is *inside* the `try` — a failure means no "Saved!" and no
+"Updated!". Both are reproduced.
+
+`delete_contact_action` has neither, so a sqlite failure there unwinds out of the app and
+reaches the crash screen. The C logs `[PB] Delete Error: <sqlite message>` and still
+draws "Erased". Crashing the phone book over a transient sqlite error is worse than the
+confirmation being slightly wrong, and `CODING-STANDARDS.md` §3 forbids failing silently
+— but it *is* a divergence, and it is the only one in `apps/PhoneBook/main.c`.
+
+### PB-7. Three quirks in `main.py` that are ported, not fixed
+
+1. **Two menu entries have no branch.** `run()`'s `if/elif` chain covers 0, 1, 2, 3 and
+   5. "Send entry" (index 4) and "1-touch dialing" (index 6) are drawn, selectable, and
+   choosing either just redraws the menu. `speed_dial` is written as 0 on insert and
+   never read.
+2. **Search and Edit disagree about the empty string.** `run()` tests the search box with
+   `if query:`, so confirming an empty field is a cancel; `edit_contact_action` tests
+   `if new_name is None:`, so confirming an empty field **saves an empty name**. Both
+   spellings are kept (`query[0] != '\0'` vs `!= NULL`).
+3. **Erase has no confirmation.** One Enter on the picker and the row is gone. The
+   Python's own comment says *"In M3 we can add a 'Are you sure?' dialog here"*.
+
+### PB-8. `_ensure_serial_redirect()` compares the device, not `sys.stdout.name`
+
+**Found in:** `PhoneBook/main.py:8-21`.
+
+The Python skips the redirect when `getattr(sys.stdout, "name", None)` already equals
+`SERIAL_CONSOLE_DEVICE` (`$NEODCT_SERIAL_DEVICE`, default `/dev/ttyAMA0`). C has no name
+on a descriptor, so `ensure_serial_redirect()` asks the same question of the file itself:
+`fstat(1)` and `stat(device)`, and skip when both are the same character device. Every
+failure is swallowed, as the bare `except Exception: pass` swallows it.
+
+The two answers differ only where stdout is a pipe or a file that is not the serial
+device, in which case both redirect. Note this runs at *import* time in Python and as the
+first statement of `app_run()` in C, because that is the earliest moment the translation
+unit has control.
+
+### PB-9. `nd_shoot.c`: how each of the two frames is stopped
+
+**Found in:** `neodct/tools/shoot_docs.py:103` and `:181`.
+
+Both recipes end the screen with something C cannot raise. `app-phonebook` is
+`run_app(ui, "Phone book", keys=[])`, where the first `read_keypress()` raises
+`ScriptExhausted` and the frame already on the canvas is the one saved; `contacts-picker`
+is `ui.keys.push(BACK)` followed by a `try`/`except BaseException: pass`.
+
+In C both are stopped with the Back key: `STOCK_CASES` gives PhoneBook `ND_KEY_CLEAR` as
+its held key, and the picker gets a one-key script. That looks like the mistake
+`run_app_inproc()`'s comment warns about — handing an app a key it reads as "quit" — and
+here it is the right answer, because the reference frame **is** the first screen the app
+draws. `shoot_stock_apps()` was also restructured to build a fresh `nd_ui` and a fresh
+virtual clock per case, which is what `with StubUI(...)` does per case in the recipe and
+what it did not do before.

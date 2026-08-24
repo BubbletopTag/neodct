@@ -76,14 +76,12 @@ extern "C" {
  *
  * search_query NULL or "" both mean "everything", exactly as Python's falsy
  * test does. */
-bool nd_contacts_pick(nd_ui *ui, const char *title, const char *btn_text,
-                      const char *search_query, const char *header_root, nd_contact *out,
-                      size_t *out_index);
+bool nd_contacts_pick(nd_ui *ui, const char *title, const char *btn_text, const char *search_query,
+                      const char *header_root, nd_contact *out, size_t *out_index);
 
 /* The core's spelling, already referenced (weakly) from nd_ui.c:
  * nd_contacts_pick(ui, title, btn_text, NULL, "1", out, NULL). */
-bool nd_contacts_show_selector(nd_ui *ui, const char *title, const char *btn_text,
-                               nd_contact *out);
+bool nd_contacts_show_selector(nd_ui *ui, const char *title, const char *btn_text, nd_contact *out);
 
 #ifdef __cplusplus
 }

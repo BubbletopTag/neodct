@@ -45,16 +45,17 @@
 #include <ft2build.h>
 #include FT_FREETYPE_H
 
+#include "nd_app.h"
 #include "nd_capture.h"
 #include "nd_draw.h"
 #include "nd_font.h"
-#include "nd_app.h"
 #include "nd_image.h"
 #include "nd_keycodes.h"
 #include "nd_paths.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
+#include "nd_widgets.h"
 
 #define FONT_REL "overlay/NeoDCT/System/ui/resources/fonts/font.ttf"
 
@@ -76,15 +77,18 @@
  * was compiling; the minimum is the closest this can get to the cost with the
  * machine to itself, and it can only ever be an over-estimate of the true
  * speed of the code, never an under-estimate. */
-#define REPEATS 5
+#define REPEATS 3
 
+/* Sized so the whole binary runs in about two seconds. Ten times these counts
+ * moved no figure below by more than 3%, and `make test` is run far more
+ * often than the numbers are read. */
 #ifdef SANITIZED
 #define FRAME_ITERS 60
 #define PART_ITERS  200
 #define BENCH_NOTE  " (SANITIZER BUILD -- these numbers are not comparable)"
 #else
-#define FRAME_ITERS 2000
-#define PART_ITERS  20000
+#define FRAME_ITERS 1000
+#define PART_ITERS  5000
 #define BENCH_NOTE  ""
 #endif
 
@@ -275,7 +279,15 @@ static void fx_free(fixture *fx)
  * 1. The whole frame
  * ------------------------------------------------------------------ */
 
-static double g_frame_ms;
+static double g_frame_ms; /* whole frame, best of REPEATS          */
+static double g_parts_ms; /* the parts, summed                     */
+static double g_text_ms;  /* the four text calls plus the metrics  */
+
+/* main.py draws "3D Cube" (7), "FPS 60.0" (8) and "BACK/OK to exit" (15).
+ * Thirty glyphs, which is what an uncached renderer would rasterise every
+ * frame. The softkey label is not counted: nd_softkey_update() is measured
+ * whole and its own text is inside that figure. */
+#define TEXT_GLYPHS_PER_FRAME 30
 
 /* The app is driven exactly as nd-shoot drives it, except that the virtual
  * clock stays OFF: this is a wall-clock measurement, so the app must see real
@@ -347,7 +359,18 @@ static void bench_whole_frame(void)
 }
 
 /* ------------------------------------------------------------------ *
- * 2. The same five parts PERFORMANCE.md decomposed the Python into
+ * 2. The frame, part by part
+ * ------------------------------------------------------------------ *
+ *
+ * PERFORMANCE.md decomposed the Python into five parts. EVERY CALL run()
+ * MAKES IS HERE, not those five, because the five leave out three quarters of
+ * the frame's text: the "3D Cube" title, the "BACK/OK to exit" hint, the two
+ * get_text_size() measurements and the softkey bar. Their sum is what the
+ * 0.2419 ms figure in PERFORMANCE.md is -- a decomposition of one text draw
+ * out of four -- and quoting it as the Python's frame time understates the
+ * Python by about six times. The full list is measured on both sides here and
+ * in the PERFORMANCE.md table, so the two add up to something a reader can
+ * check against the whole-frame number above.
  * ------------------------------------------------------------------ */
 
 /* One frame's worth of projected vertices, taken from the app's own geometry
@@ -366,18 +389,32 @@ static double ms_per(double t0, double t1, int32_t iters)
     return (t1 - t0) * 1000.0 / (double)iters;
 }
 
+/* main.py's three strings, at their real lengths -- a text cost is per
+ * character, so a benchmark that measured only the short one would flatter
+ * both sides equally and tell nobody anything. */
+#define TITLE_TEXT "3D Cube"
+#define HINT_TEXT  "BACK/OK to exit"
+
 static void bench_parts(double *text_ms_out)
 {
     fixture fx;
+    nd_softkey bar;
     double t0;
     double t1;
     int32_t i;
     int32_t j;
     int32_t rep;
+    int32_t tw = 0;
+    int32_t th = 0;
     double clear_ms = 0.0;
     double lines_ms = 0.0;
+    double title_ms = 0.0;
     double text_ms = 0.0;
+    double hint_ms = 0.0;
+    double size_ms = 0.0;
+    double bar_ms = 0.0;
     double blit_ms = 0.0;
+    double sum;
 
     *text_ms_out = 0.0;
     if (!fx_init(&fx, 2u)) {
@@ -385,6 +422,9 @@ static void bench_parts(double *text_ms_out)
         fx_free(&fx);
         return;
     }
+
+    /* An app's SoftKeyBar is always the opaque one; see nd_ui.h. */
+    nd_softkey_init(&bar, &fx.ui, false);
 
     for (rep = 0; rep < REPEATS; rep++) {
         double ms;
@@ -415,6 +455,15 @@ static void bench_parts(double *text_ms_out)
         if (rep == 0 || ms < lines_ms)
             lines_ms = ms;
 
+        /* Pillow: draw.text((6, 4), "3D Cube", font=font_s). */
+        t0 = nd_time_monotonic();
+        for (i = 0; i < PART_ITERS; i++)
+            (void)nd_draw_text(fx.ui.draw, 6, 4, TITLE_TEXT, fx.ui.font_s, ND_WHITE);
+        t1 = nd_time_monotonic();
+        ms = ms_per(t0, t1, PART_ITERS);
+        if (rep == 0 || ms < title_ms)
+            title_ms = ms;
+
         /* Pillow: draw.text((x, 16), "FPS 60.0", font=font_s). THE 75%. */
         t0 = nd_time_monotonic();
         for (i = 0; i < PART_ITERS; i++)
@@ -423,6 +472,40 @@ static void bench_parts(double *text_ms_out)
         ms = ms_per(t0, t1, PART_ITERS);
         if (rep == 0 || ms < text_ms)
             text_ms = ms;
+
+        /* Pillow: draw.text((x, content_bottom - h - 4), hint, fill="gray").
+         * Fifteen characters, and the most expensive draw in the Python's
+         * frame because of it. */
+        t0 = nd_time_monotonic();
+        for (i = 0; i < PART_ITERS; i++)
+            (void)nd_draw_text(fx.ui.draw, 60, ND_UI_H - ND_SOFTKEY_H - 18, HINT_TEXT, fx.ui.font_s,
+                               ND_GRAY);
+        t1 = nd_time_monotonic();
+        ms = ms_per(t0, t1, PART_ITERS);
+        if (rep == 0 || ms < hint_ms)
+            hint_ms = ms;
+
+        /* ui.get_text_size() twice per frame. In Pillow that is
+         * font.getbbox(), which rasterises the string all over again; here it
+         * is a walk over cached advances. */
+        t0 = nd_time_monotonic();
+        for (i = 0; i < PART_ITERS; i++) {
+            nd_ui_text_size(&fx.ui, FPS_LABEL, fx.ui.font_s, &tw, &th);
+            nd_ui_text_size(&fx.ui, HINT_TEXT, fx.ui.font_s, &tw, &th);
+        }
+        t1 = nd_time_monotonic();
+        ms = ms_per(t0, t1, PART_ITERS);
+        if (rep == 0 || ms < size_ms)
+            size_ms = ms;
+
+        /* softkey.update("Exit", present=False). */
+        t0 = nd_time_monotonic();
+        for (i = 0; i < PART_ITERS; i++)
+            nd_softkey_update(&bar, "Exit", false);
+        t1 = nd_time_monotonic();
+        ms = ms_per(t0, t1, PART_ITERS);
+        if (rep == 0 || ms < bar_ms)
+            bar_ms = ms;
 
         /* Pillow: canvas.tobytes() and the write into the mmap. Here it is
          * nd_capture's row-by-row copy, the same 126,000 bytes moved. */
@@ -435,11 +518,26 @@ static void bench_parts(double *text_ms_out)
             blit_ms = ms;
     }
 
-    printf("  clear content rect   %8.4f ms\n", clear_ms);
-    printf("  12 wireframe lines   %8.4f ms\n", lines_ms);
-    printf("  \"%s\" (cached)  %8.4f ms\n", FPS_LABEL, text_ms);
-    printf("  framebuffer commit   %8.4f ms\n", blit_ms);
+    sum = clear_ms + lines_ms + title_ms + text_ms + hint_ms + size_ms + bar_ms + blit_ms;
 
+    printf("  clear content rect        %8.4f ms\n", clear_ms);
+    printf("  12 wireframe lines        %8.4f ms\n", lines_ms);
+    printf("  text \"%s\"           %8.4f ms\n", TITLE_TEXT, title_ms);
+    printf("  text \"%s\"          %8.4f ms\n", FPS_LABEL, text_ms);
+    printf("  text \"%s\"   %8.4f ms\n", HINT_TEXT, hint_ms);
+    printf("  2x nd_ui_text_size        %8.4f ms\n", size_ms);
+    printf("  softkey bar               %8.4f ms\n", bar_ms);
+    printf("  framebuffer commit        %8.4f ms\n", blit_ms);
+    printf("  ---- sum of the parts     %8.4f ms   (whole frame %.4f ms)\n", sum, g_frame_ms);
+    if (sum > 0.0) {
+        double text_total = title_ms + text_ms + hint_ms + size_ms;
+
+        printf("  text + text metrics       %8.4f ms   %5.1f%% of the frame\n", text_total,
+               100.0 * text_total / sum);
+    }
+
+    g_parts_ms = sum;
+    g_text_ms = title_ms + text_ms + hint_ms + size_ms;
     *text_ms_out = text_ms;
     fx_free(&fx);
 }
@@ -512,12 +610,26 @@ static void bench_glyph_cache(double cached_text_ms)
     }
 
     printf("  \"%s\" FreeType per call:\n", FPS_LABEL);
-    printf("    rasterise 8 glyphs %8.4f ms\n", raster_ms);
-    printf("    + the same blend   %8.4f ms  = %.4f ms uncached\n", cached_text_ms,
+    printf("    rasterise 8 glyphs   %8.4f ms\n", raster_ms);
+    printf("    + the same blend     %8.4f ms  = %.4f ms uncached\n", cached_text_ms,
            raster_ms + cached_text_ms);
     if (cached_text_ms > 0.0) {
-        printf("    the cache is worth %8.2fx on this call\n",
+        printf("    the cache is worth   %8.2fx on this one call\n",
                (raster_ms + cached_text_ms) / cached_text_ms);
+    }
+
+    /* What the cache is worth to the FRAME, which is the number that matters
+     * and is much smaller than the number above: with text made nearly free,
+     * clearing the content rectangle is what the frame now costs
+     * (OPEN-QUESTIONS.md CB-8), and no amount of text caching touches that. */
+    if (g_parts_ms > 0.0 && raster_ms > 0.0) {
+        double per_glyph = raster_ms / 8.0;
+        double naive_text = (double)TEXT_GLYPHS_PER_FRAME * per_glyph + g_text_ms;
+        double naive_frame = g_parts_ms - g_text_ms + naive_text;
+
+        printf("    per glyph            %8.4f ms\n", per_glyph);
+        printf("    a %d-glyph frame uncached: %.4f ms vs %.4f ms cached = %.2fx on the frame\n",
+               TEXT_GLYPHS_PER_FRAME, naive_frame, g_parts_ms, naive_frame / g_parts_ms);
     }
 
     (void)FT_Done_Face(face);

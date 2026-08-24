@@ -61,8 +61,8 @@
 #include "nd_image.h"
 #include "nd_input.h"
 #include "nd_json.h"
-#include "nd_keypad.h"
 #include "nd_keycodes.h"
+#include "nd_keypad.h"
 #include "nd_paths.h"
 #include "nd_text.h"
 #include "nd_types.h"
@@ -231,8 +231,8 @@ static bool api_open(void)
 
     return g_api.run != NULL && g_api.shutdown != NULL && g_api.insert != NULL &&
            g_api.update != NULL && g_api.del != NULL && g_api.center_message != NULL &&
-           g_api.calling_screen != NULL && g_api.options_root != NULL &&
-           g_api.main_items != NULL && g_api.opt_items != NULL && g_api.contact_items != NULL;
+           g_api.calling_screen != NULL && g_api.options_root != NULL && g_api.main_items != NULL &&
+           g_api.opt_items != NULL && g_api.contact_items != NULL;
 }
 
 static void api_close(void)

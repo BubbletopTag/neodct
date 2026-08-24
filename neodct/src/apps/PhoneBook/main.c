@@ -63,21 +63,20 @@
  * ------------------------------------------------------------------ */
 
 const char *const nd_phonebook_main_items[ND_PHONEBOOK_MAIN_ITEMS] = {
-    "Search",          /* 0 */
-    "Add entry",       /* 1 */
-    "Edit",            /* 2 */
-    "Erase",           /* 3 */
-    "Send entry",      /* 4 -- no branch; does nothing */
-    "Options",         /* 5 */
-    "1-touch dialing"  /* 6 -- no branch; does nothing */
+    "Search",         /* 0 */
+    "Add entry",      /* 1 */
+    "Edit",           /* 2 */
+    "Erase",          /* 3 */
+    "Send entry",     /* 4 -- no branch; does nothing */
+    "Options",        /* 5 */
+    "1-touch dialing" /* 6 -- no branch; does nothing */
 };
 
 const char *const nd_phonebook_opt_items[ND_PHONEBOOK_OPT_ITEMS] = {"Type of view",
                                                                     "Memory status"};
 
-const char *const nd_phonebook_contact_items[ND_PHONEBOOK_CONTACT_ITEMS] = {"Call", "Edit",
-                                                                            "Delete",
-                                                                            "Send number"};
+const char *const nd_phonebook_contact_items[ND_PHONEBOOK_CONTACT_ITEMS] = {
+    "Call", "Edit", "Delete", "Send number"};
 
 /* ------------------------------------------------------------------ *
  * Small helpers

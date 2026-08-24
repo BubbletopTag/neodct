@@ -76,7 +76,7 @@
  * the honest cap -- "single-digit pixels along the wireframe edges". The same
  * two constants test_cubebench.c pins; kept in both because each test must
  * pass on its own with no arguments. */
-#define TOLERANCE_FRAME "eng-cubebench"
+#define TOLERANCE_FRAME     "eng-cubebench"
 #define TOLERANCE_PIXEL_CAP 9
 
 extern char **environ;

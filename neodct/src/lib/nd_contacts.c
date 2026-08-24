@@ -70,8 +70,8 @@ static void dwell(double seconds)
  * clear rows 0..content_bottom, centre the word with font_n, present, hold. */
 static void draw_empty(nd_ui *ui, const char *search_query)
 {
-    const char *msg = (search_query != NULL && search_query[0] != '\0') ? "No Results"
-                                                                       : "No Contacts";
+    const char *msg =
+        (search_query != NULL && search_query[0] != '\0') ? "No Results" : "No Contacts";
     int32_t screen_w = nd_ui_width(ui);
     int32_t content_bottom = nd_ui_content_bottom(ui);
     int32_t w = 0;
@@ -86,9 +86,8 @@ static void draw_empty(nd_ui *ui, const char *search_query)
     dwell(1.5);
 }
 
-bool nd_contacts_pick(nd_ui *ui, const char *title, const char *btn_text,
-                      const char *search_query, const char *header_root, nd_contact *out,
-                      size_t *out_index)
+bool nd_contacts_pick(nd_ui *ui, const char *title, const char *btn_text, const char *search_query,
+                      const char *header_root, nd_contact *out, size_t *out_index)
 {
     nd_contact *contacts = NULL; /* owned here; freed before every return */
     const char **names = NULL;   /* ditto -- borrowed by the list, so both
@@ -132,8 +131,8 @@ bool nd_contacts_pick(nd_ui *ui, const char *title, const char *btn_text,
      * nd_header owns the only copy of the id, so this is the whole of it. */
     nd_vlist_init(&list, ui, (title != NULL) ? title : ND_CONTACTS_TITLE_DEFAULT,
                   (const char *const *)names, n, 1);
-    nd_header_init(&list.header, ui, (header_root != NULL) ? header_root
-                                                           : ND_CONTACTS_ROOT_DEFAULT);
+    nd_header_init(&list.header, ui,
+                   (header_root != NULL) ? header_root : ND_CONTACTS_ROOT_DEFAULT);
     nd_softkey_init(&softkey, ui, false);
 
     for (;;) {
@@ -164,8 +163,7 @@ done:
     return picked;
 }
 
-bool nd_contacts_show_selector(nd_ui *ui, const char *title, const char *btn_text,
-                               nd_contact *out)
+bool nd_contacts_show_selector(nd_ui *ui, const char *title, const char *btn_text, nd_contact *out)
 {
     return nd_contacts_pick(ui, title, btn_text, NULL, ND_CONTACTS_ROOT_DEFAULT, out, NULL);
 }
