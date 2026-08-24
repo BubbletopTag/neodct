@@ -100,7 +100,8 @@ void nd_linuxshell_write_tty(const char *path, const char *data);
 /* _run_quiet(): spawn argv, stdout and stderr to /dev/null, wait up to
  * timeout_s. TRUE UNLESS AN EXCEPTION ESCAPED -- a non-zero exit still
  * counts as success, only a spawn failure or a timeout is false. argv[0] is
- * the path to exec, as shutil.which() left it. */
+ * the path to exec, as shutil.which() left it; a missing or non-executable
+ * one is the spawn failure, checked by hand for the reason main.c gives. */
 bool nd_linuxshell_run_quiet(const char *const *argv, double timeout_s);
 
 /* os.environ.copy() plus PS1 and TERM.
