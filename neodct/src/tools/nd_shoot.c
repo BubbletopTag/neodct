@@ -144,10 +144,9 @@ static const shoot_skip SKIPPED[] = {
      * `random` from the clock and decision 4 refused to reimplement CPython's
      * MT19937 to chase the Python's food cell and card order. */
 
-    /* Group 5 -- shoot_telephony. home-sms-banner and crash-screen ARE
-     * rendered; these three need modules that do not exist in neodct/src. */
-    {"call-active", "System/ui/Dialer/call_screen not ported yet"},
-    {"call-incoming", "System/ui/Dialer/incoming_screen not ported yet"},
+    /* Group 5 -- shoot_telephony is fully rendered now: lib/nd_dialer.c is a
+     * real port of System/ui/Dialer, so call-active and call-incoming are
+     * drawn rather than stood in for. Nothing from this group is skipped. */
 
     /* Group 6 -- shoot_engineering_apps. eng-cubebench is NOT here any more:
      * apps/CubeBench is a real port and shoot_engineering_apps() below
@@ -194,6 +193,8 @@ static const char *const RENDERED[] = {
     "game-snake",
     "game-memory",
     /* shoot_telephony */
+    "call-active",
+    "call-incoming",
     "home-sms-banner",
     "contacts-picker",
     "crash-screen",
@@ -921,7 +922,7 @@ static void shoot_telephony(nd_capture *cap)
     nd_fb *fb = nd_capture_fb(cap);
     nd_ui ui;
 
-    printf("[shoot] telephony (3 of 5 -- the two Dialer screens are not ported)\n");
+    printf("[shoot] telephony\n");
 
     write_settings("Palestine.jpg");
     nd_vclock_enable();
@@ -933,13 +934,24 @@ static void shoot_telephony(nd_capture *cap)
     }
     nd_ui_sim_status(&ui, 4, 4, "Tello");
 
-    /* shoot_telephony draws call-active and call-incoming from the SAME
-     * StubUI before this one, so home-sms-banner is the block's THIRD frame.
-     * Their pixels are not reproducible yet; their TICKS are, and the
-     * envelope's int(time.time() * 2) % 2 blink phase is decided by them.
-     * Two throwaway commits stand in. */
+    /* The two call screens come from the SAME StubUI as everything else in
+     * this block, which is what makes home-sms-banner its THIRD frame and
+     * fixes the envelope's int(time.time() * 2) % 2 blink phase.
+     *
+     * OPEN-QUESTIONS.md S-3 called this out: two throwaway presents stood in
+     * here while the Dialer was unported, and had to be DELETED rather than
+     * left beside the real draws -- two extra commits would move the blink
+     * phase and change home-sms-banner. They are gone. Each screen still
+     * costs exactly one tick, because shoot_docs.py calls the draw_* helper
+     * (which does not present) and then flushes by hand. */
+    nd_dialer_draw_call(&ui, "0741234567", "Mum");
     (void)nd_ui_present(&ui);
+    save_recent(cap, "call-active");
+
+    nd_dialer_draw_incoming(&ui, "Mum", true);
     (void)nd_ui_present(&ui);
+    save_recent(cap, "call-incoming");
+
     if (nd_vclock_frame() != 2u) {
         nd_log_err(ND_LOG_UI, "shoot: expected 2 ticks before the banner, got %llu",
                    (unsigned long long)nd_vclock_frame());

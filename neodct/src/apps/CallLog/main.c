@@ -98,8 +98,8 @@ const char *const nd_calllog_timer_keys[ND_CALLLOG_TIMER_COUNT] = {
 /* CLEAR_ITEMS index -> `type`. NULL is the Python's None: "DELETE FROM
  * calls" with no WHERE clause. See the header comment; the order is not the
  * root menu's and that is deliberate. */
-static const char *const CLEAR_TARGETS[ND_CALLLOG_CLEAR_ITEMS] = {NULL, "missed", "dialed",
-                                                                 "received"};
+const char *const nd_calllog_clear_targets[ND_CALLLOG_CLEAR_ITEMS] = {NULL, "missed", "dialed",
+                                                                      "received"};
 
 /* ------------------------------------------------------------------ *
  * Storage
@@ -393,7 +393,7 @@ static void show_clear_menu(nd_ui *ui)
     if (choice < 0 || choice >= ND_CALLLOG_CLEAR_ITEMS)
         return;
 
-    if (nd_calllog_clear(CLEAR_TARGETS[choice]))
+    if (nd_calllog_clear(nd_calllog_clear_targets[choice]))
         (void)nd_infoscreen_show(ui, "List cleared", NULL, "OK");
 }
 

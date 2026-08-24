@@ -75,6 +75,13 @@ typedef enum {
 
 extern const char *const nd_calllog_timer_keys[ND_CALLLOG_TIMER_COUNT];
 
+/* CLEAR_ITEMS index -> the `type` to delete, NULL meaning "every row".
+ * {0: None, 1: "missed", 2: "dialed", 3: "received"} -- which agrees with
+ * the labels beside it and NOT with the root menu, where Received is 1 and
+ * Dialed is 2. Exposed because a test is the only thing that can notice the
+ * two orders drifting apart. */
+extern const char *const nd_calllog_clear_targets[ND_CALLLOG_CLEAR_ITEMS];
+
 /* ------------------------------------------------------------------ *
  * Storage
  * ------------------------------------------------------------------ */
