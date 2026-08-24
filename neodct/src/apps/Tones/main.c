@@ -467,8 +467,7 @@ static size_t walk_one(const char *dir, nd_tone *out, size_t max, size_t n, walk
             continue;
         if (n >= max) {
             if (!warned_full) {
-                nd_log(ND_LOG_TONES, "More than %d tones; the rest are not listed.",
-                       (int)max);
+                nd_log(ND_LOG_TONES, "More than %d tones; the rest are not listed.", (int)max);
                 warned_full = true;
             }
             continue;
@@ -572,8 +571,8 @@ static void show_ringing_options(nd_ui *ui)
     nd_msgdialog dialog;
     int32_t selection;
 
-    nd_vlist_init(&vlist, ui, "Ringing Options", nd_tones_ringing_options,
-                  ND_TONES_RINGING_ITEMS, ND_TONES_ROOT_ID);
+    nd_vlist_init(&vlist, ui, "Ringing Options", nd_tones_ringing_options, ND_TONES_RINGING_ITEMS,
+                  ND_TONES_ROOT_ID);
     nd_softkey_init(&softkey, ui, false);
     nd_softkey_update(&softkey, "Select", false);
 

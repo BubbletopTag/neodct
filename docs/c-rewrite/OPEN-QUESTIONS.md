@@ -3133,3 +3133,253 @@ Checking `nd_msg_wrap_text` against `_wrap_lines` gives the wrong answer in both
 directions. Check every text routine against *its own* Python original.
 
 **Answer:** _(no owner decision needed — this is a test fix)_
+
+---
+
+## Calculator, Clock, Power and Tones (work package apps-small)
+
+Recorded while porting the four smallest stock apps:
+`System/apps/Calculator/main.py` (159 lines), `System/apps/Clock/main.py` (18),
+`System/apps/Power/main.py` (103) and `System/apps/Tones/main.py` (229) into
+`apps/Calculator`, `apps/Clock`, `apps/Power` and `apps/Tones`.
+
+Three golden frames moved from the skip list into the rendered set, and a
+fourth changed hands. All four are **byte-exact, 0 differing pixels**:
+`app-calculator`, `app-calculator-options`, `app-tones`, and `app-clock`
+— which apps/Stub used to draw and apps/Clock now draws.
+
+### CA-1. Division by zero is the one branch this port ADDS
+
+**Found in:** `System/apps/Calculator/main.py:67`, `except ZeroDivisionError:`.
+
+Python raises on `x / 0.0`; C returns an infinity. Left alone, `8 / 0 =` would
+have printed `inf` on a phone that prints `Error`. `nd_calc_fold()` therefore
+tests the divisor explicitly before dividing. It is the same behaviour reached
+a different way, and it is the only place in `apps/Calculator/main.c` where the
+C says something the Python does not have written down.
+
+Nothing else in that file needed adding. `+`, `-` and `*` overflow to an
+infinity in both languages (Python float multiplication does not raise
+`OverflowError`), so `1e308 * 10` shows `Error` in both — through
+`format_number`'s `inf` test, not through an exception.
+
+### CA-2. `int(value)` is arbitrary precision and `(long long)` is not
+
+**Found in:** `System/apps/Calculator/main.py:24`,
+`if value == int(value) and abs(value) < 10 ** MAX_DIGITS:`
+
+Python evaluates `int(value)` **first**, for any magnitude, and only then
+checks the `10**12` ceiling. `int(1e300)` is exact in Python; `(long long)1e300`
+is undefined behaviour in C. So `nd_calc_format_number()` uses `trunc()` for the
+equality test — exact for every finite double — and casts only inside the
+branch that `fabs(value) < 1e12` has already made safe.
+
+The formatting itself needed nothing: CPython's float formatting and
+glibc/musl `printf` are both correctly rounded, so `"%.8f"` and `"%.6e"` of the
+same double produce the same digits. Thirty-three values are pinned in
+`test_calculator.c`, every expectation produced by **running** the Python's own
+`format_number`, not by reasoning about it.
+
+### CA-3. Three unreachable branches in the Python are reproduced anyway
+
+`type_digit()` special-cases an entry of `"-0"`, `type_point()` special-cases
+`"-"`, and the twelve-character limit is measured after `lstrip("-")`. **Nothing
+in this app can put a `-` at the front of the entry**: there is no sign key and
+no unary minus in the Options menu. `type_digit()`'s `ch != "."` can never be
+false either, because only `type_point()` writes a point and it does not go
+through `type_digit()`.
+
+All four are ported. CODING-STANDARDS.md section 9.4 — a later port that adds a
+sign key will want them, and deleting reachable-looking code is how a port
+loses a rule nobody wrote down.
+
+### CA-4. The Calculator's two frames are picked by the FRAME BUDGET, not by a key
+
+**This is CB-2's substitution again**, and it is the second place in the tree
+that needs it.
+
+`Calculator.loop()` redraws on **every** key it recognises, Clear included, and
+there is no key it treats as "leave without redrawing": Clear deletes a
+character and draws, and any key it ignores never returns at all. The Python
+does not need one — `uistub.KeyScript` runs out and `wait_for_key()` raises
+`ScriptExhausted` straight out of the loop, and `frames[-1]` is whatever was
+already committed.
+
+C cannot raise out of a read. So `nd-shoot` queues the recipe's keys followed by
+enough Clears to empty the entry and return, and sets an `nd_capture` budget at
+the frame the reference holds:
+
+| frame | keys | budget |
+| --- | --- | --- |
+| `app-calculator` | `1 2 3` then 4× Clear | **4** — `draw()` plus one per digit |
+| `app-calculator-options` | `7 Enter` then 3× Clear | **3** — `draw()`, the `7`, the list |
+
+The Clears after the budget still run and still redraw; `nd_capture` refuses
+them with `ND_ERR_BUSY`, records nothing and **does not tick the virtual
+clock**, so neither the ring nor the clock can tell they happened. Both frames
+are byte-exact, and `test_calculator.c` pins the frame count, the tick count and
+the digest the way `test_cubebench.c` does.
+
+`app-tones` needs none of this: `PagedList` drains the channel before it draws,
+so its Back arrives as a held-key repeat afterwards, exactly as `app-clock`'s
+does.
+
+### CL-1. X-18 is closed: the Clock app's `while True:` is now reproduced
+
+X-18 recorded that `apps/Stub` did not reproduce Clock's loop or its
+`(46, 28, 50)` exit set, because `MessageDialog`'s own key set already covered
+the same exits. `apps/Clock` is a real port now and both are back, along with
+the `ui.fb.update(ui.canvas)` on line 10 that commits a frame **before** the
+dialog is drawn.
+
+That extra frame is captured and discarded — `shoot_docs.py` saves `frames[-1]`
+— but it is committed, and `test_clock_app.c` checks the count is 2 so that a
+tidy-up removing it is a failing test rather than a silent change to what the
+virtual clock has ticked. `app-clock` is still byte-identical to
+`widget-messagedialog`.
+
+**Two keys leave this screen, not one.** `warningmsg.show()` returns the key
+that dismissed it and the Python throws it away, so the loop's own
+`wait_for_key()` needs a second press; a Clear never leaves at all, because
+`MessageDialog` cancels on it and `(46, 28, 50)` does not contain 14. That is
+the phone's behaviour today and it is ported as-is — which also means the only
+bounded way to observe the loop from a test is `nd_app_should_exit()`, and that
+is how `test_clock_app.c` does it.
+
+### PW-1. `subprocess.Popen(["poweroff"])` searches $PATH; `nd_proc_spawn()` does not
+
+**Found in:** `System/apps/Power/main.py:45`.
+
+`Popen` uses `execvp` semantics. `nd_proc_spawn()` takes a path, deliberately
+(nd_proc.h: executables are not ND_ROOT-resolved). So `nd_power_which()` does
+the lookup first — the name itself when it contains a slash, `$PATH` otherwise,
+`confstr(_CS_PATH)`'s value when `$PATH` is unset — and its failure is the
+`OSError` the Python's `except OSError: continue` catches.
+
+The candidate ORDER is untouched: `poweroff`, `/sbin/poweroff`,
+`busybox poweroff`. On an image with both of the first two they are different
+programs.
+
+### PW-2. A missing `sync` is logged, not propagated
+
+**Found in:** `System/apps/Power/main.py:62`, `subprocess.call(["sync"])`.
+
+`subprocess.call` raises `FileNotFoundError` when the binary is absent, and
+nothing in `_go_down` catches it — so on an image without `/bin/sync`, asking
+the phone to switch off shows a **stack trace** instead. The C logs
+`[Power] cannot run sync: ...` and carries on to the halt.
+
+**This is a deliberate deviation.** No golden frame covers it, and the
+alternative is a crash screen on the one path whose entire job is to bring the
+system down cleanly. Flagging it rather than reproducing it.
+
+### PW-3. `str(OSError)` has no C spelling
+
+**Found in:** `System/apps/Power/main.py:82`,
+`_tell(ui, "Cannot ask for recovery: %s" % exc)`.
+
+Python prints `[Errno 30] Read-only file system: '/NeoDCT/User/.ndsys'`. The C
+prints `strerror(errno)` after the same colon — same message, same place, same
+consequence (no reboot), different words. Reproducing the errno-number-and-repr
+formatting would be inventing a Python detail in C for no reader's benefit.
+
+### PW-4. `nd_power_go_down()` is deliberately not covered by a test
+
+It runs `sync` and then the first `poweroff` that exists. On a developer's
+machine and on a CI runner that is a real poweroff, and a test suite that can
+switch off the machine it runs on is not a test suite. `test_power.c` drives the
+three pieces underneath it — the `$PATH` lookup, the candidate walk over
+commands that do not exist, and the recovery flag — and never the composition.
+The hole is named in `power.h`, in the test's header comment and here.
+
+For the same reason `app_run()` is only ever driven with Back on the first
+screen.
+
+### TN-1. Three caps the Python does not have
+
+`_scan_tones()` builds an unbounded Python list from an SD card's contents.
+CODING-STANDARDS.md section 1.5 will not have an array sized by the contents of
+a card, so `apps/Tones/tones.h` fixes three numbers:
+
+| | | |
+| --- | --- | --- |
+| `ND_TONES_MAX` | 256 tones | heap, `(256 + 1) * 352 = 90,464 bytes`, freed before the screen returns |
+| `ND_TONES_NAME_MAX` | 96 bytes of display name | about twenty characters fit across 240 px at 18 px, so a longer name was already running off the edge |
+| `ND_TONES_WALK_MAX` | 64 directories pending | the stock tones directory is flat; a card is not necessarily |
+
+A card with more than 256 `.mp3` files shows the first 256 in walk order and
+logs `[Tones] More than 256 tones; the rest are not listed.` rather than
+silently truncating.
+
+### TN-2. `SUPPORTED_EXTS = (".mp3")` is a STRING, not a one-element tuple
+
+**Found in:** `System/apps/Tones/main.py:33`. The missing comma makes it
+`str`, not `tuple`. `str.endswith` accepts both, so it behaves identically
+**today** — and would stop behaving identically the moment a second extension
+was added without the missing comma being noticed, because `(".mp3", ".wav")`
+is a tuple and `(".mp3" ".wav")` is the string `".mp3.wav"`.
+
+The C is a plain single-suffix test, which is what runs today. Reproducing the
+latent bug is not possible in C (there is no type confusion to reproduce);
+naming it is.
+
+### TN-3. The tone list holds LOGICAL paths, where uistub hands the Python staged ones
+
+`os.walk` is one of `uistub.PathRemap`'s patched calls, so under the capture
+harness `os.walk("/NeoDCT/System/tones")` yields **staged** roots and
+`set_setting("system.audio.ringtone", ...)` records a path under `/tmp`. On the
+device there is no remap and the same code records `/NeoDCT/System/tones/...`.
+
+The C keeps the paths logical and resolves only at `opendir`/`stat`/`mpv` time.
+That matches the device exactly, matches the project convention (`settings.prop`
+holds `/NeoDCT/...` paths and `nd_notify.c` resolves them when it reads them),
+and avoids a double prefix when `nd_notify_ringtone_path()` reads the setting
+back under a test root. Only the stub's behaviour differs, and no golden frame
+covers the tone list.
+
+### TN-4. The ringtone preview still spawns mpv — nd_notify.h has nowhere else to send it
+
+**Found in:** `System/apps/Tones/main.py:35`, `MPV_CMD`.
+
+The brief for this work package asked for the preview to go through
+`nd_notify`'s audio path rather than shelling out. It cannot, yet.
+`nd_notify.h` exposes exactly two ways to make a noise:
+
+* `nd_notify_play_tone(n, path)` — spawns `aplay`, so **WAV only**. All sixteen
+  shipped tones are `.mp3`; routing the preview through it would make every
+  one of them silent.
+* `nd_notify_start_ring(n)` — streams through `nd_tone_src` (N-1, N-2) and is
+  exactly the right machinery, but it resolves its own path from
+  `system.audio.ringtone` and cannot be pointed at an arbitrary file.
+
+So the preview keeps mpv, spawned through `nd_proc_spawn()` — fork then execve,
+no shell, the descriptor plan built before the fork, stdout and stderr on
+`/dev/null` where `subprocess.DEVNULL` puts them. That is a one-to-one port of
+what the phone does today, and `app_shutdown()` kills the player, which is the
+SIGTERM teardown contract `nd_app.h` makes the symbol mandatory for.
+
+> **The change worth making, when nd_notify.h can be reopened:** a
+> `nd_notify_preview_start(nd_notify *n, const char *path)` /
+> `nd_notify_preview_stop()` pair reusing `nd_tone_src` and `aplay`, playing
+> once rather than looping. It would delete this app's `which_exec()`, delete
+> the mpv dependency from the preview path, and cost the ~100 kB N-1 measured
+> instead of mpv's ~24 MB. `nd_notify.h` belongs to another work package and
+> `lib/nd_notify.c` is being changed by nobody this session, so this is filed
+> rather than done.
+
+### TN-5. `_flush_input()` reads `ui->input`, not `ui->keypad_fd`
+
+The Python selects on `ui.keypad_fd` with a 0.01 s timeout. The C reads the
+same records through `ui->input`, which is where an app process's key channel
+lives and is what every widget's own flush already uses (`nd_pagedlist.c`). The
+0.01 s is kept: `nd_input.h` is explicit that PagedList's 0.01 and
+MessageDialog's 0.0 are different numbers on purpose.
+
+### AS-1. `test/unit/smallapp_test.h`, and why it is a header
+
+The four tests need the same fixture — a minimal `nd_ui` with real fonts, an
+`nd_capture` framebuffer, a key channel and the golden manifest. Four copies
+would have been six hundred duplicated lines. It is a header and not a `.c`
+because the Makefile globs `test/unit` into one binary per source file, so a
+shared `.c` there would become a test with no `main()`. `draw_ref.inc` and
+`platform_test.h` are there for the same reason.

@@ -91,8 +91,8 @@ static bool api_open(void *h)
            api.display_name != NULL && api.dirs != NULL && api.scan != NULL &&
            api.preview_play != NULL && api.preview_stop != NULL && api.preview_pid != NULL &&
            api.add_more_label != NULL && api.add_more_help != NULL &&
-           api.add_more_help_with_card != NULL && api.menu != NULL &&
-           api.ringing_options != NULL && api.mpv_cmd != NULL;
+           api.add_more_help_with_card != NULL && api.menu != NULL && api.ringing_options != NULL &&
+           api.mpv_cmd != NULL;
 }
 
 /* ------------------------------------------------------------------ *

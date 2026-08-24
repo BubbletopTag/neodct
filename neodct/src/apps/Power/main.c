@@ -127,7 +127,7 @@ bool nd_power_which(const char *name, char *out, size_t out_sz)
     if (path == NULL || path[0] == '\0')
         path = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
-    for (seg = path; seg != NULL; ) {
+    for (seg = path; seg != NULL;) {
         const char *colon = strchr(seg, ':');
         size_t len = (colon != NULL) ? (size_t)(colon - seg) : strlen(seg);
         int n;
@@ -281,7 +281,6 @@ static void run_sync(void)
 void nd_power_go_down(nd_ui *ui, const char *const *const *candidates, size_t n,
                       const char *failure)
 {
-
     run_sync();
 
     if (!nd_power_spawn_first(candidates, n)) {
@@ -331,8 +330,7 @@ int app_run(nd_ui *ui)
 
         /* A FRESH LIST PER PASS. See the header comment: the cursor does not
          * survive a submenu here, and that is the Python's behaviour. */
-        nd_vlist_init(&menu, ui, POWER_TITLE, nd_power_menu, ND_POWER_MENU_ITEMS,
-                      ND_POWER_APP_ID);
+        nd_vlist_init(&menu, ui, POWER_TITLE, nd_power_menu, ND_POWER_MENU_ITEMS, ND_POWER_APP_ID);
         nd_softkey_init(&bar, ui, false);
         nd_softkey_update(&bar, "Select", false);
 

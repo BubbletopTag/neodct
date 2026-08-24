@@ -58,8 +58,8 @@
 #include "nd_image.h"
 #include "nd_input.h"
 #include "nd_json.h"
-#include "nd_keypad.h"
 #include "nd_keycodes.h"
+#include "nd_keypad.h"
 #include "nd_paths.h"
 #include "nd_types.h"
 #include "nd_ui.h"
@@ -79,45 +79,45 @@ static int sa_failures;
         }                                                                    \
     } while (0)
 
-#define CHECK_STR(got, want, what)                                                  \
-    do {                                                                            \
-        const char *g_ = (got);                                                     \
-        const char *w_ = (want);                                                    \
-        sa_checks++;                                                                \
-        if (g_ == NULL || strcmp(g_, w_) != 0) {                                    \
-            sa_failures++;                                                          \
-            fprintf(stderr, "FAIL %s:%d  %s: got \"%s\" want \"%s\"\n", __FILE__,   \
-                    __LINE__, (what), (g_ != NULL) ? g_ : "(null)", w_);            \
-        }                                                                           \
+#define CHECK_STR(got, want, what)                                                          \
+    do {                                                                                    \
+        const char *g_ = (got);                                                             \
+        const char *w_ = (want);                                                            \
+        sa_checks++;                                                                        \
+        if (g_ == NULL || strcmp(g_, w_) != 0) {                                            \
+            sa_failures++;                                                                  \
+            fprintf(stderr, "FAIL %s:%d  %s: got \"%s\" want \"%s\"\n", __FILE__, __LINE__, \
+                    (what), (g_ != NULL) ? g_ : "(null)", w_);                              \
+        }                                                                                   \
     } while (0)
 
-#define CHECK_INT(got, want, what)                                                            \
-    do {                                                                                      \
-        long long g_ = (long long)(got);                                                      \
-        long long w_ = (long long)(want);                                                     \
-        sa_checks++;                                                                          \
-        if (g_ != w_) {                                                                       \
-            sa_failures++;                                                                    \
-            fprintf(stderr, "FAIL %s:%d  %s: got %lld want %lld\n", __FILE__, __LINE__,       \
-                    (what), g_, w_);                                                          \
-        }                                                                                     \
+#define CHECK_INT(got, want, what)                                                              \
+    do {                                                                                        \
+        long long g_ = (long long)(got);                                                        \
+        long long w_ = (long long)(want);                                                       \
+        sa_checks++;                                                                            \
+        if (g_ != w_) {                                                                         \
+            sa_failures++;                                                                      \
+            fprintf(stderr, "FAIL %s:%d  %s: got %lld want %lld\n", __FILE__, __LINE__, (what), \
+                    g_, w_);                                                                    \
+        }                                                                                       \
     } while (0)
 
-#define CHECK_DBL(got, want, what)                                                            \
-    do {                                                                                      \
-        double g_ = (got);                                                                    \
-        double w_ = (want);                                                                   \
-        sa_checks++;                                                                          \
-        if (g_ != w_) {                                                                       \
-            sa_failures++;                                                                    \
-            fprintf(stderr, "FAIL %s:%d  %s: got %.17g want %.17g\n", __FILE__, __LINE__,     \
-                    (what), g_, w_);                                                          \
-        }                                                                                     \
+#define CHECK_DBL(got, want, what)                                                                \
+    do {                                                                                          \
+        double g_ = (got);                                                                        \
+        double w_ = (want);                                                                       \
+        sa_checks++;                                                                              \
+        if (g_ != w_) {                                                                           \
+            sa_failures++;                                                                        \
+            fprintf(stderr, "FAIL %s:%d  %s: got %.17g want %.17g\n", __FILE__, __LINE__, (what), \
+                    g_, w_);                                                                      \
+        }                                                                                         \
     } while (0)
 
-#define RUN(fn)     \
-    do {            \
-        fn();       \
+#define RUN(fn) \
+    do {        \
+        fn();   \
     } while (0)
 
 /* ------------------------------------------------------------------ *
@@ -531,8 +531,7 @@ ND_UNUSED_FN static void sa_expect_golden(sa_fixture *fx, const nd_image *frame,
  * A scratch directory for the run
  * ------------------------------------------------------------------ */
 
-ND_UNUSED_FN static int sa_rm_cb(const char *path, const struct stat *st, int flag,
-                                 struct FTW *ftw)
+ND_UNUSED_FN static int sa_rm_cb(const char *path, const struct stat *st, int flag, struct FTW *ftw)
 {
     ND_UNUSED(st);
     ND_UNUSED(flag);
