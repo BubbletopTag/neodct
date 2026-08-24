@@ -859,12 +859,14 @@ static const char *const MENU_WANTED[][2] = {
     {"Browser", "menu-browser"},       {"Music", "menu-music"},
 };
 
-static size_t app_index_of(const nd_ui *ui, const char *name)
+static size_t app_index_of(nd_ui *ui, const char *name)
 {
+    size_t n = 0u;
+    const nd_app_entry *apps = nd_ui_app_list(ui, &n);
     size_t i;
 
-    for (i = 0u; i < ui->n_apps; i++) {
-        if (strcmp(ui->apps[i].name, name) == 0)
+    for (i = 0u; i < n; i++) {
+        if (strcmp(apps[i].name, name) == 0)
             return i;
     }
     return (size_t)-1;
@@ -892,7 +894,12 @@ static void shoot_app_selector(nd_capture *cap)
      * status readouts report would otherwise be invisible here. */
     nd_ui_sim_status(&ui, 4, 4, "Tello");
 
-    nd_appsel_init(&selector, &ui, "Main Menu", ui.apps, ui.n_apps, ui.wallpaper);
+    {
+        size_t n_apps = 0u;
+        const nd_app_entry *apps = nd_ui_app_list(&ui, &n_apps);
+
+        nd_appsel_init(&selector, &ui, "Main Menu", apps, n_apps, nd_ui_wallpaper(&ui));
+    }
 
     for (i = 0u; i < ND_ARRAY_LEN(MENU_WANTED); i++) {
         size_t idx = app_index_of(&ui, MENU_WANTED[i][0]);
@@ -1111,7 +1118,7 @@ static bool hold_key_begin(key_script *ks, nd_ui *ui, const int32_t *keys, size_
     return nd_input_channel_send(&ks->ch, code, true) == ND_OK;
 }
 
-static size_t app_index_of(const nd_ui *ui, const char *name);
+static size_t app_index_of(nd_ui *ui, const char *name);
 
 /* uistub.run_app(ui, name, keys=...), by dlopen.
  *
@@ -1158,7 +1165,8 @@ static void run_app_inproc(nd_capture *cap, nd_ui *ui, const char *manifest_name
         g_failed++;
         return;
     }
-    if (nd_path_join(so_path, sizeof so_path, ui->apps[idx].path, ND_APP_SO_NAME) != ND_OK) {
+    if (nd_path_join(so_path, sizeof so_path, nd_ui_app_list(ui, NULL)[idx].path,
+                     ND_APP_SO_NAME) != ND_OK) {
         g_failed++;
         return;
     }

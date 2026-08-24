@@ -1,0 +1,123 @@
+#!/bin/sh
+#
+# rcS -- run the init scripts, but do not make the phone wait for all of them.
+#
+# This REPLACES buildroot's own /etc/init.d/rcS (package/skeleton-init-sysv).
+# The loop below is buildroot's, unchanged, including the ".sh is sourced,
+# everything else is forked with `start`" rule that some packages rely on.
+# Two things are added, and only two.
+#
+# ============ 1. THE SPLIT ============
+#
+# busybox init runs `::sysinit:/etc/init.d/rcS` to completion BEFORE it gets
+# to `tty1::once:/bin/run_neodct.sh`. So every script here was standing
+# between the user and the home screen -- syslogd, klogd, the udev coldplug,
+# zram's mkswap, DHCP, the modem, crond, the banner. Measured in QEMU that
+# was most of an eleven-second boot, for work the UI does not need and in
+# several cases does not care about at all.
+#
+# So: the handful of scripts the UI genuinely needs run in the foreground,
+# and the rest run afterwards in ONE background subshell -- one, not one
+# each, so their order relative to each other is exactly what it was. The
+# home screen and the modem now come up at the same time instead of one
+# after the other.
+#
+# NEODCT_BOOT_CRITICAL is the whole contract, and the default is LATE:
+#
+#   S00userdata   creates /NeoDCT/User/{db,logs,...}; the UI opens its
+#                 databases during nd_ui_init and a missing directory there
+#                 is not something it recovers from.
+#   S06sdcard     mounts a card that was already in the slot. Wallpapers and
+#                 ringtones can live on it, so a late mount would mean a
+#                 first home frame with the wallpaper missing.
+#   S10udevd      /dev/input/event*. nd_input picks its keyboard once, at
+#                 startup; if the node is not there yet the phone comes up
+#                 with no keys at all.
+#   S90display    the ST7789 panel daemon. Nothing crashes without it, but
+#                 until it runs the panel shows whatever was on it before.
+#
+# Anything not on that list runs late. If you add a script that the UI must
+# wait for, add it here -- the failure mode otherwise is a race, and a race
+# on a phone is a bug report about "sometimes".
+#
+# The one thing to keep in mind when writing a late script: its output now
+# lands while the UI is on screen, not before it. That is fine on both
+# targets today because /dev/console is a serial port on each of them
+# (ttyAMA0 under QEMU, ttyFIQ0 on the Luckfox) and the UI owns /dev/fb0 and
+# tty0, which are different devices. A script that writes to /dev/tty0
+# specifically would draw over the home screen -- so do not.
+#
+# ============ 2. THE TRACE ============
+#
+# Any script that takes longer than BOOT_SLOW_S gets a line saying so. Boot
+# time is a feature here and this is the only place the cost is visible;
+# without it the answer to "why is boot slow" is guesswork, which is how the
+# zram mkswap hid in plain sight for as long as it did.
+#
+NEODCT_BOOT_CRITICAL="S00userdata S06sdcard S10udevd S90display"
+BOOT_SLOW_S="${BOOT_SLOW_S:-0.20}"
+
+# Colours, shared with the rest of the system so a [BOOT] tag is the same
+# colour whoever printed it. Missing file is not fatal.
+[ -r /etc/neodct-colors.sh ] && . /etc/neodct-colors.sh
+command -v nd_tag > /dev/null 2>&1 || nd_tag() { printf '[%s]' "$1"; }
+
+# /proc/uptime rather than `date`: it is monotonic, it is already mounted,
+# and busybox date has no sub-second format that is portable across configs.
+uptime_s() {
+    read -r _up _idle < /proc/uptime 2>/dev/null || _up=0
+    echo "$_up"
+}
+
+run_one() {
+    _script="$1"
+    _t0=$(uptime_s)
+
+    case "$_script" in
+        *.sh)
+            # Source shell script for speed.
+            (
+                trap - INT QUIT TSTP
+                set start
+                . $_script
+            )
+            ;;
+        *)
+            # No sh extension, so fork subprocess.
+            $_script start
+            ;;
+    esac
+
+    _t1=$(uptime_s)
+    awk -v a="$_t0" -v b="$_t1" -v slow="$BOOT_SLOW_S" -v n="$(basename "$_script")" \
+        -v tag="$(nd_tag BOOT)" \
+        'BEGIN { d = b - a; if (d >= slow) printf "%s %s took %.2fs\n", tag, n, d }'
+}
+
+LATE=""
+for i in /etc/init.d/S??* ; do
+
+    # Ignore dangling symlinks (if any).
+    [ ! -f "$i" ] && continue
+
+    critical=0
+    for c in $NEODCT_BOOT_CRITICAL; do
+        [ "$(basename "$i")" = "$c" ] && critical=1
+    done
+
+    if [ "$critical" = 1 ]; then
+        run_one "$i"
+    else
+        LATE="$LATE $i"
+    fi
+done
+
+# One subshell for all of them, so S40network still precedes S41ethernet
+# still precedes S45modem. Backgrounded, so init moves on to the UI now.
+if [ -n "$LATE" ]; then
+    (
+        for i in $LATE; do
+            run_one "$i"
+        done
+    ) &
+fi

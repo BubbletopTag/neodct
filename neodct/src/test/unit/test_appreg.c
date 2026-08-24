@@ -494,8 +494,8 @@ static void test_icon_geometry(nd_ui *ui)
     CHECK_INT(icon_y, 55, "icon_y on this panel");
     CHECK_INT(cap, 82, "the icon cap AppSelector actually asks for");
 
-    for (i = 0u; i < ui->n_apps; i++) {
-        const nd_image *full = nd_ui_get_image(ui, ui->apps[i].icon);
+    for (i = 0u; i < nd_ui_app_count(ui); i++) {
+        const nd_image *full = nd_ui_get_image(ui, nd_ui_app_list(ui, NULL)[i].icon);
         const nd_image *thumb;
         int32_t fw;
         int32_t fh;
@@ -504,7 +504,7 @@ static void test_icon_geometry(nd_ui *ui)
 
         if (full == NULL) {
             CHECK(false, "the full-size icon decoded");
-            fprintf(stderr, "     %s (%s)\n", ui->apps[i].name, ui->apps[i].icon);
+            fprintf(stderr, "     %s (%s)\n", nd_ui_app_list(ui, NULL)[i].name, nd_ui_app_list(ui, NULL)[i].icon);
             continue;
         }
         /* get_image() converts to RGBA unconditionally, which is what lets
@@ -519,14 +519,14 @@ static void test_icon_geometry(nd_ui *ui)
 
         /* full is still in the cache; the thumbnail is a SEPARATE entry under
          * the "<path>@82" key, so neither call evicts the other here. */
-        thumb = nd_ui_get_image_max(ui, ui->apps[i].icon, cap);
+        thumb = nd_ui_get_image_max(ui, nd_ui_app_list(ui, NULL)[i].icon, cap);
         if (thumb == NULL) {
             CHECK(false, "the 82 px thumbnail decoded");
-            fprintf(stderr, "     %s (%s)\n", ui->apps[i].name, ui->apps[i].icon);
+            fprintf(stderr, "     %s (%s)\n", nd_ui_app_list(ui, NULL)[i].name, nd_ui_app_list(ui, NULL)[i].icon);
             continue;
         }
-        CHECK_INT(thumb->w, tw, ui->apps[i].name);
-        CHECK_INT(thumb->h, th, ui->apps[i].name);
+        CHECK_INT(thumb->w, tw, nd_ui_app_list(ui, NULL)[i].name);
+        CHECK_INT(thumb->h, th, nd_ui_app_list(ui, NULL)[i].name);
 
         /* An icon that is fully transparent would draw nothing and still pass
          * every dimension check above, which is exactly what a wrongly
@@ -598,14 +598,14 @@ static void test_scrollbar_every_index(nd_capture *cap, nd_ui *ui)
     CHECK_INT(bar_x, 232, "bar_x on this panel");
     CHECK_INT(track_top, 36, "track_top on this panel");
     CHECK_INT(track_bottom, 135, "track_bottom on this panel");
-    if (ui->n_apps < 2u) {
+    if (nd_ui_app_count(ui) < 2u) {
         CHECK(false, "the scrollbar sweep needs the whole registry");
         return;
     }
 
-    nd_appsel_init(&s, ui, "Main Menu", ui->apps, ui->n_apps, NULL);
+    nd_appsel_init(&s, ui, "Main Menu", nd_ui_app_list(ui, NULL), nd_ui_app_count(ui), NULL);
 
-    for (i = 0u; i < ui->n_apps; i++) {
+    for (i = 0u; i < nd_ui_app_count(ui); i++) {
         const nd_image *frame;
         long double step;
         long double notch;
@@ -625,7 +625,7 @@ static void test_scrollbar_every_index(nd_capture *cap, nd_ui *ui)
         /* draw.rectangle((bar_x-4, notch-3, bar_x+2, notch+3)) with float
          * corners: Pillow truncates each toward zero and the rectangle is
          * inclusive of both. */
-        step = (long double)(track_bottom - track_top) / (long double)(ui->n_apps - 1u);
+        step = (long double)(track_bottom - track_top) / (long double)(nd_ui_app_count(ui) - 1u);
         notch = (long double)track_top + ((long double)i * step);
         want_top = (int32_t)(notch - 3.0L);
         want_bottom = (int32_t)(notch + 3.0L);
@@ -678,7 +678,7 @@ static void test_scrollbar_every_index(nd_capture *cap, nd_ui *ui)
         CHECK_INT(top, 33, "the first notch starts three rows above the track");
         (void)nd_capture_save(cap, "appreg-notch-first", frame);
     }
-    s.selected_index = ui->n_apps - 1u;
+    s.selected_index = nd_ui_app_count(ui) - 1u;
     nd_appsel_draw(&s);
     {
         const nd_image *frame = nd_capture_recent(cap, 0u);
@@ -752,9 +752,9 @@ static void run_overlay_half(void)
         return;
     }
 
-    CHECK(ui.engineering_mode, "engineering mode came from settings.prop");
-    CHECK_INT(ui.n_apps, 24, "twenty-four apps with engineering mode on");
-    CHECK(ui.wallpaper == NULL, "no wallpaper configured, so the background is black");
+    CHECK(nd_ui_engineering_mode(&ui), "engineering mode came from settings.prop");
+    CHECK_INT(nd_ui_app_count(&ui), 24, "twenty-four apps with engineering mode on");
+    CHECK(nd_ui_wallpaper(&ui) == NULL, "no wallpaper configured, so the background is black");
 
     test_icon_geometry(&ui);
     test_scrollbar_every_index(cap, &ui);

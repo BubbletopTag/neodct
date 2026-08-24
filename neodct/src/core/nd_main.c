@@ -15,8 +15,12 @@
  *      validation on every HTTPS site at once.
  *   3. nd_rs_start_if_enabled()  -- the remote shell, if it was left on.
  *   4. "[Launcher] Initializing Hardware...", then the framebuffer.
- *   5. the boot splash, then EXACTLY one second.
- *   6. "[Launcher] Starting UI...", then the loop.
+ *   5. "[Launcher] Starting UI...", then the loop.
+ *
+ * launcher.py had a step between 4 and 5: a "Starting NeoDCT..." splash and
+ * then a sleep of exactly one second so it could be read. It is gone. The
+ * initramfs draws its own boot screen now, so the splash was a second screen
+ * saying less, and the sleep was a second of deliberately doing nothing.
  *
  * EVERY STEP'S FAILURE IS CAUGHT AND BOOT CONTINUES. A phone that will not
  * boot because NTP was unreachable is worse than a phone with the wrong time,
@@ -86,9 +90,6 @@ void nd_rs_start_if_enabled(void);
 /* the green the CORE tag uses, so the banner and the OS that follows it read
  * as one voice */
 #define BANNER_COLOUR 46
-
-/* launcher.py: DejaVu, NOT the NeoDCT font. The splash predates the UI's own
- * face and never moved. */
 
 static volatile sig_atomic_t g_quit;
 
@@ -261,8 +262,18 @@ static void core_run(nd_fb *fb, bool idle_measure)
     if (idle_measure) {
         /* Everything a booted phone has is now allocated: the canvas, the
          * scratch column, four faces, the wallpaper, the image cache and the
-         * app list. This is the moment the RSS number means something. */
-        (void)printf("[CORE] idle: initialised, %zu apps, holding for measurement\n", ui.n_apps);
+         * app list. This is the moment the RSS number means something.
+         *
+         * The last three are lazy now (nd_ui.h, "Lazy home state"), and a
+         * phone sitting on its home screen has certainly loaded them -- so
+         * ask for them here rather than reporting an idle figure no real
+         * device would ever show. */
+        size_t n_apps = 0u;
+
+        (void)nd_ui_wallpaper(&ui);
+        (void)nd_ui_home_layout(&ui);
+        (void)nd_ui_app_list(&ui, &n_apps);
+        (void)printf("[CORE] idle: initialised, %zu apps, holding for measurement\n", n_apps);
         (void)fflush(stdout);
         while (g_quit == 0)
             nap(0.1);
@@ -298,18 +309,16 @@ static void core_run(nd_fb *fb, bool idle_measure)
 
 static void usage(FILE *out)
 {
-    (void)fprintf(out, "usage: nd-core [--headless] [--idle-measure] [--no-splash]\n"
+    (void)fprintf(out, "usage: nd-core [--headless] [--idle-measure]\n"
                        "  --headless      do not open /dev/fb0; render into memory only\n"
                        "  --idle-measure  boot, report readiness, then hold still so a\n"
-                       "                  caller can read /proc/<pid>/smaps_rollup\n"
-                       "  --no-splash     skip the one-second boot splash\n");
+                       "                  caller can read /proc/<pid>/smaps_rollup\n");
 }
 
 int main(int argc, char **argv)
 {
     bool headless = false;
     bool idle_measure = false;
-    bool splash = true;
     nd_fb *fb = NULL;
     char serial[64];
     int i;
@@ -319,9 +328,6 @@ int main(int argc, char **argv)
             headless = true;
         } else if (strcmp(argv[i], "--idle-measure") == 0) {
             idle_measure = true;
-            splash = false;
-        } else if (strcmp(argv[i], "--no-splash") == 0) {
-            splash = false;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             usage(stdout);
             return 0;
@@ -366,20 +372,8 @@ int main(int argc, char **argv)
         nd_log(ND_LOG_FB, "headless: no panel will be written");
     }
 
-    /* 5. No splash.
-     *
-     * launcher.py drew "Starting NeoDCT..." and then slept for exactly one
-     * second so it could be read. That predates the initramfs, which now
-     * shows its own boot screen -- so the splash is a second screen saying
-     * less, and the sleep is a second of doing nothing on a phone the owner
-     * wants booting in five.
-     *
-     * Removed at the owner's request. show_boot_logo() is kept, unreferenced
-     * by the boot path but still exercised by its unit test, because the
-     * cheapest way to bring it back is not to have deleted it. */
-    (void)splash;
-
-    /* 6. The UI. */
+    /* 5. The UI. Nothing between the framebuffer and here: see the header
+     *    comment for what used to be, and why it is not. */
     nd_log(ND_LOG_LAUNCHER, "Starting UI...");
     core_run(fb, idle_measure);
 

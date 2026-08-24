@@ -602,7 +602,7 @@ static void test_softkey(void)
             nd_color c;
 
             (void)nd_image_fill_rect(wall, ND_RECT(0, 145, 239, 174), ND_RGB(7, 8, 9));
-            fx.ui.wallpaper = wall;
+            nd_ui_set_wallpaper(&fx.ui, wall);
             (void)nd_image_fill(fx.canvas, ND_WHITE);
             nd_softkey_update(&bar, NULL, false);
             c = nd_image_get_px(fx.canvas, 120, 160);
@@ -613,8 +613,7 @@ static void test_softkey(void)
             CHECK_INT(nd_image_get_px(fx.canvas, 120, 144).r, 255);
             /* The last row of the panel is copied, not left behind. */
             CHECK_INT(nd_image_get_px(fx.canvas, 0, 174).b, 9);
-            fx.ui.wallpaper = NULL;
-            nd_image_free(wall);
+            nd_ui_set_wallpaper(&fx.ui, NULL); /* frees wall */
         }
     }
 

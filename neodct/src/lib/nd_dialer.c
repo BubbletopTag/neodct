@@ -268,14 +268,15 @@ static const nd_font *fit_caller(const nd_ui *ui, char *out, size_t out_sz, cons
  * draws no clock at all. */
 static void render_status_chrome(nd_ui *ui, bool with_clock)
 {
+    const nd_home_layout *layout = nd_ui_home_layout(ui);
     size_t i;
 
-    if (ui->home_layout == NULL)
+    if (layout == NULL)
         return;
 
     if (with_clock) {
-        for (i = 0u; i < ui->home_layout->n_elements; i++) {
-            const nd_element *el = &ui->home_layout->elements[i];
+        for (i = 0u; i < layout->n_elements; i++) {
+            const nd_element *el = &layout->elements[i];
 
             if (el->type == ND_EL_TEXT && strcmp(el->text, "12:00") == 0) {
                 nd_home_render_element(ui, el);
@@ -284,8 +285,8 @@ static void render_status_chrome(nd_ui *ui, bool with_clock)
         }
     }
 
-    for (i = 0u; i < ui->home_layout->n_elements; i++) {
-        const nd_element *el = &ui->home_layout->elements[i];
+    for (i = 0u; i < layout->n_elements; i++) {
+        const nd_element *el = &layout->elements[i];
 
         if (el->type == ND_EL_ICON_SET &&
             (strcmp(el->prefix, "bat") == 0 || strcmp(el->prefix, "sig") == 0))

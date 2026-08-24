@@ -506,8 +506,18 @@ static void shoot_home_frames(nd_capture *cap, const nd_json_doc *golden)
         CHECK(false, "nd_ui_init (group A)");
         return;
     }
-    CHECK(ui.wallpaper != NULL, "the configured wallpaper loaded");
-    CHECK(ui.home_layout != NULL, "the home layout loaded");
+    /* Lazy home state -- see "Lazy home state" in nd_ui.h. The constructor
+     * leaves all of it alone; the first reader is what loads it. This is the
+     * assertion that stops it quietly going back to being eager, which would
+     * put 154 ms back onto every app launch without changing a pixel. */
+    CHECK(!ui.home_.wallpaper_ready, "construction does not load the wallpaper");
+    CHECK(!ui.home_.home_layout_ready, "construction does not parse ui_home.json");
+    CHECK(!ui.home_.apps_ready, "construction does not scan the app directories");
+    CHECK(!ui.home_.eng_mode_ready, "construction does not read engineering mode");
+
+    CHECK(nd_ui_wallpaper(&ui) != NULL, "the configured wallpaper loads on demand");
+    CHECK(nd_ui_home_layout(&ui) != NULL, "the home layout loads on demand");
+    CHECK(nd_ui_app_count(&ui) >= 13u, "the app scan runs on demand");
     CHECK(ui.softkey_exists, "softkey_exists is set at construction step 9");
     CHECK(ui.softkey != NULL && ui.softkey->transparent,
           "the core's own bar is the transparent one");
@@ -543,7 +553,7 @@ static void shoot_home_frames(nd_capture *cap, const nd_json_doc *golden)
         CHECK(false, "nd_ui_init (group B)");
         return;
     }
-    CHECK(ui.wallpaper == NULL, "no wallpaper when the setting says NONE");
+    CHECK(nd_ui_wallpaper(&ui) == NULL, "no wallpaper when the setting says NONE");
     nd_ui_sim_status(&ui, 4, 4, "Tello");
     nd_ui_update(&ui);
     check_frame(cap, golden, "home-nowallpaper", nd_capture_recent(cap, 0u));
@@ -551,11 +561,11 @@ static void shoot_home_frames(nd_capture *cap, const nd_json_doc *golden)
     /* OPEN-QUESTIONS decision 3: Settings writes only the setting, and the
      * core picks it up on the next app exit -- never before. */
     write_settings("Palestine.jpg");
-    CHECK(ui.wallpaper == NULL, "the setting alone changes nothing");
+    CHECK(nd_ui_wallpaper(&ui) == NULL, "the setting alone changes nothing");
     nd_ui_refresh_after_app(&ui);
-    CHECK(ui.wallpaper != NULL, "refresh_after_app re-reads the wallpaper");
-    CHECK(ui.engineering_mode, "refresh_after_app re-reads engineering mode");
-    CHECK(ui.n_apps >= 13u, "refresh_after_app rescans the app directories");
+    CHECK(nd_ui_wallpaper(&ui) != NULL, "refresh_after_app re-reads the wallpaper");
+    CHECK(nd_ui_engineering_mode(&ui), "refresh_after_app re-reads engineering mode");
+    CHECK(nd_ui_app_count(&ui) >= 13u, "refresh_after_app rescans the app directories");
     nd_ui_teardown(&ui);
 
     /* --- group C: no fuel gauge and no modem, the honest QEMU look --- */

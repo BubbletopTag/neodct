@@ -298,6 +298,14 @@ static bool fx_init(fixture *fx)
     fx->ui.font_xl = fx->font_xl;
     fx->ui.keypad_fd = -1;
     fx->ui.softkey_exists = true;
+    /* This fixture never had a home layout, and these assertions are written
+     * against that: render_status_chrome() returns immediately without one,
+     * so the regions checked for "nothing here" really are empty. Say so,
+     * rather than leaving the flag clear -- since the layout became lazy
+     * (nd_ui.h) a clear flag means "not loaded YET", and the first accessor
+     * call would go and read ui_home.json off disk. */
+    fx->ui.home_.home_layout = NULL;
+    fx->ui.home_.home_layout_ready = true;
     return true;
 }
 
@@ -1113,7 +1121,7 @@ static void shoot_dialer_frames(nd_capture *cap, const nd_json_doc *golden)
         nd_vclock_disable();
         return;
     }
-    CHECK(ui.home_layout != NULL, "the home layout loaded (the screens borrow its elements)");
+    CHECK(nd_ui_home_layout(&ui) != NULL, "the home layout loaded (the screens borrow its elements)");
     nd_ui_sim_status(&ui, 4, 4, "Tello");
 
     nd_dialer_draw_call(&ui, "0741234567", "Mum");

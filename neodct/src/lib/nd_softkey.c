@@ -87,6 +87,8 @@ void nd_softkey_update(nd_softkey *bar, const char *text, bool present)
     int32_t screen_h;
     bool painted_slice = false;
 
+    const nd_image *paper;
+
     if (bar == NULL || bar->ui == NULL)
         return;
     ui = bar->ui;
@@ -96,7 +98,8 @@ void nd_softkey_update(nd_softkey *bar, const char *text, bool present)
     screen_w = nd_ui_width(ui);
     screen_h = nd_ui_height(ui);
 
-    if (bar->transparent && ui->wallpaper != NULL) {
+    paper = bar->transparent ? nd_ui_wallpaper(ui) : NULL;
+    if (paper != NULL) {
         /* wallpaper.crop((0, y_start, w, h)) then canvas.paste(slice, box).
          * PIL's box is half-open, so the last row copied is screen_h - 1;
          * nd_rect is inclusive, hence the -1 on both far edges. blit_region
@@ -104,7 +107,7 @@ void nd_softkey_update(nd_softkey *bar, const char *text, bool present)
         nd_rect src = ND_RECT(0, bar->y_start, screen_w - 1, screen_h - 1);
 
         painted_slice =
-            nd_image_blit_region(ui->canvas, ui->wallpaper, src, 0, bar->y_start) == ND_OK;
+            nd_image_blit_region(ui->canvas, paper, src, 0, bar->y_start) == ND_OK;
         if (!painted_slice) {
             /* The Python's bare `except: rectangle(..., fill="black")`. */
             (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, bar->y_start, screen_w, screen_h),

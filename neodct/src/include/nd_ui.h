@@ -152,14 +152,26 @@ typedef struct nd_ui {
     nd_ui_state state;
     bool softkey_exists;         /* see the header comment; set at step 9 */
     struct nd_softkey *softkey;  /* the core's own, transparent, bar */
-    nd_image *wallpaper;         /* 240x175 RGB dimmed to 30%, or NULL */
-    nd_home_layout *home_layout; /* parsed ui_home.json, or NULL */
     nd_imgcache *image_cache;    /* 32-entry FIFO */
 
-    /* --- apps --- */
-    bool engineering_mode;
-    nd_app_entry apps[ND_APP_MAX];
-    size_t n_apps;
+    /* --- the home screen's own state. PRIVATE, and named with a trailing
+     * underscore so that it says so at every use: until the matching _ready
+     * flag is set these are all still zero, so reading one directly gets a
+     * NULL wallpaper and an empty app list rather than the real thing.
+     * Go through nd_ui_wallpaper(), nd_ui_home_layout(),
+     * nd_ui_engineering_mode() and nd_ui_app_list(); see "Lazy home state"
+     * below. --- */
+    struct {
+        nd_image *wallpaper;         /* 240x175 RGB dimmed to 30%, or NULL */
+        nd_home_layout *home_layout; /* parsed ui_home.json, or NULL */
+        bool engineering_mode;
+        nd_app_entry apps[ND_APP_MAX];
+        size_t n_apps;
+        bool wallpaper_ready;
+        bool home_layout_ready;
+        bool eng_mode_ready;
+        bool apps_ready;
+    } home_;
 
     /* --- services, all owned by the core process --- */
     nd_modem *modem;
@@ -244,6 +256,44 @@ size_t nd_ui_scan_apps(const char *dir, nd_app_entry *out, size_t max);
 /* Wallpaper: load, resize to 240x175 with LANCZOS, then dim to 30% with the
  * TRUNCATING brightness formula in nd_image.h. NULL on any failure. */
 nd_image *nd_ui_load_wallpaper(const char *path);
+
+/* ------------------------------------------------------------------ *
+ * Lazy home state
+ * ------------------------------------------------------------------ *
+ *
+ * The wallpaper, the parsed ui_home.json, the engineering-mode flag and the
+ * app-directory scan are the HOME SCREEN's state. In the Python they were
+ * loaded once by the core's constructor and every app saw them for free,
+ * because an app was exec_module()d straight into that same process.
+ *
+ * A C app is its own process, so it would have to load all four again -- and
+ * measured on the phone that is 154 ms of the 180 ms an app spent starting
+ * up, for a wallpaper it does not draw, a home layout it does not render and
+ * an app list it does not show. Nothing in apps/ reads any of them; the only
+ * readers are the home screen, the app selector, the in-call chrome and the
+ * crash screen, all of which run in the core.
+ *
+ * So they are loaded on first read instead of at construction. The core's
+ * first home frame pays exactly what its constructor used to, an app process
+ * pays nothing, and an app that DOES one day want the wallpaper still gets
+ * it -- which a flag saying "skip this in apps" could not have given it.
+ *
+ * nd_ui_refresh_after_app() invalidates all four rather than reloading them,
+ * so returning from an app costs the reload only if the home screen is
+ * actually drawn again.
+ */
+nd_image *nd_ui_wallpaper(nd_ui *ui);
+const nd_home_layout *nd_ui_home_layout(nd_ui *ui);
+bool nd_ui_engineering_mode(nd_ui *ui);
+/* Returns the scanned list and writes its length to *n_out (which may be
+ * NULL). The pointer stays valid until the next nd_ui_refresh_after_app(). */
+const nd_app_entry *nd_ui_app_list(nd_ui *ui, size_t *n_out);
+size_t nd_ui_app_count(nd_ui *ui);
+
+/* Hand the UI a wallpaper directly, taking ownership of it and freeing
+ * whatever was there. Marks it loaded, so the configured one is never read.
+ * For tests and for nd-shoot; the phone gets its wallpaper from settings. */
+void nd_ui_set_wallpaper(nd_ui *ui, nd_image *img);
 
 #ifdef __cplusplus
 }

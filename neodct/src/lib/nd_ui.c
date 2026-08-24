@@ -599,14 +599,88 @@ static void rescan_apps(nd_ui *ui)
 {
     size_t n;
 
-    ui->n_apps = 0u;
-    n = nd_ui_scan_apps(ND_PATH_APPS_DIR, ui->apps, ND_APP_MAX);
-    ui->n_apps = n;
-    if (ui->engineering_mode && ui->n_apps < ND_APP_MAX) {
-        n = nd_ui_scan_apps(ND_PATH_ENG_APPS_DIR, &ui->apps[ui->n_apps], ND_APP_MAX - ui->n_apps);
-        ui->n_apps += n;
+    ui->home_.n_apps = 0u;
+    n = nd_ui_scan_apps(ND_PATH_APPS_DIR, ui->home_.apps, ND_APP_MAX);
+    ui->home_.n_apps = n;
+    if (nd_ui_engineering_mode(ui) && ui->home_.n_apps < ND_APP_MAX) {
+        n = nd_ui_scan_apps(ND_PATH_ENG_APPS_DIR, &ui->home_.apps[ui->home_.n_apps], ND_APP_MAX - ui->home_.n_apps);
+        ui->home_.n_apps += n;
     }
-    sort_apps_by_id(ui->apps, ui->n_apps);
+    sort_apps_by_id(ui->home_.apps, ui->home_.n_apps);
+}
+
+/* ------------------------------------------------------------------ *
+ * The home screen's state, loaded on first read -- see nd_ui.h
+ * ------------------------------------------------------------------ */
+
+nd_image *nd_ui_wallpaper(nd_ui *ui)
+{
+    if (ui == NULL)
+        return NULL;
+    if (!ui->home_.wallpaper_ready) {
+        /* Set BEFORE the load, not after: a wallpaper that fails to decode
+         * must stay NULL rather than being retried on every frame. */
+        ui->home_.wallpaper_ready = true;
+        ui->home_.wallpaper = load_configured_wallpaper();
+    }
+    return ui->home_.wallpaper;
+}
+
+const nd_home_layout *nd_ui_home_layout(nd_ui *ui)
+{
+    if (ui == NULL)
+        return NULL;
+    if (!ui->home_.home_layout_ready) {
+        ui->home_.home_layout_ready = true;
+        ui->home_.home_layout = nd_layout_load(ND_PATH_HOME_LAYOUT);
+    }
+    return ui->home_.home_layout;
+}
+
+bool nd_ui_engineering_mode(nd_ui *ui)
+{
+    if (ui == NULL)
+        return false;
+    if (!ui->home_.eng_mode_ready) {
+        ui->home_.eng_mode_ready = true;
+        ui->home_.engineering_mode = nd_setting_is_enabled(
+            nd_settings_get(ND_SET_UI_ENGINEERING, ND_SET_UI_ENG_MODE_DFLT), true);
+    }
+    return ui->home_.engineering_mode;
+}
+
+const nd_app_entry *nd_ui_app_list(nd_ui *ui, size_t *n_out)
+{
+    if (ui == NULL) {
+        if (n_out != NULL)
+            *n_out = 0u;
+        return NULL;
+    }
+    if (!ui->home_.apps_ready) {
+        ui->home_.apps_ready = true;
+        rescan_apps(ui);
+    }
+    if (n_out != NULL)
+        *n_out = ui->home_.n_apps;
+    return ui->home_.apps;
+}
+
+size_t nd_ui_app_count(nd_ui *ui)
+{
+    size_t n = 0u;
+
+    (void)nd_ui_app_list(ui, &n);
+    return n;
+}
+
+void nd_ui_set_wallpaper(nd_ui *ui, nd_image *img)
+{
+    if (ui == NULL)
+        return;
+    if (ui->home_.wallpaper != img)
+        nd_image_free(ui->home_.wallpaper);
+    ui->home_.wallpaper = img;
+    ui->home_.wallpaper_ready = true;
 }
 
 /* ------------------------------------------------------------------ *
@@ -751,23 +825,17 @@ static nd_err ui_common_init(nd_ui *ui, nd_fb *fb)
 
     /* --- step 13 is CORE ONLY; see nd_ui_init --- */
 
-    /* --- step 14 --- */
-    ui->home_layout = nd_layout_load(ND_PATH_HOME_LAYOUT);
-
     /* --- step 15 --- */
     ui->image_cache = nd_imgcache_new(ND_IMGCACHE_MAX);
     if (ui->image_cache == NULL)
         return ND_ERR_NOMEM;
 
-    /* --- step 16 --- */
-    ui->wallpaper = load_configured_wallpaper();
-
-    /* --- step 17 --- */
-    ui->engineering_mode = nd_setting_is_enabled(
-        nd_settings_get(ND_SET_UI_ENGINEERING, ND_SET_UI_ENG_MODE_DFLT), true);
-
-    /* --- step 18 --- */
-    rescan_apps(ui);
+    /* --- steps 14, 16, 17 and 18 -- home_layout, wallpaper, engineering_mode
+     * and the app scan -- are NOT done here any more. They are the home
+     * screen's state and they load on first read; see "Lazy home state" in
+     * nd_ui.h. Their ORDER relative to each other is unchanged, because
+     * nd_ui_app_list() still asks nd_ui_engineering_mode() first, which is
+     * the only dependency among the four. --- */
     return ND_OK;
 }
 
@@ -825,9 +893,10 @@ nd_err nd_ui_init(nd_ui *ui, nd_fb *fb)
 
     /* --- step 13, in its real position: AFTER the fonts and the canvas, and
      * BEFORE home_layout, wallpaper, engineering_mode and apps have any
-     * meaning. ui_common_init has already assigned them, which is the one
-     * ordering difference from the Python and is invisible: the dialog reads
-     * none of the four. Recorded in OPEN-QUESTIONS.md as U-3. --- */
+     * meaning. That used to be an ordering difference from the Python --
+     * ui_common_init had already assigned all four -- recorded as U-3 in
+     * OPEN-QUESTIONS.md. Making them lazy closed it: at this point none of
+     * them has been loaded, which is exactly where launcher.py stood. --- */
     (void)show_alpha_security_notice_once(ui);
 
     return ND_OK;
@@ -887,10 +956,10 @@ void nd_ui_teardown(nd_ui *ui)
 
     nd_imgcache_free(ui->image_cache);
     ui->image_cache = NULL;
-    nd_layout_free(ui->home_layout);
-    ui->home_layout = NULL;
-    nd_image_free(ui->wallpaper);
-    ui->wallpaper = NULL;
+    nd_layout_free(ui->home_.home_layout);
+    ui->home_.home_layout = NULL;
+    nd_image_free(ui->home_.wallpaper);
+    ui->home_.wallpaper = NULL;
 
     nd_font_free(ui->font_s);
     nd_font_free(ui->font_md);
@@ -1055,26 +1124,30 @@ void nd_ui_render_home(nd_ui *ui)
     int32_t h;
     bool notify_active;
     size_t i;
+    const nd_image *paper;
+    const nd_home_layout *layout;
 
     if (ui == NULL || ui->canvas == NULL || ui->draw == NULL)
         return;
     w = nd_ui_width(ui);
     h = nd_ui_height(ui);
     notify_active = nd_ui_status_notify_active(ui);
+    paper = nd_ui_wallpaper(ui);
+    layout = nd_ui_home_layout(ui);
 
     /* --- 1. background --- */
-    if (ui->wallpaper != NULL) {
-        (void)nd_image_blit(ui->canvas, ui->wallpaper, 0, 0);
-    } else if (ui->home_layout != NULL && ui->home_layout->background != NULL) {
-        (void)nd_image_blit(ui->canvas, ui->home_layout->background, 0, 0);
+    if (paper != NULL) {
+        (void)nd_image_blit(ui->canvas, paper, 0, 0);
+    } else if (layout != NULL && layout->background != NULL) {
+        (void)nd_image_blit(ui->canvas, layout->background, 0, 0);
     } else {
         (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, w, h), ND_BLACK);
     }
 
     /* --- 2. elements, in array order, which is paint order --- */
-    if (ui->home_layout != NULL) {
-        for (i = 0u; i < ui->home_layout->n_elements; i++) {
-            const nd_element *el = &ui->home_layout->elements[i];
+    if (layout != NULL) {
+        for (i = 0u; i < layout->n_elements; i++) {
+            const nd_element *el = &layout->elements[i];
 
             /* The carrier line makes room for the "N messages received"
              * banner, like on the 3310. */
@@ -1123,11 +1196,15 @@ void nd_ui_render_home_dialing(nd_ui *ui)
     if (ui == NULL || ui->canvas == NULL || ui->draw == NULL)
         return;
 
-    if (ui->wallpaper != NULL)
-        (void)nd_image_blit(ui->canvas, ui->wallpaper, 0, 0);
-    else
-        (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, nd_ui_width(ui), nd_ui_height(ui)),
-                                ND_BLACK);
+    {
+        const nd_image *paper = nd_ui_wallpaper(ui);
+
+        if (paper != NULL)
+            (void)nd_image_blit(ui->canvas, paper, 0, 0);
+        else
+            (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, nd_ui_width(ui), nd_ui_height(ui)),
+                                    ND_BLACK);
+    }
 
     /* No status icons, no clock and no carrier on this screen. */
     if (ui->dial_buffer[0] != '\0' && ui->font_xl != NULL) {
@@ -1149,6 +1226,8 @@ void nd_ui_render_menu(nd_ui *ui)
 {
     nd_appsel menu;
     int32_t choice;
+    const nd_app_entry *apps;
+    size_t n_apps = 0u;
 
     if (ui == NULL)
         return;
@@ -1158,9 +1237,10 @@ void nd_ui_render_menu(nd_ui *ui)
         return;
     }
 
-    nd_appsel_init(&menu, ui, "Main Menu", ui->apps, ui->n_apps, ui->wallpaper);
+    apps = nd_ui_app_list(ui, &n_apps);
+    nd_appsel_init(&menu, ui, "Main Menu", apps, n_apps, nd_ui_wallpaper(ui));
     choice = nd_appsel_show(&menu);
-    if (choice != ND_WIDGET_BACK && (size_t)choice < ui->n_apps) {
+    if (choice != ND_WIDGET_BACK && (size_t)choice < n_apps) {
         /* The Python prints the INDEX here, not the manifest id, despite the
          * wording. Port the message as it is. */
         nd_log(ND_LOG_OS, "Launching App ID: %d", choice);
@@ -1170,9 +1250,9 @@ void nd_ui_render_menu(nd_ui *ui)
          * shipped manifest still says "main.py". See U-6 in
          * OPEN-QUESTIONS.md. */
         if (nd_proc_launch_app != NULL) {
-            (void)nd_proc_launch_app(ui, &ui->apps[choice], NULL, NULL, NULL);
+            (void)nd_proc_launch_app(ui, &apps[choice], NULL, NULL, NULL);
         } else {
-            nd_log_err(ND_LOG_OS, "App launcher not linked; ignoring %s", ui->apps[choice].name);
+            nd_log_err(ND_LOG_OS, "App launcher not linked; ignoring %s", apps[choice].name);
         }
     }
     /* Always unwind, so one bad app or menu event cannot trap the core loop. */
@@ -1261,9 +1341,9 @@ static void open_notification(nd_ui *ui)
     if (kind == NULL || strcmp(kind, ND_NOTIFY_KIND_SMS) != 0)
         return;
 
-    for (i = 0u; i < ui->n_apps; i++) {
-        if (strcmp(ui->apps[i].name, "Messages") == 0) {
-            messages = &ui->apps[i];
+    for (i = 0u; i < ui->home_.n_apps; i++) {
+        if (strcmp(ui->home_.apps[i].name, "Messages") == 0) {
+            messages = &ui->home_.apps[i];
             break;
         }
     }
@@ -1465,12 +1545,11 @@ void nd_ui_refresh_after_app(nd_ui *ui)
     if (ui == NULL)
         return;
 
-    nd_image_free(ui->wallpaper);
-    ui->wallpaper = load_configured_wallpaper();
-
-    ui->engineering_mode = nd_setting_is_enabled(
-        nd_settings_get(ND_SET_UI_ENGINEERING, ND_SET_UI_ENG_MODE_DFLT), true);
-    rescan_apps(ui);
+    nd_image_free(ui->home_.wallpaper);
+    ui->home_.wallpaper = NULL;
+    ui->home_.wallpaper_ready = false;
+    ui->home_.eng_mode_ready = false;
+    ui->home_.apps_ready = false;
 
     /* Messages may have been read (or arrived) inside the app. */
     ui->unread_sms = nd_db_count_unread_sms();

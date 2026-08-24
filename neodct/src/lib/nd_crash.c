@@ -532,7 +532,7 @@ void nd_crash_show_app(struct nd_ui *ui, const char *message, const char *app_na
 
     (void)nd_crash_summary(info, summary, sizeof summary);
 
-    if (ui->engineering_mode) {
+    if (nd_ui_engineering_mode(ui)) {
         flush_input(ui);
         nd_crash_draw_engineering(ui, summary[0] != '\0' ? summary : NULL);
         wait_for_continue(ui);

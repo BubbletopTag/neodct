@@ -19,6 +19,7 @@
 #   NEODCT_VERITY=permissive ...              boot even if verity fails
 #   NEODCT_VERITY=off ...                     skip verity entirely
 #   NEODCT_DEBUG=1 ...                        verbose initramfs, no quiet
+#   NEODCT_APPEND="printk.time=1" ...         extra kernel cmdline (see below)
 #   NEODCT_SD=share ...                       host folder as the card (virtiofs)
 #   NEODCT_SD=none ...                        no card inserted
 #   NEODCT_RECOVERY=1 ...                     boot into recovery mode
@@ -110,6 +111,14 @@ if [ -n "${NEODCT_DEBUG:-}" ]; then
 else
     APPEND="$APPEND quiet loglevel=0"
 fi
+
+# Anything else you want on the kernel command line, appended last so it wins.
+# The reason this exists: printk.time=1. CONFIG_PRINTK_TIME is off in both
+# kernel configs, so a boot log has no timestamps at all and "which part of
+# the boot is slow" cannot be answered without rebuilding the kernel.
+#
+#     NEODCT_APPEND="printk.time=1 initcall_debug" NEODCT_DEBUG=1 run_qemu.sh
+[ -n "${NEODCT_APPEND:-}" ] && APPEND="$APPEND $NEODCT_APPEND"
 
 # --- display -------------------------------------------------------------
 case "$DISPLAY_MODE" in

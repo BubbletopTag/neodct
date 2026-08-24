@@ -25,7 +25,7 @@
  * ============ HOW THE NINE ARE REPRODUCED ============
  *
  * shoot_docs.shoot_app_selector() opens ONE `with StubUI(wallpaper=...)`
- * block, builds one AppSelector over ui.apps with background=ui.wallpaper,
+ * block, builds one AppSelector over nd_ui_app_list(&ui, NULL) with background=nd_ui_wallpaper(&ui),
  * then walks a fixed list of app NAMES, setting selected_index to that app's
  * index and calling draw(). The index is what the page number and the
  * scrollbar notch are computed from, so looking the apps up by name -- rather
@@ -330,39 +330,39 @@ static const struct {
     {9999, "Tests", "/NeoDCT/System/engineering/apps/TestsApp"},
 };
 
-static size_t index_of(const nd_ui *ui, const char *name)
+static size_t index_of(nd_ui *ui, const char *name)
 {
     size_t i;
 
-    for (i = 0u; i < ui->n_apps; i++) {
-        if (strcmp(ui->apps[i].name, name) == 0)
+    for (i = 0u; i < nd_ui_app_count(ui); i++) {
+        if (strcmp(nd_ui_app_list(ui, NULL)[i].name, name) == 0)
             return i;
     }
     return (size_t)-1;
 }
 
-static void test_registry(const nd_ui *ui)
+static void test_registry(nd_ui *ui)
 {
     size_t i;
 
-    CHECK_INT(ui->n_apps, ND_ARRAY_LEN(EXPECTED), "every shipped manifest is registered");
-    CHECK(ui->engineering_mode, "engineering mode is on");
-    if (ui->n_apps != ND_ARRAY_LEN(EXPECTED))
+    CHECK_INT(nd_ui_app_count(ui), ND_ARRAY_LEN(EXPECTED), "every shipped manifest is registered");
+    CHECK(nd_ui_engineering_mode(ui), "engineering mode is on");
+    if (nd_ui_app_count(ui) != ND_ARRAY_LEN(EXPECTED))
         return;
 
     for (i = 0u; i < ND_ARRAY_LEN(EXPECTED); i++) {
         char icon[ND_APP_PATH_MAX];
 
-        CHECK_INT(ui->apps[i].id, EXPECTED[i].id, EXPECTED[i].name);
-        CHECK_STR(ui->apps[i].name, EXPECTED[i].name, "name in id order");
-        CHECK_STR(ui->apps[i].path, EXPECTED[i].path, "path in id order");
+        CHECK_INT(nd_ui_app_list(ui, NULL)[i].id, EXPECTED[i].id, EXPECTED[i].name);
+        CHECK_STR(nd_ui_app_list(ui, NULL)[i].name, EXPECTED[i].name, "name in id order");
+        CHECK_STR(nd_ui_app_list(ui, NULL)[i].path, EXPECTED[i].path, "path in id order");
         /* Every shipped manifest omits "icon", so the default joins
          * "icon.png" onto the app's own directory. */
         (void)nd_snprintf(icon, sizeof icon, "%s/icon.png", EXPECTED[i].path);
-        CHECK_STR(ui->apps[i].icon, icon, "icon path defaults to <dir>/icon.png");
+        CHECK_STR(nd_ui_app_list(ui, NULL)[i].icon, icon, "icon path defaults to <dir>/icon.png");
         /* U-6: the field is populated from the manifest and launches nothing.
          * All 24 still say main.py. */
-        CHECK_STR(ui->apps[i].exec, "main.py", "exec as the manifest spells it");
+        CHECK_STR(nd_ui_app_list(ui, NULL)[i].exec, "main.py", "exec as the manifest spells it");
     }
 }
 
@@ -373,14 +373,14 @@ static void test_icons_load(nd_ui *ui)
 {
     size_t i;
 
-    for (i = 0u; i < ui->n_apps; i++) {
-        const nd_image *img = nd_ui_get_image_max(ui, ui->apps[i].icon, 82);
+    for (i = 0u; i < nd_ui_app_count(ui); i++) {
+        const nd_image *img = nd_ui_get_image_max(ui, nd_ui_app_list(ui, NULL)[i].icon, 82);
 
         g_checks++;
         if (img == NULL) {
             g_failures++;
-            fprintf(stderr, "FAIL icon %s did not decode (%s)\n", ui->apps[i].name,
-                    ui->apps[i].icon);
+            fprintf(stderr, "FAIL icon %s did not decode (%s)\n", nd_ui_app_list(ui, NULL)[i].name,
+                    nd_ui_app_list(ui, NULL)[i].icon);
             continue;
         }
         /* thumbnail((82,82)) never upscales and preserves the aspect ratio,
@@ -410,12 +410,12 @@ static void test_init_defaults(nd_ui *ui)
 {
     nd_appsel s;
 
-    nd_appsel_init(&s, ui, "Main Menu", ui->apps, ui->n_apps, ui->wallpaper);
+    nd_appsel_init(&s, ui, "Main Menu", nd_ui_app_list(ui, NULL), nd_ui_app_count(ui), nd_ui_wallpaper(ui));
     CHECK_INT(s.selected_index, 0, "the carousel starts on the first app");
     CHECK(s.title != NULL && strcmp(s.title, "Main Menu") == 0,
           "title is stored -- and never drawn");
-    CHECK(s.background == ui->wallpaper, "background is the wallpaper");
-    CHECK_INT(s.n_items, ui->n_apps, "the whole registry is the carousel");
+    CHECK(s.background == nd_ui_wallpaper(ui), "background is the wallpaper");
+    CHECK_INT(s.n_items, nd_ui_app_count(ui), "the whole registry is the carousel");
 
     nd_appsel_init(&s, ui, "Main Menu", NULL, 99u, NULL);
     CHECK_INT(s.n_items, 0, "a NULL item array is an empty list whatever the count says");
@@ -489,11 +489,11 @@ static void test_show_loop(nd_ui *ui)
     int fds[2];
     size_t last;
 
-    if (ui->n_apps < 2u) {
+    if (nd_ui_app_count(ui) < 2u) {
         CHECK(false, "the show() loop needs at least two apps");
         return;
     }
-    last = ui->n_apps - 1u;
+    last = nd_ui_app_count(ui) - 1u;
 
     if (pipe(fds) != 0) {
         CHECK(false, "pipe");
@@ -515,7 +515,7 @@ static void test_show_loop(nd_ui *ui)
         nd_appsel s;
         const int32_t held[2] = {ND_KEY_DOWN, ND_KEY_ENTER};
 
-        nd_appsel_init(&s, ui, "Main Menu", ui->apps, ui->n_apps, NULL);
+        nd_appsel_init(&s, ui, "Main Menu", nd_ui_app_list(ui, NULL), nd_ui_app_count(ui), NULL);
         write_key(fds[1], ND_KEY_DOWN, 1);
         write_key(fds[1], ND_KEY_ENTER, 1);
         CHECK_INT(nd_appsel_show(&s), 1, "Down then Enter returns index 1");
@@ -528,7 +528,7 @@ static void test_show_loop(nd_ui *ui)
         nd_appsel s;
         const int32_t held[2] = {ND_KEY_UP, ND_KEY_ENTER};
 
-        nd_appsel_init(&s, ui, "Main Menu", ui->apps, ui->n_apps, NULL);
+        nd_appsel_init(&s, ui, "Main Menu", nd_ui_app_list(ui, NULL), nd_ui_app_count(ui), NULL);
         write_key(fds[1], ND_KEY_UP, 1);
         write_key(fds[1], ND_KEY_ENTER, 1);
         CHECK_INT(nd_appsel_show(&s), (int32_t)last, "Up from the first wraps to the last");
@@ -539,7 +539,7 @@ static void test_show_loop(nd_ui *ui)
         nd_appsel s;
         const int32_t held[2] = {ND_KEY_DOWN, ND_KEY_ENTER};
 
-        nd_appsel_init(&s, ui, "Main Menu", ui->apps, ui->n_apps, NULL);
+        nd_appsel_init(&s, ui, "Main Menu", nd_ui_app_list(ui, NULL), nd_ui_app_count(ui), NULL);
         s.selected_index = last;
         write_key(fds[1], ND_KEY_DOWN, 1);
         write_key(fds[1], ND_KEY_ENTER, 1);
@@ -551,7 +551,7 @@ static void test_show_loop(nd_ui *ui)
         nd_appsel s;
         const int32_t held[1] = {ND_KEY_CLEAR};
 
-        nd_appsel_init(&s, ui, "Main Menu", ui->apps, ui->n_apps, NULL);
+        nd_appsel_init(&s, ui, "Main Menu", nd_ui_app_list(ui, NULL), nd_ui_app_count(ui), NULL);
         write_key(fds[1], ND_KEY_CLEAR, 1);
         CHECK_INT(nd_appsel_show(&s), ND_WIDGET_BACK, "Clear leaves the menu");
         release_all(in, fds[1], held, ND_ARRAY_LEN(held));
@@ -563,7 +563,7 @@ static void test_show_loop(nd_ui *ui)
         nd_appsel s;
         const int32_t held[1] = {ND_KEY_ENTER};
 
-        nd_appsel_init(&s, ui, "Main Menu", ui->apps, ui->n_apps, NULL);
+        nd_appsel_init(&s, ui, "Main Menu", nd_ui_app_list(ui, NULL), nd_ui_app_count(ui), NULL);
         s.selected_index = 3u;
         write_key(fds[1], ND_KEY_DOWN, 1);
         write_key(fds[1], ND_KEY_DOWN, 0);
@@ -581,7 +581,7 @@ static void test_show_loop(nd_ui *ui)
         nd_appsel s;
         const int32_t held[1] = {ND_KEY_CLEAR};
 
-        nd_appsel_init(&s, ui, "Main Menu", ui->apps, ui->n_apps, NULL);
+        nd_appsel_init(&s, ui, "Main Menu", nd_ui_app_list(ui, NULL), nd_ui_app_count(ui), NULL);
         write_key(fds[1], ND_KEY_STAR, 1);
         write_key(fds[1], ND_KEY_STAR, 0);
         write_key(fds[1], ND_KEY_CLEAR, 1);
@@ -706,7 +706,7 @@ static void test_single_item_scrollbar(nd_capture *cap, nd_ui *ui)
     nd_appsel s;
     const nd_image *frame;
 
-    nd_appsel_init(&s, ui, "Main Menu", ui->apps, 1u, NULL);
+    nd_appsel_init(&s, ui, "Main Menu", nd_ui_app_list(ui, NULL), 1u, NULL);
     nd_appsel_draw(&s);
     frame = nd_capture_recent(cap, 0u);
     if (frame == NULL) {
@@ -757,7 +757,7 @@ static void shoot_menu_frames(nd_capture *cap, const nd_json_doc *golden)
         CHECK(false, "nd_ui_init");
         return;
     }
-    CHECK(ui.wallpaper != NULL, "the configured wallpaper loaded");
+    CHECK(nd_ui_wallpaper(&ui) != NULL, "the configured wallpaper loaded");
 
     test_registry(&ui);
     test_icons_load(&ui);
@@ -768,7 +768,7 @@ static void shoot_menu_frames(nd_capture *cap, const nd_json_doc *golden)
      * reference sets it and a divergence would otherwise be invisible. */
     nd_ui_sim_status(&ui, 4, 4, "Tello");
 
-    nd_appsel_init(&selector, &ui, "Main Menu", ui.apps, ui.n_apps, ui.wallpaper);
+    nd_appsel_init(&selector, &ui, "Main Menu", nd_ui_app_list(&ui, NULL), nd_ui_app_count(&ui), nd_ui_wallpaper(&ui));
 
     for (i = 0u; i < ND_ARRAY_LEN(WANTED); i++) {
         size_t idx = index_of(&ui, WANTED[i][0]);

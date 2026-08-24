@@ -342,7 +342,11 @@ static bool fx_init(fixture *fx)
     fx->ui.input = fx->input;
     fx->ui.keypad_fd = nd_input_fd(fx->input);
     fx->ui.softkey_exists = true;
-    fx->ui.engineering_mode = true;
+    /* This fixture builds an nd_ui by hand instead of calling nd_ui_init(),
+     * so it also has to set the lazy flag: writing the value alone would be
+     * overwritten the first time nd_ui_engineering_mode() went to settings. */
+    fx->ui.home_.engineering_mode = true;
+    fx->ui.home_.eng_mode_ready = true;
     fx->ui.image_cache = nd_imgcache_new(ND_IMGCACHE_MAX);
     return fx->ui.image_cache != NULL;
 }
