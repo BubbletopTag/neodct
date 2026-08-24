@@ -149,6 +149,7 @@ CORE_SRCS   := $(wildcard core/*.c)
 APPRUN_SRCS := $(wildcard apprun/*.c)
 SHOOT_SRCS  := $(wildcard tools/nd_shoot*.c)
 SELF_SRCS   := $(wildcard tools/nd_selftest*.c)
+DISPLAYD_SRCS := $(wildcard displayd/*.c)
 TEST_SRCS   := $(wildcard test/unit/*.c)
 
 # An app is any directory under apps/ that contains at least one .c file.
@@ -159,9 +160,18 @@ CORE_OBJS   := $(patsubst %.c,$(OBJDIR)/%.o,$(CORE_SRCS))
 APPRUN_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(APPRUN_SRCS))
 SHOOT_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(SHOOT_SRCS))
 SELF_OBJS   := $(patsubst %.c,$(OBJDIR)/%.o,$(SELF_SRCS))
+DISPLAYD_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(DISPLAYD_SRCS))
 
 TEST_BINS := $(patsubst test/unit/%.c,$(TESTDIR)/%,$(TEST_SRCS))
 APP_SOS   := $(foreach d,$(APP_DIRS),$(BUILD)/$(patsubst apps/%/,apps/%,$(d))/app.so)
+
+# Apps that exist only to be launched BY a test -- the deliberately faulting
+# one that proves the crash screen appears and the core survives. Built like
+# any other app.so, never installed, and kept out of apps/ so that no image
+# can ever ship a program whose whole job is to dereference NULL.
+TEST_APP_DIRS := $(sort $(dir $(wildcard test/apps/*/*.c)))
+TEST_APP_SOS  := $(foreach d,$(TEST_APP_DIRS),\
+	$(TESTDIR)/$(patsubst test/apps/%/,apps/%,$(d))/app.so)
 
 # Only ask for a binary whose sources exist.
 TARGETS := $(if $(LIB_SRCS),$(LIB))
@@ -169,6 +179,7 @@ TARGETS += $(if $(CORE_SRCS),$(BINDIR)/nd-core)
 TARGETS += $(if $(APPRUN_SRCS),$(BINDIR)/nd-apprun)
 TARGETS += $(if $(SHOOT_SRCS),$(BINDIR)/nd-shoot)
 TARGETS += $(if $(SELF_SRCS),$(BINDIR)/nd-selftest)
+TARGETS += $(if $(DISPLAYD_SRCS),$(BINDIR)/neodct_displayd)
 TARGETS += $(APP_SOS)
 
 # ------------------------------------------------------------------ #
@@ -230,6 +241,33 @@ $(BINDIR)/nd-apprun: $(APPRUN_OBJS) $(LIB)
 	$(say) LINK $@
 	$(Q)$(CC) -rdynamic -o $@ $(APPRUN_OBJS) -L$(LIBDIR) -lneodct $(LDFLAGS_ALL) $(PKG_LIBS) -ldl -lm
 
+
+# ---- neodct_displayd: the ST7789 SPI panel daemon ------------------
+#
+# Built from source on every `make`, and no longer shipped as a committed
+# binary. That blob was ARM, dynamically linked, and glibc-only -- under musl
+# its interpreter (/lib/ld-linux-armhf.so.3) does not exist and the kernel
+# cannot exec it at all. mkinitramfs.py copies the same file into the
+# initramfs, so the blob broke the boot-time update applier too.
+#
+# It links nothing of ours: it is a standalone SPI driver that talks to
+# /dev/spidev and /dev/fb0 and predates this port. So it does NOT link
+# libneodct, and it is built WITHOUT -Wconversion. The 24 conversion warnings
+# are ordinary driver byte-arithmetic in code that is proven on real hardware,
+# and silencing them by editing a working panel driver would risk more than it
+# would buy. Everything else in the warning set, including -Werror, applies.
+DISPLAYD_CFLAGS := $(filter-out -Wconversion -Wsign-conversion,$(CFLAGS))
+
+$(OBJDIR)/displayd/%.o: displayd/%.c
+	$(Q)mkdir -p $(dir $@)
+	$(Q)printf '  %-7s %s\n' 'CC' '$<'
+	$(Q)$(CC) $(DISPLAYD_CFLAGS) $(CPPFLAGS) -MMD -MP -c $< -o $@
+
+$(BINDIR)/neodct_displayd: $(DISPLAYD_OBJS)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)printf '  %-7s %s\n' 'LINK' '$@'
+	$(Q)$(CC) $(DISPLAYD_OBJS) -o $@ $(LDFLAGS)
+
 $(BINDIR)/nd-shoot: $(SHOOT_OBJS) $(LIB)
 	$(LINK_BIN)
 
@@ -254,6 +292,14 @@ $(BUILD)/apps/$(1)/app.so: $$(patsubst %.c,$$(OBJDIR)/%.o,$$(wildcard apps/$(1)/
 endef
 $(foreach d,$(APP_DIRS),$(eval $(call APP_RULE,$(patsubst apps/%/,%,$(d)))))
 
+define TEST_APP_RULE
+$(TESTDIR)/apps/$(1)/app.so: $$(patsubst %.c,$$(OBJDIR)/%.o,$$(wildcard test/apps/$(1)/*.c)) $$(LIB)
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(say) LINK $$@
+	$$(Q)$$(CC) -shared -o $$@ $$(filter %.o,$$^) -L$$(LIBDIR) -lneodct $$(LDFLAGS_ALL) $$(PKG_LIBS) -lm
+endef
+$(foreach d,$(TEST_APP_DIRS),$(eval $(call TEST_APP_RULE,$(patsubst test/apps/%/,%,$(d)))))
+
 # ------------------------------------------------------------------ #
 # Tests
 # ------------------------------------------------------------------ #
@@ -272,7 +318,7 @@ $(foreach d,$(APP_DIRS),$(eval $(call APP_RULE,$(patsubst apps/%/,%,$(d)))))
 # (neodct/tools/verify-c-build.sh) additionally runs some of them with an
 # explicit reference path; treat that as an override, not as the only way in.
 
-test: all $(TEST_BINS)
+test: all $(TEST_BINS) $(TEST_APP_SOS)
 	$(Q)if [ -z "$(strip $(TEST_BINS))" ]; then \
 	    printf '  %-7s %s\n' 'SKIP' 'make test: no test/unit/*.c yet'; exit 0; \
 	fi; \
@@ -291,16 +337,55 @@ test: all $(TEST_BINS)
 # Install -- the target layout, whose absolute paths are load-bearing
 # ------------------------------------------------------------------ #
 
+# ---- where the one stub app.so goes -------------------------------
+#
+# SESSION-SCOPE.md keeps all twenty-four apps in place with their real
+# manifest.json and icon.png, and gives each of them the SAME app.so: a
+# MessageDialog reading "This application has not been implemented yet."
+# One binary, twenty-four hard-linked-in-spirit copies, so the menu is
+# complete and every icon shows.
+#
+# The names are the overlay's directory names, and the split is where the
+# overlay puts them: engineering apps live under engineering/apps and only
+# appear in the menu when engineering mode is on.
+STUB_STOCK_APPS := \
+	Browser Calculator CallLog Clock Games Koki Messages MusicPlayer \
+	PhoneBook Power Settings Tones Update
+STUB_ENG_APPS := \
+	Crash CubeBench Downgrade FuelGauge KeypadMapper KeypadMapperI2C \
+	LCDTest LinuxShell Modem RemoteShell TestsApp
+
+STUB_SO := $(BUILD)/apps/Stub/app.so
+
 install: all
 	$(Q)$(INSTALL) -d $(DESTDIR)$(PREFIX)/lib $(DESTDIR)$(PREFIX)/bin
 	$(Q)$(if $(LIB_SRCS),$(INSTALL) -m 0755 $(LIB) $(DESTDIR)$(PREFIX)/lib/,:)
 	$(Q)$(if $(CORE_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-core $(DESTDIR)$(PREFIX)/bin/,:)
 	$(Q)$(if $(APPRUN_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-apprun $(DESTDIR)$(PREFIX)/bin/,:)
+	@# The panel daemon keeps its historical path: /NeoDCT/System/hw/. Both
+	@# etc/init.d/S90display and mkinitramfs.py's PANEL_DAEMON hardcode it,
+	@# and mkinitramfs reads the built target tree rather than the overlay,
+	@# so installing here is all it takes for the initramfs to keep working.
+	$(Q)$(if $(DISPLAYD_SRCS),$(INSTALL) -d $(DESTDIR)$(PREFIX)/hw,:)
+	$(Q)$(if $(DISPLAYD_SRCS),$(INSTALL) -m 0755 $(BINDIR)/neodct_displayd $(DESTDIR)$(PREFIX)/hw/,:)
 	$(Q)for so in $(APP_SOS); do \
 	    name=$$(basename $$(dirname $$so)); \
+	    [ "$$name" = Stub ] && continue; \
 	    $(INSTALL) -d $(DESTDIR)$(PREFIX)/apps/$$name; \
 	    $(INSTALL) -m 0755 $$so $(DESTDIR)$(PREFIX)/apps/$$name/app.so; \
 	done
+	$(Q)if [ -f $(STUB_SO) ]; then \
+	    for name in $(STUB_STOCK_APPS); do \
+	        d=$(DESTDIR)$(PREFIX)/apps/$$name; \
+	        [ -f $$d/app.so ] || { $(INSTALL) -d $$d; \
+	            $(INSTALL) -m 0755 $(STUB_SO) $$d/app.so; }; \
+	    done; \
+	    for name in $(STUB_ENG_APPS); do \
+	        d=$(DESTDIR)$(PREFIX)/engineering/apps/$$name; \
+	        [ -f $$d/app.so ] || { $(INSTALL) -d $$d; \
+	            $(INSTALL) -m 0755 $(STUB_SO) $$d/app.so; }; \
+	    done; \
+	fi
 
 # ------------------------------------------------------------------ #
 # Housekeeping

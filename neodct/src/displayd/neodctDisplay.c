@@ -30,6 +30,13 @@
  *   RST = pin 12 (GPIO 56)      DC  = pin 13 (GPIO 57)   BL = 3.3V
  */
 
+/* usleep() is XSI, and <unistd.h> hides it under -std=c11 unless a feature
+ * macro asks for it. Without this the compiler invents `int usleep()` and
+ * calls it with an unprototyped signature -- undefined behaviour that
+ * happens to work on glibc/ARM and is not guaranteed to anywhere else.
+ * Caught when this file moved into the -Werror build. */
+#define _DEFAULT_SOURCE
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

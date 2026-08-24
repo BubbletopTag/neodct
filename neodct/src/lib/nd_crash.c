@@ -109,7 +109,21 @@ static void fatal_handler(int signo, siginfo_t *info, void *ctx)
     }
 
     /* SA_RESETHAND already restored the default disposition, so re-raising
-     * kills us with the real signal and waitpid() reports WIFSIGNALED. */
+     * kills us with the real signal and waitpid() reports WIFSIGNALED rather
+     * than a synthetic 128+n exit status -- which is the whole reason the
+     * child re-raises instead of exiting.
+     *
+     * The unblock is not optional. sigaction() blocks the delivered signal for
+     * the duration of its own handler, so without this the raise() merely
+     * marks it pending, the handler returns into _exit(), and the core sees a
+     * plain exit of 139. Both sigprocmask and raise are async-signal-safe. */
+    {
+        sigset_t only;
+
+        (void)sigemptyset(&only);
+        (void)sigaddset(&only, signo);
+        (void)sigprocmask(SIG_UNBLOCK, &only, NULL);
+    }
     (void)raise(signo);
     _exit(128 + signo);
 }

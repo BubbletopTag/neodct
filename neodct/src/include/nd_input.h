@@ -130,7 +130,26 @@ nd_err nd_input_channel_open(nd_input_channel *ch);
 
 /* Write one press or release as a native struct input_event pair (the key
  * event followed by EV_SYN/SYN_REPORT, exactly as the kernel does).
- * ND_ERR_IO when the child has gone; the caller reaps it. */
+ * ND_ERR_IO when the child has gone; the caller reaps it.
+ *
+ * THE CALLER MUST IGNORE SIGPIPE. Writing to a pipe whose reader has exited
+ * raises SIGPIPE, and the default disposition kills the process *before*
+ * write() can return EPIPE for this function to turn into ND_ERR_IO. An app
+ * exiting while a key is in flight is an ordinary event, not an error, so a
+ * core that has not done this dies at random during normal use.
+ *
+ * nd-core does it in nd_main.c and apps get it from nd_app_main(), so shipped
+ * code is covered; anything else calling this -- a tool, a test -- must do the
+ * same. One line at startup:
+ *
+ *     (void)signal(SIGPIPE, SIG_IGN);
+ *
+ * Deliberately NOT bracketed with sigaction() inside this function the way
+ * nd_proc_spawn() does it. Spawning is rare; this runs per keypress, so that
+ * would add two syscalls to every key. Worse, signal dispositions are
+ * process-wide: in a core with a modem thread and a clock thread, one thread
+ * restoring the old disposition mid-write would strip the protection from
+ * another. A one-off SIG_IGN at startup has neither problem. */
 nd_err nd_input_channel_send(nd_input_channel *ch, int32_t code, bool pressed);
 
 /* Close both ends. Safe on an unopened channel. */

@@ -359,6 +359,13 @@ static const char *apprun_path(char *buf, size_t buf_sz)
             if (nd_snprintf(buf, buf_sz, "%s/nd-apprun", exe) == ND_OK &&
                 access(buf, X_OK) == 0)
                 return buf;
+            /* A unit test binary lives in build/<variant>/test, one directory
+             * over from build/<variant>/bin, and must drive the SAME variant's
+             * nd-apprun -- an ASan run has to fork an ASan child or the whole
+             * point of check 5 is lost. */
+            if (nd_snprintf(buf, buf_sz, "%s/../bin/nd-apprun", exe) == ND_OK &&
+                access(buf, X_OK) == 0)
+                return buf;
         }
     }
     return ND_PATH_ND_APPRUN;
@@ -369,8 +376,23 @@ static const char *apprun_path(char *buf, size_t buf_sz)
  * process that reads NEODCT_ROOT for itself -- so it gets the UNRESOLVED
  * /NeoDCT/System/apps/<Name> and resolves it the same way we would. */
 static nd_err app_env(char *keypad, size_t keypad_sz, char *crash, size_t crash_sz, char *fbv,
-                      size_t fb_sz, int keypad_fd, int crash_fd, int fb_fd)
+                      size_t fb_sz, char *rootv, size_t root_sz, int keypad_fd, int crash_fd,
+                      int fb_fd)
 {
+    const char *root = nd_path_root();
+
+    /* THE CHILD RESOLVES PATHS FOR ITSELF, so it needs the same ND_ROOT we
+     * have. Production leaves it empty and this is one wasted environment
+     * slot; the host harness stages a root with nd_path_set_root() and never
+     * touches the environment, and without this the child would look for
+     * app.so at the unprefixed /NeoDCT/System/apps/... and find nothing. */
+    if (root != NULL && root[0] != '\0') {
+        if (nd_snprintf(rootv, root_sz, "%s=%s", ND_ENV_ROOT, root) != ND_OK)
+            return ND_ERR_TOOLONG;
+    } else {
+        rootv[0] = '\0';
+    }
+
     if (nd_snprintf(keypad, keypad_sz, "%s=%d", ND_ENV_KEYPAD_FD, keypad_fd) != ND_OK)
         return ND_ERR_TOOLONG;
     if (nd_snprintf(crash, crash_sz, "%s=%d", ND_ENV_CRASH_FD, crash_fd) != ND_OK)
@@ -389,14 +411,14 @@ static nd_err app_env(char *keypad, size_t keypad_sz, char *crash, size_t crash_
 /* environ plus our three, with any inherited copy of ours removed so the child
  * cannot pick up a stale descriptor number from a previous launch. */
 static size_t build_envp(const char **envp, size_t max, const char *keypad, const char *crash,
-                         const char *fbv)
+                         const char *fbv, const char *rootv)
 {
     static const char *const OURS[] = {ND_ENV_KEYPAD_FD "=", ND_ENV_CRASH_FD "=",
-                                       ND_ENV_FB_FD "="};
+                                       ND_ENV_FB_FD "=", ND_ENV_ROOT "="};
     size_t n = 0u;
     size_t i;
 
-    for (i = 0u; environ[i] != NULL && n + 4u < max; i++) {
+    for (i = 0u; environ[i] != NULL && n + 5u < max; i++) {
         size_t k;
         bool ours = false;
 
@@ -411,6 +433,8 @@ static size_t build_envp(const char **envp, size_t max, const char *keypad, cons
     envp[n++] = crash;
     if (fbv[0] != '\0')
         envp[n++] = fbv;
+    if (rootv[0] != '\0')
+        envp[n++] = rootv;
     envp[n] = NULL;
     return n;
 }
@@ -446,6 +470,7 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
     char keypad_env[64];
     char crash_env[64];
     char fb_env[64];
+    char root_env[ND_PATH_MAX + 32];
     nd_input_channel ch = {-1, -1};
     int crash_pipe[2] = {-1, -1};
     int fb_fd = -1;
@@ -482,17 +507,16 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
     argv[0] = path;
     argv[1] = app->path;
     argv[2] = entry != NULL ? entry : ND_APP_ENTRY_RUN;
-    argv[3] = arg;                     /* NULL when there is none -- and NULL   */
-    argv[4] = NULL;                    /* terminates argv, which is why it is   */
-    if (arg == NULL)                   /* checked rather than always written.   */
-        argv[3] = NULL;
+    argv[3] = arg; /* NULL when there is none, which also terminates argv */
+    argv[4] = NULL;
 
     if (app_env(keypad_env, sizeof keypad_env, crash_env, sizeof crash_env, fb_env,
-                sizeof fb_env, ch.read_fd, crash_pipe[1], fb_fd) != ND_OK) {
+                sizeof fb_env, root_env, sizeof root_env, ch.read_fd, crash_pipe[1],
+                fb_fd) != ND_OK) {
         rc = ND_ERR_TOOLONG;
         goto done;
     }
-    (void)build_envp(envp, ND_ARRAY_LEN(envp), keypad_env, crash_env, fb_env);
+    (void)build_envp(envp, ND_ARRAY_LEN(envp), keypad_env, crash_env, fb_env, root_env);
 
     memset(&spec, 0, sizeof spec);
     spec.argv = argv;
@@ -529,10 +553,28 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
     (void)close(crash_pipe[1]);
     crash_pipe[1] = -1;
 
-    for (;;) {
-        if (nd_proc_wait(pid, 0.0, &st) == ND_OK)
-            break;
-        pump_keys(ui, &ch);
+    /* The child can exit at any instant, and the next key we forward then hits
+     * a pipe with no reader. nd-core ignores SIGPIPE for exactly this reason,
+     * but a library must not depend on its caller having done that -- a unit
+     * test that launches an app would be killed by the tenth keystroke. */
+    {
+        struct sigaction ign;
+        struct sigaction prev;
+        bool restore;
+
+        memset(&ign, 0, sizeof ign);
+        ign.sa_handler = SIG_IGN;
+        (void)sigemptyset(&ign.sa_mask);
+        restore = sigaction(SIGPIPE, &ign, &prev) == 0;
+
+        for (;;) {
+            if (nd_proc_wait(pid, 0.0, &st) == ND_OK)
+                break;
+            pump_keys(ui, &ch);
+        }
+
+        if (restore)
+            (void)sigaction(SIGPIPE, &prev, NULL);
     }
 
     memset(&info, 0, sizeof info);

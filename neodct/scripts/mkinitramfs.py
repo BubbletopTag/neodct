@@ -248,8 +248,12 @@ def resolve_libs(binaries, lib_dirs):
 DMSETUP_CANDIDATES = ("usr/sbin/dmsetup", "sbin/dmsetup",
                       "usr/bin/dmsetup", "bin/dmsetup")
 
-# Prebuilt ST7789 daemon carried in the overlay (not a buildroot package),
-# so its path in the target tree is the overlay's own.
+# The ST7789 panel daemon. Built from source by the neodct buildroot
+# package (neodct/src/displayd/) and installed into the target tree; it
+# used to be a committed binary in the overlay, which could not work once
+# the toolchain moved to musl. The path is unchanged either way, and this
+# reads the built target tree rather than the overlay, so nothing here had
+# to change when it stopped being a blob.
 PANEL_DAEMON = "NeoDCT/System/hw/neodct_displayd"
 
 # The recovery splash. Kept in a subdirectory of the init dir because
