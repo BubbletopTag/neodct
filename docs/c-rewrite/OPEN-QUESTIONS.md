@@ -1431,3 +1431,871 @@ all — `test_appsel.c` asserts column 232 is black — and `nd_appsel_draw()` a
 resets an out-of-range `selected_index` to 0 where the Python would raise `IndexError`.
 That last one is a C-only guard with no Python spelling, added because the field is
 public in `nd_widgets.h` and a caller can set it.
+
+---
+
+## ClockService and BatteryService (`lib/nd_clock.c`, `lib/nd_battery.c`)
+
+Recorded while porting `System/core/ClockService/__init__.py` (250 lines) and
+`System/core/BatteryService/__init__.py` (302 lines). Nothing here blocks; two items
+want a ruling.
+
+### CB-1. `set_clock` no longer shells out, and that changes one return value
+
+The Python's own comment justifies `subprocess.call(["date", "-s", ...])` — *"this runs
+as a plain script on a busybox system and shelling out is what everything else here
+does"*. The C cannot follow it. `nd_clock_start()` creates a thread, and CODING-STANDARDS
+1.1 bans `fork()` from a threaded process unless `execve()` is the child's first
+statement; even done correctly it is two processes and a busybox dependency to do what
+`clock_settime()` does in one syscall. So: `clock_settime(CLOCK_REALTIME)` plus
+`ioctl(RTC_SET_TIME)` on `/dev/rtc0`, falling back to `/dev/rtc`, in UTC — which is what
+busybox `hwclock -w` writes anyway, there being no `/etc/adjtime` in the overlay.
+
+**One observable difference, deliberate.** The Python returns `True` whenever `date`
+*ran*, even if `date` then failed; it only returns `False` when the binary is missing
+(`OSError`). The C returns `false` when `clock_settime` fails, e.g. `EPERM`. Nothing in
+the tree reads the return value — `apply_floor()` discards it and `sync()` discards it —
+so this is currently unobservable, but it is a difference and it is written down rather
+than hidden.
+
+### CB-2. `NEODCT_ROOT` now also gates writing the real clock
+
+The Python test suite monkeypatches `set_clock`, with the comment *"a test that sets the
+machine's clock is a test that ruins someone's day"*. C has no monkeypatching, and
+`nd_clock.h` is in the frozen header set with no test hook in it, so the guard lives in
+`nd_clock.c`: **when `nd_path_root()` is non-empty, `nd_clock_set()` logs the change and
+then returns without calling `clock_settime()`.**
+
+The reasoning beyond the tests: under `NEODCT_ROOT` every file this module reads —
+`version.prop`, `/NeoDCT/User/.clock`, `/proc/net/route` — is a fixture, so acting on a
+fixture's contents by moving the developer's real clock would be wrong whether or not a
+test asked for it. In production `NEODCT_ROOT` is unset and the guard costs one
+comparison against `'\0'`. The log line is emitted either way, because the log line is
+the load-bearing half.
+
+**What we need:** a nod that this is the right shape, or a test hook added to
+`nd_clock.h` instead.
+
+### CB-3. `/proc/net/route` and `/proc/net/ipv6_route` go through `nd_path_resolve()`
+
+Neither is in `nd_paths.h`. They are resolved anyway, on the same rule as everything
+else that is *opened*, which is what makes `_has_route()` testable at all — the host has
+a default route, so an unresolved read would return `true` on every machine and the
+"no route" branch would never be exercised. Production is unaffected.
+
+### CB-4. The five-sample mean, and why 3.20 V shuts the phone down at all
+
+`sum(deque) / len(deque)` in IEEE-754 double, oldest-first from a zero accumulator. This
+is not stylistic: five samples of 3.20 V sum to **exactly 16.0** and divide to **exactly
+3.2**, which *is* `<= ND_SHUTDOWN_V`. A running total kept across polls, a pairwise sum
+or a Kahan compensation can each land a ULP away, and then the phone runs the pack flat
+instead of shutting down. `test_battery.c`'s VEC_A pins it: samples 17 and 18 return
+`"shutdown"`, and they only do so because the arithmetic is bit-for-bit the Python's.
+
+### CB-5. `poll()` returns `"shutdown"` BEFORE it latches a warning
+
+Ported as-is and worth flagging because it reads like a fall-through bug. Once
+`_shutdown_count` reaches 3 the function returns immediately, so that poll never sets
+`_pending_warning` — visible in VEC_A, where samples 17 and 18 report a shutdown and no
+warning at all. Since `_shutdown_low_battery()` takes the screen over anyway, nothing is
+lost; but a "tidied" version that latches first would change what a later
+`take_pending_warning()` hands back if the shutdown is aborted (which it is, on a dev
+board, when `poweroff` returns non-zero).
+
+### CB-6. A bad `system.hw.battery_i2c_bus` also discards a good address
+
+`_config_from_settings()` wraps both `int()` calls in one `try`, so
+`system.hw.battery_i2c_bus=eleven` sends **both** bus and address back to the defaults
+(3 / 0x36) even when the address parsed fine. Reproduced, and asserted in
+`test_battery.c`.
+
+### CB-7. Two branches are unreachable on the host and are therefore untested
+
+* **The whole hardware path** — `read16`/`write16`, `debug_snapshot()`, `quickstart()`,
+  the `_read_error_streak` logging (first failure only, then a "recovered after N"
+  line). There is no i2c bus on the machine the tests run on, and an `I2C_SLAVE` ioctl
+  against a regular file fails at the ioctl, so the register code cannot be reached even
+  with a fake device node. This belongs in `tests/hw/`.
+* **`_level = 3` before the first read.** The constructor calls `poll(force=True)`, and
+  the simulation read never fails, so the seed value is always overwritten before anyone
+  can observe it. It is still correct to keep — on hardware a failed first read leaves
+  it in place, which is the case it exists for.
+* **"no route after 5 minutes".** Reaching it costs 60 × 5 s of real sleeping. The
+  branch is three lines and shares the `gmt_string` helper with the branch beside it,
+  which is tested.
+
+---
+
+## ModemService: the AT engine and the state machine (WP modem)
+
+`lib/nd_modem.c` + `nd_modem_at.c` + `nd_modem_audio.c` + `nd_modem_sim.c` +
+`lib/nd_modem_priv.h`, and `test/unit/test_modem.c` — the first tests this
+subsystem has ever had (433 checks). The Python is
+`System/core/ModemService/__init__.py`, 1084 lines, zero coverage.
+
+Nothing below changes a pixel: no golden frame reaches the modem, and the
+27 currently-exact frames are still exact.
+
+### M-1. The frozen `nd_modem_event` can spell four of the ten events
+
+`nd_modem.h` freezes `ND_MODEM_EV_{RING,SMS,HANGUP,CONNECTED}`. The Python
+queues ten distinct tuples: `incoming`, `connected`, `ended`, `missed`,
+`sms_received`, `sms_sim`, `sms_sent`, `sms_stored_check`, `modem_lost`,
+`modem_found` (lines 253, 369, 384–414, 442, 585–610, 851, 971).
+
+The internal ring keeps all ten, with both of `deque(maxlen=8)`'s overflow
+directions. `nd_modem_take_pending_event()` is the only place the mapping
+happens:
+
+| internal | public |
+| --- | --- |
+| `incoming` | `ND_MODEM_EV_RING`, `number` set when `+CLIP` gave one |
+| `connected` | `ND_MODEM_EV_CONNECTED` |
+| `ended`, `missed` | `ND_MODEM_EV_HANGUP` |
+| `sms_received` | `ND_MODEM_EV_SMS`, `index` = the SIM slot |
+| `sms_sim` | `ND_MODEM_EV_SMS`, `index` = **-1**, `number` = the sender |
+| `sms_stored_check` | `ND_MODEM_EV_SMS`, `index` = **-2** |
+| `sms_sent`, `modem_lost`, `modem_found` | **dropped** — popped and skipped |
+
+`nd_modem_fetch_sms(m, -1, …)` returns the stashed simulated message, so the
+`/tmp/neodct_sim_sms` hook works end to end through `nd_ui.c`'s existing
+`handle_modem_event()` with no change to anyone else's file.
+`nd_modem_fetch_sms(m, -2, …)` returns `ND_SMS_ERROR`; the sweep is
+`nd_modem_read_stored_sms()`, and **the core still has to call it** on that
+index — `main.py:1020` does, `nd_ui.c` does not yet.
+
+**What we need:** either three more enum values (`…EV_SMS_SWEEP`,
+`…EV_SMS_SIM`, `…EV_MODEM_LOST`) added to the tail of the frozen enum, or
+confirmation that dropping `sms_sent` / `modem_lost` / `modem_found` on the
+floor is acceptable. Nothing consumes them today; `modem_lost` is the one a
+future status bar would want.
+
+### M-2. The rx buffer is capped at 8 KB, and the Python's is not (R-7)
+
+`_read_pending` (line 290) appends every 512-byte chunk to `_rxbuf` and only
+ever removes COMPLETE lines. A port emitting binary with no `\n` — the
+Qualcomm DIAG port is exactly that, and an `iface == None` candidate can reach
+it — grows it without bound. `ND_MODEM_RXBUF_MAX` is 8192; on overflow the
+buffer is dropped whole, logged once per adoption, and resynchronises at the
+next newline. `test_the_rx_buffer_is_bounded` pushes 16 KB of junk through and
+then a real `+CSQ:` line. This is a latent bug in the Python too.
+
+### M-3. `struct nd_lines` is named by a frozen header and defined by none
+
+`nd_modem.h` forward-declares it for `nd_modem_send_at()`; no public header
+completes it. It is completed in `lib/nd_modem_priv.h`, so **no caller outside
+`lib/` can allocate one** and the engineering Modem app cannot use `send_at()`
+as declared. It needs to move into `nd_modem.h` (or `send_at` needs a
+different out-parameter) before app 9005 is written.
+
+### M-4. The modem reads `CLOCK_MONOTONIC`, not `nd_time_monotonic()`
+
+The project convention is `nd_vclock.h`. The modem does not follow it. The
+virtual clock only advances when a frame is committed, so a thread that
+genuinely sleeps on a serial port would spin for ever inside `_transact`'s
+deadline loop, and reading the pinned clock from two threads would be a race
+for nothing. The modem draws no pixels, so no golden frame can tell. Recorded
+rather than left as a silent inconsistency.
+
+### M-5. Four bounds the Python does not have
+
+CODING-STANDARDS §1.5 forbids anything sized by input on the stack, so:
+
+| Thing | Cap | Python |
+| --- | --- | --- |
+| collected lines per transaction | 64 lines / 4096 bytes | unbounded list |
+| one decoded line | 512 bytes | unbounded |
+| SMS records from one `+CMGL` sweep | the caller's `max` | unbounded list |
+| candidate AT ports in one probe | 32 | unbounded |
+
+A SIM7600 holds about 30 SMS slots and enumerates five ports, so none of these
+is within a factor of two of anything real. `nd_lines.truncated` records that
+a reply was clipped; nothing reads it yet.
+
+### M-6. A blocked write retries instead of dropping the modem
+
+`_transact` does one `os.write()`. On a port asserting flow control that
+raises `BlockingIOError`, which the Python catches as `OSError` and turns into
+`_drop_hardware("port write failed: …")` — the modem vanishes because it was
+busy for a millisecond. The C waits `TRANSACT_SLEEP_S` and retries; every
+other errno still drops the port. This is a deliberate divergence and the only
+one in the AT engine.
+
+### M-7. The double `close()` in `_probe_ports` is guarded, visibly identically
+
+Line 224 closes the local `fd` even when `_drop_hardware` already closed it
+and set `self.fd = None`; Python swallows the second `OSError`. In C the
+number can have been recycled by another thread, so `probe_ports()` closes it
+only when `m->fd` is still that descriptor. The externally visible behaviour —
+candidate skipped, probe continues — is unchanged.
+
+### M-8. The lock file's parent is created, and a missing lock does not stop the modem
+
+`os.open(LOCK_FILE, O_RDWR|O_CREAT)` at line 145 is unguarded: in the Python a
+failure propagates out of the constructor and takes the UI with it. Two C-only
+changes:
+
+* `mkdir -p` of the lock file's directory first, because `/tmp` always exists
+  in production but `<ND_ROOT>/tmp` does not, and the tests need the hook.
+* A lock file that still will not open logs an error, leaves `lock_fd` at -1
+  and makes `acquire()` succeed unconditionally. The modem then works and is
+  simply not serialised against `S45modem`, which beats not booting.
+
+### M-9. Every path goes through `nd_path_resolve()`, including `/sys` and `/proc`
+
+`/tmp/neodct-modem.lock`, the four `/tmp/neodct_sim_*` hooks,
+`/sys/class/tty`, `/proc/asound` and the AT device node itself. In production
+`ND_ROOT` is empty and all of it is a plain copy. It is what lets
+`test_modem.c` drive port discovery against a staged `bInterfaceNumber` tree
+and reach a pty through `/dev/modem`. The *executables* (`aplay`, `arecord`)
+are not resolved — `nd_proc.h` is explicit that an executable is not phone
+data — and neither is `/dev/null`.
+
+### M-10. `int()` accepts underscores in Python and not here
+
+`int("1_0")` is 10 since PEP 515. `nd_modem__parse_int` rejects it. No modem
+emits it; recorded because it is a real difference in a function whose whole
+job is to be `int()`.
+
+### M-11. `nd_sms_rec` carries two fields the Python record does not
+
+The Python's record is `{index, sender, body}`. The frozen struct adds
+`timestamp` and `unread`; the modem writes `0` and `true`. The `+CMGR:` header
+does carry a timestamp (`"24/08/23,10:11:12+04"`) and it is currently thrown
+away, exactly as the Python throws it away. Parsing it would be new
+behaviour, so it is not done.
+
+### M-12. `nd_modem_send_at()` reports "no hardware" as an error
+
+The Python's `send_at` → `_command` returns `(None, [])` both when there is no
+modem and when the port is locked. The C returns `ND_ERR_HARDWARE` for the
+first and `ND_ERR_TIMEOUT` for the second, because a frozen `nd_err` return is
+no use if it only ever has one failure value. `final_out` is empty in both
+cases, which is what the caller actually renders.
+
+### M-13. `nd_modem_close()` joins the thread, so it waits for the request in flight
+
+Worst case that is the 30-second SMS ack. The alternative — cancelling a
+thread that holds the flock and an open CMGS — is worse. In practice the
+thread wakes every 100 ms and shutdown is immediate. The UI must not call
+`nd_modem_close()` from a signal handler.
+
+### M-14. `aplay` and `arecord` are looked up on `PATH` in-process
+
+`subprocess.Popen(["aplay", …])` searches `PATH`; `nd_proc_spawn()` takes a
+path and `execve()`s it, so the search happens before the fork (which is also
+the only place it is allowed to happen — a `PATH` walk between `fork` and
+`exec` would allocate). A miss is reported the way Python's
+`FileNotFoundError` was: `Speaker pipe unavailable: aplay: No such file or
+directory`.
+
+### M-15. Five Python behaviours reproduced that look like bugs
+
+All of them are pinned by a test.
+
+1. **`dial()` logs the number after filtering but before the empty check**
+   (line 771), so `dial("hello")` prints `[MODEM] Requesting Dial: ` and then
+   returns False. `test_a_junk_number_logs_an_empty_dial_and_fails`.
+2. **`MISSED_CALL:` has no `state != "IDLE"` guard** where `VOICE CALL: END`
+   does (lines 405 vs 401), so a missed-call URC arriving with no call up
+   still stops the audio and queues an event.
+3. **A quote-less `+COPS: 0` sets the operator to `None`** (line 578) rather
+   than leaving the last carrier on the home screen.
+4. **Port discovery sorts with `strcmp`**, so `ttyUSB10` is tried before
+   `ttyUSB2` and `card10` before `card2`. `test_candidate_port_ordering` and
+   `test_capture_scan_is_byte_sorted` assert exactly that order.
+5. **`bInterfaceNumber` is parsed as hexadecimal**, so a port on interface 16
+   reads `"10"` and is neither preferred nor dropped.
+   `test_hex_interface_16_is_not_interface_10`.
+
+Two more that are correct but surprising and are also pinned:
+`line.split('"')[1]` needs only ONE quote to succeed (`+CLIP: "5551234` parses),
+and a mid-command URC is handled AND still appended to the collected lines,
+which is the only reason `AT+CEREG?`'s own reply reaches `_parse_reg`.
+
+### M-16. Two loops leave early when the port has already gone
+
+`_transact`'s deadline loop and `send_sms`'s 30-second ack loop both keep
+spinning in the Python after `_read_pending` has called `_drop_hardware`,
+because neither checks. They return the same answer at the end of the timeout
+that the C returns immediately. One user-visible consequence: a modem that
+disappears mid-CMGS gives Messages `"Send failed: modem lost"` where the
+Python would have said `"Send failed: timeout waiting for network"` thirty
+seconds later. The C wording matches the two other drop paths in the same
+function, and is what actually happened.
+
+---
+
+## nd-core, nd-apprun, the launcher and the stub app (WP core-loop)
+
+Recorded while porting `launcher.py:main()`, `main.py:run()` and `launch_app()`, and
+while writing `lib/nd_proc.c`, `lib/nd_crash.c`, `lib/nd_app.c`, `lib/nd_fb_adopt.c`,
+`apprun/nd_apprun.c` and `apps/Stub/main.c`. Nothing here blocks. Each is a place where
+the C could not be literally 1:1, or where a decision was made that ought to be seen
+rather than discovered.
+
+### X-1. The 24 shipped `manifest.json` files still say `"exec": "main.py"` — DELIBERATELY
+
+The work package asked for them to be rewritten to `"exec": "app.so"`. They were not,
+and this is the one instruction in the brief that was not carried out, so the reasoning
+is spelled out in full.
+
+`neodct/overlay/` **is the Python reference and it is the oracle.** `goldenframe.py`
+drives the real Python UI to produce `neodct/tests/golden/`, and `launch_app()`
+(`main.py:907`) builds its import path as `os.path.join(app["path"], app["exec"])`.
+Setting `exec` to `app.so` makes every Python app launch fail, which retires the only
+mechanism the project has for re-cutting a reference frame — and two frames are already
+scheduled for a re-cut (`game-snake`, `game-memory`, answer 4). The brief's own "WHAT NOT
+TO DO" says `neodct/overlay/` is not to be modified.
+
+**It also changes nothing in C.** `nd_app.h` fixes the code at `ND_APP_SO_NAME` beside
+the manifest; `nd-apprun` composes `<app dir>/app.so` and never reads `exec`;
+`nd_ui_render_menu()` passes `entry = NULL`. `nd_app_entry.exec` is parsed and stored and
+nothing dereferences it. Already recorded as U-6 and A-7 by two earlier packages, both of
+which reached the same conclusion independently.
+
+**The change, whenever the owner wants Python retired**, is one line:
+
+```sh
+sed -i 's/"exec": *"main\.py"/"exec": "app.so"/' \
+    neodct/overlay/NeoDCT/System/apps/*/manifest.json \
+    neodct/overlay/NeoDCT/System/engineering/apps/*/manifest.json
+```
+
+It needs no C change and no test change. It should be done in the commit that drops
+Python from the defconfigs, not before.
+
+### X-2. Twenty-four apps get the stub, not twenty-five
+
+`SESSION-SCOPE.md` says "all 25 apps" in prose; its own table lists 13 stock + 11
+engineering = 24, and the overlay ships exactly 24 app directories with 24
+`manifest.json` and 24 `icon.png`. (The 25th `manifest.json` in the tree is
+`System/apps/Koki/assets/manifest.json`, which is an asset pack, not an app.) The
+Makefile's `STUB_STOCK_APPS` and `STUB_ENG_APPS` name all 24; `make install` puts the one
+built `apps/Stub/app.so` into each. Same finding as A-5.
+
+### X-3. `nd-shoot` runs an app IN-PROCESS with `dlopen`, not through `fork`/`execve`
+
+A capture harness has to share an address space with the canvas it is capturing. A child
+process draws into its own memory and `nd_capture` would record nothing, so `run_app` in
+`tools/nd_shoot.c` resolves `<app dir>/app.so`, `dlopen`s it and calls `app_run(ui)`.
+
+This is the faithful port of the thing it replaces: `uistub.run_app()` imports the app
+with `importlib` **into the harness process** and calls `module.run(ui)`, for exactly the
+same reason. It is NOT the launcher, and the difference matters, so the out-of-process
+path is proved separately and harder: `test/unit/test_proc.c` forks `nd-apprun` for real,
+against an app that dereferences NULL, and checks that `waitpid` reports `SIGSEGV`, that
+the child's own `si_code`/`si_addr` arrived down the crash pipe, that `crash.log` gained
+a report, that the crash screen was drawn, and that the core then goes on to launch
+another app.
+
+### X-4. Only `app-clock` of the thirteen stock-app frames is rendered
+
+`spec-build-test.md` section 3.6 records `app-clock` as byte-identical to
+`widget-messagedialog`, because the Clock app *is* a "This application has not been
+implemented yet." dialog. So the one shipped `app.so` draws that frame for real, and it
+comes out byte-exact. The other twelve draw their own screens and the stub cannot stand
+in for any of them; they remain in `nd-shoot`'s `SKIPPED[]` with their reasons.
+
+`app-messages` ≡ `widget-pagedlist` and `app-phonebook` ≡ `widget-verticallist` are the
+other two duplicate digests in section 3.6, and both are still skipped: those apps draw
+a real list, and the fact that the pixels happen to match a widget-gallery frame is not
+permission to claim the app rendered them.
+
+### X-5. The app child inherits `NEODCT_ROOT`, which `nd_app.h` does not list
+
+`nd_app.h` names three inherited things: `NEODCT_KEYPAD_FD`, `NEODCT_CRASH_FD`,
+`NEODCT_FB_FD`. A fourth is required and `nd_proc_launch_app()` sets it: the child is a
+fresh process that reads `NEODCT_ROOT` for itself, and the core's root may have been set
+with `nd_path_set_root()` rather than through the environment (which is exactly what
+every host test and `nd-shoot` do). Without it the child looks for `app.so` at the
+unprefixed `/NeoDCT/System/apps/...`, finds nothing, and exits 1 — which is what it did
+until the second run of `test_proc`. In production `ND_ROOT` is empty and the variable is
+not set at all.
+
+Any inherited copy of all four is stripped from the child's environment first, so a stale
+descriptor number from a previous launch can never be picked up.
+
+### X-6. The three descriptors keep their own numbers; the fd map only clears `FD_CLOEXEC`
+
+`nd_proc_spec.fds` looks like a plan to `dup2` onto fixed slots. It is not used that way:
+`nd_app.h` says "the numbers themselves are not fixed" and the child is *told* what they
+are, so each descriptor is listed as a map onto itself. That branch exists because
+`dup2(fd, fd)` is a documented no-op and does **not** clear the close-on-exec flag, so a
+descriptor opened with `pipe2(O_CLOEXEC)` would vanish at the exec. The `fcntl(F_SETFD, 0)`
+in that branch is the whole reason it is there.
+
+### X-7. `nd_fb_adopt_fd()` and `nd_app_fb_from_env()` are additions to `nd_app.h`
+
+`nd_fb.h` can open exactly one thing: `/dev/fb0`. The point of `NEODCT_FB_FD` is that an
+app process needs no permission on that device (`SECURITY.md`), so the descriptor has to
+be turned back into an `nd_fb` without a second `open()`. The implementation is a new
+file, `lib/nd_fb_adopt.c`, so `nd_fb.c` — another work package's — was not touched; the
+two declarations are additive and live in `nd_app.h` because they exist solely for the
+process boundary that header describes.
+
+**The adopted mapping is NOT re-zeroed.** `nd_fb.h` explains that the device path zeroes
+once at open so later partial-band writes leave the letterbox rows black; that already
+happened, in the core. Zeroing again would blank the panel between the app starting and
+its first frame — a visible flash the Python never had.
+
+### X-8. The crash report is a fixed binary record, not a backtrace
+
+`nd_crash.h` says the child writes "the signal, si_code, faulting address and a
+backtrace". There is no backtrace. `backtrace()` lives in `execinfo.h`, which is a glibc
+extension; `MUSL.md` makes musl the target libc and musl does not ship it, and there is
+no async-signal-safe substitute worth the risk inside a handler that is already running
+on a corrupted stack.
+
+So the handler writes one `write(2)` of a POD struct — magic, `si_signo`, `si_code`,
+`si_addr` and the entry-point name — which is smaller than `PIPE_BUF` and therefore
+atomic, and the CORE formats the human line from it. That keeps every `snprintf` on the
+side of the boundary that is allowed to call one. This is the concrete shape of the
+"honest limitation" `nd_crash.h` opens with.
+
+### X-9. The fatal handler must unblock the signal before re-raising
+
+Worth writing down because the symptom is silent and wrong rather than loud. `sigaction`
+blocks the delivered signal for the duration of its own handler, so `raise(signo)` after
+`SA_RESETHAND` merely marks it pending: the handler returns, `_exit(128 + signo)` runs,
+and the core sees `WIFEXITED` with status 139 instead of `WIFSIGNALED` with `SIGSEGV`.
+Both are classified as a crash, so the screen looked right and the *reason* was wrong.
+`sigprocmask(SIG_UNBLOCK, ...)` immediately before the raise fixes it and is
+async-signal-safe.
+
+### X-10. `SIGTERM` and `SIGKILL` are not crashes
+
+They are how the core reclaims the screen for an incoming call (`nd_app.h`'s teardown
+contract, and `nd_proc_terminate()`'s escalation). `nd_proc_launch_app()` logs
+"was stopped by the core, not by a fault" and shows no crash screen. This is the direct
+descendant of the Python's `except (KeyboardInterrupt, IncomingCall): raise` — a ringing
+phone was never an app crash there either.
+
+### X-11. Four additive declarations in `nd_crash.h`
+
+`nd_crash_draw_engineering()`, `nd_crash_summary()`, `nd_crash_signal_name()` and
+`nd_crash_set_entry()`. The first is not optional: `spec-build-test.md` section 3.6's
+`crash-screen` recipe calls `CrashHandler._draw_engineering_crash_screen()` **directly**,
+without the wait, so the C has to expose the same split or the frame cannot be
+reproduced. Nothing above them in the header changed.
+
+### X-12. The core cannot resume from a fault in its own code
+
+The Python loop wraps its whole body in `except BaseException:`, logs, sleeps 0.1 s and
+carries on. Almost everything that ever caught was an app crashing, because an app was
+`exec_module`'d straight into the core process — and that failure is the one this design
+removes rather than papers over. What is genuinely gone is resuming the core itself: C
+has no consistent state to resume into after `SIGSEGV`. `nd-core` installs a handler that
+writes one async-signal-safe line to stderr and re-raises, so the death is visible on the
+serial console instead of silent.
+
+`nd_ui_render_menu()` and `nd_proc_launch_app()` already contain their own equivalents of
+the Python's inner `try/except` blocks, so the loop body has nothing left to guard.
+
+### X-13. While an app child runs, the core pumps keys but does not tick the services
+
+In Python, `_battery_tick`, `_modem_tick` and `_ring_tick` lived inside
+`read_keypress()`, and an app calling `ui.read_keypress()` was what kept them running.
+An app process cannot call the core's `read_keypress`, so `nd_proc_launch_app()`'s pump
+loop forwards press and release records onto the channel and does nothing else.
+
+That is the correct destination — OPEN-QUESTIONS answer 1 moves the modem to its own
+thread in the core precisely so a call interrupts an app that never polls anything — but
+**the thread is not written yet**, so today an incoming call does not interrupt a running
+app. The core's half of the sequence is already here and tested: `nd_proc_terminate()`
+sends `SIGTERM`, waits out the grace period and escalates to `SIGKILL`. The services work
+package has to call it from the modem thread.
+
+### X-14. `nd_proc_launch_app()` ignores `SIGPIPE` for the duration of the pump
+
+The child can exit at any instant and the next forwarded key then hits a pipe with no
+reader. `nd-core` ignores `SIGPIPE` globally, but a library must not depend on its caller
+having done so — the first version of `test_proc.c` was killed by signal 13 partway
+through the suite. The disposition is saved and restored around the loop.
+
+### X-15. The reaper keeps what it reaps
+
+`nd_proc.h` says the reaper "skips pids that are being waited on explicitly". A signal
+handler cannot know which pid somebody is about to wait on without a lock, and taking a
+lock in a handler is the other classic way to deadlock a threaded process. So the handler
+reaps everything into a 16-slot ring of `(pid, status)` and `nd_proc_wait()` checks the
+ring before it calls `waitpid()`. Same observable behaviour, no lock, and it closes the
+race where the reaper collects the app child a microsecond before the launcher asks about
+it and `waitpid` answers `ECHILD` with no status. Pinned by
+`test_reaper_keeps_the_status`.
+
+A full ring drops the oldest entry: a status nobody has asked for in sixteen deaths is a
+status nobody is going to ask for.
+
+### X-16. `nd_path_join()` RESOLVES — do not resolve its output
+
+`nd_path_join(out, sz, dir, child)` returns an **ND_ROOT-resolved** path, not a joined
+virtual one. Calling `nd_path_resolve()` on its result prefixes the root twice, which
+under an empty root is invisible and under a test root produces
+`/tmp/x/tmp/x/NeoDCT/...`. It cost two debugging cycles here (once in `nd-apprun`, once
+in `test_proc.c`'s staging) and it is not stated in `nd_paths.h`. Build a virtual path
+with `nd_snprintf("%s/%s", ...)` and resolve once, or use `nd_path_join` and resolve
+never.
+
+### X-17. `nd-shoot` stages `System` as a directory of symlinks, with `apps/` expanded
+
+It used to be one symlink onto `neodct/overlay/NeoDCT/System`. An app directory now has
+to gain an `app.so`, and nothing may be written into the overlay, so `System` is a real
+directory whose entries are all symlinks except `apps/`, which is expanded into real
+per-app directories of symlinks plus one symlink to the built `apps/Stub/app.so`.
+
+Every file the renderer opens is therefore the same file it opened before. Verified, not
+assumed: the 25 frames that were byte-exact before the change are byte-exact after it,
+and `test_shoot.c` reports 27 of 27.
+
+`engineering/apps` is deliberately left as a plain symlink — nothing launches an
+engineering app, and the menu only needs each one's `manifest.json` and `icon.png`.
+
+### X-18. The stub app does not reproduce Clock's `while True:`
+
+`System/apps/Clock/main.py` wraps `warningmsg.show()` in a loop and returns on key 46,
+28 or 50. `MessageDialog`'s own key set already covers those, so the loop would spin only
+on a key the dialog itself ignored — which the C dialog does not return. Same pixels,
+same exit conditions, one less loop. The Clock app also clears rows 0..145 and flushes
+once before the dialog; that frame is not `frames[-1]` and no reference image contains
+it.
+
+### X-19. Three new `nd-core` flags
+
+`--headless` (no `/dev/fb0`), `--no-splash`, and `--idle-measure` (boot fully, print one
+readiness line, then hold still). The acceptance gate's check 8 invokes
+`nd-core --headless --idle-measure` and waits for a line containing "idle", so the last
+two are required by the gate rather than optional.
+
+### X-20. Two boot steps are still somebody else's
+
+* `ClockService` and `RemoteShell` are `spec-core-services.md`'s. `nd_main.c` references
+  `nd_clock_start` and `nd_rs_start_if_enabled` **weakly**, the pattern `nd_ui.c`
+  established for the modem, the battery and the notify service: when the module lands
+  the reference resolves and the branch starts being taken with no edit here. Both calls
+  sit inside a "boot continues" guard in the Python, so "not linked" is a case the
+  Python already had a message for. `lib/nd_clock.c` landed from the services package
+  mid-session and now resolves; `nd_rs_start_if_enabled` still logs
+  `[RSHELL] remote shell unavailable: not linked in this build`.
+  The server list `ND_NTP_SERVERS` needs the same treatment, since it is data the same
+  module owns.
+* `run()`'s step 1, `System.hw.i2c_keypad_setup.maybe_run_first_time_setup(fb)`, is not
+  called. It belongs to `System/hw`, it may `execv` the whole UI, and there is nothing to
+  call yet. The line it goes on is marked in `core_run()`.
+
+### X-21. The boot splash falls back to the UI face when DejaVu is missing
+
+`launcher.py` loads `/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf` at 20 and
+`DejaVuSans.ttf` at 14 and falls back to `ImageFont.load_default()`, a bundled bitmap
+face C has no equivalent of. The C falls back to `font.ttf` at 20 and logs that it did.
+Same gap as U-2, and the splash is not a golden frame. Both DejaVu files are present on
+the host this was measured on, so the fallback is dormant here.
+
+### X-22. Idle RSS
+
+`nd-core --headless --idle-measure`, measured from `/proc/<pid>/smaps_rollup` the same
+way the Python baseline was:
+
+| build | RSS | PSS | what it had loaded |
+| --- | --- | --- | --- |
+| Python, `uistub.StubUI` + `ui.update()` | 23,900 kB | 20,644 kB | fonts, wallpaper, 24 apps, sqlite — plus the capture harness |
+| `nd-core --headless --idle-measure`, staged root with a wallpaper | **6,516 kB** | **4,814 kB** | fonts, wallpaper, 24 apps, sqlite, the modem and clock threads |
+| the same, staged root, no wallpaper configured | 5,772 kB | 4,082 kB | one 240x175 RGB surface fewer |
+| the same, empty root — what the gate measures | 5,288 kB | 3,634 kB | no fonts, no wallpaper, no apps |
+
+Both sides are `/proc/<pid>/smaps_rollup`, read the same way, on the same host, in the
+same session. `verify-c-build.sh` check 8 reports 5,592 kB and PASSes its 9 MB target.
+
+**3.7x smaller than the Python by RSS, 4.3x by PSS.** The second row is the honest one:
+it is the phone as it actually boots. Two caveats a reader is owed. The Python row is
+measured through `uistub`, which is the only way to run that UI without a framebuffer, so
+it carries the harness's own weight — it is slightly unfair in the C's favour. And the
+gate runs `nd-core` with no `NEODCT_ROOT`, so its number is the last row: the flattering
+one. Say which root a figure had.
+
+### X-23. Not yet done in this package, and knowingly
+
+* Nothing calls `nd_proc_launch_app()` with `ND_APP_ENTRY_OPEN_MESSAGE` outside the
+  tests. `nd_ui.c`'s notification path already passes it; Messages has no `app.so` of its
+  own yet, so it reaches the stub, which exports no `app_open_message` and is correctly
+  reported as "App has no app_open_message(ui)".
+* `nd_proc_spec.owner` is recorded and not yet acted on. The four owner classes only
+  start to differ once the modem's audio bridge and the tone player exist.
+* `dlclose()` is not called on the way out of `nd-apprun`. An app's static destructors
+  would then run after its own `app_shutdown()`, and on the `SIGTERM` path the phone is
+  already ringing. The process is one `_exit()` from returning every page anyway.
+
+### X-24. A shutdown signal sets a flag AND arms a two-second alarm
+
+Found while running the acceptance gate: `nd-core` ignored `SIGTERM` completely and had
+to be `SIGKILL`ed. The flag `on_quit()` sets is only read by the two loops in
+`core_run()`, and the core was sitting in construction step 13's blocking modal, which
+looks at nothing.
+
+In Python a `SIGINT` raises `KeyboardInterrupt`, which unwinds from wherever the process
+is -- including out of a modal's key wait -- and `run()` re-raises it, so the UI process
+always dies. C has no unwinding. So the handler now does both: it asks for a graceful
+exit, and it arms `alarm(2)`, whose handler writes one async-signal-safe line and
+`_exit(0)`s. A clean shutdown finishes long before the alarm; a wedged one still goes,
+and an init system never has to `SIGKILL` the phone.
+
+### X-25. `--idle-measure` acknowledges the first-boot notice before it measures
+
+Same root cause, different consequence. On a phone that has never been booted,
+`nd_ui_init()` step 13 draws a modal and waits for a key; with no keypad attached
+nothing ever dismisses it, which is faithful and is also the end of any unattended
+measurement. The gate would have measured a half-built core and then hung on `wait`.
+
+`--idle-measure` is explicitly a measurement mode with no user, so it writes
+`/NeoDCT/User/.ack_security_warning` first -- into whatever `ND_ROOT` is in force, so a
+staged root stays inside itself -- and logs that it did. Every byte the notice would
+account for is freed the moment it is dismissed, so the number is the same either way;
+the state being measured is a phone that has been booted before, which is the state
+worth measuring. No other mode touches that file.
+
+
+---
+
+## NotifyService and the ringer (`lib/nd_notify.c`)
+
+Recorded while porting `System/core/NotifyService/__init__.py` (232 lines). The banner
+state machine is a literal transcription and has nothing to declare. The ringer does:
+it is the one place in this package where the C deliberately does not do what the
+Python does, and the reason is R-9.
+
+### N-1. The ringtone STREAMS. This is R-9, and it is a deviation on purpose
+
+`miniaudio.decode_file(path, SIGNED16, nchannels=2, sample_rate=44100)` materialises the
+whole tone before the first note. Measured against the sixteen shipped tones with
+`dr_mp3` (frame counts read out of the files, not estimated):
+
+| Tone | frames @ 48 kHz | duration | decoded to 44.1 kHz stereo int16 |
+| --- | --- | --- | --- |
+| `Low.mp3` (the default) | 163,840 | 3.41 s | 602 kB |
+| `Nokia Tune.mp3` (44.1 kHz) | 208,896 | 4.74 s | 836 kB |
+| `Ring Ring.mp3` | 339,968 | 7.08 s | 1.25 MB |
+| `Valkyrie.mp3` | 1,511,424 | 31.5 s | 5.55 MB |
+| `Brave Scotland.mp3` | 1,728,512 | 36.0 s | 6.35 MB |
+| `Tchaikovsky.mp3` | 1,740,800 | 36.3 s | **6.40 MB** |
+
+Those numbers agree with the spec's table to within a rounding of the duration. A user
+who picks Tchaikovsky adds 6.4 MB to the **core** process the moment the phone rings and
+holds it until they answer — on a build whose whole idle RSS is 5.5 MB.
+
+So `lib/nd_notify.c` decodes as it plays. `nd_tone_src` (`lib/nd_notify_priv.h`) pulls
+4096 source frames at a time out of `dr_mp3`/`dr_wav`, converts to 44100 Hz stereo
+int16, and seeks back to frame 0 at EOF. Peak cost is the decoder object plus two
+buffers: **~100 kB for any tone**, against 6.4 MB for the worst one. The 64 kB figure in
+the brief is the output ring — `ND_RING_CHUNK_FRAMES` is 16384 stereo frames, exactly
+65536 bytes, which is also one `send()` and 372 ms of audio.
+
+**The loop stays sample-exact**, which is the property `_loop_generator` was written to
+have: the frame after the file's last frame is frame 0, with no gap, no fade and no
+silence. `test_notify.c` checks that two ways — directly, four times round a 97-frame
+fixture read in awkward pieces, and end to end, 16384 frames captured out of the player
+and compared frame by frame against a 997-frame source.
+
+The spec's suggested mitigation of *"refuse to ring from a file over N MB and fall back
+to Low.mp3"* is **not implemented and is not needed**: streaming makes the tone's length
+irrelevant to memory. A cap would only introduce a size at which a user's own ringtone
+mysteriously stops working.
+
+### N-2. The samples go to `aplay`, not to a linked ALSA
+
+The Python opens a `miniaudio.PlaybackDevice`. The C writes the same S16_LE / 2 channels
+/ 44100 Hz stream to `aplay -q -t raw -f S16_LE -c 2 -r 44100 --buffer-time=500000`,
+which is the 500 ms `RING_BUF_MS` expressed the way aplay spells it. Reasons, in order
+of weight:
+
+* **`aplay` is already a hard dependency.** Both defconfigs set
+  `BR2_PACKAGE_ALSA_UTILS_APLAY=y`, `play_tone()` has always spawned it, and
+  `nd_modem_audio.c` spawns it for call audio. Nothing new ships.
+* **The Python's stated reason for avoiding mpv is honoured.** The docstring says
+  miniaudio exists so a ringtone does not cost a *"~24MB mpv process"*. `aplay` streaming
+  raw PCM is a few hundred kB. Avoiding *mpv* was the point; linking an audio library
+  was the means.
+* **`libneodct.so` then links no audio library at all.** The host that renders the golden
+  frames has no `libasound` headers and no `pkg-config alsa`, so a linked backend could
+  not be built there, let alone tested. `make` does not gain a dependency.
+
+**A socketpair, not a pipe, and `send(MSG_NOSIGNAL)`, not `write()`.** When the ringer
+stops, the player dies while the feeder thread is mid-write. On a pipe that is SIGPIPE,
+and the only way to suppress SIGPIPE is process-wide — which a library has no business
+doing to `nd-core`, whose reaper and shutdown handler live on the main thread. On a
+socket it is a plain `EPIPE` on one thread and nothing else notices.
+
+**mpv remains the fallback, reached by the same condition.** `dr_mp3`/`dr_wav` cannot
+read `.wma`, `.flac` or `.ogg` — and neither can miniaudio, so a `.wma` tone already
+falls through to mpv today and still does.
+
+### N-3. Two vendored single-header decoders, and one suspended warning set
+
+`lib/vendor/dr_mp3.h` (5426 lines) and `lib/vendor/dr_wav.h` (9193 lines), from
+`mackron/dr_libs`, unmodified, public domain or MIT-0. They are `#include`d into
+`nd_notify.c` between `#pragma GCC diagnostic push/pop` with `-Wconversion` and friends
+turned off **for those two includes only**; everything this project writes still compiles
+under the full set. Editing a vendored DSP header to silence warnings about arithmetic
+that is correct is how a port acquires a bug that cannot be reported upstream.
+
+Cost, measured by relinking `libneodct.so` with and without `nd_notify.c`:
+**331,960 -> 455,448 bytes stripped** (+123.5 kB), 1,355,144 -> 1,902,592 unstripped.
+That +123 kB is the whole MP3 and WAV decoding capability, and it does not move idle
+RSS -- the gate still reports 5,596 kB, against a 9,216 kB ceiling -- because none of
+those pages are faulted in until the phone rings.
+
+### N-4. One Python branch has no C equivalent
+
+`ringtone_path()` wraps the settings read in `try/except` and prints
+`[NOTIFY] Ringtone setting unreadable ({exc}).` if `SettingsStorage` raises.
+`nd_settings_get_copy()` cannot raise; it returns the default. The branch is therefore
+unreachable in C and is not reproduced. Every other line of that function is, including
+the `{configured!r}` repr quoting in `Ringtone missing: '...'` and the deliberate silence
+of the last-resort directory sweep.
+
+Related, and reproduced rather than corrected: the extension-retry list is
+`.mp3 .wav .wma .flac .ogg` but the last-resort sweep only accepts `.mp3 .wav .wma`. A
+tones directory holding nothing but `.ogg` files therefore ends in `None` and
+`[NOTIFY] No ringtone available; ringing silently.`, even though the retry list would
+have accepted an `.ogg`. That asymmetry is the Python's.
+
+### N-5. One log line says what the C did instead of what the Python said
+
+`[NOTIFY] miniaudio ring failed ({exc}); trying mpv.` became
+`[NOTIFY] Streaming ring failed (not MP3 or WAV); trying mpv.` — same tag, same colour,
+same position in the chain, same next step, and it names the thing that actually failed.
+This is the licence in SESSION-SCOPE.md's logging rule: the mechanism must match, the
+message may differ where the C genuinely does something different. Every other
+`[NOTIFY]` string in the module is byte-for-byte the Python's.
+
+### N-6. `stop_ring()` can still print twice, on purpose
+
+The Python checks both handles and prints from each, so a state where the miniaudio
+device *and* the mpv process were somehow both live prints `[NOTIFY] Ringer stopped.`
+twice. The C keeps that shape (`n->ring` and `n->mpv_pid` are separate). It should never
+happen; if it ever does, seeing it twice on the serial console is the point.
+
+### N-7. The resampler is linear, and it is exact at 44100
+
+Thirteen of the sixteen shipped tones are 48 kHz mono; `Drip Groove.mp3` and
+`Nokia Tune.mp3` are 44.1 kHz mono; `sms.wav` is 22.05 kHz mono. miniaudio's default
+converter is a linear resampler, so this is one too — with an integer accumulator
+(`frac += rate; while (frac >= 44100) frac -= 44100`) rather than a float one, because a
+float cursor over a tone looped for a minute drifts and an integer one cannot.
+
+At 44100 Hz in, the fraction is zero on every output frame and the path degenerates to a
+bit-exact copy with mono duplicated across both channels. That is checked, not assumed
+(`test_a_44100_mono_source_comes_out_bit_for_bit_in_both_channels`).
+
+A file with more than two channels keeps the first two rather than downmixing. No
+shipped tone has more than one; if a user ever puts a 5.1 WAV in `/NeoDCT/System/tones`
+they get the front pair.
+
+### N-8. Not covered by the host tests, and knowingly
+
+* **ALSA itself.** Whether the phone's card accepts S16_LE stereo at 44100 through
+  `aplay -t raw`, and whether `--buffer-time=500000` is honoured, is a `tests/hw`
+  question. The host has no sound card, no `aplay` and no `mpv`; the tests substitute
+  shell scripts on `PATH`, which is indistinguishable from the real thing as far as this
+  module can tell, and proves everything up to the ALSA boundary.
+* **`make TSAN=1`.** The feeder's stop flag is a `volatile sig_atomic_t`, matching the
+  pattern `nd_proc.c` already uses. TSan would call the flag a race even though the
+  thread's real wake-up is the `shutdown()`-induced `EPIPE`. The gate does not run TSan;
+  noting it so nobody is surprised.
+
+---
+
+## CubeBench (`apps/CubeBench`, engineering app 9998)
+
+### CB-1. `eng-cubebench` came out BYTE-EXACT, not merely inside its tolerance
+
+The frame tolerance policy above puts `eng-cubebench` in the `tolerance` class, budgeting
+"single-digit pixels along the wireframe edges" for a one-ULP `sin`/`cos` disagreement
+between libcs. **On this host the delta is zero.** `test_cubebench.c` drives the built
+`app.so` through `nd_capture` with a 60-frame budget and the virtual clock, and the
+SHA-256 of frame 60 equals the manifest's
+`4dc887d233374e143e9f8cfffdfeef857ba7ed97b8ac8500d055b15e1c04c6b9`.
+
+That is expected rather than lucky: CPython's `math.sin`/`math.cos` are the platform
+libm's, so the Python capture and the C port ran the same glibc code on the same
+`double`s. The tolerance still has to stay, because it exists for **musl on the device**,
+which is a different libm and has not been measured yet.
+
+The test therefore reports the real number every run rather than only asserting the cap:
+a byte-exact frame prints `BYTE-EXACT (0 differing pixels)`, and anything else prints the
+count, the percentage and the bounding box before checking it against
+`ND_CUBEBENCH_PIXEL_CAP` (9). A port regression that happened to stay under 9 pixels
+cannot hide.
+
+**Question for the owner:** once a musl build has run on hardware, should `eng-cubebench`
+be promoted from `tolerance` to `exact` if it is still zero there? It would close the one
+hole in the "any pixel change fails the build" guarantee.
+
+### CB-2. Sixty frames, and where that number comes from
+
+Nothing in `main.py` limits the run: `while True:` with `read_keypress(0)`. The reference
+frame is bounded by the *harness*, not the app — `uistub.StubUI`'s default
+`idle_budget=60` makes the 61st idle poll raise `ScriptExhausted`, so 60 frames reach the
+framebuffer and `frames[-1]` is the sixtieth. `shoot_docs.py`'s `frame_budget=240` never
+bites.
+
+The C reproduces the same *end state* through the frame budget instead of the key budget:
+`nd_fb_update()` returns `ND_ERR_BUSY` on the 61st commit and `app_run()` returns. The
+61st frame is composed onto the canvas and then discarded, exactly as the Python composes
+nothing and unwinds — either way the ring holds frame 60 and the virtual clock has ticked
+60 times. Verified in the test.
+
+### CB-3. `fps_inst` is computed and never displayed
+
+`main.py` assigns `fps_inst = 1.0 / dt` on every frame and only ever draws `fps_display`.
+Ported as-is (`nd_cubebench_fps.inst`) rather than deleted: it costs one divide, it is
+what a reader of the Python expects to find, and it is the obvious hook for anyone who
+later wants an instantaneous readout.
+
+### CB-4. The FPS window restarts at `now`, so only the first window holds six frames
+
+`fps_window_start = now` rather than `+= 0.5`. With the virtual clock's 0.1 s tick the
+first window closes on frame 6 (6 frames / 0.5 s = **12.0**) and every window after it
+holds five (5 / 0.5 = **10.0**). So the reference frame reads `FPS 10.0`, and frames 1-5
+read `FPS 0.0`. This looks like an off-by-one and is not: a long frame shortens the next
+window instead of accumulating debt, which is the behaviour you want from a benchmark.
+
+### CB-5. `min(w, content_bottom)` feeds BOTH `size` and `fov`, with different factors
+
+`size = min * 0.22` and `fov = min * 1.1` are separate constants over the same base, and
+`view_dist = size * 5.5` chains off the first. At 240x145 that is 31.9, 159.5 and 175.45.
+They were tuned by eye; 0.22 and 1.1 are not a hidden single factor and must not be
+folded together. Pinned in `test_cubebench.c`.
+
+### CB-6. The perspective divide clamps at 0.1 rather than culling
+
+`if denom < 0.1: denom = 0.1`. A vertex that rotates behind the camera does not get
+dropped — it gets `scale = fov * 10` and lands far off-screen, where the rasteriser clips
+it. With `view_dist = 5.5 * size` the cube never actually reaches that state, so the
+branch is dead on this panel. Ported anyway, and tested, because it is the only thing
+standing between a future geometry change and a division by zero.
+
+### CB-7. The glyph cache was already in `lib/nd_font.c`; measured, it is worth 2.4x here
+
+`PERFORMANCE.md` predicted that a naive C port would inherit Pillow's 75%-of-the-frame
+text cost and asked for a glyph cache. `lib/nd_font.c` already had one — all 95 printable
+ASCII characters rasterised into one arena at `nd_font_load()`, under 80 KB for all four
+sizes — so nothing needed writing. It was measured rather than assumed, by temporarily
+bypassing the cache and re-running:
+
+| | cached | re-rasterised per call |
+| --- | --- | --- |
+| `draw.text("FPS 60.0")` | 0.0022 ms | 0.0166 ms |
+| whole CubeBench frame | 0.0538 ms | 0.1307 ms |
+
+So the cache is worth **7.6x on the text call** and **2.4x on the frame**. The prediction
+was right about the mechanism.
+
+### CB-8. `nd_draw_rect_fill` is now the most expensive thing in the frame
+
+With text cached, clearing the 240x146 content rectangle costs **0.0305 ms**, which is
+57% of the 0.0538 ms frame — and it is *slower* than Pillow's 0.0189 ms for the same
+rectangle, because Pillow fills a solid run per row and `nd_draw_rect_fill()` writes pixel
+by pixel. Not touched here: `lib/nd_draw.c` belongs to another work package and a
+row-at-a-time fill is a change to the most pixel-critical function in the project. Raising
+it because it is the next lever, and because "the C is slower than Pillow at this one
+thing" is exactly the sort of fact that should not stay in a scratch buffer.

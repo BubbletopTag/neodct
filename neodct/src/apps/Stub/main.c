@@ -39,6 +39,4 @@ int app_run(nd_ui *ui)
 /* MANDATORY even though there is nothing to release: nd_app.h requires every
  * app to export one, so that a missing symbol always means the author forgot
  * and never means there was nothing to do. */
-void app_shutdown(void)
-{
-}
+void app_shutdown(void) {}

@@ -50,8 +50,8 @@
 #include "nd_font.h"
 #include "nd_image.h"
 #include "nd_input.h"
-#include "nd_keypad.h"
 #include "nd_keycodes.h"
+#include "nd_keypad.h"
 #include "nd_paths.h"
 #include "nd_proc.h"
 #include "nd_types.h"
@@ -74,10 +74,10 @@ static char g_bindir[ND_PATH_MAX];
 /* Which step of stage_root() gave up, so a skipped test says why rather than
  * leaving somebody to bisect a shell script. */
 static int g_stage_step;
-#define STAGE_FAIL(n)      \
-    do {                   \
+#define STAGE_FAIL(n)       \
+    do {                    \
         g_stage_step = (n); \
-        return false;      \
+        return false;       \
     } while (0)
 
 /* ------------------------------------------------------------------ *
@@ -143,8 +143,7 @@ static bool resolve_font(char *out, size_t sz)
 
     if (env != NULL && env[0] != '\0')
         return nd_strlcpy(out, env, sz) < sz;
-    if (nd_snprintf(cand, sizeof cand, "%.400s/" FONT_REL, g_neodct) == ND_OK &&
-        file_exists(cand))
+    if (nd_snprintf(cand, sizeof cand, "%.400s/" FONT_REL, g_neodct) == ND_OK && file_exists(cand))
         return nd_strlcpy(out, cand, sz) < sz;
     if (file_exists("../" FONT_REL))
         return nd_strlcpy(out, "../" FONT_REL, sz) < sz;
@@ -742,35 +741,50 @@ static void test_summary_is_capped_at_ninety(void)
     CHECK_STR(out, "");
 }
 
+/* Rotation is checked by PLANTING an oversized log rather than by writing four
+ * hundred reports: _rotate_if_needed() runs on every call, so a loop that
+ * grows the file also rotates it partway through and leaves crash.log small
+ * again -- the test would then be asserting on wherever the loop happened to
+ * stop. One planted file and one report is the rule itself, and it keeps four
+ * hundred [CRASH] lines out of the suite's output. */
 static void test_crash_log_rotates(void)
 {
-    char resolved[ND_PATH_MAX];
+    char cur[ND_PATH_MAX];
+    char old[ND_PATH_MAX];
     nd_crash_info info;
     struct stat st;
+    FILE *f;
     size_t i;
+
+    CHECK_INT(nd_mkdir_p(ND_PATH_LOG_DIR, 0755u), ND_OK);
+    CHECK_INT(nd_path_resolve(cur, sizeof cur, ND_PATH_CRASH_LOG), ND_OK);
+    CHECK_INT(nd_path_resolve(old, sizeof old, ND_PATH_CRASH_LOG_1), ND_OK);
+    (void)unlink(old);
+
+    f = fopen(cur, "wb");
+    if (f == NULL) {
+        CHECK(false);
+        return;
+    }
+    for (i = 0u; i < (size_t)ND_CRASH_LOG_MAX_BYTES + 1024u; i++)
+        (void)fputc('x', f);
+    (void)fclose(f);
 
     memset(&info, 0, sizeof info);
     info.from_signal = true;
     info.signo = SIGILL;
+    CHECK(nd_crash_log("rotation", &info, NULL) != NULL);
 
-    /* Push past 64 KiB, then one more report to trip the rotation. */
-    CHECK(nd_crash_log("filler", &info, NULL) != NULL);
-    CHECK_INT(nd_path_resolve(resolved, sizeof resolved, ND_PATH_CRASH_LOG), ND_OK);
-    for (i = 0u; i < 400u; i++) {
-        char note[256];
-
-        memset(note, 'n', sizeof note - 1u);
-        note[sizeof note - 1u] = '\0';
-        (void)nd_crash_log("filler", &info, note);
-    }
-    CHECK(stat(resolved, &st) == 0);
-    if (st.st_size > (off_t)ND_CRASH_LOG_MAX_BYTES) {
-        (void)nd_crash_log("filler", &info, NULL);
-        CHECK_INT(nd_path_resolve(resolved, sizeof resolved, ND_PATH_CRASH_LOG_1), ND_OK);
-        CHECK(stat(resolved, &st) == 0);
-    } else {
-        CHECK(false); /* 400 x ~300 bytes should have passed 64 KiB */
-    }
+    /* The oversized file became crash.log.1 ... */
+    CHECK(stat(old, &st) == 0);
+    CHECK(st.st_size > (off_t)ND_CRASH_LOG_MAX_BYTES);
+    /* ... and the new report started a fresh crash.log. Total on disk is
+     * therefore capped at 2 x 64 KiB, which is the whole point on 128 MB of
+     * NAND. */
+    CHECK(stat(cur, &st) == 0);
+    CHECK(st.st_size > 0);
+    CHECK(st.st_size < (off_t)ND_CRASH_LOG_MAX_BYTES);
+    CHECK(crash_log_contains("source: rotation"));
 }
 
 int main(void)

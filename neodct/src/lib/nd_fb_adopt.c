@@ -74,8 +74,7 @@ nd_err nd_fb_adopt_fd(nd_fb **out, int fd)
 
     fb->mem = mmap(NULL, fb->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (fb->mem == MAP_FAILED) {
-        nd_log_err(ND_LOG_FB, "inherited fd %d: mmap %zu bytes: %s", fd, fb->size,
-                   strerror(errno));
+        nd_log_err(ND_LOG_FB, "inherited fd %d: mmap %zu bytes: %s", fd, fb->size, strerror(errno));
         fb->mem = NULL;
         free(fb);
         return ND_ERR_IO;

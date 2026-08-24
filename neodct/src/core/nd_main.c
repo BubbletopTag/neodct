@@ -100,10 +100,33 @@ static volatile sig_atomic_t g_quit;
  * Signals
  * ------------------------------------------------------------------ */
 
+/* ============ WHY A SIGNAL SETS A FLAG *AND* ARMS AN ALARM ============
+ *
+ * In Python a SIGINT raises KeyboardInterrupt, which unwinds from wherever the
+ * process happens to be -- including from inside a modal dialog's key wait --
+ * and `run()` re-raises it, so the UI process always dies. C has no unwinding,
+ * and the flag below is only read by the two loops in core_run(). A core
+ * sitting in the first-boot notice, or in any blocking widget, would ignore a
+ * SIGTERM forever and have to be SIGKILLed, which is not something an init
+ * system should have to do to shut a phone down.
+ *
+ * So the signal does both: it asks for a graceful exit, and it arms a two
+ * second alarm that takes the process down if nobody noticed. A clean shutdown
+ * finishes long before the alarm; a wedged one still goes. */
 static void on_quit(int signo)
 {
     ND_UNUSED(signo);
     g_quit = 1;
+    (void)alarm(2);
+}
+
+static void on_alarm(int signo)
+{
+    static const char msg[] = "[CORE] shutdown flag ignored; exiting anyway\n";
+
+    ND_UNUSED(signo);
+    (void)!write(2, msg, sizeof msg - 1u);
+    _exit(0);
 }
 
 static void on_fatal(int signo)
@@ -130,6 +153,12 @@ static void install_signals(void)
     sa.sa_flags = 0;
     (void)sigaction(SIGTERM, &sa, NULL);
     (void)sigaction(SIGINT, &sa, NULL);
+
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_alarm;
+    (void)sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    (void)sigaction(SIGALRM, &sa, NULL);
 
     memset(&sa, 0, sizeof sa);
     sa.sa_handler = on_fatal;
@@ -186,8 +215,8 @@ static void splash_version(char *out, size_t out_sz)
     (void)nd_snprintf(out, out_sz, "System v%s", v);
 }
 
-static void centre_text(nd_draw *d, int32_t screen_w, int32_t y, const char *text,
-                        const nd_font *f, nd_color colour)
+static void centre_text(nd_draw *d, int32_t screen_w, int32_t y, const char *text, const nd_font *f,
+                        nd_color colour)
 {
     int32_t w = 0;
     int32_t h = 0;
@@ -237,8 +266,7 @@ static void show_boot_logo(nd_fb *fb)
     centre_text(&draw, screen_w, title_y, SPLASH_TITLE, bold != NULL ? bold : fallback, ND_WHITE);
 
     splash_version(ver, sizeof ver);
-    centre_text(&draw, screen_w, title_y + 30, ver, regular != NULL ? regular : fallback,
-                ND_GRAY);
+    centre_text(&draw, screen_w, title_y + 30, ver, regular != NULL ? regular : fallback, ND_GRAY);
 
     if (fb != NULL)
         (void)nd_fb_update(fb, canvas);
@@ -264,9 +292,43 @@ static void nap(double seconds)
  * The main loop (main.py:run)
  * ------------------------------------------------------------------ */
 
+/* Construction step 13 draws a BLOCKING modal on a phone that has never been
+ * booted, and waits for a key. That is correct, and it is also the end of any
+ * unattended measurement: with no keypad attached nothing ever dismisses it.
+ *
+ * --idle-measure is explicitly a measurement mode with no user, and the state
+ * worth measuring is a phone that HAS been booted before -- every byte the
+ * notice would account for is freed again the moment it is dismissed. So the
+ * acknowledgement is written first, exactly as nd_ui.c writes it, and the run
+ * says out loud that it did.
+ *
+ * It is written into whatever ND_ROOT is in force, so a staged root stays
+ * inside itself. */
+static void ack_security_notice_for_measurement(void)
+{
+    char resolved[ND_PATH_MAX];
+    FILE *f;
+
+    if (nd_path_exists(ND_PATH_ACK_SECURITY))
+        return;
+    nd_log(ND_LOG_CORE, "idle-measure: acknowledging the first-boot notice so the "
+                        "measurement does not sit on a modal");
+    (void)nd_mkdir_p(ND_PATH_USER, 0755u);
+    if (nd_path_resolve(resolved, sizeof resolved, ND_PATH_ACK_SECURITY) != ND_OK)
+        return;
+    f = fopen(resolved, "w");
+    if (f != NULL) {
+        (void)fputs("0", f);
+        (void)fclose(f);
+    }
+}
+
 static void core_run(nd_fb *fb, bool idle_measure)
 {
     nd_ui ui;
+
+    if (idle_measure)
+        ack_security_notice_for_measurement();
 
     /* First boot with an i2c keypad but no keymap runs the on-screen setup
      * wizard here, which exec-restarts the UI and may never return. It is

@@ -371,8 +371,10 @@ install: all
 	$(Q)for so in $(APP_SOS); do \
 	    name=$$(basename $$(dirname $$so)); \
 	    [ "$$name" = Stub ] && continue; \
-	    $(INSTALL) -d $(DESTDIR)$(PREFIX)/apps/$$name; \
-	    $(INSTALL) -m 0755 $$so $(DESTDIR)$(PREFIX)/apps/$$name/app.so; \
+	    sub=apps; \
+	    for e in $(STUB_ENG_APPS); do [ "$$e" = "$$name" ] && sub=engineering/apps; done; \
+	    $(INSTALL) -d $(DESTDIR)$(PREFIX)/$$sub/$$name; \
+	    $(INSTALL) -m 0755 $$so $(DESTDIR)$(PREFIX)/$$sub/$$name/app.so; \
 	done
 	$(Q)if [ -f $(STUB_SO) ]; then \
 	    for name in $(STUB_STOCK_APPS); do \

@@ -54,6 +54,8 @@
  * int(time.time() * 2) % 2 blink phase depends on exactly that.
  */
 
+#include <dirent.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <ftw.h>
 #include <stdio.h>
@@ -62,7 +64,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "nd_app.h"
 #include "nd_capture.h"
+#include "nd_crash.h"
 #include "nd_draw.h"
 #include "nd_fb.h"
 #include "nd_image.h"
@@ -98,6 +102,10 @@ static const shoot_skip SKIPPED[] = {
     /* Group 3 -- shoot_stock_apps. SESSION-SCOPE.md keeps all 25 apps with
      * their real manifest and icon, but their app.so is not written yet; the
      * whole of neodct/src/apps/ is empty. */
+    /* app-clock is NOT here: the Clock app IS the stub dialog (section 3.6
+     * records app-clock as byte-identical to widget-messagedialog), so the one
+     * shipped app.so renders it for real. The other twelve draw their own
+     * screens and the stub cannot stand in for any of them. */
     {"app-phonebook", "app not implemented: neodct/src/apps/ is empty"},
     {"app-messages", "app not implemented: neodct/src/apps/ is empty"},
     {"app-messages-inbox", "app not implemented: neodct/src/apps/ is empty"},
@@ -107,7 +115,6 @@ static const shoot_skip SKIPPED[] = {
     {"app-games", "app not implemented: neodct/src/apps/ is empty"},
     {"app-calculator", "app not implemented: neodct/src/apps/ is empty"},
     {"app-calculator-options", "app not implemented: neodct/src/apps/ is empty"},
-    {"app-clock", "app not implemented: neodct/src/apps/ is empty"},
     {"app-tones", "app not implemented: neodct/src/apps/ is empty"},
     {"app-musicplayer", "app not implemented: neodct/src/apps/ is empty"},
     {"app-koki", "Koki is out of scope this session (SESSION-SCOPE.md)"},
@@ -122,7 +129,6 @@ static const shoot_skip SKIPPED[] = {
     {"call-active", "System/ui/Dialer/call_screen not ported yet"},
     {"call-incoming", "System/ui/Dialer/incoming_screen not ported yet"},
     {"contacts-picker", "PhoneBook shared/list_ui not ported yet"},
-    {"crash-screen", "System/core/CrashHandler not ported yet"},
 
     /* Group 6 -- shoot_engineering_apps. */
     {"eng-modem", "app not implemented: neodct/src/apps/ is empty"},
@@ -291,6 +297,130 @@ static bool find_overlay(const char *flag)
     return false;
 }
 
+/* ------------------------------------------------------------------ *
+ * Giving the staged apps an app.so
+ * ------------------------------------------------------------------ *
+ *
+ * /NeoDCT/System is a SYMLINK onto neodct/overlay, and neodct/overlay is the
+ * Python reference -- nothing may be written there, so app.so cannot simply be
+ * dropped beside each manifest.json. Instead the one directory that needs to
+ * gain a file, System/apps, is rebuilt as a real directory of real app
+ * directories whose contents are symlinks back to the overlay, plus a symlink
+ * to the app.so this build produced.
+ *
+ * Every other entry of System stays a plain symlink, so the fonts, wallpapers,
+ * icons and ui_home.json are byte-for-byte the same files the 25 already-exact
+ * frames were rendered from. The engineering apps are not expanded: nothing
+ * launches one, and the menu only needs their manifest and icon.
+ */
+
+/* build/<variant>/bin/nd-shoot -> build/<variant>/apps/Stub/app.so. The one
+ * stub, the one every app directory gets. */
+static bool stub_app_so(char *out, size_t out_sz)
+{
+    char exe[ND_PATH_MAX];
+
+    if (!self_exe_dir(exe, sizeof exe))
+        return false;
+    if (nd_snprintf(out, out_sz, "%s/../apps/Stub/app.so", exe) != ND_OK)
+        return false;
+    return access(out, R_OK) == 0;
+}
+
+/* One app directory: a real directory of symlinks, plus app.so. */
+static bool stage_one_app(const char *src_dir, const char *dst_dir, const char *stub)
+{
+    DIR *d = opendir(src_dir);
+    struct dirent *e;
+    char link[ND_PATH_MAX];
+    char target[ND_PATH_MAX];
+
+    if (d == NULL)
+        return false;
+    if (mkdir(dst_dir, 0755) != 0 && errno != EEXIST) {
+        (void)closedir(d);
+        return false;
+    }
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+        if (nd_snprintf(link, sizeof link, "%s/%s", dst_dir, e->d_name) != ND_OK ||
+            nd_snprintf(target, sizeof target, "%s/%s", src_dir, e->d_name) != ND_OK)
+            continue;
+        /* An entry that is already there is fine -- the same overlay file. */
+        if (symlink(target, link) != 0 && errno != EEXIST)
+            nd_log_err(ND_LOG_OS, "symlink %s: %s", link, strerror(errno));
+    }
+    (void)closedir(d);
+
+    if (stub == NULL)
+        return true;
+    if (nd_snprintf(link, sizeof link, "%s/%s", dst_dir, ND_APP_SO_NAME) != ND_OK)
+        return false;
+    (void)unlink(link);
+    return symlink(stub, link) == 0;
+}
+
+/* System as a real directory: every entry symlinked, except apps/, which is
+ * expanded so each app can gain an app.so. */
+static bool stage_system(const char *sys_src, const char *sys_dst)
+{
+    char stub[ND_PATH_MAX];
+    char apps_src[ND_PATH_MAX];
+    char apps_dst[ND_PATH_MAX];
+    char link[ND_PATH_MAX];
+    char target[ND_PATH_MAX];
+    DIR *d;
+    struct dirent *e;
+    bool have_stub = stub_app_so(stub, sizeof stub);
+
+    if (!have_stub)
+        nd_log(ND_LOG_OS, "no apps/Stub/app.so in this build; app frames will be skipped");
+
+    if (mkdir(sys_dst, 0755) != 0 && errno != EEXIST)
+        return false;
+
+    d = opendir(sys_src);
+    if (d == NULL)
+        return false;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+        if (strcmp(e->d_name, "apps") == 0)
+            continue; /* expanded below */
+        if (nd_snprintf(link, sizeof link, "%s/%s", sys_dst, e->d_name) != ND_OK ||
+            nd_snprintf(target, sizeof target, "%s/%s", sys_src, e->d_name) != ND_OK)
+            continue;
+        if (symlink(target, link) != 0 && errno != EEXIST)
+            nd_log_err(ND_LOG_OS, "symlink %s: %s", link, strerror(errno));
+    }
+    (void)closedir(d);
+
+    if (nd_snprintf(apps_src, sizeof apps_src, "%s/apps", sys_src) != ND_OK)
+        return false;
+    if (nd_snprintf(apps_dst, sizeof apps_dst, "%s/apps", sys_dst) != ND_OK)
+        return false;
+    if (mkdir(apps_dst, 0755) != 0 && errno != EEXIST)
+        return false;
+
+    d = opendir(apps_src);
+    if (d == NULL)
+        return false;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.')
+            continue;
+        if (nd_snprintf(target, sizeof target, "%s/%s", apps_src, e->d_name) != ND_OK ||
+            nd_snprintf(link, sizeof link, "%s/%s", apps_dst, e->d_name) != ND_OK)
+            continue;
+        if (!dir_exists(target))
+            continue;
+        if (!stage_one_app(target, link, have_stub ? stub : NULL))
+            return false;
+    }
+    (void)closedir(d);
+    return true;
+}
+
 /* /NeoDCT/System is the read-only overlay, symlinked; /NeoDCT/User is real
  * and writable, because settings.prop and the sqlite databases live there. */
 static bool stage_root(void)
@@ -345,8 +475,8 @@ static bool stage_root(void)
         return false;
     if (nd_snprintf(sys_target, sizeof sys_target, "%s/NeoDCT/System", g_overlay) != ND_OK)
         return false;
-    if (symlink(sys_target, sys_link) != 0 && errno != EEXIST) {
-        nd_log_err(ND_LOG_OS, "symlink %s: %s", sys_link, strerror(errno));
+    if (!stage_system(sys_target, sys_link)) {
+        nd_log_err(ND_LOG_OS, "cannot stage %s: %s", sys_link, strerror(errno));
         return false;
     }
 
@@ -655,6 +785,147 @@ static void shoot_telephony(nd_capture *cap)
     ui.unread_sms = 1;
     nd_ui_update(&ui);
     save_recent(cap, "home-sms-banner");
+
+    nd_ui_teardown(&ui);
+    nd_ui_sim_clear(&ui);
+    nd_vclock_disable();
+
+    /* The crash screen is a SECOND `with StubUI()` block in shoot_telephony:
+     * no wallpaper, no simulate_status, and a fresh clock. shoot_docs.py calls
+     * CrashHandler._draw_engineering_crash_screen() directly and then flushes
+     * by hand, so the frame is committed twice -- the draw itself presents,
+     * and the recipe presents again. Nothing on this screen depends on the
+     * clock, so the extra tick moves no pixel; it is reproduced because the
+     * recipe is the specification. */
+    write_settings(NULL);
+    nd_vclock_enable();
+    nd_ui_sim_clear(&ui);
+    if (nd_ui_init(&ui, fb) != ND_OK) {
+        nd_log_err(ND_LOG_UI, "shoot: nd_ui_init failed (crash screen)");
+        g_failed++;
+        return;
+    }
+    nd_crash_draw_engineering(&ui, "RuntimeError: example failure");
+    (void)nd_ui_present(&ui);
+    save_recent(cap, "crash-screen");
+
+    nd_ui_teardown(&ui);
+    nd_ui_sim_clear(&ui);
+    nd_vclock_disable();
+}
+
+/* ------------------------------------------------------------------ *
+ * Group 3 -- shoot_stock_apps, the one case the stub app can honestly draw
+ * ------------------------------------------------------------------ *
+ *
+ * uistub.run_app() imports the app IN-PROCESS and calls run(ui), because a
+ * capture harness has to be in the same address space as the canvas it is
+ * capturing. This does the same thing with dlopen: the app.so beside the
+ * manifest, RTLD_NOW, app_run(ui). It is NOT the launcher -- nd-core forks and
+ * execve's nd-apprun, and a child process cannot draw into this process's
+ * canvas. That path is proved separately, out of process and with a real
+ * SIGSEGV, in test/unit/test_proc.c.
+ *
+ * Only app-clock is rendered. spec-build-test.md section 3.6 records
+ * app-clock as byte-identical to widget-messagedialog because the Clock app IS
+ * a "This application has not been implemented yet." dialog -- so the one
+ * shipped app.so draws it for real. The other twelve stock apps draw their own
+ * screens; the stub cannot stand in for any of them and they stay skipped.
+ */
+
+/* MessageDialog flushes pending input before its first draw, so a key written
+ * into the channel up front is eaten before show() ever waits on it. The way
+ * through is the one test_widgets_lists.c found: press a key and do not
+ * release it, with that key in the repeat set. The flush consumes the press,
+ * the held state survives it, and the synthesised repeat arrives after the
+ * screen is up -- which is also how the Python's ScriptExhausted got out of an
+ * app that would otherwise loop forever. */
+static bool hold_key_begin(key_script *ks, nd_ui *ui, int32_t code)
+{
+    static int32_t held;
+
+    held = code;
+    if (!key_script_begin(ks, ui, NULL, 0u))
+        return false;
+    if (nd_input_set_repeat_codes(ks->in, &held, 1u) != ND_OK)
+        return false;
+    nd_input_set_repeat(ks->in, 0.20, 0.05);
+    return nd_input_channel_send(&ks->ch, code, true) == ND_OK;
+}
+
+static size_t app_index_of(const nd_ui *ui, const char *name);
+
+static void run_stock_app(nd_capture *cap, nd_ui *ui, const char *manifest_name,
+                          int64_t frame_budget, const char *slug)
+{
+    char so_path[ND_PATH_MAX];
+    key_script ks;
+    void *handle;
+    int (*run)(nd_ui *);
+    size_t idx = app_index_of(ui, manifest_name);
+
+    if (idx == (size_t)-1) {
+        nd_log_err(ND_LOG_OS, "shoot: no app named '%s'", manifest_name);
+        g_failed++;
+        return;
+    }
+    if (nd_path_join(so_path, sizeof so_path, ui->apps[idx].path, ND_APP_SO_NAME) != ND_OK) {
+        g_failed++;
+        return;
+    }
+
+    handle = dlopen(so_path, RTLD_NOW | RTLD_LOCAL);
+    if (handle == NULL) {
+        nd_log_err(ND_LOG_OS, "shoot: %s: %s", slug, dlerror());
+        g_failed++;
+        return;
+    }
+    run = (int (*)(nd_ui *))(uintptr_t)dlsym(handle, ND_APP_SYM_RUN);
+    if (run == NULL) {
+        nd_log_err(ND_LOG_OS, "shoot: %s exports no %s", so_path, ND_APP_SYM_RUN);
+        (void)dlclose(handle);
+        g_failed++;
+        return;
+    }
+
+    if (!hold_key_begin(&ks, ui, ND_KEY_ENTER)) {
+        nd_log_err(ND_LOG_OS, "shoot: %s: no key channel", slug);
+        (void)dlclose(handle);
+        g_failed++;
+        return;
+    }
+
+    nd_capture_set_budget(cap, frame_budget);
+    (void)run(ui);
+    nd_capture_clear_budget(cap);
+
+    key_script_end(&ks, ui);
+    save_recent(cap, slug);
+    /* Not dlclose()d until after the frame is saved: the canvas holds no
+     * pointer into the .so, but unloading a library whose code just ran is
+     * cheap to get wrong and there is nothing to gain from it here. */
+    (void)dlclose(handle);
+}
+
+static void shoot_stock_apps(nd_capture *cap)
+{
+    nd_fb *fb = nd_capture_fb(cap);
+    nd_ui ui;
+
+    printf("[shoot] stock apps (1 of 13 -- the other twelve are not ported)\n");
+
+    /* A fresh WP + STATUS UI, as every case in shoot_stock_apps gets. */
+    write_settings("Palestine.jpg");
+    nd_vclock_enable();
+    nd_ui_sim_clear(&ui);
+    if (nd_ui_init(&ui, fb) != ND_OK) {
+        nd_log_err(ND_LOG_UI, "shoot: nd_ui_init failed (stock apps)");
+        g_failed++;
+        return;
+    }
+    nd_ui_sim_status(&ui, 4, 4, "Tello");
+
+    run_stock_app(cap, &ui, "Clock", 240, "app-clock");
 
     nd_ui_teardown(&ui);
     nd_ui_sim_clear(&ui);
@@ -1005,6 +1276,7 @@ int main(int argc, char **argv)
 
     shoot_home(cap);
     shoot_app_selector(cap);
+    shoot_stock_apps(cap);
     shoot_telephony(cap);
     shoot_widgets(cap);
 

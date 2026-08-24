@@ -193,17 +193,28 @@ bool nd_crash_read_report(int report_fd, nd_crash_info *out)
 const char *nd_crash_signal_name(int signo)
 {
     switch (signo) {
-    case SIGSEGV: return "SIGSEGV";
-    case SIGBUS:  return "SIGBUS";
-    case SIGILL:  return "SIGILL";
-    case SIGFPE:  return "SIGFPE";
-    case SIGABRT: return "SIGABRT";
-    case SIGTERM: return "SIGTERM";
-    case SIGKILL: return "SIGKILL";
-    case SIGPIPE: return "SIGPIPE";
-    case SIGHUP:  return "SIGHUP";
-    case SIGINT:  return "SIGINT";
-    default:      return "signal";
+    case SIGSEGV:
+        return "SIGSEGV";
+    case SIGBUS:
+        return "SIGBUS";
+    case SIGILL:
+        return "SIGILL";
+    case SIGFPE:
+        return "SIGFPE";
+    case SIGABRT:
+        return "SIGABRT";
+    case SIGTERM:
+        return "SIGTERM";
+    case SIGKILL:
+        return "SIGKILL";
+    case SIGPIPE:
+        return "SIGPIPE";
+    case SIGHUP:
+        return "SIGHUP";
+    case SIGINT:
+        return "SIGINT";
+    default:
+        return "signal";
     }
 }
 
@@ -233,8 +244,7 @@ size_t nd_crash_summary(const nd_crash_info *info, char *out, size_t out_sz)
         (void)nd_snprintf(full, sizeof full, "%s: killed by signal %d",
                           nd_crash_signal_name(info->signo), info->signo);
     } else if (info->exit_status != 0) {
-        (void)nd_snprintf(full, sizeof full, "AppExit: exited with status %d",
-                          info->exit_status);
+        (void)nd_snprintf(full, sizeof full, "AppExit: exited with status %d", info->exit_status);
     } else {
         return 0u;
     }
@@ -250,16 +260,17 @@ size_t nd_crash_summary(const nd_crash_info *info, char *out, size_t out_sz)
  * The log
  * ------------------------------------------------------------------ */
 
+/* /proc is not a NeoDCT path, so it is opened directly and NOT through
+ * nd_path_resolve() -- same reasoning as /dev/ttyFIQ0 above. A crash report
+ * that recorded a test root's uptime instead of the machine's would be worse
+ * than useless. */
 static void read_first_field(const char *path, char *out, size_t out_sz, const char *dflt)
 {
-    char resolved[ND_PATH_MAX];
     FILE *f;
     char line[256];
 
     (void)nd_strlcpy(out, dflt, out_sz);
-    if (nd_path_resolve(resolved, sizeof resolved, path) != ND_OK)
-        return;
-    f = fopen(resolved, "r");
+    f = fopen(path, "r");
     if (f == NULL)
         return;
     if (fgets(line, sizeof line, f) != NULL) {
@@ -359,9 +370,6 @@ const char *nd_crash_log(const char *source, const nd_crash_info *info, const ch
     read_first_field("/proc/uptime", uptime, sizeof uptime, "?");
     if (strcmp(uptime, "?") != 0)
         (void)nd_strlcat(uptime, "s", sizeof uptime);
-    /* /proc/uptime is NOT under ND_ROOT; read_first_field resolves, which is a
-     * plain copy in production and, in a test root, correctly finds nothing
-     * and reports "?" rather than a host figure that means nothing. */
     read_mem_available(mem, sizeof mem);
     (void)nd_crash_summary(info, summary, sizeof summary);
 
@@ -466,17 +474,16 @@ void nd_crash_draw_engineering(nd_ui *ui, const char *summary)
     }
 
     if (!painted) {
-        const nd_font *font = ui->font_xl != NULL
-                                  ? ui->font_xl
-                                  : (ui->font_n != NULL ? ui->font_n : ui->font_s);
+        const nd_font *font =
+            ui->font_xl != NULL ? ui->font_xl : (ui->font_n != NULL ? ui->font_n : ui->font_s);
 
         if (font != NULL) {
             int32_t w = 0;
             int32_t h = 0;
 
             nd_ui_text_size(ui, "CRASH", font, &w, &h);
-            (void)nd_draw_text(ui->draw, (screen_w - w) / 2,
-                               nd_max32(0, (content_bottom - h) / 2), "CRASH", font, ND_WHITE);
+            (void)nd_draw_text(ui->draw, (screen_w - w) / 2, nd_max32(0, (content_bottom - h) / 2),
+                               "CRASH", font, ND_WHITE);
         }
     }
 

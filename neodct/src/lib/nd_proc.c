@@ -356,8 +356,7 @@ static const char *apprun_path(char *buf, size_t buf_sz)
         slash = strrchr(exe, '/');
         if (slash != NULL) {
             *slash = '\0';
-            if (nd_snprintf(buf, buf_sz, "%s/nd-apprun", exe) == ND_OK &&
-                access(buf, X_OK) == 0)
+            if (nd_snprintf(buf, buf_sz, "%s/nd-apprun", exe) == ND_OK && access(buf, X_OK) == 0)
                 return buf;
             /* A unit test binary lives in build/<variant>/test, one directory
              * over from build/<variant>/bin, and must drive the SAME variant's
@@ -413,8 +412,8 @@ static nd_err app_env(char *keypad, size_t keypad_sz, char *crash, size_t crash_
 static size_t build_envp(const char **envp, size_t max, const char *keypad, const char *crash,
                          const char *fbv, const char *rootv)
 {
-    static const char *const OURS[] = {ND_ENV_KEYPAD_FD "=", ND_ENV_CRASH_FD "=",
-                                       ND_ENV_FB_FD "=", ND_ENV_ROOT "="};
+    static const char *const OURS[] = {ND_ENV_KEYPAD_FD "=", ND_ENV_CRASH_FD "=", ND_ENV_FB_FD "=",
+                                       ND_ENV_ROOT "="};
     size_t n = 0u;
     size_t i;
 
@@ -510,9 +509,8 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
     argv[3] = arg; /* NULL when there is none, which also terminates argv */
     argv[4] = NULL;
 
-    if (app_env(keypad_env, sizeof keypad_env, crash_env, sizeof crash_env, fb_env,
-                sizeof fb_env, root_env, sizeof root_env, ch.read_fd, crash_pipe[1],
-                fb_fd) != ND_OK) {
+    if (app_env(keypad_env, sizeof keypad_env, crash_env, sizeof crash_env, fb_env, sizeof fb_env,
+                root_env, sizeof root_env, ch.read_fd, crash_pipe[1], fb_fd) != ND_OK) {
         rc = ND_ERR_TOOLONG;
         goto done;
     }

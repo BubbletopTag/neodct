@@ -32,6 +32,14 @@ static volatile int *const g_null = NULL;
 
 static int g_mode; /* set by app_open_message, read by app_run */
 
+/* UBSan is right that this dereferences null and says so, which puts a
+ * "runtime error:" line in the ASan log that looks exactly like a real
+ * finding. The store is the POINT of the program, so the check is turned off
+ * here and only here -- the fault still happens, the kernel still sends
+ * SIGSEGV, and the log stays readable. */
+#if defined(__GNUC__)
+__attribute__((no_sanitize("undefined")))
+#endif
 int app_run(nd_ui *ui)
 {
     ND_UNUSED(ui);
@@ -62,6 +70,4 @@ int app_open_inbox(nd_ui *ui)
     return app_run(ui);
 }
 
-void app_shutdown(void)
-{
-}
+void app_shutdown(void) {}
