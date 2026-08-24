@@ -3383,3 +3383,216 @@ would have been six hundred duplicated lines. It is a header and not a `.c`
 because the Makefile globs `test/unit` into one binary per source file, so a
 shared `.c` there would become a test with no `main()`. `draw_ref.inc` and
 `platform_test.h` are there for the same reason.
+
+---
+
+## CallLog and Games (`apps/CallLog/`, `apps/Games/`, work package CL/GM)
+
+Both apps are ported and all four of their golden frames render. Three of the
+four are byte-exact against the Python; the fourth is the one `recut` frame in
+the set. See GM-1.
+
+### CL-1. `_connect()` creates `call_log.db` on a READ, and that is kept
+
+**Found in:** `System/apps/CallLog/main.py:47-62` — `_connect()` runs
+`os.makedirs(exist_ok=True)` and `CREATE TABLE IF NOT EXISTS` on every call, and
+`fetch_calls()` calls it before a `SELECT`.
+
+So opening "Missed calls" on a phone that has never taken a call **leaves an
+empty database behind**. Messages does the exact opposite — `msg_db.c` guards
+every read with `os.path.exists()` precisely so an unused inbox never appears —
+and the two apps really do disagree. `nd_calllog_connect()` reproduces
+CallLog's behaviour, and `test_calllog.c` asserts the file is absent before the
+first list screen and present after it, so the difference is pinned rather than
+left to drift.
+
+`call_log.db` is also the one of the four databases that gets **no**
+`PRAGMA journal_mode=WAL`, which `nd_db.h` already says to preserve; the test
+asks sqlite what mode the file came up in and requires `delete`.
+
+### CL-2. `number` is truncated at 64 bytes, and `timestamp` is an int64
+
+**Found in:** the schema — `number TEXT` with no length, `timestamp INTEGER`.
+
+`nd_call_rec.number` is `ND_CALLLOG_NUMBER_MAX` = 64, which is
+`ND_CONTACT_NUMBER_MAX` from `nd_db.h`, so a number the phone book can hold is
+a number the call log can show. A longer one is truncated for display; the row
+is not changed. Nothing writes this table yet — the Dialer is the intended
+writer — so the cap has no producer to disagree with today.
+
+There is **no** row cap beyond the Python's own `LIMIT 20`, which is why this
+port adds no bound the Python does not have.
+
+### CL-3. Python's `int()` accepts underscores and non-ASCII digits; this does not
+
+**Found in:** `_get_timer_seconds()`, `int(get_setting(key, "0") or 0)`.
+
+`py_int()` in `apps/CallLog/main.c` (and its twin in `apps/Games/main.c`)
+accepts surrounding whitespace and one sign and nothing else. Python's `int()`
+additionally accepts `_` separators (3.6+) and any Unicode decimal digit. Both
+would have to be hand-written into `settings.prop` to matter, and both fold to
+the default here rather than to a value — which is the same branch an
+unparseable string already takes. Same deviation `M-10` records for the modem,
+noted again because a settings value is more plausibly hand-edited than an AT
+reply.
+
+Everything else about `int()` is reproduced, including that an **empty** value
+is caught by `or 0` before parsing and that trailing junk raises rather than
+parsing a prefix.
+
+### CL-4. The clear menu and the root menu disagree about index 1 and 2
+
+**Found in:** `show_clear_menu()`'s `{0: None, 1: "missed", 2: "dialed", 3:
+"received"}` against `ROOT_ITEMS`' missed / received / dialed.
+
+Both maps agree with the labels printed beside them, so neither is wrong —
+they are simply different orders, and swapping either one to "tidy up" would
+clear the wrong list. Ported as found, both spelled out in `calllog.h`, and
+`test_calllog.c` asserts that index 1 of the two tables names different lists
+so a future edit that silently aligns them fails.
+
+### GM-1. `game-snake` is recut; `game-memory` did NOT need to be
+
+Decision 4 gave permission to re-capture **both** game frames. Measured, only
+one needed it.
+
+| frame | against the Python's reference | class |
+| --- | --- | --- |
+| `app-games` | 0 differing pixels | `exact` |
+| `game-memory` | **0 differing pixels** | `exact` |
+| `game-snake` | **40 of 42,000 (0.10 %)**, in two 6×6 boxes | `recut` |
+
+`game-snake`'s entire difference is the food cell: Python's MT19937 put it at
+grid `(5,12)`, libneodct's pinned LCG puts it at `(4,0)`. Two 6×6 outlined
+rectangles, 20 lit pixels each, 40 in total. The score, the border, all three
+body cells and the black softkey band are byte-identical, which is a stronger
+result than the permission asked for — it says the port is right everywhere the
+generator does not reach.
+
+`game-memory` differs in the shuffle too, but **the shuffle reaches no pixel in
+that frame**: all forty cards are face down, so the board is forty identical
+white rectangles plus the cursor ring. Recutting it would have replaced a
+reference the Python drew with a byte-identical one this build drew, which
+buys nothing and loses the cross-check. It keeps its original reference and
+stays `exact`.
+
+So `tests/golden/manifest.json` carries exactly one `"tolerance": "recut"`
+entry, and `test_shoot.c`'s `RECUT[]` names exactly one frame.
+
+### GM-2. Neither game touches the auto-repeat configuration
+
+**Found in:** `snake.py:118` and `memory.py:199`, both `poll_key(ui, timeout)`.
+
+Decision 2 asks for held-key state in every app, and the games are the obvious
+place for it. They get it **without a line of code**: `nd_input` synthesises
+repeat presses for 103/105/106/108 from its own held state, so a held Down in
+Memory walks the cursor and a held direction in Snake re-queues a turn that
+`queue_turn()` already discards. Same mechanism, same reasoning as `W-8`.
+
+Neither game calls `nd_input_set_repeat_codes()` to widen that to 2/4/6/8, and
+that is deliberate: the repeat set is **process-global**, `nd_keypad.h` exposes
+no getter to restore it from, and an app that narrowed it would strip the
+repeat from the key its own caller is using to get out — which is exactly how
+`nd-shoot` and `test_games.c` leave both games. Widening it safely needs a
+save/restore pair on `nd_keypad.h`, which belongs to another work package.
+
+### GM-3. `nd_app_should_exit()` ends a game as "quit", not as a score
+
+**Found in:** nothing in the Python — `IncomingCall` unwound the game loop and
+`_finish_game` never ran.
+
+Both `play()` loops poll `nd_app_should_exit()` and return `-1`, the value that
+spells the Python's `return None`. `_finish_game()` returns immediately on it,
+so **a call arriving mid-game cannot overwrite a top score**. Returning the
+score instead would have been the other plausible reading and is worse: it
+would write a partial game's score to `settings.prop` during a SIGTERM
+teardown, from a process that is meant to be releasing things and exiting.
+
+### GM-4. `time.sleep()` is skipped under the virtual clock
+
+Snake's 0.4 s death pause and Memory's 0.25 / 0.9 / 0.3 s pauses go through
+`nd_games_dwell()`, which returns immediately when `nd_vclock_enabled()`. Same
+decision and same reasoning as `PB-3`: under capture, time is a frame counter,
+a real sleep moves no pixel, and the only thing it changes is how long the
+oracle takes. On the phone all four durations are the Python's.
+
+No golden frame passes through one — both reference frames are the game's
+opening `render()`, which happens before any pause is reachable.
+
+### GM-5. `poll_key`'s "no read_keypress" fallback is unreachable, and is kept
+
+**Found in:** `games_common.py:29-35` — `if hasattr(ui, "read_keypress")`, then
+`try/except`, then `time.sleep(timeout); return None`.
+
+In C `nd_ui_read_keypress()` is linked in and cannot be missing, so the
+fallback is reachable only through `nd_games_poll_key(NULL, t)`. It is
+implemented anyway (sleep the timeout, report no key) because the alternative
+is a function that faults on an argument the Python handled, and `test_games.c`
+covers the NULL path.
+
+`ND_KEY_INCOMING_CALL` is folded into "no key" for the same reason it can never
+arrive: a call reaches an app as SIGTERM (`nd_app.h`), not as a key code.
+
+### GM-6. The snake body is a 406-entry array, and the cap is unreachable
+
+29 × 14 = 406 is both the board and the longest a snake can be, because the
+step that would fill the last cell is a step into its own body. `nd_snake_step()`
+still checks the bound before `memmove`-ing the head in — CODING-STANDARDS.md
+§1.5 does not accept "the geometry proves it" as a reason to omit a bounds
+check — and returns "died" if it is ever reached. `test_games.c` fills the board
+by hand and asserts `spawn_food()` clears `has_food` there, which is the state
+just before that branch.
+
+### GM-7. Memory's twenty glyphs are pixel-exact against Pillow
+
+`draw_glyph()` is twenty shapes drawn with six of the seven ImageDraw
+primitives, including the one thing `nd_draw.h` names as its reason for
+implementing Pillow's parity rule: kind 15's self-intersecting quadrilateral.
+`test_games.c` carries an ink count and an FNV-1a hash over every lit pixel's
+coordinates for all twenty, generated by running the **shipped
+`System/apps/Games/memory.py`** through Pillow 12.3.0 at the box a real card
+gets, `(18,11)-(32,25)`. All twenty match.
+
+Two findings worth recording:
+
+- **`polygon(..., outline=)` has no C entry point.** Only kind 5 needs it.
+  Pillow's outline path at width 1 is one `ImagingDrawLine` per edge plus the
+  closing edge, so `apps/Games/memory.c` draws it with four `nd_draw_line()`
+  calls at width 1. It matches. A `nd_draw_polygon_outline()` on `nd_draw.h`
+  would be the tidier home for it, and that header belongs to another package.
+- **Kind 9 spills four pixels outside its box, in Pillow too.** The X is two
+  width-2 *diagonal* lines, and a wide line grows along its minor axis — which
+  for a diagonal is perpendicular to the run, so each stroke pokes one pixel
+  past each end. Measured at `(17,25) (33,25) (18,26) (32,26)`. On a card those
+  four land in the 4 px inset the glyph box was cut from, so the X visibly
+  reaches closer to the card edge than the other nineteen shapes. Asserting
+  zero spill would be asserting a tidier drawing than the phone has ever
+  produced; the test pins the four instead.
+
+### GM-8. What ends each game in `nd-shoot`, and why the budget is an exact count
+
+`uistub`'s `idle_budget=60` is what ends both games in the Python: the script
+runs out, the 61st idle poll raises `ScriptExhausted`, and because the virtual
+clock only advances on a **committed frame**, an idle poll moves no time — so
+Snake's first tick never falls due and the board is never touched. `frames[-1]`
+is the opening `render()`, and `shoot_docs.py`'s `frame_budget=300` never
+bites.
+
+C cannot raise out of a read, so `shoot_games()` uses the frame budget the way
+`CB-2` uses it for CubeBench, with a **held** Back to let the app out
+afterwards. That makes each budget an exact frame count rather than a ceiling:
+
+| frame | frames | which |
+| --- | --- | --- |
+| `game-snake` | 4 | Games menu, the Down redraw, the Snake menu, the board |
+| `game-memory` | 3 | Games menu, the Memory menu, the board |
+
+Everything the held Back draws on the way out — the menu each game returns to,
+and the one above it — is refused with `ND_ERR_BUSY`, records nothing and does
+not tick the clock. `test_games.c` pins both counts.
+
+`test_games.c` also renders `game-snake` a **second** way: `nd_snake_init()` +
+`nd_snake_render()` with no menus in front of them. It is byte-identical to the
+four-frame path, which is the check that the food cell depends on the seed and
+on nothing else — not on how many frames had been drawn, and not on which
+screens had run.

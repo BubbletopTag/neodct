@@ -39,19 +39,30 @@
  *  9. flip() scores max(2, 10 - 2*misses), zeroes the miss counter on a
  *     match, and puts a mismatched pair back face down.
  *
- * 10. All twenty glyphs draw inside their box and nothing outside it, and
- *     kind 15 -- the self-intersecting quadrilateral -- comes out as an
- *     HOURGLASS rather than a filled bow tie. That shape is the reason
- *     nd_draw.h promises Pillow's parity rule, so it is checked by shape and
- *     not merely by "some ink appeared".
+ * 10. ALL TWENTY GLYPHS MATCH PILLOW PIXEL FOR PIXEL -- ink count and a hash
+ *     over every lit (x, y), taken from the shipped memory.py run through
+ *     Pillow 12.3.0 at the box the game really uses. Nineteen of these
+ *     shapes would pass an "ink appeared inside the box" check while drawing
+ *     something else entirely.
+ *
+ *     Kind 9, the X, SPILLS FOUR PIXELS past its box, and Pillow spills the
+ *     same four. A width-2 line grows along its minor axis, which for a
+ *     diagonal is perpendicular to the run, so the ends poke past the
+ *     corners. The test pins the spill rather than forbidding it: the only
+ *     way to satisfy "nothing outside" would be to stop matching Pillow.
  *
  * 11. THE THREE GOLDEN FRAMES. app-games is `exact` against the Python.
- *     game-snake and game-memory are frame class `recut` (OPEN-QUESTIONS.md
- *     decision 4): the reference for game-snake was re-captured from this
- *     build because the food cell comes out of libneodct's pinned LCG rather
- *     than CPython's MT19937. game-memory needed no recut -- every card is
- *     face down in that frame, so the shuffle does not reach a pixel -- and
- *     it is still judged against the Python's own reference here.
+ *     game-snake is frame class `recut` (OPEN-QUESTIONS.md decision 4): its
+ *     reference was re-captured from this build because the food cell comes
+ *     out of libneodct's pinned LCG rather than CPython's MT19937.
+ *     game-memory needed NO recut -- every card is face down in that frame,
+ *     so the shuffle reaches no pixel -- and it is still judged here against
+ *     the Python's own original reference.
+ *
+ * 12. THE FOOD CELL IS DECIDED BY THE SEED AND NOTHING ELSE. game-snake is
+ *     rendered a second way -- the game constructed directly, with no menus
+ *     in front of it -- and comes out byte-identical, which is what says the
+ *     spawn does not depend on how many frames had been drawn first.
  *
  * Runs with no arguments. NEODCT_GOLDEN names the reference set.
  */
@@ -1039,6 +1050,41 @@ static void test_frame_game_memory(void)
     run_game_frame(keys, ND_ARRAY_LEN(keys), 3, "game-memory");
 }
 
+/* game-snake a SECOND way: the game constructed directly, with no menus in
+ * front of it, so the virtual clock stands at frame 0 instead of frame 3 when
+ * the generator is seeded.
+ *
+ * The two paths agreeing is the claim that THE FOOD CELL DEPENDS ON THE SEED
+ * AND ON NOTHING ELSE -- not on how many frames had been committed, and not
+ * on which screens had run before it. `random.seed(time.time())` truncates to
+ * a whole second, and three frames is 0.3 s, so the seed is the same integer
+ * either way. If some future screen added a frame here the seed would still
+ * not move until 1704112497, and this test is what would notice if the
+ * spawn ever started reading anything but the seed. */
+static void test_snake_frame_is_seed_only(void)
+{
+    sa_fixture fx;
+    nd_snake g;
+
+    if (!sa_fx_init(&fx)) {
+        CHECK(false, "fixture");
+        sa_fx_free(&fx);
+        return;
+    }
+
+    nd_vclock_enable();
+    /* Level 5 is what games.snake.level defaults to, which is what the menu
+     * path handed SnakeGame. */
+    api.snake_init(&g, &fx.ui, 5);
+    api.snake_render(&g);
+
+    CHECK_INT((int)nd_capture_frames_drawn(fx.cap), 1, "render() commits exactly one frame");
+    sa_expect_golden(&fx, nd_capture_recent(fx.cap, 0u), "game-snake");
+
+    nd_vclock_disable();
+    sa_fx_free(&fx);
+}
+
 /* ------------------------------------------------------------------ *
  * Null safety
  * ------------------------------------------------------------------ */
@@ -1131,6 +1177,7 @@ int main(void)
     RUN(test_frame_app_games);
     RUN(test_frame_game_snake);
     RUN(test_frame_game_memory);
+    RUN(test_snake_frame_is_seed_only);
     RUN(test_null_safety);
 
     rc = sa_end(h, "test_games");
