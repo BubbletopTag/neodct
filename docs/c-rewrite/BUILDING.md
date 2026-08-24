@@ -5,6 +5,108 @@ work; the **Buildroot build** takes hours and produces the thing that boots.
 
 ---
 
+## 0. Getting the branch
+
+The C rewrite lives on **`c-rewrite`**. `main` is still the Python.
+
+If you already have the repository:
+
+```sh
+git fetch origin c-rewrite
+git checkout c-rewrite
+```
+
+From scratch:
+
+```sh
+git clone https://github.com/BubbletopTag/neodct.git
+cd neodct
+git checkout c-rewrite
+```
+
+The clone is around 51 MB of history, because Buildroot is vendored rather than
+being a submodule — 15,000 tracked files. There is nothing to `git submodule
+update`; what you clone is what you build.
+
+### What you need before starting
+
+| | Host build | Buildroot build |
+| --- | --- | --- |
+| Time | seconds | **hours** on a cold tree |
+| Disk | ~200 MB | **10–15 GB** |
+| Network | none after `apt` | **unrestricted** — see below |
+| Gets you | tests, screenshots, `nd-core` on your laptop | an image that boots |
+
+**Buildroot downloads several hundred upstream tarballs.** Any network that
+filters outbound HTTPS will fail at the first one with
+`Proxy tunneling failed: Forbidden`, before a single package builds. If a
+mirror 403s on plain HTTP, fetching the tarball yourself over HTTPS into
+`buildroot/dl/<package>/` and re-running `make` is enough — the hash is checked
+either way, so a hand-fetched file is no less safe.
+
+### One thing that will bite you: NetSurf's `libnsfb`
+
+`buildroot/package/netsurf/netsurf.mk:21` builds the browser from the vendored
+fork in `netsurf-neodct/`, which **is** in the repository now. But one piece of
+it is not.
+
+`netsurf-neodct/libnsfb` is recorded as a **git submodule** — mode `160000`,
+a pointer to commit `56f22241` — and there is no `.gitmodules` saying where to
+fetch it from. So a clone gets an empty directory:
+
+```
+$ git ls-tree HEAD netsurf-neodct/
+040000 tree    netsurf-neodct/netsurf      <- 22 MB of real content
+160000 commit  netsurf-neodct/libnsfb      <- a pointer to nothing
+040000 tree    netsurf-neodct/tests        <- 52 MB the build never reads
+```
+
+The rsync then copies nothing and the build fails later, in the browser's own
+makefile rather than anywhere obvious:
+
+```
+make[2]: *** No rule to make target 'install'.  Stop.
+make[2]: Leaving directory '.../netsurf-3.11/libnsfb'
+```
+
+**On the machine where the fork was created this works**, because a real
+`libnsfb` is checked out there. That is the same trap the vendoring was meant
+to close: it does not fail for the person who has it, only for everyone else,
+and now it fails further into the build.
+
+Until the content is committed, build without the browser:
+
+```sh
+cd buildroot
+make neodct_qemu_defconfig
+sed -i 's/^BR2_PACKAGE_NETSURF=y/# BR2_PACKAGE_NETSURF is not set/' .config
+make olddefconfig
+make
+```
+
+That edits `.config` only, never the tracked defconfigs, so it is a local
+override rather than a change to what the project ships. Everything except the
+browser works; the Browser app's launcher is ported and simply finds no
+`netsurf-fb` to launch.
+
+To fix it properly, from inside `netsurf-neodct/`:
+
+```sh
+git rm --cached libnsfb      # drop the gitlink
+rm -rf libnsfb/.git          # make it a plain directory
+git add libnsfb && git commit
+```
+
+which is what `netsurf/` already is. A `.gitmodules` entry would also work, but
+a submodule inside a vendored fork buys nothing and is one more thing to
+forget.
+
+While in there: `netsurf.mk` reads only `netsurf/` and `libnsfb/`. `tests/` is
+52 MB of the 74 MB and is never touched, and `prefix/` is build output
+(`include/`, `lib/`). Already permanent in history, but worth not growing.
+
+---
+
 ## 1. The host build — start here
 
 Compiles the OS for your laptop, runs 40,000 tests, and renders the phone's
