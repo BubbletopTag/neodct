@@ -47,6 +47,7 @@
 #include <time.h>
 
 #include "nd_app.h"
+#include "nd_bench.h"
 #include "nd_battery.h"
 #include "nd_crash.h"
 #include "nd_db.h"
@@ -913,6 +914,7 @@ nd_err nd_ui_init_app(nd_ui *ui, nd_fb *fb, int keypad_fd)
     g_ring_seen_at = 0.0;
 
     (void)nd_settings_init();
+    nd_bench_mark("ui_init_app: settings");
 
     /* No modem, no battery, no notify: those live in the core and an app that
      * needs them asks across the boundary. An incoming call arrives here as
@@ -924,9 +926,12 @@ nd_err nd_ui_init_app(nd_ui *ui, nd_fb *fb, int keypad_fd)
         ui->has_matrix_keypad = false;
     }
 
+    nd_bench_mark("ui_init_app: input");
     ui->unread_sms = nd_db_count_unread_sms();
+    nd_bench_mark("ui_init_app: unread sms");
 
     rc = ui_common_init(ui, fb);
+    nd_bench_mark("ui_init_app: fonts+canvas");
     if (rc != ND_OK) {
         nd_ui_teardown(ui);
         return rc;

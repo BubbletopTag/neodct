@@ -38,6 +38,7 @@
 #include <unistd.h>
 
 #include "nd_app.h"
+#include "nd_bench.h"
 #include "nd_crash.h"
 #include "nd_fb.h"
 #include "nd_log.h"
@@ -112,7 +113,9 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    nd_bench_mark("apprun: exec + link");
     handle = dlopen(resolved, RTLD_NOW | RTLD_LOCAL);
+    nd_bench_mark("apprun: dlopen(app.so)");
     if (handle == NULL) {
         nd_log_err(ND_LOG_OS, "App load failed: %s", dlerror());
         return 1;
@@ -132,6 +135,7 @@ int main(int argc, char **argv)
 
     /* The key channel is opened by nd_ui_init_app(), which takes ownership of
      * the descriptor -- opening it here as well would close it twice. */
+    nd_bench_mark("apprun: framebuffer");
     if (nd_ui_init_app(&ui, fb, keypad_fd) != ND_OK) {
         nd_log_err(ND_LOG_OS, "App load failed: no UI context for %s", app_dir);
         rc = 1;
@@ -168,7 +172,9 @@ int main(int argc, char **argv)
         }
     }
 
+    nd_bench_mark("apprun: app returned");
     nd_ui_teardown(&ui);
+    nd_bench_mark("apprun: ui teardown");
 
 out:
     /* Step 3 of the teardown contract: app_shutdown() runs from ORDINARY code,
