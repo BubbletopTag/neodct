@@ -147,6 +147,7 @@ GOLDEN := $(abspath ../tests/golden)
 LIB_SRCS    := $(wildcard lib/*.c)
 CORE_SRCS   := $(wildcard core/*.c)
 APPRUN_SRCS := $(wildcard apprun/*.c)
+MEDIA_SRCS  := $(wildcard mediawidget/*.c)
 SHOOT_SRCS  := $(wildcard tools/nd_shoot*.c)
 SELF_SRCS   := $(wildcard tools/nd_selftest*.c)
 DISPLAYD_SRCS := $(wildcard displayd/*.c)
@@ -158,6 +159,7 @@ APP_DIRS := $(sort $(dir $(wildcard apps/*/*.c)))
 LIB_OBJS    := $(patsubst %.c,$(OBJDIR)/%.o,$(LIB_SRCS))
 CORE_OBJS   := $(patsubst %.c,$(OBJDIR)/%.o,$(CORE_SRCS))
 APPRUN_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(APPRUN_SRCS))
+MEDIA_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(MEDIA_SRCS))
 SHOOT_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(SHOOT_SRCS))
 SELF_OBJS   := $(patsubst %.c,$(OBJDIR)/%.o,$(SELF_SRCS))
 DISPLAYD_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(DISPLAYD_SRCS))
@@ -177,6 +179,7 @@ TEST_APP_SOS  := $(foreach d,$(TEST_APP_DIRS),\
 TARGETS := $(if $(LIB_SRCS),$(LIB))
 TARGETS += $(if $(CORE_SRCS),$(BINDIR)/nd-core)
 TARGETS += $(if $(APPRUN_SRCS),$(BINDIR)/nd-apprun)
+TARGETS += $(if $(MEDIA_SRCS),$(BINDIR)/neodct-play)
 TARGETS += $(if $(SHOOT_SRCS),$(BINDIR)/nd-shoot)
 TARGETS += $(if $(SELF_SRCS),$(BINDIR)/nd-selftest)
 TARGETS += $(if $(DISPLAYD_SRCS),$(BINDIR)/neodct_displayd)
@@ -267,6 +270,12 @@ $(BINDIR)/neodct_displayd: $(DISPLAYD_OBJS)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)printf '  %-7s %s\n' 'LINK' '$@'
 	$(Q)$(CC) $(DISPLAYD_OBJS) -o $@ $(LDFLAGS)
+
+# neodct-play: the MediaWidget CLI. NetSurf execs this by absolute path
+# when a <video> is clicked, so where it installs is part of the contract
+# with the browser -- see the install rule and nd_media.h.
+$(BINDIR)/neodct-play: $(MEDIA_OBJS) $(LIB)
+	$(LINK_BIN)
 
 $(BINDIR)/nd-shoot: $(SHOOT_OBJS) $(LIB)
 	$(LINK_BIN)
@@ -368,6 +377,16 @@ install: all
 	@# so installing here is all it takes for the initramfs to keep working.
 	$(Q)$(if $(DISPLAYD_SRCS),$(INSTALL) -d $(DESTDIR)$(PREFIX)/hw,:)
 	$(Q)$(if $(DISPLAYD_SRCS),$(INSTALL) -m 0755 $(BINDIR)/neodct_displayd $(DESTDIR)$(PREFIX)/hw/,:)
+	@# neodct-play goes where the BROWSER looks for it, not where it would
+	@# be tidiest. netsurf-neodct/.../neodct_media.h has
+	@#   #define NEODCT_MEDIA_PLAYER "/NeoDCT/System/core/MediaWidget/neodct-play"
+	@# as a compile-time constant, so this path is a contract with a
+	@# separately-built program. Move it and every <video> on the web goes
+	@# back to answering "Cannot play that". input.conf ships beside it from
+	@# the overlay, and nd_media.h hardcodes that path too.
+	$(Q)$(if $(MEDIA_SRCS),$(INSTALL) -d $(DESTDIR)$(PREFIX)/core/MediaWidget,:)
+	$(Q)$(if $(MEDIA_SRCS),$(INSTALL) -m 0755 $(BINDIR)/neodct-play \
+	    $(DESTDIR)$(PREFIX)/core/MediaWidget/,:)
 	$(Q)for so in $(APP_SOS); do \
 	    name=$$(basename $$(dirname $$so)); \
 	    [ "$$name" = Stub ] && continue; \
