@@ -365,10 +365,46 @@ into `nd_ui.c`; twice the host answer disagreed with the phone's. With
 NEODCT_BENCH=1 /NeoDCT/System/bin/nd-apprun /NeoDCT/System/apps/Clock run
 ```
 
-**Cold launches are still 120–170 ms.** The first time an app is opened after
-boot, `app.so`, the font and the databases all come off squashfs uncompressed
-for the first time. Only the warm number is 50 ms. Both are honest; which one
-the owner sees depends on whether they have opened that app before.
+### The "cold launch" was not a cold cache — a correction
+
+The paragraph that stood here said the first app opened after boot took
+120–170 ms because `app.so`, the font and the databases came off squashfs
+uncompressed for the first time. **That was wrong**, and the evidence was
+already in the numbers above it: the *second* launch measured worse than the
+first — 45.9 ms in `4 faces` against 24.6 ms. A cold cache does not get
+colder.
+
+What it actually was: the rcS split moved the rest of the boot off the
+critical path, which is why the home screen appears in a third of the time —
+but the work did not stop. `S11udevall` alone is 2.7 s, and on a single core
+it was then competing with the UI the user was already looking at, and with
+any app they opened in that window.
+
+Two experiments settled it. Waiting 25 s for the background work to finish
+and *then* launching an app that had never been opened: **40 ms**, no penalty
+at all. And running the background group under `nice -n 10`, which is now
+what `rcS` does:
+
+| launch | before | after |
+| --- | --- | --- |
+| 1st ever, during boot | 120 ms | **50 ms** |
+| 2nd, never opened before | 140 ms | **50 ms** |
+| 3rd, 4th | 50 ms | 50 ms |
+
+Boot itself is unchanged at 6.0 s, within noise of the 5.9 s before it.
+`nice 10` and not 19 on purpose: this is the rest of the boot, with the
+network and the modem behind it, so it should yield to the UI rather than be
+starved by it.
+
+A page-cache pre-warm at boot was written first, on the strength of the wrong
+diagnosis, and deleted: it did not help, and being another 1 MB of squashfs
+decompression in exactly the contended window, it made the real problem
+slightly worse. Cache the CPU, not the pages.
+
+**One launch does warm the next, though — and it is shared.** Opening one app
+makes every *other* app fast, including ones never opened, because what warms
+is `libneodct.so`, freetype, sqlite, the font and the databases. Each
+`app.so` is a few tens of KB and does not move the number.
 
 ### The boot: 17.4 s to 5.9 s
 
@@ -424,7 +460,7 @@ NEODCT_APPEND="printk.time=1" NEODCT_DEBUG=1 neodct/tools/run_qemu.sh
 
 ### What is left
 
-The 20 ms spawn floor, 12 ms of `FT_New_Face` (four faces, one file, opened
-four times), and the cold-cache first launch. None of them is the difference
-between "instant" and "a slight delay" any more; all three are written down
-here so the next person does not have to re-derive them.
+The 20 ms spawn floor and 12 ms of `FT_New_Face` — four faces, one font file,
+opened four times. Neither is the difference between "instant" and "a slight
+delay" any more; both are written down here so the next person does not have
+to re-derive them.

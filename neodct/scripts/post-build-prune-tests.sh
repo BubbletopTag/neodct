@@ -171,6 +171,17 @@ find "$TARGET_DIR/NeoDCT" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/
 # now-empty service directories under System/core go with them -- that tree is
 # Python and t9.dict, nothing else, so an empty directory there is a leftover
 # and not something somebody meant.
+# The icebox does not ship.
+#
+# /NeoDCT/Development is where work gets parked -- Icebox/MusicPlayer is a
+# whole app with an icon and a manifest_disabled.disabled, sitting there
+# waiting for somebody to come back to it. That is a working-tree thing.
+# Nothing on the phone reads the directory (grep across src, overlay/etc,
+# overlay/bin and scripts finds no reference at all), so shipping it just
+# puts half-finished code on a device where it can only confuse whoever
+# finds it. It stays in the repository, which is the point of an icebox.
+rm -rf "$TARGET_DIR/NeoDCT/Development"
+
 if [ "${NEODCT_KEEP_PYTHON:-0}" != "1" ] && [ -d "$TARGET_DIR/NeoDCT" ]; then
     py_count=$(find "$TARGET_DIR/NeoDCT" \
         \( -name '*.py' -o -name '*.pyc' -o -name '*.pyo' -o -name '*.py.old' \) \

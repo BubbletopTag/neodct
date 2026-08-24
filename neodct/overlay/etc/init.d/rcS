@@ -83,8 +83,10 @@ run_one() {
             )
             ;;
         *)
-            # No sh extension, so fork subprocess.
-            $_script start
+            # No sh extension, so fork subprocess. RUN_NICE is empty for the
+            # foreground scripts and "nice -n 10" for the background ones --
+            # see the comment on the LATE loop below.
+            $RUN_NICE $_script start
             ;;
     esac
 
@@ -94,6 +96,7 @@ run_one() {
         'BEGIN { d = b - a; if (d >= slow) printf "%s %s took %.2fs\n", tag, n, d }'
 }
 
+RUN_NICE=""
 LATE=""
 for i in /etc/init.d/S??* ; do
 
@@ -114,7 +117,22 @@ done
 
 # One subshell for all of them, so S40network still precedes S41ethernet
 # still precedes S45modem. Backgrounded, so init moves on to the UI now.
+#
+# And niced, which matters more than it looks. Moving this work off the
+# critical path got the home screen up in a third of the time, but the work
+# did not stop -- S11udevall alone is 2.7 s -- and on a single core it then
+# competed with the UI the user was already looking at. Measured: an app
+# launched in that window took 120-170 ms, and the SECOND launch was slower
+# than the first, which is not how a cold cache behaves. It was never cold
+# pages, it was contention: once the background work finishes, an app that
+# has never been opened launches in 40 ms.
 if [ -n "$LATE" ]; then
+    # nice 10 rather than 19: this is not idle-only work, it is the rest of
+    # the boot, and the network and the modem are behind it. It should yield
+    # to the UI, not be starved by it. RUN_NICE is read by run_one().
+    if command -v nice > /dev/null 2>&1; then
+        RUN_NICE="nice -n 10"
+    fi
     (
         for i in $LATE; do
             run_one "$i"
