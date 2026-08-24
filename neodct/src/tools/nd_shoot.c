@@ -12,21 +12,31 @@
  *   uistub.PathRemap             ->  nd_path_set_root() over a staged root
  *   goldenframe._Frozen          ->  nd_vclock_enable() (lib/nd_vclock.c)
  *
- * ============ IT RENDERS 25 OF THE 49, ON PURPOSE ============
+ * ============ IT RENDERS 28 OF THE 49, ON PURPOSE ============
  *
  * The 49 recipes are spec-build-test.md section 3.6. Twenty-four of them
- * launch an app, and no app exists in this tree yet -- apps/ is empty, the
- * Dialer and the crash handler are not ported, and the two games are not
- * either. A capture tool that drew *something* for those names would be
- * worse than useless: goldenframe.py would report 24 pixel diffs that say
+ * launch an app, and SESSION-SCOPE.md ports exactly three of those apps this
+ * session: the Clock (which IS the stub dialog), CubeBench and the Browser
+ * launcher. The other twenty-one stock and engineering apps ship their real
+ * manifest and icon with a stub app.so behind them, so their screens do not
+ * exist yet -- and a capture tool that drew *something* for those names would
+ * be worse than useless: goldenframe.py would report pixel diffs that say
  * nothing about the port, and a passing frame could not be told from a
  * coincidence.
  *
- * So the twenty-four are SKIPPED, by name and with a reason, listed in
- * <out>/nd-shoot-skipped.json and printed on stdout. goldenframe.py's
- * compare() then reports each of them as "missing -- not rendered by
- * candidate", which is the truth. The frames that ARE rendered are the whole
- * home screen set, the whole app-selector set and the whole widget gallery.
+ * So the twenty-one are SKIPPED, by name and each with the reason that
+ * actually applies to it, listed in <out>/nd-shoot-skipped.json and printed
+ * on stdout. goldenframe.py's compare() then reports each of them as
+ * "missing -- not rendered by candidate", which is the truth. The frames that
+ * ARE rendered are the whole home screen set, the whole app-selector set, the
+ * whole widget gallery, the crash screen, the SMS banner, app-clock and
+ * eng-cubebench.
+ *
+ * The Browser is real too and is staged with its real app.so, but none of the
+ * 49 reference frames launches it -- `menu-browser` is the app-selector tile,
+ * which is rendered from the manifest and needs no app.so at all. So there is
+ * nothing for this tool to un-skip on its account; it is listed here because
+ * "the Browser is missing" would otherwise be the obvious wrong conclusion.
  *
  * ============ WHY THE STAGED ROOT IS A SYMLINK FARM ============
  *
@@ -66,6 +76,7 @@
 
 #include "nd_app.h"
 #include "nd_capture.h"
+#include "nd_contacts.h"
 #include "nd_crash.h"
 #include "nd_draw.h"
 #include "nd_fb.h"
@@ -90,52 +101,109 @@ typedef struct {
     const char *reason;
 } shoot_skip;
 
-/* The twenty-four names spec-build-test.md section 3.6 defines that this tree
+/* The nineteen names spec-build-test.md section 3.6 defines that this tree
  * cannot honestly draw yet. Kept in the file so the list is reviewable
  * against the spec table, and emitted verbatim into the output directory.
  *
- * Three of these are byte-identical to widget frames that ARE rendered
- * (app-clock == widget-messagedialog, app-messages == widget-pagedlist,
- * app-phonebook == widget-verticallist). Copying the pixels across would make
- * the count look better and would be a lie: nothing launched an app. */
+ * EVERY REASON IS THE REASON FOR THAT ONE FRAME. A blanket string is worse
+ * than no string: this table said "neodct/src/apps/ is empty" for months
+ * after apps/CubeBench and apps/Browser landed, which is how eng-cubebench
+ * stayed skipped while the app that draws it was sitting in the build. A
+ * reader has to be able to tell "nobody has written this app" from "the app
+ * exists and something else is in the way", so the two are worded
+ * differently and the module that is actually missing is named.
+ *
+ * One of these is byte-identical to a widget frame that IS rendered
+ * (app-messages == widget-pagedlist). Copying the pixels across would make
+ * the count look better and would be a lie: nothing launched an app.
+ * app-phonebook has the same relationship to widget-verticallist and is NOT
+ * on this list any more -- apps/PhoneBook is a real port, and
+ * shoot_stock_apps() below launches it. */
 static const shoot_skip SKIPPED[] = {
     /* Group 3 -- shoot_stock_apps. SESSION-SCOPE.md keeps all 25 apps with
-     * their real manifest and icon, but their app.so is not written yet; the
-     * whole of neodct/src/apps/ is empty. */
-    /* app-clock is NOT here: the Clock app IS the stub dialog (section 3.6
-     * records app-clock as byte-identical to widget-messagedialog), so the one
-     * shipped app.so renders it for real. The other twelve draw their own
-     * screens and the stub cannot stand in for any of them. */
-    {"app-phonebook", "app not implemented: neodct/src/apps/ is empty"},
-    {"app-messages", "app not implemented: neodct/src/apps/ is empty"},
-    {"app-messages-inbox", "app not implemented: neodct/src/apps/ is empty"},
-    {"app-calllog", "app not implemented: neodct/src/apps/ is empty"},
-    {"app-settings", "app not implemented: neodct/src/apps/ is empty"},
-    {"app-settings-wallpaper", "app not implemented: neodct/src/apps/ is empty"},
-    {"app-games", "app not implemented: neodct/src/apps/ is empty"},
-    {"app-calculator", "app not implemented: neodct/src/apps/ is empty"},
-    {"app-calculator-options", "app not implemented: neodct/src/apps/ is empty"},
-    {"app-tones", "app not implemented: neodct/src/apps/ is empty"},
-    {"app-musicplayer", "app not implemented: neodct/src/apps/ is empty"},
+     * their real manifest and icon, and stubs every one of them except
+     * CubeBench and the Browser: what is behind these twelve manifests is
+     * apps/Stub/app.so, a "This application has not been implemented yet."
+     * dialog that is not the screen the reference frame holds.
+     *
+     * app-clock is NOT here: the Clock app IS that dialog (section 3.6
+     * records app-clock as byte-identical to widget-messagedialog), so the
+     * stub renders it for real. */
+    {"app-messages", "Messages is stubbed this session (SESSION-SCOPE.md); no folder list"},
+    {"app-messages-inbox", "Messages is stubbed this session (SESSION-SCOPE.md); no inbox"},
+    {"app-calllog", "CallLog is stubbed this session (SESSION-SCOPE.md)"},
+    {"app-settings", "Settings is stubbed this session (SESSION-SCOPE.md)"},
+    {"app-settings-wallpaper", "Settings is stubbed this session (SESSION-SCOPE.md)"},
+    {"app-games", "Games is stubbed this session (SESSION-SCOPE.md)"},
+    {"app-calculator", "Calculator is stubbed this session (SESSION-SCOPE.md)"},
+    {"app-calculator-options", "Calculator is stubbed this session (SESSION-SCOPE.md)"},
+    {"app-tones", "Tones is stubbed this session (SESSION-SCOPE.md)"},
+    {"app-musicplayer", "Music is stubbed this session (SESSION-SCOPE.md)"},
     {"app-koki", "Koki is out of scope this session (SESSION-SCOPE.md)"},
 
-    /* Group 4 -- shoot_games. Both are launched through the Games app. */
-    {"game-snake", "app not implemented: Games has no app.so yet"},
-    {"game-memory", "app not implemented: Games has no app.so yet"},
+    /* Group 4 -- shoot_games. Both are launched through the Games app, which
+     * is stubbed; and both are `recut` class anyway (OPEN-QUESTIONS.md frame
+     * tolerance policy), so their references will be re-captured from C
+     * rather than matched against the Python's MT19937. */
+    {"game-snake", "Games is stubbed this session; snake.py not ported (recut class)"},
+    {"game-memory", "Games is stubbed this session; memory.py not ported (recut class)"},
 
-    /* Group 5 -- shoot_telephony. home-sms-banner IS rendered; the other four
-     * need the Dialer screens, the PhoneBook contact picker and the crash
-     * handler, none of which exist in neodct/src yet. */
+    /* Group 5 -- shoot_telephony. home-sms-banner and crash-screen ARE
+     * rendered; these three need modules that do not exist in neodct/src. */
     {"call-active", "System/ui/Dialer/call_screen not ported yet"},
     {"call-incoming", "System/ui/Dialer/incoming_screen not ported yet"},
-    {"contacts-picker", "PhoneBook shared/list_ui not ported yet"},
 
-    /* Group 6 -- shoot_engineering_apps. */
-    {"eng-modem", "app not implemented: neodct/src/apps/ is empty"},
-    {"eng-fuelgauge", "app not implemented: neodct/src/apps/ is empty"},
-    {"eng-lcdtest", "app not implemented: neodct/src/apps/ is empty"},
-    {"eng-cubebench", "app not implemented: neodct/src/apps/ is empty"},
-    {"eng-tests", "app not implemented: neodct/src/apps/ is empty"},
+    /* Group 6 -- shoot_engineering_apps. eng-cubebench is NOT here any more:
+     * apps/CubeBench is a real port and shoot_engineering_apps() below
+     * launches it. The other four engineering apps are behind the stub. */
+    {"eng-modem", "ModemInfo is stubbed this session (SESSION-SCOPE.md)"},
+    {"eng-fuelgauge", "FuelGauge is stubbed this session (SESSION-SCOPE.md)"},
+    {"eng-lcdtest", "LCDTest is stubbed this session (SESSION-SCOPE.md)"},
+    {"eng-tests", "Tests is stubbed this session (SESSION-SCOPE.md)"},
+};
+
+/* What this build DOES draw, in the order the groups draw it. It is a
+ * declaration, not a description: main() checks the number of frames actually
+ * saved against it and fails the run if the two have drifted apart, because
+ * this list was two names short of the truth for as long as the skip table
+ * was wrong and nothing noticed. --list prints it. */
+static const char *const RENDERED[] = {
+    /* shoot_home */
+    "home",
+    "home-panel",
+    "home-dialing",
+    "home-nowallpaper",
+    "home-simulation",
+    /* shoot_app_selector */
+    "menu-phone-book",
+    "menu-panel",
+    "menu-messages",
+    "menu-games",
+    "menu-settings",
+    "menu-calculator",
+    "menu-koki-mobile",
+    "menu-browser",
+    "menu-music",
+    /* shoot_stock_apps */
+    "app-phonebook",
+    "app-clock",
+    /* shoot_telephony */
+    "home-sms-banner",
+    "contacts-picker",
+    "crash-screen",
+    /* shoot_engineering_apps */
+    "eng-cubebench",
+    /* shoot_widgets */
+    "widget-verticallist",
+    "widget-verticallist-scrolled",
+    "widget-pagedlist",
+    "widget-textinput",
+    "widget-textinputlong",
+    "widget-messagedialog",
+    "widget-textscroller",
+    "widget-levelselector",
+    "widget-infoscreen",
+    "widget-softkeybar",
 };
 
 /* ------------------------------------------------------------------ *
@@ -309,26 +377,53 @@ static bool find_overlay(const char *flag)
  * to the app.so this build produced.
  *
  * Every other entry of System stays a plain symlink, so the fonts, wallpapers,
- * icons and ui_home.json are byte-for-byte the same files the 25 already-exact
- * frames were rendered from. The engineering apps are not expanded: nothing
- * launches one, and the menu only needs their manifest and icon.
+ * icons and ui_home.json are byte-for-byte the same files the 27 already-exact
+ * frames were rendered from.
+ *
+ * System/engineering gets the same treatment one level deeper, because the
+ * engineering apps live in System/engineering/apps and NOT in System/apps --
+ * `Cube Bench` is one of them. So engineering/ is a real directory too, its
+ * tools/ stays a symlink, and its apps/ is expanded exactly like the stock
+ * one. Before eng-cubebench was rendered this whole subtree was a single
+ * symlink and nothing could have gained an app.so under it.
+ *
+ * ============ WHICH app.so EACH APP DIRECTORY GETS ============
+ *
+ * The one this build produced for it, if there is one, and apps/Stub/app.so
+ * otherwise. The mapping is by directory name: neodct/src/apps/<Name> builds
+ * build/<variant>/apps/<Name>/app.so, and <Name> is also the overlay's
+ * directory name -- CubeBench and Browser both line up today, and an app a
+ * later work package adds lines up without touching this file.
+ *
+ * Staging the real .so is not the same as rendering with it. Only the frames
+ * that call run_app_inproc() dlopen anything; the rest read the manifest and
+ * the icon, which are the overlay's own files either way.
  */
 
-/* build/<variant>/bin/nd-shoot -> build/<variant>/apps/Stub/app.so. The one
- * stub, the one every app directory gets. */
-static bool stub_app_so(char *out, size_t out_sz)
+/* build/<variant>/bin/nd-shoot -> build/<variant>/apps/<name>/app.so. False
+ * when this build has no such app, which is the normal case for the
+ * twenty-two apps that are stubbed. */
+static bool built_app_so(const char *name, char *out, size_t out_sz)
 {
     char exe[ND_PATH_MAX];
 
     if (!self_exe_dir(exe, sizeof exe))
         return false;
-    if (nd_snprintf(out, out_sz, "%s/../apps/Stub/app.so", exe) != ND_OK)
+    if (nd_snprintf(out, out_sz, "%s/../apps/%s/app.so", exe, name) != ND_OK)
         return false;
     return access(out, R_OK) == 0;
 }
 
-/* One app directory: a real directory of symlinks, plus app.so. */
-static bool stage_one_app(const char *src_dir, const char *dst_dir, const char *stub)
+/* The one stub, the one every app directory gets when nothing better exists. */
+static bool stub_app_so(char *out, size_t out_sz)
+{
+    return built_app_so("Stub", out, out_sz);
+}
+
+/* One app directory: a real directory of symlinks, plus app.so. `so` is the
+ * shared object to link in as this app's app.so, or NULL to leave the
+ * directory without one. */
+static bool stage_one_app(const char *src_dir, const char *dst_dir, const char *so)
 {
     DIR *d = opendir(src_dir);
     struct dirent *e;
@@ -353,60 +448,37 @@ static bool stage_one_app(const char *src_dir, const char *dst_dir, const char *
     }
     (void)closedir(d);
 
-    if (stub == NULL)
+    if (so == NULL)
         return true;
     if (nd_snprintf(link, sizeof link, "%s/%s", dst_dir, ND_APP_SO_NAME) != ND_OK)
         return false;
     (void)unlink(link);
-    return symlink(stub, link) == 0;
+    return symlink(so, link) == 0;
 }
 
-/* System as a real directory: every entry symlinked, except apps/, which is
- * expanded so each app can gain an app.so. */
-static bool stage_system(const char *sys_src, const char *sys_dst)
+/* A whole apps/ directory: one real subdirectory per app, each with the
+ * app.so this build produced for it, falling back to `stub`. Used for both
+ * System/apps and System/engineering/apps -- CubeBench is in the second one,
+ * and the two need identical treatment because the app registry scans them
+ * identically (nd_ui.c rescan_apps()). */
+static bool stage_apps_dir(const char *apps_src, const char *apps_dst, const char *stub)
 {
-    char stub[ND_PATH_MAX];
-    char apps_src[ND_PATH_MAX];
-    char apps_dst[ND_PATH_MAX];
-    char link[ND_PATH_MAX];
-    char target[ND_PATH_MAX];
     DIR *d;
     struct dirent *e;
-    bool have_stub = stub_app_so(stub, sizeof stub);
+    char link[ND_PATH_MAX];
+    char target[ND_PATH_MAX];
+    bool ok = true;
 
-    if (!have_stub)
-        nd_log(ND_LOG_OS, "no apps/Stub/app.so in this build; app frames will be skipped");
-
-    if (mkdir(sys_dst, 0755) != 0 && errno != EEXIST)
-        return false;
-
-    d = opendir(sys_src);
-    if (d == NULL)
-        return false;
-    while ((e = readdir(d)) != NULL) {
-        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
-            continue;
-        if (strcmp(e->d_name, "apps") == 0)
-            continue; /* expanded below */
-        if (nd_snprintf(link, sizeof link, "%s/%s", sys_dst, e->d_name) != ND_OK ||
-            nd_snprintf(target, sizeof target, "%s/%s", sys_src, e->d_name) != ND_OK)
-            continue;
-        if (symlink(target, link) != 0 && errno != EEXIST)
-            nd_log_err(ND_LOG_OS, "symlink %s: %s", link, strerror(errno));
-    }
-    (void)closedir(d);
-
-    if (nd_snprintf(apps_src, sizeof apps_src, "%s/apps", sys_src) != ND_OK)
-        return false;
-    if (nd_snprintf(apps_dst, sizeof apps_dst, "%s/apps", sys_dst) != ND_OK)
-        return false;
     if (mkdir(apps_dst, 0755) != 0 && errno != EEXIST)
         return false;
 
     d = opendir(apps_src);
     if (d == NULL)
         return false;
-    while ((e = readdir(d)) != NULL) {
+    while (ok && (e = readdir(d)) != NULL) {
+        char own[ND_PATH_MAX];
+        const char *so;
+
         if (e->d_name[0] == '.')
             continue;
         if (nd_snprintf(target, sizeof target, "%s/%s", apps_src, e->d_name) != ND_OK ||
@@ -414,11 +486,99 @@ static bool stage_system(const char *sys_src, const char *sys_dst)
             continue;
         if (!dir_exists(target))
             continue;
-        if (!stage_one_app(target, link, have_stub ? stub : NULL))
-            return false;
+
+        so = built_app_so(e->d_name, own, sizeof own) ? own : stub;
+        ok = stage_one_app(target, link, so);
+    }
+    (void)closedir(d);
+    return ok;
+}
+
+/* Every entry of `src` symlinked into `dst`, except the names in `skip`,
+ * which the caller builds itself. */
+static bool stage_links_except(const char *src, const char *dst, const char *const *skip,
+                               size_t n_skip)
+{
+    DIR *d;
+    struct dirent *e;
+    char link[ND_PATH_MAX];
+    char target[ND_PATH_MAX];
+
+    if (mkdir(dst, 0755) != 0 && errno != EEXIST)
+        return false;
+
+    d = opendir(src);
+    if (d == NULL)
+        return false;
+    while ((e = readdir(d)) != NULL) {
+        size_t i;
+        bool skipped = false;
+
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+        for (i = 0u; i < n_skip; i++) {
+            if (strcmp(e->d_name, skip[i]) == 0)
+                skipped = true;
+        }
+        if (skipped)
+            continue;
+        if (nd_snprintf(link, sizeof link, "%s/%s", dst, e->d_name) != ND_OK ||
+            nd_snprintf(target, sizeof target, "%s/%s", src, e->d_name) != ND_OK)
+            continue;
+        if (symlink(target, link) != 0 && errno != EEXIST)
+            nd_log_err(ND_LOG_OS, "symlink %s: %s", link, strerror(errno));
     }
     (void)closedir(d);
     return true;
+}
+
+/* System/engineering: tools/ is a plain symlink, apps/ is expanded so
+ * CubeBench can gain the app.so this build made for it. */
+static bool stage_engineering(const char *src, const char *dst, const char *stub)
+{
+    static const char *const EXPANDED[] = {"apps"};
+    char apps_src[ND_PATH_MAX];
+    char apps_dst[ND_PATH_MAX];
+
+    if (!stage_links_except(src, dst, EXPANDED, ND_ARRAY_LEN(EXPANDED)))
+        return false;
+    if (nd_snprintf(apps_src, sizeof apps_src, "%s/apps", src) != ND_OK ||
+        nd_snprintf(apps_dst, sizeof apps_dst, "%s/apps", dst) != ND_OK)
+        return false;
+    return stage_apps_dir(apps_src, apps_dst, stub);
+}
+
+/* System as a real directory: every entry symlinked, except apps/ and
+ * engineering/, which are expanded so each app can gain an app.so. */
+static bool stage_system(const char *sys_src, const char *sys_dst)
+{
+    static const char *const EXPANDED[] = {"apps", "engineering"};
+    char stub[ND_PATH_MAX];
+    char child_src[ND_PATH_MAX];
+    char child_dst[ND_PATH_MAX];
+    bool have_stub = stub_app_so(stub, sizeof stub);
+
+    if (!have_stub)
+        nd_log(ND_LOG_OS, "no apps/Stub/app.so in this build; app frames will be skipped");
+
+    if (!stage_links_except(sys_src, sys_dst, EXPANDED, ND_ARRAY_LEN(EXPANDED)))
+        return false;
+
+    if (nd_snprintf(child_src, sizeof child_src, "%s/apps", sys_src) != ND_OK ||
+        nd_snprintf(child_dst, sizeof child_dst, "%s/apps", sys_dst) != ND_OK)
+        return false;
+    if (!stage_apps_dir(child_src, child_dst, have_stub ? stub : NULL))
+        return false;
+
+    /* An overlay without an engineering/ directory is not an error: the
+     * engineering menu is simply empty, which is what a non-engineering image
+     * looks like. */
+    if (nd_snprintf(child_src, sizeof child_src, "%s/engineering", sys_src) != ND_OK ||
+        nd_snprintf(child_dst, sizeof child_dst, "%s/engineering", sys_dst) != ND_OK)
+        return false;
+    if (!dir_exists(child_src))
+        return true;
+    return stage_engineering(child_src, child_dst, have_stub ? stub : NULL);
 }
 
 /* /NeoDCT/System is the read-only overlay, symlinked; /NeoDCT/User is real
@@ -755,7 +915,7 @@ static void shoot_telephony(nd_capture *cap)
     nd_fb *fb = nd_capture_fb(cap);
     nd_ui ui;
 
-    printf("[shoot] telephony (1 of 5 -- the Dialer and CrashHandler are not ported)\n");
+    printf("[shoot] telephony (3 of 5 -- the two Dialer screens are not ported)\n");
 
     write_settings("Palestine.jpg");
     nd_vclock_enable();
@@ -785,6 +945,36 @@ static void shoot_telephony(nd_capture *cap)
     ui.unread_sms = 1;
     nd_ui_update(&ui);
     save_recent(cap, "home-sms-banner");
+
+    /* "The contact picker the home screen opens on up/down": the last thing
+     * the first StubUI block does, on the SAME ui and the same clock.
+     *
+     *     ui.keys.push(BACK)
+     *     contacts.show_contact_selector(ui, title="Select", btn_text="Call")
+     *
+     * The list has one row -- init_databases() seeded ("NeoDCT Support",
+     * "555-1234", 2) into the staged root when nd_ui_init ran -- so the
+     * picker paints "Call" on the strip, draws the list, and leaves through
+     * the queued Back. The list's frame is the one saved; nothing on it reads
+     * the clock, but the two throwaway ticks above still decide its number.
+     *
+     * shoot_docs.py wraps the call in try/except because in the Python a
+     * cancelled picker can raise out of the stub's key script. Here Back is a
+     * value, not an exception, so there is nothing to catch. */
+    {
+        static const int32_t BACK_ONCE[] = {ND_KEY_CLEAR};
+        key_script ks;
+        nd_contact picked;
+
+        if (!key_script_begin(&ks, &ui, BACK_ONCE, ND_ARRAY_LEN(BACK_ONCE))) {
+            nd_log_err(ND_LOG_UI, "shoot: cannot open a key script for the contact picker");
+            g_failed++;
+        } else {
+            (void)nd_contacts_show_selector(&ui, "Select", "Call", &picked);
+            key_script_end(&ks, &ui);
+            save_recent(cap, "contacts-picker");
+        }
+    }
 
     nd_ui_teardown(&ui);
     nd_ui_sim_clear(&ui);
@@ -826,11 +1016,31 @@ static void shoot_telephony(nd_capture *cap)
  * canvas. That path is proved separately, out of process and with a real
  * SIGSEGV, in test/unit/test_proc.c.
  *
- * Only app-clock is rendered. spec-build-test.md section 3.6 records
- * app-clock as byte-identical to widget-messagedialog because the Clock app IS
- * a "This application has not been implemented yet." dialog -- so the one
- * shipped app.so draws it for real. The other twelve stock apps draw their own
- * screens; the stub cannot stand in for any of them and they stay skipped.
+ * Two of the thirteen are rendered.
+ *
+ *   app-phonebook   apps/PhoneBook is a real port. Its run() builds the
+ *                   seven-item VerticalList, paints "Select" and blocks, and
+ *                   that second frame is the reference. spec-build-test.md
+ *                   section 3.6 records app-phonebook as byte-identical to
+ *                   widget-verticallist, and the two are drawn by different
+ *                   code here -- one by the widget gallery, one by the app --
+ *                   so agreeing is a real check rather than a tautology.
+ *   app-clock       section 3.6 records app-clock as byte-identical to
+ *                   widget-messagedialog because the Clock app IS a "This
+ *                   application has not been implemented yet." dialog, so the
+ *                   one shipped stub app.so draws it for real.
+ *
+ * The other eleven stock apps draw their own screens; the stub cannot stand
+ * in for any of them and they stay skipped.
+ *
+ * ============ A FRESH UI PER CASE, AS THE RECIPE HAS ============
+ *
+ * shoot_docs.py opens a new `with StubUI(wallpaper="Palestine.jpg")` block
+ * for every case in shoot_stock_apps, which means a fresh virtual clock and a
+ * fresh canvas each time. Both frames here clear every row they occupy, so
+ * neither is decided by it today -- but the next app ported into this group
+ * may well be, and a shared clock is exactly the kind of difference that is
+ * invisible until it is not.
  */
 
 /* MessageDialog flushes pending input before its first draw, so a key written
@@ -855,13 +1065,29 @@ static bool hold_key_begin(key_script *ks, nd_ui *ui, int32_t code)
 
 static size_t app_index_of(const nd_ui *ui, const char *name);
 
-static void run_stock_app(nd_capture *cap, nd_ui *ui, const char *manifest_name,
-                          int64_t frame_budget, const char *slug)
+/* uistub.run_app(ui, name, keys=...), by dlopen.
+ *
+ * `manifest_name` is the manifest's "name" field and NOT the directory name:
+ * the two differ for the engineering apps, where System/engineering/apps/
+ * CubeBench/manifest.json says "Cube Bench", with a space. uistub matches on
+ * the manifest name (`if app["name"] == name`) and so does app_index_of(),
+ * so the recipe's string is used verbatim and the space is load-bearing.
+ *
+ * `hold_key` is ND_KEY_NONE for an app whose loop ends on the frame budget,
+ * and a key code for one that blocks on input and has to be let out. It is
+ * NOT part of the Python recipe -- every case in shoot_docs.py passes
+ * keys=[] -- it stands in for uistub's ScriptExhausted, which C cannot raise
+ * out of a read. Passing a key an app treats as "quit" would end the run at
+ * frame 1, which is why CubeBench (EXIT_KEYS = {14, 28, 46, 50}) must be
+ * given ND_KEY_NONE and the MessageDialog behind app-clock must not. */
+static void run_app_inproc(nd_capture *cap, nd_ui *ui, const char *manifest_name,
+                           int64_t frame_budget, const char *slug, int32_t hold_key)
 {
     char so_path[ND_PATH_MAX];
     key_script ks;
     void *handle;
     int (*run)(nd_ui *);
+    bool have_keys;
     size_t idx = app_index_of(ui, manifest_name);
 
     if (idx == (size_t)-1) {
@@ -888,7 +1114,13 @@ static void run_stock_app(nd_capture *cap, nd_ui *ui, const char *manifest_name,
         return;
     }
 
-    if (!hold_key_begin(&ks, ui, ND_KEY_ENTER)) {
+    /* Either way the app gets a channel with nobody writing to it, so
+     * read_keypress(0) is a poll that returns ND_KEY_NONE -- exactly what
+     * uistub's empty KeyScript does, and not dependent on whether this host
+     * has a /dev/input/event0. */
+    have_keys = (hold_key == ND_KEY_NONE) ? key_script_begin(&ks, ui, NULL, 0u)
+                                          : hold_key_begin(&ks, ui, hold_key);
+    if (!have_keys) {
         nd_log_err(ND_LOG_OS, "shoot: %s: no key channel", slug);
         (void)dlclose(handle);
         g_failed++;
@@ -907,25 +1139,124 @@ static void run_stock_app(nd_capture *cap, nd_ui *ui, const char *manifest_name,
     (void)dlclose(handle);
 }
 
+/* shoot_docs.py's `cases` table, restricted to the ports that exist, in its
+ * order. `hold` is this file's stand-in for ScriptExhausted; see
+ * run_app_inproc().
+ *
+ * PhoneBook is let out with CLEAR, which its main menu treats as Back. That
+ * looks like the mistake run_app_inproc()'s comment warns about -- giving an
+ * app a key it reads as "quit" -- and here it is the right answer: the
+ * reference frame IS the first screen the app draws, so the app must be
+ * stopped the moment that screen is on the panel and not one frame later. The
+ * Python reaches the same place from the other side: keys=[] means the first
+ * read_keypress() raises, and the frame already committed is the one saved.
+ * Clock is different because MessageDialog drains the channel before drawing,
+ * so its key has to arrive as a repeat afterwards. */
+static const struct {
+    const char *manifest_name;
+    int64_t budget;
+    const char *slug;
+    int32_t hold;
+} STOCK_CASES[] = {
+    {"Phone book", 240, "app-phonebook", ND_KEY_CLEAR},
+    {"Clock", 240, "app-clock", ND_KEY_ENTER},
+};
+
 static void shoot_stock_apps(nd_capture *cap)
 {
     nd_fb *fb = nd_capture_fb(cap);
     nd_ui ui;
+    size_t i;
 
-    printf("[shoot] stock apps (1 of 13 -- the other twelve are not ported)\n");
+    printf("[shoot] stock apps (2 of 13 -- the other eleven are not ported)\n");
 
-    /* A fresh WP + STATUS UI, as every case in shoot_stock_apps gets. */
-    write_settings("Palestine.jpg");
+    for (i = 0u; i < ND_ARRAY_LEN(STOCK_CASES); i++) {
+        /* A fresh WP + STATUS UI per case, as every `with StubUI(...)` block
+         * in shoot_stock_apps gets. */
+        write_settings("Palestine.jpg");
+        nd_vclock_enable();
+        nd_ui_sim_clear(&ui);
+        if (nd_ui_init(&ui, fb) != ND_OK) {
+            nd_log_err(ND_LOG_UI, "shoot: nd_ui_init failed (%s)", STOCK_CASES[i].slug);
+            g_failed++;
+            nd_vclock_disable();
+            return;
+        }
+        nd_ui_sim_status(&ui, 4, 4, "Tello");
+
+        run_app_inproc(cap, &ui, STOCK_CASES[i].manifest_name, STOCK_CASES[i].budget,
+                       STOCK_CASES[i].slug, STOCK_CASES[i].hold);
+
+        nd_ui_teardown(&ui);
+        nd_ui_sim_clear(&ui);
+        nd_vclock_disable();
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * Group 6 -- shoot_engineering_apps, the one of five that is a real port
+ * ------------------------------------------------------------------ *
+ *
+ * shoot_docs.py's recipe:
+ *
+ *     ("Cube Bench", [], "eng-cubebench")
+ *     with StubUI() as ui:                       # NO wallpaper
+ *         ui.stub.simulate_status(4, 4, "Tello")
+ *         frames = run_app(ui, name, keys=keys)
+ *         save_frame(frames, slug, out)          # frames[-1]
+ *
+ * A fresh StubUI per case, so a fresh virtual clock, and no wallpaper -- the
+ * default. Neither the wallpaper nor the status bar reaches this frame,
+ * because CubeBench clears rows 0..content_bottom and then repaints the
+ * softkey strip underneath, which between them is every pixel of the
+ * 240x175. Both are set anyway: the recipe is the specification, and the
+ * next engineering app to be ported will not be so self-contained.
+ *
+ * ============ SIXTY FRAMES, AND WHERE THAT NUMBER COMES FROM ============
+ *
+ * `run_app(..., frame_budget=240)` is not what stops CubeBench. Nothing in
+ * main.py limits the run -- `while True:` with `read_keypress(0)` -- so the
+ * reference frame is bounded by the HARNESS: uistub.StubUI's default
+ * idle_budget of 60 makes the 61st idle poll raise ScriptExhausted, 60 frames
+ * reach the framebuffer, and frames[-1] is the sixtieth. The 240-frame budget
+ * never bites.
+ *
+ * C has no exception to raise out of a read, so the same end state is reached
+ * through the frame budget instead: the 61st nd_fb_update() returns
+ * ND_ERR_BUSY, app_run() returns, and the ring still holds frame 60 with the
+ * virtual clock ticked exactly 60 times. OPEN-QUESTIONS.md CB-2 records this
+ * as the deliberate substitution it is, and test_cubebench.c pins the frame
+ * count, the tick count and the digest.
+ */
+
+/* uistub.StubUI(idle_budget=60). See above: this is the number that decides
+ * which frame eng-cubebench.png is, not shoot_docs.py's frame_budget=240. */
+#define ENG_IDLE_BUDGET 60
+
+static void shoot_engineering_apps(nd_capture *cap)
+{
+    nd_fb *fb = nd_capture_fb(cap);
+    nd_ui ui;
+
+    printf("[shoot] engineering apps (1 of 5 -- the other four are stubbed)\n");
+
+    write_settings(NULL);
     nd_vclock_enable();
     nd_ui_sim_clear(&ui);
     if (nd_ui_init(&ui, fb) != ND_OK) {
-        nd_log_err(ND_LOG_UI, "shoot: nd_ui_init failed (stock apps)");
+        nd_log_err(ND_LOG_UI, "shoot: nd_ui_init failed (engineering apps)");
         g_failed++;
         return;
     }
     nd_ui_sim_status(&ui, 4, 4, "Tello");
 
-    run_stock_app(cap, &ui, "Clock", 240, "app-clock");
+    /* eng-cubebench is the one `tolerance` frame in the set: sin() and cos()
+     * disagree by an ULP between libcs and that can move a wireframe vertex
+     * by a pixel (OPEN-QUESTIONS.md frame tolerance policy). On a glibc host
+     * it is byte-exact, because CPython's math.sin is the platform libm's and
+     * the capture ran the same code on the same doubles. The budget exists
+     * for musl on the device. */
+    run_app_inproc(cap, &ui, "Cube Bench", ENG_IDLE_BUDGET, "eng-cubebench", ND_KEY_NONE);
 
     nd_ui_teardown(&ui);
     nd_ui_sim_clear(&ui);
@@ -1176,33 +1507,6 @@ static void usage(FILE *out)
 
 static void print_list(void)
 {
-    static const char *const RENDERED[] = {
-        "home",
-        "home-panel",
-        "home-dialing",
-        "home-nowallpaper",
-        "home-simulation",
-        "menu-phone-book",
-        "menu-panel",
-        "menu-messages",
-        "menu-games",
-        "menu-settings",
-        "menu-calculator",
-        "menu-koki-mobile",
-        "menu-browser",
-        "menu-music",
-        "home-sms-banner",
-        "widget-verticallist",
-        "widget-verticallist-scrolled",
-        "widget-pagedlist",
-        "widget-textinput",
-        "widget-textinputlong",
-        "widget-messagedialog",
-        "widget-textscroller",
-        "widget-levelselector",
-        "widget-infoscreen",
-        "widget-softkeybar",
-    };
     size_t i;
 
     printf("rendered (%zu):\n", ND_ARRAY_LEN(RENDERED));
@@ -1278,6 +1582,7 @@ int main(int argc, char **argv)
     shoot_app_selector(cap);
     shoot_stock_apps(cap);
     shoot_telephony(cap);
+    shoot_engineering_apps(cap);
     shoot_widgets(cap);
 
     root_off();
@@ -1290,6 +1595,17 @@ int main(int argc, char **argv)
 
     if (write_skip_list() != ND_OK)
         goto done;
+
+    /* RENDERED[] and SKIPPED[] together are this tool's claim about itself,
+     * and test_shoot.c checks the claim against the 49 reference names. A
+     * group that quietly stopped saving a frame would otherwise show up only
+     * as a "missing" line in goldenframe's output, which looks exactly like a
+     * frame that was never meant to be there. */
+    if (g_saved != ND_ARRAY_LEN(RENDERED)) {
+        nd_log_err(ND_LOG_FB, "shoot: saved %zu frames but RENDERED[] names %zu", g_saved,
+                   ND_ARRAY_LEN(RENDERED));
+        g_failed++;
+    }
 
     printf("[shoot] wrote %zu frames, skipped %zu, %zu failed\n", g_saved, ND_ARRAY_LEN(SKIPPED),
            g_failed);
