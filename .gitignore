@@ -69,3 +69,6 @@ netsurf-neodct/
 # commit nor blocks a release tag. The build leaves it out via
 # NEODCT_EXCLUDE_APPS=Tube. Remove this line when Tube is ready to ship.
 neodct/overlay/NeoDCT/System/apps/Tube/
+
+# C build output (host builds; the buildroot package builds out-of-tree)
+neodct/src/build/

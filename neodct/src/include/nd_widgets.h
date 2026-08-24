@@ -299,6 +299,15 @@ typedef struct {
     int32_t text_area_bottom; /* 141 */
     nd_empty_backspace_fn on_empty_backspace;
     void *on_empty_ctx;
+
+    /* Incremental-rewrap watermark. Decision C-2 asks for the Python's O(n^2)
+     * rewrap to be fixed by rewrapping from the edited line rather than the
+     * whole string; wrap_clean_off is a byte offset that is known to start a
+     * wrapped line, and wrap_clean_lines is how many lines precede it. Both
+     * are an optimisation only -- zeroing them costs a full rewrap and
+     * changes nothing on screen. See nd_textlong.c. */
+    size_t wrap_clean_off;
+    size_t wrap_clean_lines;
 } nd_textlong;
 
 nd_err nd_textlong_init(nd_textlong *t, nd_ui *ui, const char *title, char *text_buf, size_t cap,
