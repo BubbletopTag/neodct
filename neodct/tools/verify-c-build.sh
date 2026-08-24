@@ -101,6 +101,61 @@ else
         grep -B2 "\^\^ in" "$OUT/musl.log" | head -30 | sed 's/^/        /'
     fi
 fi
+
+head2 "3b. Compiles and passes with the TARGET's word size and char signedness"
+# The tests run on x86-64. The phone is 32-bit ARM, and it differs in two ways
+# that silently change behaviour rather than failing to build:
+#
+#   long and pointers are 4 bytes, not 8 -- which is what -Wconversion is on
+#   for, since narrowing that is invisible on a 64-bit desktop;
+#
+#   plain `char` is UNSIGNED on ARM and SIGNED on x86. Any `char c; if (c < 0)`
+#   or comparison against a byte >= 0x80 flips meaning between the two.
+#
+# 32-bit x86 is not ARM -- it tolerates unaligned access where ARM faults, and
+# it is a different instruction set. But it reproduces both of the above for
+# free, so it catches the portability class most likely to bite before the
+# cross-build does. Running the TESTS this way, not just compiling, is the
+# point: a signedness flip produces wrong answers, not warnings.
+if ! gcc -m32 -E -x c /dev/null >/dev/null 2>&1; then
+    skip "gcc -m32 unavailable (install gcc-multilib)"
+else
+    if make -C "$SRC" clean >/dev/null 2>&1 && \
+       make -C "$SRC" CFLAGS="-m32 -funsigned-char" LDFLAGS="-m32" -j"$(nproc)" \
+            > "$OUT/m32.log" 2>&1; then
+        pass "builds 32-bit with unsigned char"
+    else
+        # A pkg-config miss here is the 32-bit -dev packages being absent, not
+        # a portability problem; say which so it is not mistaken for one.
+        if grep -q "cannot find -l\|No such file or directory" "$OUT/m32.log"; then
+            skip "32-bit dev libraries not installed -- compile-only check follows"
+        else
+            fail "32-bit build failed -- see $OUT/m32.log"
+            tail -15 "$OUT/m32.log" | sed 's/^/        /'
+        fi
+    fi
+    # Compile-only sweep, which needs no 32-bit libraries to link against.
+    M32_FAIL=0
+    for c in $(find "$SRC/lib" "$SRC/core" "$SRC/apprun" "$SRC/apps" "$SRC/tools" \
+                    -name '*.c' 2>/dev/null); do
+        if ! gcc -m32 -funsigned-char -std=c11 -c "$c" -o /dev/null -I"$SRC/include" \
+             $(pkg-config --cflags freetype2 libpng sqlite3 2>/dev/null) \
+             -D_GNU_SOURCE -Wall -Wextra -Werror -Wshadow -Wconversion \
+             -Wstrict-prototypes -Wmissing-prototypes -Wvla -O2 -fPIC \
+             >> "$OUT/m32c.log" 2>&1; then
+            grep -q "fatal error:.*No such file" "$OUT/m32c.log" || \
+                M32_FAIL=$((M32_FAIL + 1))
+        fi
+    done
+    if [ "$M32_FAIL" -eq 0 ]; then
+        pass "all sources compile 32-bit + unsigned char, -Wconversion clean"
+    else
+        fail "$M32_FAIL source(s) fail at the target's word size"
+        tail -20 "$OUT/m32c.log" | sed 's/^/        /'
+    fi
+    make -C "$SRC" clean >/dev/null 2>&1
+    make -C "$SRC" -j"$(nproc)" >/dev/null 2>&1
+fi
 fi
 
 # --------------------------------------------------------------- tests
