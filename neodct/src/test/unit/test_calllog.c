@@ -104,10 +104,9 @@ static bool api_open(void *h)
 
     return api.run != NULL && api.shutdown != NULL && api.connect != NULL && api.fetch != NULL &&
            api.clear != NULL && api.timer_get != NULL && api.timer_set != NULL &&
-           api.format_duration != NULL && api.format_call_time != NULL &&
-           api.root_items != NULL && api.clear_items != NULL && api.duration_items != NULL &&
-           api.clear_targets != NULL && api.types != NULL && api.titles != NULL &&
-           api.timer_keys != NULL && api.unknown != NULL;
+           api.format_duration != NULL && api.format_call_time != NULL && api.root_items != NULL &&
+           api.clear_items != NULL && api.duration_items != NULL && api.clear_targets != NULL &&
+           api.types != NULL && api.titles != NULL && api.timer_keys != NULL && api.unknown != NULL;
 }
 
 /* ------------------------------------------------------------------ *
@@ -412,7 +411,8 @@ static void test_timers(void)
     CHECK_INT(nd_settings_set(ND_SET_CALLLOG_DUR_LAST, "12abc"), ND_OK, "store trailing junk");
     CHECK_INT(api.timer_get(ND_CALLLOG_TIMER_LAST), 0, "int(\"12abc\") raises -> 0");
     CHECK_INT(nd_settings_set(ND_SET_CALLLOG_DUR_LAST, "-5"), ND_OK, "store negative");
-    CHECK_INT(api.timer_get(ND_CALLLOG_TIMER_LAST), -5, "int(\"-5\") is -5; format_duration clamps");
+    CHECK_INT(api.timer_get(ND_CALLLOG_TIMER_LAST), -5,
+              "int(\"-5\") is -5; format_duration clamps");
     CHECK_INT(nd_settings_set(ND_SET_CALLLOG_DUR_LAST, "0"), ND_OK, "tidy up");
 
     /* Out of range is refused rather than indexing off the end of the key
@@ -472,7 +472,8 @@ static void test_null_safety(void)
     CHECK_INT(api.connect(NULL), ND_ERR_INVAL, "connect(NULL)");
     CHECK(api.format_duration(0, NULL, 0u) == NULL, "format_duration with no buffer");
     CHECK(api.format_call_time(0, NULL, 0u) == NULL, "format_call_time with no buffer");
-    CHECK_STR(api.format_duration(0, b, sizeof b), "", "a buffer too short for HH:MM:SS gives \"\"");
+    CHECK_STR(api.format_duration(0, b, sizeof b), "",
+              "a buffer too short for HH:MM:SS gives \"\"");
 }
 
 /* ------------------------------------------------------------------ *

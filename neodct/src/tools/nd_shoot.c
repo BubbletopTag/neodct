@@ -138,11 +138,12 @@ static const shoot_skip SKIPPED[] = {
     {"app-koki", "Koki is out of scope this session (SESSION-SCOPE.md)"},
 
     /* Group 4 -- shoot_games. Both are rendered now: apps/Games is a real
-     * port and shoot_games() below launches it. They are the frame set's two
-     * `recut` names (OPEN-QUESTIONS.md frame tolerance policy) -- their
-     * references were re-captured from this build because both games seed
-     * `random` from the clock and decision 4 refused to reimplement CPython's
-     * MT19937 to chase the Python's food cell and card order. */
+     * port and shoot_games() below launches it. Decision 4 allowed BOTH to
+     * be re-cut; measured, only game-snake needed it, and it is the frame
+     * set's one `recut` name (OPEN-QUESTIONS.md GM-1). game-memory came out
+     * byte-identical to the Python after all -- every card in that frame is
+     * face down, so the different shuffle reaches no pixel -- and it kept
+     * its original reference. Nothing from this group is skipped. */
 
     /* Group 5 -- shoot_telephony is fully rendered now: lib/nd_dialer.c is a
      * real port of System/ui/Dialer, so call-active and call-incoming are
@@ -1305,7 +1306,7 @@ static void shoot_stock_apps(nd_capture *cap)
 }
 
 /* ------------------------------------------------------------------ *
- * Group 4 -- shoot_games, both frames, both `recut`
+ * Group 4 -- shoot_games, and the one frame in the set that is `recut`
  * ------------------------------------------------------------------ *
  *
  * shoot_docs.py's recipe:
@@ -1343,15 +1344,29 @@ static void shoot_stock_apps(nd_capture *cap)
  * to, and the one above it -- is refused by nd_capture with ND_ERR_BUSY,
  * which records nothing and does not tick the clock.
  *
- * ============ WHY THESE TWO ARE ALLOWED TO DIFFER FROM THE PYTHON =======
+ * ============ ONE OF THE TWO IS `recut`, NOT BOTH =======================
  *
- * OPEN-QUESTIONS.md decision 4. Snake seeds `random` from the clock and then
- * calls `random.choice` for the food cell; Memory seeds it and calls
- * `random.shuffle`. Reimplementing CPython's MT19937 to reproduce those two
- * draws was refused, so libneodct's pinned LCG runs instead and the two
- * reference PNGs were re-captured from this build. They are `recut` class:
- * exact against their own reference from now on, and a change to either
- * game's geometry still fails the comparison the way any other frame would.
+ * OPEN-QUESTIONS.md decision 4 gave permission to re-capture both. Measured,
+ * only one needed it.
+ *
+ *   game-snake   40 of 42,000 pixels differ from the Python -- two 6x6
+ *                outlined boxes, and nothing else. That is the food cell and
+ *                only the food cell: CPython's MT19937 put it at grid (5,12)
+ *                and libneodct's pinned LCG puts it at (4,0). The score, the
+ *                border, all three body cells and the black softkey band are
+ *                byte-identical. Its reference is re-cut from this build and
+ *                carries "tolerance": "recut" in the golden manifest.
+ *
+ *   game-memory  0 pixels differ. Memory's shuffle is not the Python's
+ *                either, but every card in this frame is FACE DOWN, so the
+ *                board is forty identical white rectangles and the shuffle
+ *                reaches no pixel. Re-cutting it would have replaced a
+ *                reference the Python drew with a byte-identical one this
+ *                build drew, losing the cross-check and buying nothing. It
+ *                keeps its original reference and stays `exact`.
+ *
+ * Either way, both are compared like any other frame from now on: a change
+ * to either game's geometry fails as loudly as it would anywhere else.
  */
 
 static const int32_t SNAKE_KEYS[] = {ND_KEY_DOWN, ND_KEY_ENTER, ND_KEY_ENTER};
@@ -1376,7 +1391,7 @@ static void shoot_games(nd_capture *cap)
     nd_ui ui;
     size_t i;
 
-    printf("[shoot] games (2 frames, both recut -- OPEN-QUESTIONS.md decision 4)\n");
+    printf("[shoot] games (2 frames; game-snake is the set's one recut)\n");
 
     for (i = 0u; i < ND_ARRAY_LEN(GAME_CASES); i++) {
         /* A fresh `with StubUI()` per case: no wallpaper, and a fresh

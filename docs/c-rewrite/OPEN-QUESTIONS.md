@@ -3596,3 +3596,172 @@ not tick the clock. `test_games.c` pins both counts.
 four-frame path, which is the check that the food cell depends on the seed and
 on nothing else — not on how many frames had been drawn, and not on which
 screens had run.
+
+---
+
+## The Dialer: call_screen and incoming_screen
+
+`lib/nd_dialer.c`, `test/unit/test_dialer.c`, and two lines of `tools/nd_shoot.c`.
+
+Both golden frames this package owns — `call-active` and `call-incoming` — are
+**exact, 0 differing pixels each**, checked by SHA-256 in the unit test and by
+`goldenframe.py --compare` against `nd-shoot`'s output. The other 39 frames
+`nd-shoot` renders are unchanged and still exact; the whole set is 41 rendered,
+41 matching, 0 differing pixels in total. Nothing below moves a pixel unless it
+says so.
+
+### DL-1. S-3 is discharged: the two throwaway presents are gone, not joined
+
+`nd-shoot`'s `shoot_telephony()` used to commit two blank frames where the call
+screens belong, because their pixels could not be reproduced and their **ticks**
+could: `home-sms-banner` is the block's third frame and the envelope's
+`int(time.time() * 2) % 2` blink phase is decided by the two before it. S-3 said
+that if the Dialer landed, the stand-ins had to be **deleted** rather than left
+beside the real draws.
+
+They are deleted. Each screen still costs exactly one tick, because
+`shoot_docs.py` calls the `draw_*` helper — which does not present — and flushes
+by hand. `nd_vclock_frame() == 2` is still asserted before the banner is drawn,
+and `home-sms-banner` is still byte-identical.
+
+`test_ui.c`'s group D was **not** touched. It draws no Dialer screen; its two
+`nd_ui_present()` calls are stand-ins for the ticks alone, its own comment says
+so, and they produce the same frame number and the same banner. Changing it
+would have been churn in another package's file for no pixel.
+
+### DL-2. The captured frames have no softkey bar, and that is the recipe
+
+`shoot_telephony()` calls `draw_call_screen()` / `draw_incoming_screen()`
+directly; the loops that own them are what normally build a `SoftKeyBar`. So
+both references have a black strip below y=148 and the status sprites
+overhanging into rows 146–147, uncovered — on the home screen the bar hides that
+overhang and here nothing does. `nd_dialer_draw_call()` and
+`nd_dialer_draw_incoming()` therefore do not present and do not draw a bar; only
+`nd_dialer_show_calling()` and `nd_dialer_show_incoming()` do.
+`test_dialer.c` asserts both halves of it as separate numbers, so "somebody
+added a bar" and "the sprites stopped overhanging" fail differently.
+
+### DL-3. The first frame of a ringing call has the blink OFF
+
+`incoming_screen.py:100-115` sets `blink_on = True` and then inverts it before
+the first draw, because `last_blink` starts at `0.0` and any real
+`time.monotonic()` reading is more than `BLINK_S` past that. The ring screen
+therefore opens **without** the word "calling" and grows it half a second later.
+Ported as it is — "port the bug too" — and pinned by
+`test_dialer.c::test_first_ring_frame_has_the_label_off`, driven through
+`show_incoming()` rather than asserted about the source, so it stays true
+however the loop is rewritten. No golden frame covers it:
+`draw_incoming_screen(ui, "Mum", True)` is called with the phase as an argument
+precisely so the captured frame does not depend on the loop.
+
+### DL-4. `show_calling` presents twice per frame
+
+`call_screen.py:196-198` calls `ui.fb.update()` and then `softkey.update("End")`,
+whose `present` defaults to `True`. That is two commits for one 0.25 s frame and
+it is visible on the panel as a two-stage repaint. `nd_widgets.h` already said to
+keep it; it is kept. `show_incoming` does **not** — it passes `present=False` and
+flushes once — so the two screens genuinely differ in how many frames a second
+they push.
+
+### DL-5. Two more text fitters, and they disagree with each other
+
+`nd_text.h` counts six and warns against merging them. Two of the six are here,
+and the differences all reach the screen:
+
+| | `call_screen._fit_text` | `incoming_screen._fit_caller_text` |
+| --- | --- | --- |
+| ladder | preferred font, then `font_s` | `font_n`, then `font_s` |
+| search | binary, over prefix lengths | linear, one codepoint at a time |
+| ellipsis | `U+2026` — **no glyph in this font**, so it draws nothing and still costs its 8 px advance | `"..."`, three visible stops |
+| gives up with | the bare `U+2026` | `"?"` |
+| zero-length prefix | is a candidate (`mid` can be 0) | is **not** (`while trimmed and ...` stops without testing it) |
+
+The invisible ellipsis is not a defect to fix: `nd_draw.h` records the same
+behaviour for `MessageDialog`, which depends on it. The visible consequence is
+that a truncated **number** ends in a gap and a truncated **caller name** ends in
+ink, and `test_dialer.c` asserts exactly that difference.
+
+Both searches run forwards in C where the Python bisects or trims backwards.
+Every advance in this font is a non-negative whole number of pixels
+(`fontref.json` fact 2) and both append their ellipsis unconditionally, so width
+is monotone in the prefix length and "the widest that fits" and "the last that
+fits scanning up" name the same string. Same argument `nd_text.c` makes for its
+four.
+
+### DL-6. `ui->handling_call` is part of the ring screen's contract
+
+`nd_ui_read_keypress()` runs `_ring_tick` on every call, and with a RINGING modem
+and `handling_call` false it returns `ND_KEY_INCOMING_CALL` **instead of the
+key** — so `show_incoming()` would never see Answer or Decline and would spin.
+`nd_ui_handle_incoming_call()` sets the flag before it calls in, exactly as the
+Python's `IncomingCall` cannot re-raise inside its own handler.
+
+This is not a note about test scaffolding: it means the ring screen may not be
+called from anywhere that has not set the flag. `test_dialer.c` sets it and says
+why, so the requirement is written down somewhere a caller will trip over.
+
+### DL-7. `name` reaches `draw_call_screen` and is deliberately unused
+
+`call_screen.py:158-159`: *"Optional: if you ever want the contact name too...
+Keeping it off by default to match your request."* So `nd_dialer_draw_call()`
+takes the argument its two callers in `nd_ui.c` pass and draws nothing with it.
+`call-active` is captured with `name="Mum"` and has no "Mum" on it; the unit test
+asserts the rows above the label are empty, so "somebody started drawing the
+name" fails as itself rather than as a digest mismatch.
+
+### DL-8. The number is capped at the modem's own field width
+
+`show_incoming()` rebinds `number` when a late `+CLIP` arrives, so the C keeps a
+copy rather than the caller's pointer, and that copy is `ND_MODEM_NUMBER_MAX`
+(32) — the width `nd_modem.h` gives a caller ID, so nothing the modem can report
+is truncated by it. The Python has no cap. A caller ID longer than 31 bytes would
+be shortened here and not there; no modem produces one.
+
+### DL-9. The legacy keypad branch is not ported
+
+`call_screen.show_calling()` opens `/dev/input/event0` itself and drains it with
+`_flush_input()` when the UI has no `read_keypress` attribute — a standalone-
+execution fallback. In C `nd_ui_read_keypress()` is a function, not an optional
+attribute, so the branch is unreachable; and `nd_keypad.h` gives the core sole
+ownership of the keypad, which is what makes the sandboxing in `SECURITY.md`
+possible later. Dropped, with the reason recorded here rather than left as dead
+code.
+
+### DL-10. `PB-5` is still open and this package does not close it
+
+`PhoneBook`'s "Call" menu item still draws its own three-line "Calling..."
+screen and never touches the modem — the bug `README.md` line 144 has advertised
+since 0.3.0. Now that `nd_dialer_show_calling()` exists, the fix is four lines,
+but it is still blocked on the same thing PB-5 named: an app process has
+`ui->modem == NULL`, so PhoneBook cannot dial without a route to the core that
+does not exist yet. Unchanged, and still the owner's call.
+
+### DL-11. The fitter assertions pin INK, and ink is not the font's metric
+
+`test_dialer.c` asserts where the lit columns actually are, not what
+`nd_text_size()` reports, and the two differ by a few pixels at every one of
+these strings. Written down because the numbers look wrong beside each other and
+the temptation is to "correct" one to the other:
+
+| string | font | `nd_text_size()` | lit columns | why |
+| --- | --- | --- | --- | --- |
+| `0741234567` | `font_n` | 155 | 55..206, **152** | the leading `0` and trailing `7` carry side bearing |
+| `+353 (0) 87 555 01…` | `font_s` | 168 | 55..216, **162** | *and* the box includes `U+2026`'s advance, which lights nothing |
+| `Grandmother Josephin...` | `font_s` | 216 | 12..226, **215** | centred at `(240-216)//2 = 12` from the metric, then drawn |
+
+The last row is the one worth keeping: the CENTRING uses the metric — the Python
+computes `(screen_w - w) // 2` from `get_text_size()` — while the assertion that
+follows reads pixels. Both are correct and they are not the same number.
+
+Two consequences the test now spells out rather than assuming:
+
+- The truncated **number** is proved to be at `font_s` by its ink height, 15
+  rows. The same fitted string at `font_n` measures 248x21 — twice the 175 px
+  budget wide and six rows taller — so 15 can only have come from the small
+  face. Ranges like "≤ 11" were guesses at what 14 px ought to give and are
+  gone.
+- The trimmed **caller name** is proved to end in a full stop by *where* the
+  rightmost lit column has ink: rows 36..39, nine rows below the line's own ink
+  top. `lit(x1, y1)` does **not** hold and must not be asserted — `y1` is 41,
+  set by the descender of the `p` in "Josephin", which is nowhere near the last
+  column.

@@ -75,7 +75,7 @@ const char *const nd_calllog_root_items[ND_CALLLOG_ROOT_ITEMS] = {
 };
 
 const char *const nd_calllog_clear_items[ND_CALLLOG_CLEAR_ITEMS] = {"All", "Missed", "Dialed",
-                                                                   "Received"};
+                                                                    "Received"};
 
 const char *const nd_calllog_duration_items[ND_CALLLOG_DURATION_ITEMS] = {
     "Last call duration",
@@ -186,10 +186,9 @@ bool nd_calllog_clear(const char *call_type)
         return false;
     }
 
-    if (sqlite3_prepare_v2(db,
-                           (call_type == NULL) ? "DELETE FROM calls"
-                                               : "DELETE FROM calls WHERE type=?",
-                           -1, &st, NULL) != SQLITE_OK) {
+    if (sqlite3_prepare_v2(
+            db, (call_type == NULL) ? "DELETE FROM calls" : "DELETE FROM calls WHERE type=?", -1,
+            &st, NULL) != SQLITE_OK) {
         nd_log(ND_LOG_CALLLOG, "DB clear failed: %s", sqlite3_errmsg(db));
         nd_db_close(db);
         return false;
@@ -276,8 +275,7 @@ bool nd_calllog_timer_set(nd_calllog_timer which, int64_t seconds)
     if (nd_snprintf(buf, sizeof buf, "%lld", (long long)seconds) != ND_OK)
         return false;
     if (nd_settings_set(nd_calllog_timer_keys[which], buf) != ND_OK) {
-        nd_log(ND_LOG_CALLLOG, "Timer write failed: cannot store %s",
-               nd_calllog_timer_keys[which]);
+        nd_log(ND_LOG_CALLLOG, "Timer write failed: cannot store %s", nd_calllog_timer_keys[which]);
         return false;
     }
     return true;
@@ -364,10 +362,9 @@ static void show_call_list(nd_ui *ui, const char *title, const char *call_type)
         if (choice < 0 || (size_t)choice >= n)
             return;
 
-        (void)nd_infoscreen_show(ui, items[choice],
-                                 nd_calllog_format_call_time(calls[choice].timestamp, when,
-                                                             sizeof when),
-                                 "Back");
+        (void)nd_infoscreen_show(
+            ui, items[choice],
+            nd_calllog_format_call_time(calls[choice].timestamp, when, sizeof when), "Back");
 
         /* Not in the Python, which had IncomingCall to unwind it. nd_app.h:
          * a loop that outlives a frame polls this. */
@@ -491,6 +488,4 @@ int app_run(nd_ui *ui)
 /* Nothing is held: no sound card, no child process, no open database between
  * screens. nd_app.h requires the symbol anyway, so that "missing" always
  * means "the author forgot" and never "nothing to do". */
-void app_shutdown(void)
-{
-}
+void app_shutdown(void) {}
