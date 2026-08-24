@@ -170,10 +170,18 @@ void nd_music_format_time(int32_t seconds, char *out, size_t out_sz);
 
 /* run_now_playing()'s own truncate().
  *
- * IT MEASURES `t` ON THE FIRST PASS AND `t + "..."` ON EVERY PASS AFTER, so
- * a string that just overflows loses one more character than it needs to.
- * That off-by-one is in the Python and is visible on screen; ported.
- * Returns out. */
+ * IT MEASURES `t` ON THE FIRST PASS AND `t + "..."` ON EVERY PASS AFTER.
+ * That asymmetry is the Python's and is what makes a string that already fits
+ * come back with no ellipsis at all, so it is reproduced exactly rather than
+ * tidied into one uniform measurement -- measuring the ellipsis on the first
+ * pass too would truncate strings that fit.
+ *
+ * A width nothing fits in returns "..." alone rather than looping, which is
+ * the Python's `len(t) > 0` guard and is pinned in test_musicplayer.c.
+ *
+ * `t[:-1]` drops one CHARACTER, so the C drops one UTF-8 CODEPOINT; a
+ * byte-wise chop would measure a different width and draw a replacement
+ * glyph. Returns out. */
 const char *nd_music_truncate(char *out, size_t out_sz, const char *text, const nd_font *f,
                               int32_t max_w);
 
@@ -186,10 +194,11 @@ const char *nd_music_truncate(char *out, size_t out_sz, const char *text, const 
  * The Python's fallback ladder, mapped onto what can actually go wrong here
  * (OPEN-QUESTIONS.md MU-5):
  *
- *   the decoder does not know the format   -> this ONE track goes to mpv;
- *   (.flac, .ogg, .aac)                       the session keeps STREAM
- *   the decoder opened it and it is empty  -> false, no fallback. This is
- *                                             miniaudio.DecodeError: the file
+ *   the decoder does not know the format,  -> this ONE track goes to mpv;
+ *   and the name says it is audio             the session keeps STREAM
+ *   (.flac, .ogg, .aac)
+ *   the decoder does not know the format   -> false, no fallback. This is
+ *   and the name says nothing                 miniaudio.DecodeError: the file
  *                                             is bad, the backend is fine
  *   aplay is missing, or a socket, thread  -> the session switches to mpv for
  *   or fork failed                            good, which is the Python's

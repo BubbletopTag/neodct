@@ -86,11 +86,11 @@ extern const char *const nd_setapp_exts[ND_SETAPP_EXT_COUNT]; /* ".jpg", ".jpeg"
  * compares `wallpaper_setting.upper() != "NONE"`. */
 #define ND_SETAPP_WALLPAPER_NONE "NONE"
 
-#define ND_SETAPP_MAX       256
-#define ND_SETAPP_NAME_MAX  96
-#define ND_SETAPP_PATH_MAX  256
-#define ND_SETAPP_WALK_MAX  64
-#define ND_SETAPP_DIRS_MAX  3
+#define ND_SETAPP_MAX      256
+#define ND_SETAPP_NAME_MAX 96
+#define ND_SETAPP_PATH_MAX 256
+#define ND_SETAPP_WALK_MAX 64
+#define ND_SETAPP_DIRS_MAX 3
 
 /* GET_MORE_LABEL and the two help texts behind it. Which one is shown
  * depends on whether a card is in the phone right now, and getting that

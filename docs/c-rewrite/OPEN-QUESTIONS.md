@@ -3765,3 +3765,388 @@ Two consequences the test now spells out rather than assuming:
   top. `lit(x1, y1)` does **not** hold and must not be asserted — `y1` is 41,
   set by the descender of the `p` in "Josephin", which is nowhere near the last
   column.
+
+---
+
+## Settings (`apps/Settings/`, work package ST)
+
+`System/apps/Settings/main.py`, 310 lines, ported whole. Both reference frames
+render **byte-exact**: `app-settings` and `app-settings-wallpaper`, 0 differing
+pixels of 42,000 each. Nothing else moved — the other 41 frames that were exact
+before this package are still exact.
+
+### ST-0. Decision 3 verified: the Python does NOT repaint the wallpaper inside Settings
+
+The work package asked for this to be checked rather than assumed, so here is
+the evidence rather than an assertion.
+
+`_wallpaper_menu_once()` assigns `ui.wallpaper` at `Settings/main.py:91-93`,
+between `set_setting()` and the confirmation dialog. The only reader of
+`ui.wallpaper` anywhere in the framework is `SoftKeyBar.update()`:
+
+```python
+# framework.py:470-478
+wallpaper = getattr(self.ui, "wallpaper", None)
+if self.is_transparent and wallpaper:
+    bg_slice = wallpaper.crop(box)
+    self.ui.canvas.paste(bg_slice, box)
+else:
+    self.ui.draw.rectangle(..., fill="black")
+```
+
+and `is_transparent` is `not hasattr(ui, 'softkey')` (framework.py:464). The
+core assigns `ui.softkey` during its own construction, so **every** bar an app
+builds takes the `else` branch. `ui.apps` and `ui.engineering_mode` are read by
+the home screen and the AppSelector, neither of which runs while an app does.
+
+So the three assignments were already invisible until the app returned. Both
+reference frames stop at a `VerticalList` well before any of them.
+**No frame needed re-cutting**, and the C simply does not make the assignments —
+`nd_ui_refresh_after_app()` picks the settings up on the way out.
+
+### ST-1. Three caps the Python does not have
+
+The wallpaper list is a Python list bounded only by what is on the SD card.
+Mirrors the Tones port's numbers (TN-1), because it scans the same shape of
+tree from the same three directories:
+
+| constant | value | what happens at the cap |
+| --- | --- | --- |
+| `ND_SETAPP_MAX` | 256 | the first 256 in walk order are listed, and `[OS] More than 256 wallpapers; the rest are not listed.` is logged once |
+| `ND_SETAPP_NAME_MAX` | 96 | a display name is truncated; ~20 characters fit across 240 px at 18 px, so anything this long already ran off the edge |
+| `ND_SETAPP_WALK_MAX` | 64 | a deeper tree stops descending and logs the directory it skipped |
+
+The list is heap-allocated at `(256 + 2) * 352 = 90,816` bytes — the `+ 2` is
+the `"None"` row inserted at index 0 and the `"Get more..."` row appended after
+it, both of which the Python adds to a list that may already be full — and it
+is freed before the screen returns.
+
+### ST-2. `_wrap_text()` is the SEVENTH word-wrapper, and it is not any of the other six
+
+`nd_text.h` documents four, `nd_widgets.h` adds PagedList's, MSG-7 adds
+Messages', DL-5 adds two more from the Dialer. This is another one.
+
+It is `Settings/main.py:97-119` and it is **line-for-line identical to
+Messages' until the `else` branch**, which is exactly where it differs:
+
+```python
+# Settings                        # Messages
+if current:                       if current:
+    lines.append(current)             lines.append(current)
+current = word                        current = word
+                                  else:
+                                      trimmed = word
+                                      while trimmed and not fits(trimmed + "..."):
+                                          trimmed = trimmed[:-1]
+                                      lines.append(trimmed + "..." if trimmed else "...")
+                                      current = ""
+```
+
+So a word wider than the column is **left over-wide and un-ellipsised** here,
+where Messages trims it and appends `"..."` unconditionally. It also shares the
+two properties that make both of them different from `nd_text_wrap()`:
+`text.split()` with no argument, so newlines are lost; and an empty or
+whitespace-only string returns **one empty line**, not zero.
+
+It is `nd_setapp_wrap_text()` in `apps/Settings/main.c`, not in `nd_text.c`, for
+the reason MSG-7 gives: putting it next to the other six invites exactly the
+merge `nd_text.h`'s header warns against. `test_settings_app.c` asserts the
+over-wide case directly, so a future merge fails a test instead of quietly
+changing the About screen.
+
+### ST-3. A missing `neodct-sdcard` helper shows a dialog where Python raises
+
+`_show_memory_card()`'s last resort is
+`subprocess.call([SDCARD_HELPER, "format", card.device])`. With the helper
+absent, Python raises `FileNotFoundError` out of `subprocess.call`, out of
+`run()`, and the core's crash screen appears.
+
+`nd_proc_spawn()` cannot do that: `fork()` succeeds, the `execve()` fails in the
+child, and the child exits 127 (nd_proc.h says so explicitly). The C therefore
+sees `result == 127` and shows **"Formatting failed.\nThe card may be write
+protected."** — which is the wrong reason but the right shape of answer, and is
+strictly better than a crash screen on a phone.
+
+Recorded rather than fixed: making it crash to match would mean checking
+`access(X_OK)` before the fork purely to reproduce a traceback.
+
+The helper's path is passed to `execve` **unresolved**. `PathRemap` in
+`uistub.py` intercepts `open()`, not `execve()`, so the Python hands the kernel
+the literal `/NeoDCT/System/hw/neodct-sdcard` even under the test harness, and
+`nd_proc.h` says the same thing from the other side: "The path is NOT
+ND_ROOT-resolved: it is an executable."
+
+### ST-4. `subprocess.call` inherits stdio; `nd_proc_spec` does not
+
+`nd_proc_spec` closes every descriptor it is not given. `subprocess.call` with
+no `stdout=`/`stderr=` inherits all three. So `sdcard_format()` maps 0, 1 and 2
+onto themselves explicitly. The helper is a shell script that reports what it is
+doing, and the serial console is where that has to land.
+
+`subprocess.call` also returns `-signo` for a child killed by a signal, so the C
+does too — nothing branches on the value except `== 0`, but the two are the same
+function and should read as it.
+
+### ST-5. `app_shutdown()` kills the format helper, and that is not paranoia
+
+Settings holds no sound card, so the obvious answer was an empty
+`app_shutdown()`. It is not: `sdcard_format()` blocks in `nd_proc_wait(pid,
+-1.0, ...)` while `mkfs.vfat` runs, and an incoming call arriving during a card
+format is precisely the case the teardown contract in `nd_app.h` is written for.
+The pid is a file-static for the same reason Tones' preview pid is —
+`app_shutdown()` takes no argument.
+
+### ST-6. Two behaviours reproduced rather than fixed
+
+1. **`os.makedirs(WALLPAPER_DIR)` runs on every visit and its failure is
+   swallowed whole.** The Python's own comment says why: "read-only or no user
+   partition: stock wallpapers still work". `nd_mkdir_p()`'s return is
+   discarded to match.
+
+2. **`_scan_wallpapers()` has no `os.path.exists(base)` guard**, where
+   `_scan_tones()` does. `os.walk` yields nothing for a missing directory, so
+   the two behave identically; the C reproduces the shape (`opendir` failing is
+   a silent `return`) rather than adding the guard.
+
+### ST-7. `_setting_is_enabled()` was NOT re-implemented here
+
+`nd_settings.h` already documents `nd_setting_is_enabled()` as being exactly
+`Settings/main.py:122-130`, one of the three boolean parsers that deliberately
+disagree. The app calls it. A second copy inside the app is how the two would
+drift, and the drift would be silent — the wrong default for an unrecognised
+value flips the engineering menu's initial cursor.
+
+`test_settings_app.c` additionally asserts
+`ND_SETAPP_ENG_KEY == ND_SET_UI_ENGINEERING`, because after Decision 3 this
+app's entire effect is the key it writes: a typo there is a no-op the golden
+frames could never catch.
+
+### ST-8. How `nd-shoot` stops each of the two frames
+
+`app-settings` is a held Back: `VerticalList` does not drain the channel before
+its first draw, so the press arrives at `wait_for_key()` with the reference
+frame already committed — the same recipe `app-phonebook` and `app-games` use.
+
+`app-settings-wallpaper` is `shoot_docs.py`'s `keys=[ENTER]` plus a **frame
+budget of 2**, and the budget is an exact count, not a guess:
+
+| frame | what draws it |
+| --- | --- |
+| 1 | `run()`'s `VerticalList`, "Settings" |
+| 2 | `_wallpaper_menu_once()`'s `VerticalList`, "Wallpaper" — **the reference** |
+| 3 | `run()`'s list again, after Back unwinds the picker — **refused** |
+
+The Python stops at frame 2 because `ScriptExhausted` comes out of the picker's
+`wait_for_key()`. C cannot raise out of a read, so the held Back leaves the
+picker, the root list redraws, and `nd_capture` refuses that third frame with
+`ND_ERR_BUSY` — which records nothing and does not tick the virtual clock, so
+neither the ring nor the clock can tell it happened. Same mechanism as
+`CALC_FRAMES` (CA-4).
+
+`test_settings_app.c` takes the same frame the other way round: it lets all
+three draw and asserts on `nd_capture_recent(cap, 1u)`, so the two sides do not
+share the budget arithmetic.
+
+### ST-9. The About page has no golden frame, so it was diffed against the Python directly
+
+`_show_about()` is the one screen in this app that no widget paints — 40 lines
+of `rectangle`/`line`/`text` with its own `//` centring, its own `y > bottom -
+18` clipping and two calls into the seventh wrapper — and
+`spec-build-test.md` section 3.6 has no reference frame for it. "The unit test
+checks a few pixels" is not the same claim as "it matches".
+
+So it was rendered both ways and compared:
+
+* Python: `goldenframe.DeterministicUI(wallpaper="Palestine.jpg")`, the shipped
+  `Settings/main.py` imported by path, `_show_about(ui)` run to
+  `ScriptExhausted`, last committed frame saved.
+* C: `nd_setapp_draw_about()` through the built `app.so` on the same fixture
+  `test_settings_app.c` uses, under an empty `ND_ROOT` so both sides read the
+  same three settings (`NeoDCT System v0.3.1a`, `0.3.1a`, `Unknown` — both runs
+  printed them before drawing).
+
+**0 differing pixels of 42,000.** One frame each, so the
+`SoftKeyBar(present=False)` + `fb.update()` pairing is right too. The harness
+was a throwaway; what stays behind is `nd_setapp_draw_about()` being a separate
+symbol from the key loop, which is what made the comparison possible at all.
+
+---
+
+## MusicPlayer (`apps/MusicPlayer/`, `lib/nd_id3.c`, work package MU)
+
+`System/apps/MusicPlayer/main.py`, 516 lines. The golden frame `app-musicplayer`
+is **byte-exact**, and it is the "No SD card." `MessageDialog` — with no card in
+the harness `run(ui)` gets four lines in and stops, so everything below is
+pinned by `test_musicplayer.c` (245 checks) rather than by a picture.
+
+### MU-1. Three caps the Python does not have
+
+The Python holds the playlist in a list and never bounds it; mutagen's strings
+are arbitrarily long. CODING-STANDARDS.md section 1.5 will not have an array
+sized by the contents of an SD card, so:
+
+| cap | value | cost | what a card past it sees |
+| --- | --- | --- | --- |
+| `ND_MUSIC_MAX` | 256 tracks | 65,536 bytes, heap, freed before the screen returns | the first 256 in walk order, and a log line |
+| `ND_MUSIC_WALK_MAX` | 64 pending directories | 16,384 bytes, heap | deeper directories are not scanned, and a log line |
+| `ND_MUSIC_TEXT_MAX` | 192 bytes | fixed | a tag truncated at a codepoint boundary |
+| `ND_ID3_TAG_MAX` | 1 MB | the worst-case allocation | the tag is refused before a byte is allocated |
+
+192 bytes is about sixty Latin characters and the widest string this screen can
+draw is fifteen, so the text cap is not reachable on the panel. **Are these the
+numbers the owner wants?** 256 tracks is the one with a plausible real user
+behind it.
+
+### MU-2. The track list says "4-1" in an app whose id is 970
+
+`VerticalList(self.ui, "Music", display_list, app_id=4)` — 4 is **Settings'**
+root id, so the breadcrumb on the track list reads `4-1`, `4-2` … It is a
+copy-paste bug in the Python, it is on screen, and CODING-STANDARDS.md section
+9.4 says port it. `ND_MUSIC_LIST_APP_ID` is 4 with the reason next to it and
+`ND_MUSIC_APP_ID` is 970. Fixing it would be a one-character change and a
+visible one; say the word.
+
+### MU-3. `nd_tone_src` was NOT reused, and the shared version is worth having
+
+`lib/nd_notify.c` already streams dr_mp3/dr_wav into `aplay` for the ringtone,
+which is exactly the shape AUDIO.md asks for. It was not reused, for two
+reasons that are properties of a ringtone and not of a track:
+
+* `nd_tone_src_read()` **seeks back to frame 0 at EOF and never reports an
+  end.** A track has to finish so the screen can return.
+* it has no position to report, and `_MiniaudioPlayer.position()` is what makes
+  the progress bar follow the music instead of the wall clock.
+
+So `apps/MusicPlayer/audio.c` has its own thirty lines around the same two
+decoders. **The decoders themselves are not duplicated** — `lib/nd_notify.c` is
+the one translation unit with `DR_MP3_IMPLEMENTATION`, libneodct exports the
+symbols, and this file includes the headers for their declarations only. There
+is one copy of dr_mp3 in the image.
+
+**Proposal:** give `nd_notify_priv.h` a `loop` flag and a frame counter, and
+both callers use one source. That is a change to another work package's header
+and was not made here.
+
+### MU-4. `.flac` and `.ogg` stay in the STREAM extension list although nothing in-process can read them
+
+`_MiniaudioPlayer.EXTS` is `(".mp3", ".wav", ".flac", ".ogg")` because miniaudio
+decodes all four. dr_mp3 and dr_wav decode two. The list is ported **unchanged**:
+a track that vanishes from the list is a worse answer than one that plays
+through the mpv fallback, and dropping them would change what the track list
+shows. See MU-5 for what happens when one is chosen.
+
+### MU-5. The Python's fallback ladder, mapped onto what can actually go wrong here
+
+`play_file()` catches everything and then distinguishes `miniaudio.DecodeError`
+("this file is bad, the backend is fine") from anything else ("usually device
+init — the in-process path is unusable"). The C has three conditions where the
+Python has two:
+
+| what happened | C | why |
+| --- | --- | --- |
+| neither decoder knows the format (`.flac`, `.ogg`, `.aac`) | **this one track** goes to mpv; the session stays in-process | miniaudio would have decoded it, so this is not a bad file. One ogg on the card must not put every later mp3 behind a 24 MB process |
+| the decoder opened it and it yields nothing | `false`, no fallback | this is `miniaudio.DecodeError` |
+| `aplay` missing, socket / thread / fork failed | the session switches to mpv for good | the Python's "device init failed" branch |
+
+The first row has no Python equivalent because miniaudio has no equivalent gap.
+Pinned by `test_playback`.
+
+### MU-6. No resampler: `aplay` is told the file's own rate
+
+`lib/nd_notify.c` hardcodes `aplay -r 44100` and resamples to it, because a
+ringtone is mixed against a fixed device. This file passes the **file's** rate
+and channel count to `aplay` instead and writes the decoder's output untouched.
+`aplay`'s default device is ALSA's `plug` layer, whose entire job is rate and
+channel conversion, so the same conversion happens one layer down — and a
+second copy of a linear resampler is exactly what the brief said not to write.
+`position()` then counts source frames over the source rate, which is the same
+number of seconds either way.
+
+### MU-7. `NEODCT_MUSIC_AUDIO=miniaudio` has no third behaviour here
+
+The Python has three branches: mpv if forced, miniaudio if importable, and
+"`=miniaudio` but the module is missing → audio disabled". The third is
+unreachable in C — the decoders are compiled into libneodct, so there is no
+import to fail — and it is **left out rather than faked**. `=miniaudio` behaves
+as unset. Pinned by `test_pick_player`.
+
+### MU-8. ID3 tags are read from any file, where mutagen reads them only from MP3s
+
+`get_metadata()` calls `MP3(filepath, ID3=ID3)`, which **raises for a non-MP3**
+and leaves every default standing — so a FLAC with a prepended ID3v2 tag shows
+its filename in the Python. `nd_id3_read()` looks for the `ID3` magic and does
+not care what follows it, so that file would show its real title here.
+
+This is the one place the port is *more* capable than the original. It reaches
+no golden frame (a FLAC cannot be played in-process anyway) and the alternative
+— sniffing for an MPEG sync frame purely to decide whether to refuse to read a
+tag that is right there — is worse code for a worse result. **Flagging it rather
+than choosing silently.**
+
+Related and smaller: the Python's `meta["length"]` comes from mutagen's Xing
+header for MP3s and from miniaudio for everything else. Here both are the same
+call, because the decoder that plays the file is also the one that measures it.
+`drmp3_get_pcm_frame_count()` walks the file rather than trusting a header, so
+the number is at least as accurate; it costs a pass over the file behind the
+"Loading…" card the Python already draws.
+
+### MU-9. `format_time()` clamps a negative rather than reproducing Python's floor division
+
+`f"{seconds // 60:02d}:{seconds % 60:02d}"` floors toward negative infinity;
+C's `/` and `%` truncate toward zero, so `-1` would print `-1:59` in Python and
+`0:-1` here. **No caller can reach it** — both call sites go through
+`int(max(0, …))` or an elapsed duration — so the C clamps at zero instead of
+carrying a floor-division helper that nothing uses. Said out loud because a
+silent arithmetic difference is the kind of thing that surfaces two years later.
+
+A related non-difference: `f"{m:02d}"` pads to two digits and does not truncate
+to two, so a 100-minute track prints `100:00` and the right-aligned `-MM:SS`
+moves left. Ported; pinned.
+
+### MU-10. `truncate()`'s asymmetric measurement is correct, and the first draft of its test was not
+
+`run_now_playing`'s nested `truncate()` measures the bare string on the first
+pass and `t + "..."` on every pass after. That reads like an off-by-one and it
+is not: the bare first measurement is the test for *"does this need truncating
+at all"*, and it is what lets a string that fits come back with no ellipsis.
+Measuring `t + "..."` on the first pass too would put dots on strings that fit.
+Ported as-is, and the comments that called it a bug were corrected.
+
+**The lesson is in the test vectors, not the function.** They were first
+computed with a desktop Pillow, which finds libraqm and therefore uses the
+COMPLEX layout engine — and kerns. python-pillow on the phone is built with
+`-Craqm=disable` and never does. `"Now Playing"` at 14 px is 105 px kerned and
+**108 px not**, and 108 is what the panel has always drawn. Two of five vectors
+came out one character too long, the C was right both times, and
+`tools/fontref.py` forces `ImageFont.Layout.BASIC` for exactly this reason.
+`test_musicplayer.c` says so where the vectors are.
+
+### MU-11. Sorting and metadata are limited, and the limitation is ported
+
+README.md already calls the sorting and metadata support here limited.
+`scan_music()` is `for root, dirs, files in os.walk(...)` with `sorted(files)`
+**inside** the loop, so each directory's own files are sorted by byte value and
+the playlist is **not sorted globally**: a track in a subdirectory sorts after
+every track beside its parent, whatever its name is. `test_scan` pins that with
+a file called `0-first.mp3` two directories down, which a global sort would put
+first and which comes fifth.
+
+`os.walk` descends in `os.scandir` order, which is the filesystem's. The C keeps
+a LIFO and reverses each directory's segment after pushing it, so the pre-order
+matches; the order among siblings is `readdir`'s, as it is in Python.
+
+### MU-12. How `nd-shoot` stops this frame
+
+`app-musicplayer` is the third case in `STOCK_CASES` whose frame is picked by
+the budget, and the only one where the budget is **1**.
+
+With no card staged, `run(ui)` shows a `MessageDialog` and then a `TextScroller`,
+in that order and **with no key in between** — there is nothing a script can
+press that leaves the app between the two. The Python stops at the dialog
+because `MessageDialog.show()`'s first `read_keypress` raises `ScriptExhausted`
+with that frame already committed. A held Enter in C gets the same frame drawn
+and then walks straight on into the help text, whose page would be `frames[-1]`.
+So the recording is stopped after the dialog's single present and the
+scroller's page is refused by `nd_capture` with `ND_ERR_BUSY` — the same
+mechanism as `CALC_FRAMES`. `test_musicplayer.c` takes the frame the same way,
+so both sides agree on the arithmetic.

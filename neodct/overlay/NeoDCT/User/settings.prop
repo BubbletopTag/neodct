@@ -1,0 +1,5 @@
+system.audio.ringtone=/NeoDCT/System/tones/Low.mp3
+system.hw.battery_i2c_addr=0x36
+system.hw.battery_i2c_bus=3
+system.ui.engineering_mode=ON
+system.ui.wallpaper=NONE

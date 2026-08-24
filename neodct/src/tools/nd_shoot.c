@@ -125,14 +125,13 @@ typedef struct {
 static const shoot_skip SKIPPED[] = {
     /* Group 3 -- shoot_stock_apps. SESSION-SCOPE.md keeps all 25 apps with
      * their real manifest and icon, and stubs every one of them except
-     * CubeBench and the Browser: what is behind these twelve manifests is
+     * CubeBench and the Browser: what is behind these eleven manifests is
      * apps/Stub/app.so, a "This application has not been implemented yet."
      * dialog that is not the screen the reference frame holds.
      *
      * app-clock is NOT here: the Clock app IS that dialog (section 3.6
      * records app-clock as byte-identical to widget-messagedialog), so the
      * stub renders it for real. */
-    {"app-musicplayer", "Music is stubbed this session (SESSION-SCOPE.md)"},
     {"app-koki", "Koki is out of scope this session (SESSION-SCOPE.md)"},
 
     /* Group 4 -- shoot_games. Both are rendered now: apps/Games is a real
@@ -147,13 +146,10 @@ static const shoot_skip SKIPPED[] = {
      * real port of System/ui/Dialer, so call-active and call-incoming are
      * drawn rather than stood in for. Nothing from this group is skipped. */
 
-    /* Group 6 -- shoot_engineering_apps. eng-cubebench is NOT here any more:
-     * apps/CubeBench is a real port and shoot_engineering_apps() below
-     * launches it. The other four engineering apps are behind the stub. */
-    {"eng-modem", "ModemInfo is stubbed this session (SESSION-SCOPE.md)"},
-    {"eng-fuelgauge", "FuelGauge is stubbed this session (SESSION-SCOPE.md)"},
-    {"eng-lcdtest", "LCDTest is stubbed this session (SESSION-SCOPE.md)"},
-    {"eng-tests", "Tests is stubbed this session (SESSION-SCOPE.md)"},
+    /* Group 6 -- shoot_engineering_apps. Nothing from this group is skipped
+     * any more: apps/CubeBench, apps/Modem, apps/FuelGauge, apps/LCDTest and
+     * apps/TestsApp are all real ports and shoot_engineering_apps() below
+     * launches all five. */
 };
 
 /* What this build DOES draw, in the order the groups draw it. It is a
@@ -190,6 +186,7 @@ static const char *const RENDERED[] = {
     "app-calculator-options",
     "app-clock",
     "app-tones",
+    "app-musicplayer",
     /* shoot_games */
     "game-snake",
     "game-memory",
@@ -199,8 +196,13 @@ static const char *const RENDERED[] = {
     "home-sms-banner",
     "contacts-picker",
     "crash-screen",
-    /* shoot_engineering_apps */
+    /* shoot_engineering_apps -- shoot_docs.py's order, which is NOT the
+     * manifest-id order: ModemInfo, FuelGauge, LCD Test, Cube Bench, Tests. */
+    "eng-modem",
+    "eng-fuelgauge",
+    "eng-lcdtest",
     "eng-cubebench",
+    "eng-tests",
     /* shoot_widgets */
     "widget-verticallist",
     "widget-verticallist-scrolled",
@@ -1294,6 +1296,19 @@ static const struct {
      * the first screen returns from run() at once, and the frame already
      * committed is the one saved. */
     {"Tones", 240, "app-tones", NULL, 0u, ND_KEY_CLEAR, ND_APP_SYM_RUN},
+    /* Music is THE THIRD case whose frame is picked by the budget, and the
+     * only one where the budget is 1.
+     *
+     * With no card staged, run(ui) shows a MessageDialog and then a
+     * TextScroller, in that order and unconditionally -- there is no key that
+     * leaves the app between them. The Python stops at the dialog because
+     * MessageDialog.show()'s first read_keypress raises ScriptExhausted with
+     * that frame already committed; a held Enter here gets the same frame
+     * drawn and then walks straight on into the help text, whose last page
+     * would be frames[-1]. So the recording is stopped after the dialog's
+     * single present, and the scroller's pages are refused by nd_capture
+     * exactly as the Calculator's trailing Clears are. */
+    {"Music", 1, "app-musicplayer", NULL, 0u, ND_KEY_ENTER, ND_APP_SYM_RUN},
 };
 
 static void shoot_stock_apps(nd_capture *cap)
@@ -1302,7 +1317,7 @@ static void shoot_stock_apps(nd_capture *cap)
     nd_ui ui;
     size_t i;
 
-    printf("[shoot] stock apps (8 of 13 -- the other five are not ported)\n");
+    printf("[shoot] stock apps (9 of 13 -- the other four are not ported)\n");
 
     for (i = 0u; i < ND_ARRAY_LEN(STOCK_CASES); i++) {
         /* A fresh WP + STATUS UI per case, as every `with StubUI(...)` block
@@ -1440,74 +1455,149 @@ static void shoot_games(nd_capture *cap)
 }
 
 /* ------------------------------------------------------------------ *
- * Group 6 -- shoot_engineering_apps, the one of five that is a real port
+ * Group 6 -- shoot_engineering_apps, all five of them
  * ------------------------------------------------------------------ *
  *
- * shoot_docs.py's recipe:
+ * shoot_docs.py's recipe, in this order:
  *
- *     ("Cube Bench", [], "eng-cubebench")
+ *     ("ModemInfo", [], "eng-modem")
+ *     ("FuelGauge", [], "eng-fuelgauge")
+ *     ("LCD Test",  [], "eng-lcdtest")
+ *     ("Cube Bench",[], "eng-cubebench")
+ *     ("Tests",     [], "eng-tests")
  *     with StubUI() as ui:                       # NO wallpaper
  *         ui.stub.simulate_status(4, 4, "Tello")
  *         frames = run_app(ui, name, keys=keys)
  *         save_frame(frames, slug, out)          # frames[-1]
  *
  * A fresh StubUI per case, so a fresh virtual clock, and no wallpaper -- the
- * default. Neither the wallpaper nor the status bar reaches this frame,
- * because CubeBench clears rows 0..content_bottom and then repaints the
- * softkey strip underneath, which between them is every pixel of the
- * 240x175. Both are set anyway: the recipe is the specification, and the
- * next engineering app to be ported will not be so self-contained.
+ * default. Neither reaches any of these five frames: each app clears rows
+ * 0..content_bottom and repaints the softkey strip underneath, which between
+ * them is every pixel of the 240x175. Both are set anyway, because the recipe
+ * is the specification.
  *
- * ============ SIXTY FRAMES, AND WHERE THAT NUMBER COMES FROM ============
+ * The manifest names are the strings uistub matches on and two of them are
+ * NOT the directory name -- "Cube Bench" and "LCD Test" both have a space,
+ * and "Tests" is the TestsApp directory. The space is load-bearing.
  *
- * `run_app(..., frame_budget=240)` is not what stops CubeBench. Nothing in
- * main.py limits the run -- `while True:` with `read_keypress(0)` -- so the
- * reference frame is bounded by the HARNESS: uistub.StubUI's default
- * idle_budget of 60 makes the 61st idle poll raise ScriptExhausted, 60 frames
- * reach the framebuffer, and frames[-1] is the sixtieth. The 240-frame budget
- * never bites.
+ * ============ simulate_status() DECIDES TWO OF THESE FRAMES ============
  *
- * C has no exception to raise out of a read, so the same end state is reached
- * through the frame budget instead: the 61st nd_fb_update() returns
- * ND_ERR_BUSY, app_run() returns, and the ring still holds frame 60 with the
- * virtual clock ticked exactly 60 times. OPEN-QUESTIONS.md CB-2 records this
- * as the deliberate substitution it is, and test_cubebench.c pins the frame
- * count, the tick count and the digest.
+ * It is not chrome here the way it is on the home screen. It patches
+ * `battery.hardware`, `modem.signal_level()` and `modem.operator_display()`
+ * on the live service objects, and:
+ *
+ *   eng-fuelgauge  exists ONLY because of it. FuelGauge's first act is
+ *                  `if not battery.hardware: MessageDialog(...).show()`, so
+ *                  without the patch the reference frame would be a copy of
+ *                  widget-messagedialog. With it, the app runs, asks a gauge
+ *                  that is not there for its registers, and draws the ERROR
+ *                  row the frame holds.
+ *   eng-modem      gets "BARS 4/4" from the patched signal_level(), while
+ *                  "OPER --" comes from the unpatched raw attribute beside
+ *                  it. Two rows, two different readouts, on the same frame.
+ *
+ * nd_ui_sim_status() is the C spelling of all three (nd_ui_sim.h), and the
+ * two apps read it through nd_ui_status_battery_hardware() and
+ * nd_ui_status_signal_level().
+ *
+ * ============ WHAT ENDS EACH RUN ============
+ *
+ * Every case in the recipe passes keys=[], so in the Python every one of them
+ * is ended by uistub: idle_budget=60 for the two that poll, ScriptExhausted
+ * on the first read for the two that block. C can raise neither, so each case
+ * below names the substitute, and none of them is a guess:
+ *
+ *   eng-cubebench  THE FRAME BUDGET. main.py polls read_keypress(0) and never
+ *                  blocks, so the Python's 61st idle poll raises with 60
+ *                  frames committed and frames[-1] is the sixtieth. The C
+ *                  reaches the same end state when the 61st nd_fb_update()
+ *                  returns ND_ERR_BUSY. Held keys are wrong for this one --
+ *                  its EXIT_KEYS are {14, 28, 46, 50} and any of them would
+ *                  stop it at frame 1. OPEN-QUESTIONS.md CB-2.
+ *
+ *   eng-modem      A HELD Back, and the reference frame is frame 1. Both apps
+ *   eng-fuelgauge  draw unconditionally at the top of the loop and only then
+ *                  read a key, and with a virtual clock that advances one
+ *                  0.1 s tick per COMMITTED frame, `now - last_draw` never
+ *                  reaches their 1.0 s refresh again -- 60 idle polls move no
+ *                  time at all. So the Python's frames[-1] is its first
+ *                  frame, and a held Back that arrives at the first
+ *                  read_keypress leaves the app with exactly that frame
+ *                  committed. Handing an app its own quit key is the mistake
+ *                  run_app_inproc() warns about, and here it is the right
+ *                  answer for the same reason it is for app-phonebook: the
+ *                  reference IS the first screen the app draws.
+ *
+ *   eng-lcdtest    A HELD Back again, and the reference frame is the SECOND
+ *                  of two identical ones. main.py commits twice per pattern
+ *                  -- softkey.update() presents and then fb.update() presents
+ *                  the same pixels -- before it blocks in wait_for_key(). The
+ *                  Python's frames[-1] is the second commit; so is the C's.
+ *
+ *   eng-tests      A HELD Enter, not Back. TestsApp commits three times
+ *                  (softkey, "Hello World", the dialog) and the reference is
+ *                  the third, so the key has to arrive at MessageDialog's
+ *                  wait and not before. MessageDialog drains the channel
+ *                  before its first draw, which eats a queued press and
+ *                  leaves the HELD state behind it, so the synthesised repeat
+ *                  arrives after the dialog is up -- the same trick app-clock
+ *                  uses. Back would be wrong twice over: it is
+ *                  MessageDialog's cancel key AND it is not in TestsApp's own
+ *                  (46, 28, 50), so the app would loop straight back into
+ *                  show() and redraw for ever.
  */
 
-/* uistub.StubUI(idle_budget=60). See above: this is the number that decides
- * which frame eng-cubebench.png is, not shoot_docs.py's frame_budget=240. */
+/* uistub.StubUI(idle_budget=60). This is the number that decides which frame
+ * eng-cubebench.png is, not shoot_docs.py's frame_budget=240. */
 #define ENG_IDLE_BUDGET 60
+
+static const struct {
+    const char *manifest_name;
+    int64_t budget;
+    const char *slug;
+    int32_t hold;
+} ENG_CASES[] = {
+    {"ModemInfo", 240, "eng-modem", ND_KEY_CLEAR},
+    {"FuelGauge", 240, "eng-fuelgauge", ND_KEY_CLEAR},
+    {"LCD Test", 240, "eng-lcdtest", ND_KEY_CLEAR},
+    {"Cube Bench", ENG_IDLE_BUDGET, "eng-cubebench", ND_KEY_NONE},
+    {"Tests", 240, "eng-tests", ND_KEY_ENTER},
+};
 
 static void shoot_engineering_apps(nd_capture *cap)
 {
     nd_fb *fb = nd_capture_fb(cap);
     nd_ui ui;
+    size_t i;
 
-    printf("[shoot] engineering apps (1 of 5 -- the other four are stubbed)\n");
+    printf("[shoot] engineering apps (5 frames)\n");
 
-    write_settings(NULL);
-    nd_vclock_enable();
-    nd_ui_sim_clear(&ui);
-    if (nd_ui_init(&ui, fb) != ND_OK) {
-        nd_log_err(ND_LOG_UI, "shoot: nd_ui_init failed (engineering apps)");
-        g_failed++;
-        return;
+    for (i = 0u; i < ND_ARRAY_LEN(ENG_CASES); i++) {
+        /* A fresh `with StubUI()` per case: no wallpaper, fresh clock. */
+        write_settings(NULL);
+        nd_vclock_enable();
+        nd_ui_sim_clear(&ui);
+        if (nd_ui_init(&ui, fb) != ND_OK) {
+            nd_log_err(ND_LOG_UI, "shoot: nd_ui_init failed (%s)", ENG_CASES[i].slug);
+            g_failed++;
+            nd_vclock_disable();
+            return;
+        }
+        nd_ui_sim_status(&ui, 4, 4, "Tello");
+
+        /* eng-cubebench is the one `tolerance` frame in the set: sin() and
+         * cos() disagree by an ULP between libcs and that can move a
+         * wireframe vertex by a pixel (OPEN-QUESTIONS.md frame tolerance
+         * policy). On a glibc host it is byte-exact, because CPython's
+         * math.sin is the platform libm's and the capture ran the same code
+         * on the same doubles. The budget exists for musl on the device. */
+        run_app_inproc(cap, &ui, ENG_CASES[i].manifest_name, ENG_CASES[i].budget,
+                       ENG_CASES[i].slug, NULL, 0u, ENG_CASES[i].hold, ND_APP_SYM_RUN);
+
+        nd_ui_teardown(&ui);
+        nd_ui_sim_clear(&ui);
+        nd_vclock_disable();
     }
-    nd_ui_sim_status(&ui, 4, 4, "Tello");
-
-    /* eng-cubebench is the one `tolerance` frame in the set: sin() and cos()
-     * disagree by an ULP between libcs and that can move a wireframe vertex
-     * by a pixel (OPEN-QUESTIONS.md frame tolerance policy). On a glibc host
-     * it is byte-exact, because CPython's math.sin is the platform libm's and
-     * the capture ran the same code on the same doubles. The budget exists
-     * for musl on the device. */
-    run_app_inproc(cap, &ui, "Cube Bench", ENG_IDLE_BUDGET, "eng-cubebench", NULL, 0u,
-                   ND_KEY_NONE, ND_APP_SYM_RUN);
-
-    nd_ui_teardown(&ui);
-    nd_ui_sim_clear(&ui);
-    nd_vclock_disable();
 }
 
 /* ------------------------------------------------------------------ *

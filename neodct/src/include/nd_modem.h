@@ -109,6 +109,15 @@ typedef struct {
     nd_call_state state;
     char caller_id[ND_MODEM_NUMBER_MAX];
     int32_t call_secs; /* -1 when not connected */
+    /* ---- APPENDED, see OPEN-QUESTIONS.md M-16 ----
+     *
+     * +CEREG <stat>, -1 for Python's None. status_snapshot() has carried it
+     * since it was written (ModemService line 1067) and the frozen struct
+     * dropped it; the engineering Modem app draws it as its REG row and
+     * `registered` cannot stand in, because that bool cannot tell HOME from
+     * ROAMING, nor either of them from "nothing has answered yet". Appended,
+     * so no existing field moves. */
+    int32_t reg_stat;
 } nd_modem_status;
 
 typedef struct nd_modem nd_modem;
@@ -142,10 +151,66 @@ void nd_modem_requeue_event(nd_modem *m, const nd_modem_event *e);
 
 void nd_modem_status_snapshot(nd_modem *m, nd_modem_status *out);
 
+/* ------------------------------------------------------------------ *
+ * struct nd_lines -- the reply of one AT transaction
+ * ------------------------------------------------------------------ *
+ *
+ * COMPLETED HERE RATHER THAN FORWARD-DECLARED. This header named the type for
+ * nd_modem_send_at() and no public header ever finished it, so the definition
+ * lived in lib/nd_modem_priv.h -- which meant the engineering Modem app (id
+ * 9005), the one caller send_at() exists for, could not allocate one and
+ * could not call the function as declared. That is OPEN-QUESTIONS.md M-3, and
+ * this is the fix it asks for: the definition and its two size constants
+ * moved up, verbatim. No signature changed and no field moved; nd_modem_priv.h
+ * still gets all of it through this header, so every existing call site in
+ * lib/ and in test_modem.c is untouched.
+ *
+ * A flat pool plus an offset table, not [64][512]: a reply is almost always
+ * two short lines and the fixed array would be 32 KB of the modem's 18.
+ *
+ * The nd_modem__ prefix on the accessors is kept even though they are public
+ * now, because renaming them would touch every call site in the AT engine to
+ * buy nothing -- see M-3's note.
+ *
+ * ============ AND IT STAYS `struct nd_lines`, NEVER A TYPEDEF ============
+ *
+ * nd_text.h -- also frozen, also public -- already spells `nd_lines` as a
+ * typedef for its wrapped-text line list. Struct tags and typedef names are
+ * different namespaces in C, so the definition below is legal beside it, but
+ * a `typedef struct nd_lines nd_lines;` here is NOT: any translation unit
+ * that included both headers would fail to compile, and nd_ui.h pulls this
+ * one in, so that is most of the tree. The typedef therefore stays in
+ * lib/nd_modem_priv.h, where only the AT engine sees it, and a caller out
+ * here writes `struct nd_lines`.
+ *
+ * It is 4 KB and change. An app keeps it static or on the heap, never on the
+ * stack (CODING-STANDARDS.md 1.5).
+ */
+
+/* Collected intermediate lines for one transaction. M-5 records these as two
+ * of the four bounds the Python does not have. */
+#define ND_MODEM_LINES_MAX  64
+#define ND_MODEM_LINES_POOL 4096
+
+struct nd_lines {
+    char pool[ND_MODEM_LINES_POOL];
+    size_t used;
+    uint16_t off[ND_MODEM_LINES_MAX];
+    size_t n;
+    bool truncated; /* a line or the pool did not fit; the Python has no cap */
+};
+
+/* Empty the collector. A caller MUST reset before the first use: the struct is
+ * not zeroed for it. */
+void nd_modem__lines_reset(struct nd_lines *l);
+void nd_modem__lines_add(struct nd_lines *l, const char *line);
+/* NULL past the end. The returned pointer is into `l`'s own pool and lives as
+ * long as `l` does, or until the next reset. */
+const char *nd_modem__lines_get(const struct nd_lines *l, size_t i);
+
 /* Raw AT passthrough for the engineering Modem app. timeout 0 means 5.0 s.
  * final_out receives the final result line ("OK", "+CME ERROR: 10", ...) and
  * lines_out the intermediate ones. */
-struct nd_lines;
 nd_err nd_modem_send_at(nd_modem *m, const char *cmd, double timeout, char *final_out,
                         size_t final_sz, struct nd_lines *lines_out);
 

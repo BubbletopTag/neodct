@@ -206,9 +206,17 @@ static struct {
     pthread_mutex_t lock;
     bool lock_live;
     uint64_t sent_bytes; /* under lock: written to the player, i.e. heard */
-} g = {ND_MUSIC_BACKEND_NONE, ND_MUSIC_BACKEND_NONE, -1, false, false,
-       {false, {{0}}, 0u, 0u},  false,  -1,    NULL,  0u,   0,
-       false, 0, {{0}}, false,  0u};
+} g = {
+    /* Designated, not positional: the two decoder unions in music_src cannot
+     * be spelled positionally without -Wmissing-braces objecting, and a
+     * positional list of eighteen fields is a bug waiting for the next field
+     * to be added. Everything not named here is zero, which is what the two
+     * `false`s and the NULL would have said. */
+    .backend = ND_MUSIC_BACKEND_NONE,
+    .running = ND_MUSIC_BACKEND_NONE,
+    .pid = -1,
+    .fd = -1,
+};
 
 /* ------------------------------------------------------------------ *
  * Spawning -- the same shape nd_notify.c and apps/Tones use
@@ -642,10 +650,21 @@ bool nd_music_play(const char *path)
     nd_music_stop();
 
     if (rc == ND_ERR_UNSUPPORTED) {
-        /* miniaudio would have decoded this (.flac, .ogg); dr_mp3 and dr_wav
-         * cannot. mpv plays THIS track and the session stays in-process, so
-         * one ogg on the card does not put every later mp3 behind a 24 MB
-         * process. AUDIO.md, and OPEN-QUESTIONS.md MU-5. */
+        /* THE EXTENSION IS WHAT SEPARATES THE TWO PYTHON BRANCHES HERE.
+         *
+         * miniaudio decodes .flac and .ogg and dr_mp3/dr_wav do not, so for
+         * those the Python played the track and this must too -- mpv gets
+         * THIS track and the session stays in-process, so one ogg on the card
+         * does not put every later mp3 behind a 24 MB process.
+         *
+         * For anything else -- a .txt handed in by hand, a file whose name
+         * lies about what it is -- miniaudio would have raised DecodeError,
+         * which the Python treats as "the FILE is bad, the backend is fine"
+         * and does NOT fall back on. The mpv extension list is the widest
+         * "this is meant to be audio" test available, so it is the gate.
+         * AUDIO.md, and OPEN-QUESTIONS.md MU-5. */
+        if (!nd_music_is_supported(real, ND_MUSIC_BACKEND_MPV))
+            return false;
         nd_log(ND_LOG_MUSIC, "falling back to mpv for this track");
         if (start_mpv(real))
             return true;

@@ -73,12 +73,6 @@
  * +CMGL header plus a 160-character body, well inside this. */
 #define ND_MODEM_LINE_MAX 512
 
-/* Collected intermediate lines for one transaction, as a flat pool plus an
- * offset table -- a fixed [64][512] array would be 32 KB for a reply that is
- * almost always two short lines. */
-#define ND_MODEM_LINES_MAX  64
-#define ND_MODEM_LINES_POOL 4096
-
 /* Candidate AT ports considered in one probe. A SIM7600 enumerates five. */
 #define ND_MODEM_CAND_MAX 32
 
@@ -99,26 +93,17 @@
 #define ND_MODEM_SMS_IDX_SIM    (-1)
 #define ND_MODEM_SMS_IDX_STORED (-2)
 
-/* ------------------------------------------------------------------ *
- * struct nd_lines -- named but never defined by the frozen nd_modem.h
- * ------------------------------------------------------------------ */
-
-/* nd_modem.h forward-declares this for nd_modem_send_at() and no public
- * header ever completes it, so it is completed here. See OPEN-QUESTIONS.md
- * M-3: an out-of-lib caller cannot currently allocate one. */
-struct nd_lines {
-    char pool[ND_MODEM_LINES_POOL];
-    size_t used;
-    uint16_t off[ND_MODEM_LINES_MAX];
-    size_t n;
-    bool truncated; /* a line or the pool did not fit; the Python has no cap */
-};
-
+/* struct nd_lines, its two size constants and the three nd_modem__lines_*
+ * accessors moved into nd_modem.h when the engineering Modem app was ported
+ * -- the app is the caller nd_modem_send_at() exists for and could not
+ * allocate one from out here. OPEN-QUESTIONS.md M-3. They arrive through the
+ * #include above; nothing in lib/ or in test_modem.c had to change.
+ *
+ * The TYPEDEF could not go with them: nd_text.h spells `nd_lines` as its own
+ * typedef, and the two would collide in every translation unit that includes
+ * both. It stays here, where only the AT engine and test_modem.c see it, and
+ * the public spelling is `struct nd_lines`. */
 typedef struct nd_lines nd_lines;
-
-void nd_modem__lines_reset(nd_lines *l);
-void nd_modem__lines_add(nd_lines *l, const char *line);
-const char *nd_modem__lines_get(const nd_lines *l, size_t i);
 
 /* ------------------------------------------------------------------ *
  * The event ring

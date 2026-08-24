@@ -50,12 +50,38 @@ extern const double ND_LEVEL_THRESHOLDS[4]; /* { 3.35, 3.55, 3.75, 3.95 } */
 #define ND_BATT_WARN_LOW      "low"
 #define ND_BATT_WARN_CRITICAL "critical"
 
+/* ============ THE FIVE APPENDED FIELDS ============
+ *
+ * The first five members are the frozen set. The five below them were added
+ * when the engineering FuelGauge app (id 9004) was ported, because that app
+ * -- the only caller this struct exists for -- prints all ten and can
+ * reconstruct none of the five:
+ *
+ *   raw_vcell   drawn as "%.4f V  (0x%04X)" beside the volts. Recovering it
+ *   raw_soc     as vcell / ND_VCELL_LSB is a double division by a value that
+ *   raw_config  is not a power of two, so it is not guaranteed to land back
+ *               on the integer the chip returned; CFG has no float form at
+ *               all and cannot be recovered by any arithmetic.
+ *   bus, addr   drawn as "i2c-3 @ 0x36" along the bottom. They are settled
+ *               inside nd_battery_open() from system.hw.battery_i2c_bus /
+ *               _addr, and nothing else exposes them -- an app re-reading
+ *               those settings would be guessing that the core opened the
+ *               gauge the same way.
+ *
+ * Appended rather than inserted, so no existing initialiser or field offset
+ * moves. See OPEN-QUESTIONS.md B-1.
+ */
 typedef struct {
     double vcell;
     double soc_percent;
     double crate;  /* %/hr, signed; NaN when the part has no CRATE   */
     int32_t level; /* 0..4                                          */
     int ic_version;
+    uint16_t raw_vcell;  /* REG_VCELL  as read                       */
+    uint16_t raw_soc;    /* REG_SOC    as read                       */
+    uint16_t raw_config; /* REG_CONFIG as read                       */
+    int bus;             /* the i2c bus this gauge was opened on     */
+    int addr;            /* its 7-bit address                        */
 } nd_battery_snap;
 
 typedef struct nd_battery nd_battery;
@@ -83,7 +109,14 @@ bool nd_battery_vcell(const nd_battery *b, double *out);
 const char *nd_battery_take_pending_warning(nd_battery *b);
 
 /* The engineering FuelGauge app's readout. false in simulation mode, which is
- * why that app refuses to run without hardware. */
+ * why that app refuses to run without hardware.
+ *
+ * *out is zeroed on entry, with crate NaN. A FALSE RETURN STILL LEAVES bus,
+ * addr, ic_version and level FILLED IN whenever the gauge claims to be
+ * present, because the Python builds those four into the dict before the
+ * register reads and hands them back with an "error" key when a read throws --
+ * which is what keeps "i2c-3 @ 0x36" on screen under an ERROR row. Use
+ * nd_battery_has_hardware() to tell the two false cases apart. */
 bool nd_battery_debug_snapshot(nd_battery *b, nd_battery_snap *out);
 
 bool nd_battery_quickstart(nd_battery *b);

@@ -533,8 +533,26 @@ bool nd_battery_debug_snapshot(nd_battery *b, nd_battery_snap *out)
     uint16_t raw_crate = 0u;
     uint16_t raw_config = 0u;
 
-    if (b == NULL || out == NULL || !b->hardware)
+    if (b == NULL || out == NULL)
         return false;
+
+    memset(out, 0, sizeof *out);
+    out->crate = NAN;
+    /* These four are plain attributes of the service object, not register
+     * reads, and debug_snapshot() puts them in the dict BEFORE the try:. So
+     * they are filled in first and they survive BOTH false returns -- which
+     * is what keeps "i2c-3 @ 0x36" on screen under an ERROR row. The Python
+     * reaches that state by having simulate_status() set `hardware = True` on
+     * a service whose fd is still None; the C cannot patch a field, so the
+     * app's own gate decides and this function always answers with what it
+     * knows. */
+    out->bus = b->bus;
+    out->addr = b->addr;
+    out->ic_version = (int)b->version;
+    out->level = b->level;
+
+    if (!b->hardware)
+        return false; /* `if not self.hardware: return None` */
 
     /* Four fresh reads, in this order. The FuelGauge app shows them side by
      * side and a reordering makes the CRATE it prints belong to a different
@@ -548,8 +566,14 @@ bool nd_battery_debug_snapshot(nd_battery *b, nd_battery_snap *out)
     out->soc_percent = (double)raw_soc / 256.0;
     /* 0xFFFF marks a 17043/44, which has no CRATE register at all. */
     out->crate = raw_crate == 0xFFFFu ? NAN : (double)signed16(raw_crate) * ND_CRATE_LSB;
-    out->level = b->level;
-    out->ic_version = (int)b->version;
+    /* The five the FuelGauge app prints and cannot reconstruct; see
+     * nd_battery.h. raw_crate is deliberately NOT among them -- the app shows
+     * only the scaled %/hr, and NaN already carries "this part has none". */
+    out->raw_vcell = raw_vcell;
+    out->raw_soc = raw_soc;
+    out->raw_config = raw_config;
+    out->bus = b->bus;
+    out->addr = b->addr;
     return true;
 }
 

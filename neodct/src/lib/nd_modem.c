@@ -2130,6 +2130,7 @@ void nd_modem_status_snapshot(nd_modem *m, nd_modem_status *out)
     memset(out, 0, sizeof *out);
     out->signal_level = -1;
     out->csq_rssi = -1;
+    out->reg_stat = -1; /* Python's None; REG_NAMES[None] is "--" */
     out->call_secs = -1;
     out->state = ND_CALL_IDLE;
     if (m == NULL)
@@ -2147,6 +2148,7 @@ void nd_modem_status_snapshot(nd_modem *m, nd_modem_status *out)
     (void)nd_strlcpy(out->port, m->port, sizeof out->port);
     (void)nd_strlcpy(out->imei, m->imei_known ? m->imei : "", sizeof out->imei);
     out->csq_rssi = m->csq;
+    out->reg_stat = m->reg_stat;
     out->state = m->state;
     (void)nd_strlcpy(out->caller_id, m->caller_id_known ? m->caller_id : "", sizeof out->caller_id);
     unlock_state(m);

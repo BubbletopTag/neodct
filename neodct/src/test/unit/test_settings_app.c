@@ -101,8 +101,8 @@ static bool api_open(void *h)
            api.eng_options != NULL && api.exts != NULL;
 }
 
-static char g_root[ND_PATH_MAX];    /* the controlled tree              */
-static char g_wproot[ND_PATH_MAX];  /* System/wallpapers -> the overlay */
+static char g_root[ND_PATH_MAX];   /* the controlled tree              */
+static char g_wproot[ND_PATH_MAX]; /* System/wallpapers -> the overlay */
 static char g_saved_root[ND_PATH_MAX];
 
 /* ------------------------------------------------------------------ *
@@ -372,8 +372,8 @@ static void test_about(void)
     }
     nd_vclock_enable();
 
-    header_y = nd_ui_header_divider_y(&fx.ui);       /* max(30, H*0.11) = 30 */
-    line_pad = nd_max32(10, (int32_t)(240 * 0.12));  /* max(10, int(W*0.12)) = 28 */
+    header_y = nd_ui_header_divider_y(&fx.ui);      /* max(30, H*0.11) = 30 */
+    line_pad = nd_max32(10, (int32_t)(240 * 0.12)); /* max(10, int(W*0.12)) = 28 */
     CHECK_INT(header_y, 30, "header_y");
     CHECK_INT(line_pad, 28, "line_pad");
 
