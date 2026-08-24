@@ -269,3 +269,162 @@ Two independent improvements, both behaviour-preserving:
 Item 2 is out of scope for the port. Recorded here so it is not forgotten, because
 on a battery-powered device an idle loop that repaints ten times a second is the
 kind of thing that quietly costs hours of standby time.
+
+---
+
+## MEASURED: boot and app launch, 2026-08-24
+
+The owner, running both builds side by side in QEMU: *"the dialer comes up
+instantly after clicking call, but the other apps still have a slight delay"*
+and *"they launch slower ON C"* — and an eleven-second cold boot against a
+wanted five.
+
+Both turned out to be real, both turned out to have causes nothing about the
+C-versus-Python framing would have predicted, and **neither was findable on a
+desktop.** That last point is the most important thing in this section.
+
+### Why the dialer felt different
+
+It is not an app. The dialer is `lib/nd_dialer.c`, drawn by the core in the
+core's own process. Nothing is spawned, nothing is linked, nothing is
+initialised — the screen just changes.
+
+An app is a separate process, because a crashing app must not take the phone
+with it (`nd_apprun.c`). Python never paid for that: `main.py:910` runs an app
+with `importlib.util.spec_from_file_location` and `exec_module`, straight into
+the launcher's own interpreter. The app inherits the already-loaded fonts, the
+wallpaper, the app registry and the open databases as a matter of course.
+
+So the comparison the owner was making — dialer against app — was really
+"no process" against "a whole process", and the C was being asked to pay for
+isolation the Python never bought.
+
+That is the honest floor. Everything above it was waste.
+
+### The measurements
+
+On the phone (aarch64, musl, squashfs, QEMU), warm:
+
+| | before | after |
+| --- | --- | --- |
+| `/bin/true` | 10 ms | 10 ms |
+| `nd-apprun`, exec + link only | 20 ms | 20 ms |
+| **a real app launch** | **200 ms** | **50 ms** |
+
+The 20 ms floor is `execve` plus the dynamic loader resolving eleven shared
+objects. It is the price of the process boundary and it is not going away
+without a pre-linked zygote.
+
+### What the other 180 ms was
+
+`NEODCT_BENCH=1`, on the target:
+
+| mark | ms | who actually reads it |
+| --- | --- | --- |
+| `ui_init_app: unread sms` | **60–70** | the flashing envelope on the **home screen** |
+| wallpaper PNG decode | ~104 | the **home screen** background |
+| engineering-mode setting | ~28 | only the app scan |
+| `rescan_apps`, every manifest.json | ~18 | the **app selector** |
+| `ui_home.json` | ~4 | the **home screen** |
+| four `FT_New_Face` calls | 12 | genuinely needed |
+| surfaces (canvas + scratch column) | 5 | genuinely needed |
+| `dlopen(app.so)` | 3 | genuinely needed |
+
+Every row above the line is the home screen's state, rebuilt from scratch by
+every app process, for a screen that app will never draw. Not one file in
+`apps/` reads any of it — `grep` says zero, and `settings_app.h` had already
+written it down.
+
+They are lazy now: loaded on first read rather than at construction. The core's
+first frame pays exactly what its constructor used to; an app pays nothing. A
+future app that genuinely wants the wallpaper still gets it, which a
+"skip this in apps" flag could not have given it.
+
+### The part worth remembering
+
+**The host said the wrong thing, twice.**
+
+On this x86-64 desktop, `nd_db_count_unread_sms()` costs **0.005 ms**. On the
+phone it costs **60–70 ms** — over half of the whole launch — because counting
+unread SMS opens SQLite, and the staged host root has no database file to open
+while the phone has three. A desktop profile does not merely understate that
+cost; it reports it as free.
+
+The wallpaper was the same story in reverse: 1.7 ms on the host, ~104 ms on the
+phone, because the host reads a decompressed PNG out of page cache and the
+phone reads it through squashfs on an emulated CPU. Same code, same input, a
+sixty-fold difference in what it is worth fixing.
+
+This is why `nd_bench.h` exists and why the marks are committed rather than
+patched in and reverted. Twice this was chased by hand-editing `fprintf()`s
+into `nd_ui.c`; twice the host answer disagreed with the phone's. With
+`NEODCT_BENCH` unset — every boot anyone will ever see — a mark is one cached
+`getenv` and a branch, and the clock is not even read.
+
+```
+NEODCT_BENCH=1 /NeoDCT/System/bin/nd-apprun /NeoDCT/System/apps/Clock run
+```
+
+**Cold launches are still 120–170 ms.** The first time an app is opened after
+boot, `app.so`, the font and the databases all come off squashfs uncompressed
+for the first time. Only the warm number is 50 ms. Both are honest; which one
+the owner sees depends on whether they have opened that app before.
+
+### The boot: 17.4 s to 5.9 s
+
+Measured in the same QEMU, on a container that ran the owner's 11-second boot
+in 17.4 s — so read the ratio, not the absolute.
+
+| | before | after |
+| --- | --- | --- |
+| initramfs done (`[ndsys]`) | 6.69 s | 1.47 s |
+| `Starting UI...` | 17.09 s | 5.26 s |
+| **UI up** | **17.42 s** | **5.93 s** |
+
+Four things, in order of what they were worth:
+
+**1. `busybox init` ran every init script before starting the UI.**
+`::sysinit:/etc/init.d/rcS` runs to completion before `tty1::once:` gets a
+look in, so syslogd, klogd, the random seed, the udev coldplug, zram's
+`mkswap`, DHCP, the modem and crond were all standing between the user and the
+home screen. `rcS` is ours now and splits: the four scripts the UI genuinely
+needs run in front, everything else in one background subshell in its existing
+order. `S11udevall` still takes 2.46 s — it just takes it at 8.7 s, on a phone
+that has been usable since 5.9 s.
+
+**2. A flat two-second sleep in the initramfs.** `panel_start()` started the
+display daemon and then `sleep 2`, because the daemon resets the panel and
+forces fb0 to 32bpp and anything blitted before that lands in the wrong
+format. The daemon now writes `NEODCT_DISPLAYD_READY` when it has actually
+finished, and the initramfs polls for that in 20 ms steps — giving up at once
+if the daemon exits, which is what happens on QEMU where there is no SPI bus
+to find. `PANEL_SETTLE` remains the ceiling, so the worst case is the
+behaviour it replaced.
+
+**3. udev's full coldplug, 2.8 s, blocking.** Replaying an add event for every
+device in `/sys` and waiting for the last one. Almost none of it matters to the
+UI — but one part does: `/dev/input/by-path/*-kbd` is how
+`nd_evdev_discover()` picks the keypad, and devtmpfs alone gives
+`/dev/input/event0` with no promise that event0 is the keyboard. Under QEMU
+there is a virtio *tablet* on the same bus, so dropping udev entirely would
+have booted a phone with no working keys. So `S10udevd` settles the input
+subsystem only — a handful of devices, and on a Luckfox with a GPIO matrix
+keypad, possibly none at all — and `S11udevall` does the rest in the
+background.
+
+**4. The one-second splash sleep**, already removed at the owner's request.
+
+None of this was findable before `run_qemu.sh` learned `NEODCT_APPEND`:
+`CONFIG_PRINTK_TIME` is off in both kernel configs, so a boot log carried no
+timestamps and "which part is slow" had no answer that was not a guess.
+
+```
+NEODCT_APPEND="printk.time=1" NEODCT_DEBUG=1 neodct/tools/run_qemu.sh
+```
+
+### What is left
+
+The 20 ms spawn floor, 12 ms of `FT_New_Face` (four faces, one file, opened
+four times), and the cold-cache first launch. None of them is the difference
+between "instant" and "a slight delay" any more; all three are written down
+here so the next person does not have to re-derive them.

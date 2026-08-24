@@ -970,7 +970,7 @@ static void shoot_telephony(nd_capture *cap)
 
     /* ui.notify.post_sms(1, tone=False); ui._unread_sms = 1 */
     nd_ui_sim_sms_banner(&ui, 1);
-    ui.unread_sms = 1;
+    nd_ui_set_unread_sms(&ui, 1);
     nd_ui_update(&ui);
     save_recent(cap, "home-sms-banner");
 

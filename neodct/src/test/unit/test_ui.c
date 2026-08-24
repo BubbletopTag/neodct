@@ -600,7 +600,7 @@ static void shoot_home_frames(nd_capture *cap, const nd_json_doc *golden)
     CHECK_INT(nd_vclock_frame(), 2, "two ticks before the banner frame");
 
     nd_ui_sim_sms_banner(&ui, 1);
-    ui.unread_sms = 1;
+    nd_ui_set_unread_sms(&ui, 1);
     CHECK(nd_ui_status_notify_active(&ui), "the banner is up");
     nd_ui_update(&ui);
     check_frame(cap, golden, "home-sms-banner", nd_capture_recent(cap, 0u));

@@ -167,10 +167,12 @@ typedef struct nd_ui {
         bool engineering_mode;
         nd_app_entry apps[ND_APP_MAX];
         size_t n_apps;
+        int32_t unread_sms;
         bool wallpaper_ready;
         bool home_layout_ready;
         bool eng_mode_ready;
         bool apps_ready;
+        bool unread_sms_ready;
     } home_;
 
     /* --- services, all owned by the core process --- */
@@ -180,7 +182,6 @@ typedef struct nd_ui {
 
     /* --- transient core state --- */
     char dial_buffer[ND_DIAL_BUFFER_MAX];
-    int32_t unread_sms;
     bool handling_call;
     bool shutting_down;
 } nd_ui;
@@ -294,6 +295,17 @@ size_t nd_ui_app_count(nd_ui *ui);
  * whatever was there. Marks it loaded, so the configured one is never read.
  * For tests and for nd-shoot; the phone gets its wallpaper from settings. */
 void nd_ui_set_wallpaper(nd_ui *ui, nd_image *img);
+
+/* The unread-SMS count. It lives with the home state because that is the
+ * only thing that reads it: the flashing envelope in nd_ui_render_home().
+ *
+ * It was the most expensive thing in an app launch by a wide margin --
+ * 60-70 ms of the 130, measured on the phone with NEODCT_BENCH -- because
+ * counting it opens SQLite, and every app process was doing that for a
+ * number no app has ever looked at. On a desktop it costs 0.005 ms, which
+ * is exactly why it was not noticed until it was measured on the target. */
+int32_t nd_ui_unread_sms(nd_ui *ui);
+void nd_ui_set_unread_sms(nd_ui *ui, int32_t n);
 
 #ifdef __cplusplus
 }

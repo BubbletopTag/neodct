@@ -666,6 +666,25 @@ const nd_app_entry *nd_ui_app_list(nd_ui *ui, size_t *n_out)
     return ui->home_.apps;
 }
 
+int32_t nd_ui_unread_sms(nd_ui *ui)
+{
+    if (ui == NULL)
+        return 0;
+    if (!ui->home_.unread_sms_ready) {
+        ui->home_.unread_sms_ready = true;
+        ui->home_.unread_sms = nd_db_count_unread_sms();
+    }
+    return ui->home_.unread_sms;
+}
+
+void nd_ui_set_unread_sms(nd_ui *ui, int32_t n)
+{
+    if (ui == NULL)
+        return;
+    ui->home_.unread_sms = n;
+    ui->home_.unread_sms_ready = true;
+}
+
 size_t nd_ui_app_count(nd_ui *ui)
 {
     size_t n = 0u;
@@ -815,6 +834,7 @@ static nd_err ui_common_init(nd_ui *ui, nd_fb *fb)
 
     /* --- step 10: surfaces --- */
     rc = ui_build_surfaces(ui, fb);
+    nd_bench_mark("ui_common: surfaces");
     if (rc != ND_OK)
         return rc;
 
@@ -823,6 +843,7 @@ static nd_err ui_common_init(nd_ui *ui, nd_fb *fb)
 
     /* --- step 12 --- */
     ui_load_fonts(ui);
+    nd_bench_mark("ui_common: 4 faces");
 
     /* --- step 13 is CORE ONLY; see nd_ui_init --- */
 
@@ -866,7 +887,8 @@ nd_err nd_ui_init(nd_ui *ui, nd_fb *fb)
         (void)nd_notify_open(&ui->notify);
 
     /* --- step 3 --- */
-    ui->unread_sms = nd_db_count_unread_sms();
+    /* --- step 3 is the unread-SMS count, and it is lazy now: see
+     * nd_ui_unread_sms(). --- */
 
     /* --- step 4 --- */
     ui->handling_call = false;
@@ -927,8 +949,6 @@ nd_err nd_ui_init_app(nd_ui *ui, nd_fb *fb, int keypad_fd)
     }
 
     nd_bench_mark("ui_init_app: input");
-    ui->unread_sms = nd_db_count_unread_sms();
-    nd_bench_mark("ui_init_app: unread sms");
 
     rc = ui_common_init(ui, fb);
     nd_bench_mark("ui_init_app: fonts+canvas");
@@ -1031,7 +1051,7 @@ static bool handle_modem_event(nd_ui *ui, const nd_modem_event *ev)
             row_id = nd_db_store_incoming_sms(rec.sender, rec.text);
             if (ui->notify != NULL && nd_notify_post_sms != NULL)
                 nd_notify_post_sms(ui->notify, row_id, true);
-            ui->unread_sms++;
+            nd_ui_set_unread_sms(ui, nd_ui_unread_sms(ui) + 1);
         }
     }
     /* Call events are left to _ring_tick and handle_incoming_call. */
@@ -1168,7 +1188,7 @@ void nd_ui_render_home(nd_ui *ui)
 
     /* --- 3. notification layer: a flashing envelope while unread mail
      * exists, a banner while it is undismissed --- */
-    if (notify_active || ui->unread_sms > 0) {
+    if (notify_active || nd_ui_unread_sms(ui) > 0) {
         /* 500 ms on, 500 ms off. */
         if (((int64_t)(nd_time_now() * 2.0)) % 2 == 0) {
             double icon_scale = (double)h / 240.0;
@@ -1356,7 +1376,7 @@ static void open_notification(nd_ui *ui)
         /* The Python falls back to the hard-coded Messages path here; with
          * process-per-app there is nothing to fall back to, so all that is
          * left is to re-count. */
-        ui->unread_sms = nd_db_count_unread_sms();
+        ui->home_.unread_sms_ready = false;
         return;
     }
 
@@ -1368,7 +1388,7 @@ static void open_notification(nd_ui *ui)
     } else {
         (void)nd_proc_launch_app(ui, messages, ND_APP_ENTRY_OPEN_INBOX, NULL, NULL);
     }
-    ui->unread_sms = nd_db_count_unread_sms();
+    ui->home_.unread_sms_ready = false;
 }
 
 void nd_ui_handle_input(nd_ui *ui, int32_t code)
@@ -1557,5 +1577,5 @@ void nd_ui_refresh_after_app(nd_ui *ui)
     ui->home_.apps_ready = false;
 
     /* Messages may have been read (or arrived) inside the app. */
-    ui->unread_sms = nd_db_count_unread_sms();
+    ui->home_.unread_sms_ready = false;
 }
