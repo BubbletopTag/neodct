@@ -43,7 +43,8 @@ neodct/overlay/tests/*.avi
 neodct/overlay/tests/*.mp3
 neodct/overlay/tests/*.mp4
 neodct/overlay/tests/*.mkv
-netsurf-neodct/
+# want this in the repo
+# netsurf-neodct/
 
 ############################
 # Agent tooling (local only)
