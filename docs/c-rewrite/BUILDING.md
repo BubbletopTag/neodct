@@ -44,37 +44,36 @@ mirror 403s on plain HTTP, fetching the tarball yourself over HTTPS into
 `buildroot/dl/<package>/` and re-running `make` is enough — the hash is checked
 either way, so a hand-fetched file is no less safe.
 
-### One thing that will bite you: NetSurf's `libnsfb`
+### NetSurf
 
-`buildroot/package/netsurf/netsurf.mk:21` builds the browser from the vendored
-fork in `netsurf-neodct/`, which **is** in the repository now. But one piece of
-it is not.
+The browser is built from the vendored fork in `netsurf-neodct/`, which is in
+the repository — `buildroot/package/netsurf/netsurf.mk:21` rsyncs `netsurf/`
+and `libnsfb/` over the extracted upstream tarball.
 
-`netsurf-neodct/libnsfb` is recorded as a **git submodule** — mode `160000`,
-a pointer to commit `56f22241` — and there is no `.gitmodules` saying where to
-fetch it from. So a clone gets an empty directory:
+Verified building from a clean checkout on this branch:
 
 ```
-$ git ls-tree HEAD netsurf-neodct/
-040000 tree    netsurf-neodct/netsurf      <- 22 MB of real content
-160000 commit  netsurf-neodct/libnsfb      <- a pointer to nothing
-040000 tree    netsurf-neodct/tests        <- 52 MB the build never reads
+/usr/bin/netsurf-fb    3,275,568 bytes
+ELF 64-bit, ARM aarch64
+interpreter: /lib/ld-musl-aarch64.so.1
 ```
 
-The rsync then copies nothing and the build fails later, in the browser's own
-makefile rather than anywhere obvious:
+If you ever see the browser fail with
 
 ```
 make[2]: *** No rule to make target 'install'.  Stop.
 make[2]: Leaving directory '.../netsurf-3.11/libnsfb'
 ```
 
-**On the machine where the fork was created this works**, because a real
-`libnsfb` is checked out there. That is the same trap the vendoring was meant
-to close: it does not fail for the person who has it, only for everyone else,
-and now it fails further into the build.
+that is `netsurf-neodct/libnsfb` having become a **git submodule** again
+(`git ls-tree HEAD netsurf-neodct/libnsfb` showing mode `160000` rather than
+`040000`). A gitlink with no `.gitmodules` clones as an empty directory, the
+rsync copies nothing, and the failure surfaces inside the browser's own
+makefile rather than anywhere that names the cause. It also will not reproduce
+on the machine that created the fork, because a real checkout is sitting there.
 
-Until the content is committed, build without the browser:
+To build without the browser — useful when bisecting something unrelated, since
+NetSurf is one of the longest packages in the tree:
 
 ```sh
 cd buildroot
@@ -84,26 +83,13 @@ make olddefconfig
 make
 ```
 
-That edits `.config` only, never the tracked defconfigs, so it is a local
-override rather than a change to what the project ships. Everything except the
-browser works; the Browser app's launcher is ported and simply finds no
-`netsurf-fb` to launch.
+That edits `.config` only, never the tracked defconfigs. The Browser app's
+launcher is ported and simply finds no `netsurf-fb` to launch.
 
-To fix it properly, from inside `netsurf-neodct/`:
-
-```sh
-git rm --cached libnsfb      # drop the gitlink
-rm -rf libnsfb/.git          # make it a plain directory
-git add libnsfb && git commit
-```
-
-which is what `netsurf/` already is. A `.gitmodules` entry would also work, but
-a submodule inside a vendored fork buys nothing and is one more thing to
-forget.
-
-While in there: `netsurf.mk` reads only `netsurf/` and `libnsfb/`. `tests/` is
-52 MB of the 74 MB and is never touched, and `prefix/` is build output
-(`include/`, `lib/`). Already permanent in history, but worth not growing.
+**One thing worth not growing:** `netsurf.mk` reads only `netsurf/` and
+`libnsfb/`. `tests/` is 52 MB of the 74 MB and the build never touches it;
+`prefix/` is build output (`include/`, `lib/`). Both are already permanent in
+history.
 
 ---
 
