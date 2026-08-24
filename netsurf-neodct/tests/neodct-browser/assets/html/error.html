@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>System Alert</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <style>
+        /* --- NEO-DCT THEME (Matching MessageDialog) --- */
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            cursor: none;
+        }
+
+        body {
+            background-color: #000000;
+            color: #FFFFFF;
+            font-family: "Nokia Cellphone FC", "NeoDCT Font", monospace;
+            margin: 0;
+            padding: 0;
+            width: 240px;
+            height: 240px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* --- CONTENT AREA (Top 210px) --- */
+        .content {
+            flex-grow: 1;
+            padding: 8px; /* Margin=8 */
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* --- HEADER SECTION --- */
+        .header {
+            display: flex;
+            align-items: flex-start;
+            margin-bottom: 6px;
+        }
+
+        .icon-box {
+            width: 32px;
+            height: 32px;
+            margin-right: 6px;
+            flex-shrink: 0;
+        }
+
+        /* PIXEL SVG (Warning Icon) */
+        svg {
+            width: 32px;
+            height: 32px;
+            image-rendering: pixelated;
+        }
+        svg path, svg rect {
+            fill: #FFF;
+        }
+
+        .title {
+            font-size: 14px; /* font_md / font_n */
+            font-weight: bold;
+            line-height: 1.2;
+            padding-top: 2px;
+        }
+
+        /* --- MESSAGE BODY --- */
+        .message {
+            font-size: 12px; /* font_s / font_n */
+            line-height: 1.3;
+            white-space: pre-wrap; /* Preserve manual newlines */
+            word-wrap: break-word;
+            overflow: hidden;
+            /* Ellipsis simulation if too long is hard in pure CSS without -webkit-line-clamp */
+            display: -webkit-box;
+            -webkit-line-clamp: 8; /* Approx max lines */
+            -webkit-box-orient: vertical;
+        }
+
+        /* --- SOFTKEY BAR (Bottom 30px) --- */
+        .softkey-bar {
+            height: 30px;
+            background-color: #000000;
+            border-top: 1px solid #000; /* Implicit divider if needed, effectively invisible on black */
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+        }
+
+        /* Optional: Debug line to verify SoftKey area matches Python */
+        /* .softkey-bar { border-top: 1px dotted #333; } */
+
+        .softkey-text {
+            color: #FFFFFF;
+            font-size: 12px; /* font_n */
+            text-transform: uppercase;
+            font-weight: bold;
+        }
+
+    </style>
+</head>
+<body>
+
+    <div class="content">
+        <!-- HEADER -->
+        <div class="header">
+            <div class="icon-box">
+                <!-- Warning Icon (Matches DEFAULT_WARNING_ICON logic) -->
+                <svg viewBox="0 0 12 12">
+                    <rect x="5" y="1" width="2" height="6" />
+                    <rect x="5" y="8" width="2" height="2" />
+                    <rect x="1" y="1" width="1" height="3" />
+                    <rect x="1" y="1" width="3" height="1" />
+                    <rect x="1" y="8" width="1" height="3" />
+                    <rect x="1" y="10" width="3" height="1" />
+                    <rect x="10" y="1" width="1" height="3" />
+                    <rect x="8" y="1" width="3" height="1" />
+                    <rect x="10" y="8" width="1" height="3" />
+                    <rect x="8" y="10" width="3" height="1" />
+                </svg>
+            </div>
+            <div class="title">{title}</div>
+        </div>
+
+        <!-- BODY -->
+        <div class="message">{message}</div>
+    </div>
+
+    <!-- SOFTKEY -->
+    <div class="softkey-bar">
+        <div class="softkey-text">OK</div>
+    </div>
+
+    <script>
+        // Optional: Allow Python to inject custom button text if needed
+        // document.querySelector('.softkey-text').innerText = "{button_text}";
+    </script>
+
+</body>
+</html>

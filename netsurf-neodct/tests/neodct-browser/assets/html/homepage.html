@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>NeoDCT Web</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <style>
+        /* --- LOAD LOCAL FONT --- */
+        @font-face {
+            font-family: "Nokia Cellphone FC";
+            /* This assumes font.ttf is in ../fonts/ relative to this html file */
+            /* Adjust the path if your directory structure is different */
+            src: url("../fonts/font.ttf") format("truetype");
+        }
+
+        /* --- NEO-DCT THEME --- */
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            cursor: none; /* Hide default cursor, we use our sprite */
+        }
+
+        body {
+            background-color: #000000;
+            color: #FFFFFF;
+            font-family: "Nokia Cellphone FC", monospace;
+            margin: 0;
+            padding: 0;
+            width: 240px;
+            height: 240px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        /* --- HEADER --- */
+        header {
+            width: 100%;
+            text-align: center;
+            padding-top: 10px;
+            padding-bottom: 5px;
+            border-bottom: 2px solid #FFFFFF;
+            margin-bottom: 8px;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 18px;
+            font-weight: bold;
+            letter-spacing: 1px;
+            line-height: 1;
+        }
+
+        .subtitle {
+            font-size: 8px;
+            color: #AAAAAA;
+            margin-top: 2px;
+            text-transform: lowercase;
+        }
+
+        /* --- SEARCH BAR --- */
+        .search-container {
+            width: 220px; /* Fits with margins */
+            margin-bottom: 12px;
+        }
+
+        form {
+            display: flex;
+            width: 100%;
+        }
+
+        input[type="text"] {
+            flex-grow: 1;
+            background-color: #000;
+            color: #FFF;
+            border: 2px solid #FFF;
+            border-right: none;
+            height: 28px;
+            padding: 0 5px;
+            font-family: inherit;
+            font-size: 12px;
+            outline: none;
+            border-radius: 0; /* No rounded corners */
+        }
+
+        input[type="text"]:focus {
+            background-color: #222;
+        }
+
+        button[type="submit"] {
+            background-color: #FFF;
+            color: #000;
+            border: 2px solid #FFF;
+            height: 28px;
+            width: 28px;
+            padding: 0;
+            font-weight: bold;
+            font-size: 14px;
+            line-height: 1;
+            cursor: pointer;
+            border-radius: 0;
+        }
+
+        button[type="submit"]:active {
+            background-color: #AAA;
+        }
+
+        /* --- APP GRID --- */
+        .app-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 6px;
+            width: 220px;
+        }
+
+        a.app-icon {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background-color: #000;
+            border: 2px solid #FFF;
+            color: #FFF;
+            text-decoration: none;
+            height: 60px;
+            transition: all 0.1s;
+        }
+
+        /* Inverted Hover State */
+        a.app-icon:hover, a.app-icon:focus {
+            background-color: #FFF;
+            color: #000;
+        }
+        
+        /* Invert SVG icons on hover */
+        a.app-icon:hover svg path, 
+        a.app-icon:hover svg rect,
+        a.app-icon:focus svg path, 
+        a.app-icon:focus svg rect {
+            fill: #000;
+        }
+
+        .icon-label {
+            margin-top: 4px;
+            font-size: 10px;
+            text-transform: uppercase;
+        }
+
+        /* --- PIXEL ART ICONS (Inline SVG) --- */
+        svg {
+            width: 24px;
+            height: 24px;
+            image-rendering: pixelated;
+        }
+        svg path, svg rect {
+            fill: #FFF;
+        }
+
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>NeoDCT Web</h1>
+        <div class="subtitle">powered by webkit</div>
+    </header>
+
+    <div class="search-container">
+        <form action="https://html.duckduckgo.com/html/" method="GET">
+            <input type="text" name="q" placeholder="Search the web..." autocomplete="off">
+            <button type="submit">&gt;</button>
+        </form>
+    </div>
+
+    <div class="app-grid">
+        <!-- WEATHER -->
+        <a href="https://weather.gov" class="app-icon">
+            <svg viewBox="0 0 12 12">
+                <!-- Pixel Cloud/Sun -->
+                <rect x="1" y="5" width="8" height="5" />
+                <rect x="2" y="4" width="4" height="1" />
+                <rect x="8" y="2" width="3" height="3" />
+            </svg>
+            <div class="icon-label">Weather</div>
+        </a>
+
+        <!-- NEWS -->
+        <a href="https://lite.cnn.com" class="app-icon">
+            <svg viewBox="0 0 12 12">
+                <!-- Pixel Newspaper -->
+                <rect x="2" y="1" width="8" height="10" />
+                <rect x="3" y="3" width="6" height="1" fill="black" style="fill:black" /> 
+                <rect x="3" y="5" width="6" height="1" fill="black" style="fill:black" />
+                <rect x="3" y="7" width="4" height="1" fill="black" style="fill:black" />
+            </svg>
+            <div class="icon-label">News</div>
+        </a>
+
+        <!-- WIKI -->
+        <a href="https://en.m.wikipedia.org" class="app-icon">
+            <svg viewBox="0 0 12 12">
+                <!-- Pixel 'W' -->
+                <rect x="1" y="2" width="2" height="7" />
+                <rect x="3" y="8" width="1" height="1" />
+                <rect x="4" y="6" width="1" height="2" />
+                <rect x="5" y="5" width="2" height="1" />
+                <rect x="7" y="6" width="1" height="2" />
+                <rect x="8" y="8" width="1" height="1" />
+                <rect x="9" y="2" width="2" height="7" />
+            </svg>
+            <div class="icon-label">Wiki</div>
+        </a>
+    </div>
+
+</body>
+</html>

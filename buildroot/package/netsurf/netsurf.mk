@@ -144,8 +144,13 @@ define NETSURF_BUILD_CMDS
 		build
 endef
 
+# NETSURF_MAKE_ENV, not TARGET_MAKE_ENV: the bundle's install target will
+# relink nsfb if anything under netsurf/ is newer than the binary, and the
+# component libraries only exist in $(@D)/tmpusr/lib. Without the -L that
+# NETSURF_MAKE_ENV carries, that relink fails with "cannot find
+# -lparserutils" after the build step has already succeeded.
 define NETSURF_INSTALL_TARGET_CMDS
-	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) $(NETSURF_MAKE_OPTS) \
+	$(NETSURF_MAKE_ENV) $(MAKE) -C $(@D) $(NETSURF_MAKE_OPTS) \
 		DESTDIR=$(TARGET_DIR) install
 endef
 

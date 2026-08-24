@@ -18,10 +18,12 @@ clear > /dev/tty0
 # 4. Run the UI
 #
 # /NeoDCT is inside the read-only squashfs, so the crash log goes to the
-# user-data partition. PYTHONPYCACHEPREFIX matters more than it looks: with
-# a read-only rootfs python cannot drop .pyc files next to the .py files, so
-# without a writable cache prefix every boot re-parses the whole UI.
-export PYTHONPYCACHEPREFIX=/NeoDCT/User/.pycache
+# user-data partition.
+#
+# There is deliberately no PYTHONPYCACHEPREFIX here any more. The bytecode
+# is compiled into the image at build time (post-build-prune-tests.sh), and
+# setting a cache prefix would make python look only there and ignore what
+# we shipped -- turning every boot back into a full re-parse of the UI.
 CRASH_LOG=/NeoDCT/User/logs/crash.log
 mkdir -p /NeoDCT/User/logs 2>/dev/null || CRASH_LOG=/tmp/crash.log
 

@@ -513,6 +513,18 @@ class IncomingCall(BaseException):
 
 
 # --- UI LOGIC ---
+def _trim_malloc_arenas():
+    """Return glibc's free arenas to the kernel.
+
+    ctypes is imported here rather than at the top of the file on purpose:
+    it costs memory to import, and this runs at most once per app launch --
+    paying for it at start-up would eat into the saving it exists to make.
+    """
+    import ctypes
+
+    ctypes.CDLL("libc.so.6").malloc_trim(0)
+
+
 class NeoDCT_UI:
     def __init__(self, fb_driver):
         init_databases()       
@@ -710,6 +722,30 @@ class NeoDCT_UI:
             
             
     IMAGE_CACHE_MAX = 32
+
+    def release_memory(self):
+        """Hand back what the UI is only holding out of convenience.
+
+        Called before starting something large. The browser and mpv
+        together do not fit alongside a fully-loaded launcher on 56 MB, and
+        what the kernel does about that is compress the launcher into zram
+        -- which costs the single core the video decoder is trying to use.
+        Giving the pages up first is cheaper than having them squeezed.
+
+        Measured: about 1.2 MB, all of it anonymous, which is the kind
+        that can only go to swap. gc.collect() alone returns none of it --
+        CPython gives freed blocks back to its own arenas, not to the
+        kernel -- so the malloc trim is the part that does the work.
+        """
+        cache = getattr(self, "image_cache", None)
+        if cache is not None:
+            cache.clear()
+        gc.collect()
+        try:
+            _trim_malloc_arenas()
+        except Exception:
+            # A saving is never worth failing an app launch over.
+            pass
 
     def get_image(self, path, max_size=None, scale=None):
         """Load (and cache) an RGBA image.
@@ -916,6 +952,10 @@ class NeoDCT_UI:
             spec.loader.exec_module(module)
 
             if hasattr(module, "run"):
+                # Start the app on as clean a slate as we can give it. The
+                # launcher's caches are worth about 1.2 MB, and an app like
+                # the browser wants every one of them.
+                self.release_memory()
                 module.run(self)
             else:
                 print(f"[OS] App has no run(ui): {path}")

@@ -29,12 +29,35 @@ Two audio paths, by design:
 import os
 import subprocess
 
-try:
-    import miniaudio
-    HAS_MINIAUDIO = True
-except ImportError:
-    HAS_MINIAUDIO = False
-    print("[NOTIFY] 'miniaudio' not found; ringtone falls back to mpv.")
+# The audio stack is loaded on demand, never at start-up.
+#
+# Importing python-miniaudio costs 12.9 MB of RSS -- measured on the
+# device, and more than everything else the home screen holds put
+# together -- because it drags ssl and hashlib in behind it. It exists
+# here to play a ringtone. A phone that is sitting on the home screen is
+# not playing one, and should not be paying 12.9 MB for the possibility.
+#
+# The cost is paid on the first ring instead, which is the one moment
+# there is something to show for it.
+_miniaudio = None          # the module once loaded, else None
+_miniaudio_tried = False   # so a missing package is looked for once only
+
+
+def miniaudio_module():
+    """The miniaudio module, or None when it is not installed."""
+    global _miniaudio, _miniaudio_tried
+
+    if not _miniaudio_tried:
+        _miniaudio_tried = True
+        try:
+            import miniaudio
+        except ImportError:
+            print("[NOTIFY] 'miniaudio' not found; "
+                  "ringtone falls back to mpv.")
+        else:
+            _miniaudio = miniaudio
+
+    return _miniaudio
 
 TONES_DIR = "/NeoDCT/System/tones"
 SMS_TONE = os.path.join(TONES_DIR, "sms.wav")
@@ -159,7 +182,8 @@ class NotifyService:
         if path is None:
             print("[NOTIFY] No ringtone available; ringing silently.")
             return False
-        if HAS_MINIAUDIO:
+        miniaudio = miniaudio_module()
+        if miniaudio is not None:
             try:
                 # Decode once, then loop the whole buffer in-process: a
                 # ringtone is a few seconds, and looping a stream_file

@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Play one url with mpv, on behalf of whatever started us.
+
+NetSurf execs this when a <video> placeholder is clicked. Doing it this way
+rather than in C keeps every decision about how mpv runs in MediaWidget,
+where Messages and the rest can reuse it, and gives the browser a way to be
+stopped for the duration without knowing anything about signals: the pid
+suspended is our own parent.
+
+    neodct-play http://host/watch.avi
+    neodct-play --dry-run URL       print the command instead of running it
+    neodct-play --parent PID        suspend PID rather than our parent
+    neodct-play --no-suspend URL    leave the application running
+
+Exit status is mpv's, so the caller can tell playback apart from a build
+with no mpv in it (127).
+"""
+
+import argparse
+import os
+import sys
+
+# /NeoDCT on the phone; the overlay root when the tests run from a checkout.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))))))
+
+from System.core import MediaWidget
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="neodct-play", description=__doc__.splitlines()[0])
+    parser.add_argument("url")
+    parser.add_argument("--parent", type=int, default=None,
+                        help="pid to stop while playing (default: our parent)")
+    parser.add_argument("--no-suspend", action="store_true",
+                        help="leave the calling application running")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print what would happen and exit")
+    parser.add_argument("--device", default=None,
+                        help="evdev device the keypad arrives on")
+    parser.add_argument("--fbdev", default=MediaWidget.FB_DEVICE)
+    args = parser.parse_args(argv)
+
+    suspend_pid = None
+    if not args.no_suspend:
+        suspend_pid = args.parent if args.parent is not None else os.getppid()
+        # Under an init that reaped our parent we would be looking at pid 1.
+        if suspend_pid <= 1:
+            suspend_pid = None
+
+    # NEODCT_MPV exists so the test suite can put something predictable in
+    # mpv's place; on the phone the default is the only mpv there is.
+    mpv = os.environ.get("NEODCT_MPV") or MediaWidget.MPV_BIN
+
+    device = args.device or MediaWidget.EvdevKeys.discover()
+    keys = MediaWidget.EvdevKeys.open(device)
+
+    if args.dry_run:
+        argv_out = MediaWidget.build_argv(
+            args.url, fbdev=args.fbdev, mpv=mpv,
+            ipc_socket=MediaWidget.IPC_SOCKET if keys else None)
+        print("suspend: %s" % (suspend_pid if suspend_pid else "none"))
+        print("keypad: %s" % (device or "none"))
+        print(" ".join(argv_out))
+        if keys:
+            keys.close()
+        return 0
+
+    try:
+        return MediaWidget.play(args.url, suspend_pid=suspend_pid,
+                                keysource=keys, mpv=mpv, fbdev=args.fbdev)
+    finally:
+        if keys:
+            keys.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

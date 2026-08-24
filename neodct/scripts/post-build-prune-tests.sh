@@ -67,7 +67,7 @@ find "$TARGET_DIR/NeoDCT" \
 
 # Apps the build was told to leave out.
 #
-#     NEODCT_EXCLUDE_APPS="Tube Foo" make
+#     NEODCT_EXCLUDE_APPS="Games Koki" make
 #
 # The overlay is a live working tree and may hold an app somebody is still
 # experimenting with. It has to stay in the tree for them to work on, and
@@ -84,10 +84,43 @@ for name in ${NEODCT_EXCLUDE_APPS:-}; do
     done
 done
 
-# Host-built .pyc files are useless on the target (host python != target
-# python) and a read-only rootfs cannot replace them. Drop them; the
-# runtime caches to /NeoDCT/User/.pycache instead (see run_neodct.sh).
+# Compile the UI's bytecode into the image.
+#
+# /NeoDCT is read-only squashfs, so python can never write a .pyc beside a
+# .py at runtime, and compiling from source costs memory it does not give
+# back: measured on the device, System.ui.framework is 4.0 MB imported
+# from source and 0.4 MB imported from bytecode.
+#
+# This used to be handled by caching to /NeoDCT/User/.pycache at runtime,
+# on the grounds that host python and target python differ. They do not --
+# buildroot builds both from the same version, and bytecode is
+# version-tagged and architecture independent. Shipping it in the image is
+# better than caching it on the user partition in three ways: it is there
+# on the first boot after an update, which is when the phone is slowest;
+# it survives a user-data reset; and it sits inside the dm-verity tree, so
+# it carries the same signature as the source it came from. Python trusts
+# a .pyc over its .py, so bytecode on a writable partition is bytecode
+# nothing has vouched for.
+#
+# Stale files go first: BR2_ROOTFS_OVERLAY never deletes, so a __pycache__
+# left by an earlier build would otherwise shadow source that has changed.
 find "$TARGET_DIR/NeoDCT" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
+
+PYC_PYTHON="${HOST_DIR:-}/bin/python3"
+[ -x "$PYC_PYTHON" ] || PYC_PYTHON="$(command -v python3 || true)"
+if [ -n "$PYC_PYTHON" ] && [ -x "$PYC_PYTHON" ]; then
+    # -s/-p rewrite the source path recorded in each .pyc, so a traceback
+    # on the phone names /NeoDCT/... rather than a build directory that
+    # exists on nobody's machine but the builder's.
+    if "$PYC_PYTHON" -m compileall -q -f \
+            -s "$TARGET_DIR" -p / "$TARGET_DIR/NeoDCT" >/dev/null 2>&1; then
+        echo "[post-build] bytecode precompiled into /NeoDCT"
+    else
+        echo "[post-build] bytecode precompile failed; shipping source only"
+    fi
+else
+    echo "[post-build] no host python found; shipping source only"
+fi
 
 # Luckfox-specific console config: replace generic inittab
 # only when called with a luckfox platform id.
