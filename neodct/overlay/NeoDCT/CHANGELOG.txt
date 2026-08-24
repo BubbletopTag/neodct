@@ -1,5 +1,33 @@
 # NeoDCT OS Changelog
 
+0.4.0
+Changed
+- The whole operating system is now written in C. Everything you see on
+  screen -- the menus, the phone book, the dialler, the text boxes -- is
+  drawn by new code that produces the same picture, pixel for pixel, as
+  the version before it. 27 screens are checked against the old ones
+  automatically, and every one of them matches exactly.
+- The phone uses about a third of the memory it used to. Sitting on the
+  home screen it was using around 20 MB and now uses under 6 MB, which
+  is most of the reason for doing this at all: there is finally room to
+  add things.
+- Apps now run as separate programs instead of inside the system itself.
+  If an app goes wrong it can no longer take the phone down with it --
+  you get a crash screen and you are back at the menu, and the modem,
+  the clock and the battery never stop running.
+- A call now interrupts whatever app you are in. It could not always do
+  that before; a game that never checked for keypresses would quietly
+  miss the call.
+- Every app can now tell when you are holding a key down, so holding up
+  or down scrolls a list instead of moving one line per press.
+
+Fixed
+- Settings were being written back to storage on every single read, from
+  the modem and battery code that runs constantly. On a phone that keeps
+  everything in flash memory that wears the chip out for no reason.
+- The screen driver was being shipped as a prebuilt file that nobody
+  rebuilt. It is now compiled from its source with everything else.
+
 0.3.13a
 Fixed
 - Downloading an update over mobile data now carries on where it stopped.
