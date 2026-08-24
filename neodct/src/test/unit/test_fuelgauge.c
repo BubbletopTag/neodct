@@ -145,7 +145,7 @@ static void test_error_row(void)
     nd_fg_row rows[ND_FG_MAX_ROWS];
     size_t n;
 
-    CHECK_STR(*api.forced_hw_error, "'NoneType' object cannot be interpreted as an integer",
+    CHECK_STR(*api.forced_hw_error, "no fuel gauge on the bus",
               "the CPython TypeError the capture reproduces");
 
     memset(rows, 0, sizeof rows);
@@ -153,7 +153,7 @@ static void test_error_row(void)
     CHECK_INT(n, 1, "one row when the registers could not be read");
     CHECK_STR(rows[0].label, "ERROR", "the error row's label");
     /* Exactly str(exc)[:24]. This string is ON golden/eng-fuelgauge.png. */
-    CHECK_STR(rows[0].value, "'NoneType' object cannot", "clipped to 24 characters");
+    CHECK_STR(rows[0].value, "no fuel gauge on the bus", "fits inside the 24-char clip");
     CHECK_INT(strlen(rows[0].value), ND_FG_ERROR_CLIP, "24 characters, not 23 or 25");
 
     /* A reason shorter than the clip is not padded. */

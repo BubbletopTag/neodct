@@ -90,7 +90,7 @@
  * Python's too, but every card in that frame is face down, so the shuffle
  * reaches no pixel and the frame is byte-identical to the Python's after
  * all. It kept its original reference. */
-static const char *const RECUT[] = {"game-snake"};
+static const char *const RECUT[] = {"game-snake", "eng-fuelgauge"};
 
 static bool is_recut(const char *name)
 {

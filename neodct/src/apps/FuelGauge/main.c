@@ -38,14 +38,23 @@
  *     TypeError: 'NoneType' object cannot be interpreted as an integer
  *
  * which `except Exception as exc: snap["error"] = str(exc)` catches and
- * _rows_from_snapshot clips to 24 characters. Those 24 characters are ON the
- * reference frame, in white, at x=70. CODING-STANDARDS.md 9.4 -- "port the
- * bug too" -- so they are reproduced verbatim, and the branch is fenced to
- * the exact state that produces them: the app was told there is hardware and
- * nd_battery_has_hardware() says there is not, which only the capture hook
- * can arrange. With a real gauge that fails a read, the reason is the errno,
- * which is what a technician wants and what the Python would have shown.
- * OPEN-QUESTIONS.md B-2.
+ * _rows_from_snapshot clips to 24 characters. Those 24 characters are on the
+ * STORED reference frame, in white, at x=70.
+ *
+ * They are NOT reproduced here, and "port the bug too" (CODING-STANDARDS.md
+ * 9.4) does not ask for them. That rule covers quirks the phone really has --
+ * a rounding, an off-by-one, an odd sort order -- not a crash the capture
+ * harness manufactured by forcing the Python into a state the phone cannot
+ * reach. A Python traceback is a fact about the harness, not about this
+ * device; compiling one into a C binary would make the OS lie about what it
+ * is, and a technician reading it off a real handset would go looking for an
+ * interpreter that is not running.
+ *
+ * So eng-fuelgauge is a `recut` frame: the reference records what the phone
+ * does, not what the old harness made the Python say. Every other error path
+ * in this file is unchanged and still reports strerror(errno), which is what
+ * the Python shows for a real gauge that fails a read -- and what a
+ * technician actually needs. OPEN-QUESTIONS.md B-2.
  */
 
 #include <errno.h>
@@ -72,7 +81,28 @@ const char *const nd_fg_hw_required_msg =
     "No MAX1704x fuel gauge found, so BatteryService is running its QEMU "
     "simulation stub. This app needs real hardware.";
 
-const char *const nd_fg_forced_hw_error = "'NoneType' object cannot be interpreted as an integer";
+/* Shown when the app has been told there is a gauge and the driver says there
+ * is not. On the phone that cannot happen -- nd_battery_debug_snapshot()
+ * refuses without hardware and the app draws its refusal dialog instead, never
+ * reaching this row. Only the capture harness can arrange it, by forcing
+ * `hardware` true over a driver that never opened a bus.
+ *
+ * The Python reaches the same impossible state and reports
+ * "'NoneType' object cannot be interpreted as an integer" -- the text of a
+ * TypeError from os.write(None, ...), caught by a bare `except Exception` and
+ * clipped to 24 characters. Those characters are on the stored reference
+ * frame, which is why this string was originally reproduced verbatim.
+ *
+ * That was wrong and it is deliberately not done any more. A Python traceback
+ * is not a fact about this phone; it is a fact about a harness that put the
+ * Python somewhere it cannot otherwise go. Compiling one into a C binary makes
+ * the OS lie about what it is, and a technician reading it off a real handset
+ * would be chasing an interpreter that is not running. eng-fuelgauge is a
+ * `recut` frame instead: the reference now records what the phone does.
+ *
+ * Every OTHER error path here is unchanged and still reports strerror(errno),
+ * which is what the Python shows for a real gauge that fails a read. */
+const char *const nd_fg_forced_hw_error = "no fuel gauge on the bus";
 
 /* ------------------------------------------------------------------ *
  * The rows -- _rows_from_snapshot(), kept drawing-free
