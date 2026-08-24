@@ -144,7 +144,8 @@ void nd_msg_filter_number(char *dst, size_t dst_sz, const char *src)
     for (i = 0u; src[i] != '\0' && out + 1u < dst_sz; i++) {
         char c = src[i];
 
-        if (strchr("0123456789*#+", c) != NULL && c != '\0')
+        /* c is never NUL here, so strchr()'s terminator match cannot fire. */
+        if (strchr("0123456789*#+", c) != NULL)
             dst[out++] = c;
     }
     dst[out] = '\0';
@@ -477,7 +478,7 @@ static void strip_copy(char *out, size_t out_sz, const char *text)
     const char *end;
     size_t n;
 
-    while (*start != '\0' && strchr(" \t\n\r\v\f", *start) != NULL && *start != '\0')
+    while (*start != '\0' && strchr(" \t\n\r\v\f", *start) != NULL)
         start++;
     end = start + strlen(start);
     while (end > start && strchr(" \t\n\r\v\f", end[-1]) != NULL)

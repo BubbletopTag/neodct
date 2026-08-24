@@ -136,9 +136,6 @@ static const shoot_skip SKIPPED[] = {
     {"app-settings", "Settings is stubbed this session (SESSION-SCOPE.md)"},
     {"app-settings-wallpaper", "Settings is stubbed this session (SESSION-SCOPE.md)"},
     {"app-games", "Games is stubbed this session (SESSION-SCOPE.md)"},
-    {"app-calculator", "Calculator is stubbed this session (SESSION-SCOPE.md)"},
-    {"app-calculator-options", "Calculator is stubbed this session (SESSION-SCOPE.md)"},
-    {"app-tones", "Tones is stubbed this session (SESSION-SCOPE.md)"},
     {"app-musicplayer", "Music is stubbed this session (SESSION-SCOPE.md)"},
     {"app-koki", "Koki is out of scope this session (SESSION-SCOPE.md)"},
 
@@ -189,7 +186,10 @@ static const char *const RENDERED[] = {
     "app-phonebook",
     "app-messages",
     "app-messages-inbox",
+    "app-calculator",
+    "app-calculator-options",
     "app-clock",
+    "app-tones",
     /* shoot_telephony */
     "home-sms-banner",
     "contacts-picker",
@@ -1079,12 +1079,13 @@ static void shoot_telephony(nd_capture *cap)
  * the held state survives it, and the synthesised repeat arrives after the
  * screen is up -- which is also how the Python's ScriptExhausted got out of an
  * app that would otherwise loop forever. */
-static bool hold_key_begin(key_script *ks, nd_ui *ui, int32_t code)
+static bool hold_key_begin(key_script *ks, nd_ui *ui, const int32_t *keys, size_t n_keys,
+                           int32_t code)
 {
     static int32_t held;
 
     held = code;
-    if (!key_script_begin(ks, ui, NULL, 0u))
+    if (!key_script_begin(ks, ui, keys, n_keys))
         return false;
     if (nd_input_set_repeat_codes(ks->in, &held, 1u) != ND_OK)
         return false;
@@ -1108,9 +1109,24 @@ static size_t app_index_of(const nd_ui *ui, const char *name);
  * keys=[] -- it stands in for uistub's ScriptExhausted, which C cannot raise
  * out of a read. Passing a key an app treats as "quit" would end the run at
  * frame 1, which is why CubeBench (EXIT_KEYS = {14, 28, 46, 50}) must be
- * given ND_KEY_NONE and the MessageDialog behind app-clock must not. */
+ * given ND_KEY_NONE and the MessageDialog behind app-clock must not.
+ *
+ * `entry_sym` is "app_run" for every case but one. nd_app.h lets Messages
+ * export two more entry points that take exactly the same nd_ui * and return
+ * exactly the same int, and app-messages-inbox is captured through
+ * "app_open_inbox"; see the group comment above for why.
+ *
+ * `keys`/`n_keys` are shoot_docs.py's key script, written into the channel as
+ * press/release pairs before the app is called. Only the two Calculator cases
+ * have one -- every other case in the recipe passes keys=[] -- and a queued
+ * script works there because neither the Calculator's own loop nor
+ * VerticalList flushes the channel before its first draw. An app whose first
+ * screen DOES flush (MessageDialog, PagedList) would eat one, which is what
+ * `hold_key` is for; the two combine, the flush consuming the held press and
+ * leaving the held state behind it. */
 static void run_app_inproc(nd_capture *cap, nd_ui *ui, const char *manifest_name,
-                           int64_t frame_budget, const char *slug, int32_t hold_key)
+                           int64_t frame_budget, const char *slug, const int32_t *keys,
+                           size_t n_keys, int32_t hold_key, const char *entry_sym)
 {
     char so_path[ND_PATH_MAX];
     key_script ks;
@@ -1135,9 +1151,9 @@ static void run_app_inproc(nd_capture *cap, nd_ui *ui, const char *manifest_name
         g_failed++;
         return;
     }
-    run = (int (*)(nd_ui *))(uintptr_t)dlsym(handle, ND_APP_SYM_RUN);
+    run = (int (*)(nd_ui *))(uintptr_t)dlsym(handle, entry_sym);
     if (run == NULL) {
-        nd_log_err(ND_LOG_OS, "shoot: %s exports no %s", so_path, ND_APP_SYM_RUN);
+        nd_log_err(ND_LOG_OS, "shoot: %s exports no %s", so_path, entry_sym);
         (void)dlclose(handle);
         g_failed++;
         return;
@@ -1147,8 +1163,8 @@ static void run_app_inproc(nd_capture *cap, nd_ui *ui, const char *manifest_name
      * read_keypress(0) is a poll that returns ND_KEY_NONE -- exactly what
      * uistub's empty KeyScript does, and not dependent on whether this host
      * has a /dev/input/event0. */
-    have_keys = (hold_key == ND_KEY_NONE) ? key_script_begin(&ks, ui, NULL, 0u)
-                                          : hold_key_begin(&ks, ui, hold_key);
+    have_keys = (hold_key == ND_KEY_NONE) ? key_script_begin(&ks, ui, keys, n_keys)
+                                          : hold_key_begin(&ks, ui, keys, n_keys, hold_key);
     if (!have_keys) {
         nd_log_err(ND_LOG_OS, "shoot: %s: no key channel", slug);
         (void)dlclose(handle);
@@ -1181,14 +1197,58 @@ static void run_app_inproc(nd_capture *cap, nd_ui *ui, const char *manifest_name
  * read_keypress() raises, and the frame already committed is the one saved.
  * Clock is different because MessageDialog drains the channel before drawing,
  * so its key has to arrive as a repeat afterwards. */
+
+/* shoot_docs.py types 1, 2, 3 into the Calculator for app-calculator and
+ * 7 then Enter for app-calculator-options. The trailing Clears are NOT in the
+ * recipe: they are how the C leaves an app that the Python left by having
+ * read_keypress() raise. Each one draws a frame the budget below refuses, so
+ * they are invisible in the capture -- see CALC_FRAMES / CALC_OPT_FRAMES. */
+static const int32_t CALC_KEYS[] = {ND_KEY_1,     ND_KEY_2,     ND_KEY_3,    ND_KEY_CLEAR,
+                                    ND_KEY_CLEAR, ND_KEY_CLEAR, ND_KEY_CLEAR};
+static const int32_t CALC_OPT_KEYS[] = {ND_KEY_7, ND_KEY_ENTER, ND_KEY_CLEAR, ND_KEY_CLEAR,
+                                        ND_KEY_CLEAR};
+
+/* THE BUDGET IS WHAT PICKS THE FRAME for the two Calculator cases, exactly as
+ * uistub's idle_budget picks CubeBench's sixtieth (OPEN-QUESTIONS.md CB-2).
+ *
+ * Calculator.loop() redraws on EVERY key it recognises, Clear included, so
+ * the keys that let the app out would each commit a frame after the one the
+ * reference holds. There is no key this app treats as "leave without
+ * redrawing": Clear deletes a digit and draws, and the only other way out is
+ * a key it ignores, which never returns at all. So the budget stops the
+ * recording at the frame the Python's ScriptExhausted stopped it at:
+ *
+ *   app-calculator          draw() + one per digit          = 4 frames
+ *   app-calculator-options  draw() + the 7 + the list       = 3 frames
+ *
+ * The four Clears after them still run, still redraw, and are refused by
+ * nd_capture with ND_ERR_BUSY -- which records nothing and does not tick the
+ * virtual clock, so neither the ring nor the clock can tell they happened. */
+#define CALC_FRAMES     4
+#define CALC_OPT_FRAMES 3
+
 static const struct {
     const char *manifest_name;
     int64_t budget;
     const char *slug;
+    const int32_t *keys;
+    size_t n_keys;
     int32_t hold;
+    const char *entry;
 } STOCK_CASES[] = {
-    {"Phone book", 240, "app-phonebook", ND_KEY_CLEAR},
-    {"Clock", 240, "app-clock", ND_KEY_ENTER},
+    {"Phone book", 240, "app-phonebook", NULL, 0u, ND_KEY_CLEAR, ND_APP_SYM_RUN},
+    {"Messages", 240, "app-messages", NULL, 0u, ND_KEY_CLEAR, ND_APP_SYM_RUN},
+    {"Messages", 240, "app-messages-inbox", NULL, 0u, ND_KEY_CLEAR, ND_APP_SYM_OPEN_INBOX},
+    {"Calculator", CALC_FRAMES, "app-calculator", CALC_KEYS, ND_ARRAY_LEN(CALC_KEYS), ND_KEY_NONE,
+     ND_APP_SYM_RUN},
+    {"Calculator", CALC_OPT_FRAMES, "app-calculator-options", CALC_OPT_KEYS,
+     ND_ARRAY_LEN(CALC_OPT_KEYS), ND_KEY_NONE, ND_APP_SYM_RUN},
+    {"Clock", 240, "app-clock", NULL, 0u, ND_KEY_ENTER, ND_APP_SYM_RUN},
+    /* Tones' PagedList flushes the channel before it draws, so its way out
+     * has to be a held key like Clock's rather than a queued one. Back on
+     * the first screen returns from run() at once, and the frame already
+     * committed is the one saved. */
+    {"Tones", 240, "app-tones", NULL, 0u, ND_KEY_CLEAR, ND_APP_SYM_RUN},
 };
 
 static void shoot_stock_apps(nd_capture *cap)
@@ -1197,7 +1257,7 @@ static void shoot_stock_apps(nd_capture *cap)
     nd_ui ui;
     size_t i;
 
-    printf("[shoot] stock apps (2 of 13 -- the other eleven are not ported)\n");
+    printf("[shoot] stock apps (6 of 13 -- the other seven are not ported)\n");
 
     for (i = 0u; i < ND_ARRAY_LEN(STOCK_CASES); i++) {
         /* A fresh WP + STATUS UI per case, as every `with StubUI(...)` block
@@ -1214,7 +1274,8 @@ static void shoot_stock_apps(nd_capture *cap)
         nd_ui_sim_status(&ui, 4, 4, "Tello");
 
         run_app_inproc(cap, &ui, STOCK_CASES[i].manifest_name, STOCK_CASES[i].budget,
-                       STOCK_CASES[i].slug, STOCK_CASES[i].hold);
+                       STOCK_CASES[i].slug, STOCK_CASES[i].keys, STOCK_CASES[i].n_keys,
+                       STOCK_CASES[i].hold, STOCK_CASES[i].entry);
 
         nd_ui_teardown(&ui);
         nd_ui_sim_clear(&ui);
@@ -1285,7 +1346,8 @@ static void shoot_engineering_apps(nd_capture *cap)
      * it is byte-exact, because CPython's math.sin is the platform libm's and
      * the capture ran the same code on the same doubles. The budget exists
      * for musl on the device. */
-    run_app_inproc(cap, &ui, "Cube Bench", ENG_IDLE_BUDGET, "eng-cubebench", ND_KEY_NONE);
+    run_app_inproc(cap, &ui, "Cube Bench", ENG_IDLE_BUDGET, "eng-cubebench", NULL, 0u,
+                   ND_KEY_NONE, ND_APP_SYM_RUN);
 
     nd_ui_teardown(&ui);
     nd_ui_sim_clear(&ui);
