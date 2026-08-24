@@ -113,12 +113,15 @@ typedef struct {
  * exists and something else is in the way", so the two are worded
  * differently and the module that is actually missing is named.
  *
- * One of these is byte-identical to a widget frame that IS rendered
- * (app-messages == widget-pagedlist). Copying the pixels across would make
- * the count look better and would be a lie: nothing launched an app.
- * app-phonebook has the same relationship to widget-verticallist and is NOT
- * on this list any more -- apps/PhoneBook is a real port, and
- * shoot_stock_apps() below launches it. */
+ * Two names that used to be here are gone: app-messages and
+ * app-messages-inbox. apps/Messages is a real port now and
+ * shoot_stock_apps() below launches it, the same way app-phonebook stopped
+ * being skipped when apps/PhoneBook landed. Both of those frames are
+ * byte-identical to a widget frame that is also rendered (app-messages ==
+ * widget-pagedlist, app-phonebook == widget-verticallist); copying the
+ * pixels across would have made the count look better and would have been a
+ * lie, because nothing would have launched an app. Now something does, and
+ * the two sides agreeing is a real check rather than a tautology. */
 static const shoot_skip SKIPPED[] = {
     /* Group 3 -- shoot_stock_apps. SESSION-SCOPE.md keeps all 25 apps with
      * their real manifest and icon, and stubs every one of them except
@@ -129,8 +132,6 @@ static const shoot_skip SKIPPED[] = {
      * app-clock is NOT here: the Clock app IS that dialog (section 3.6
      * records app-clock as byte-identical to widget-messagedialog), so the
      * stub renders it for real. */
-    {"app-messages", "Messages is stubbed this session (SESSION-SCOPE.md); no folder list"},
-    {"app-messages-inbox", "Messages is stubbed this session (SESSION-SCOPE.md); no inbox"},
     {"app-calllog", "CallLog is stubbed this session (SESSION-SCOPE.md)"},
     {"app-settings", "Settings is stubbed this session (SESSION-SCOPE.md)"},
     {"app-settings-wallpaper", "Settings is stubbed this session (SESSION-SCOPE.md)"},
@@ -186,6 +187,8 @@ static const char *const RENDERED[] = {
     "menu-music",
     /* shoot_stock_apps */
     "app-phonebook",
+    "app-messages",
+    "app-messages-inbox",
     "app-clock",
     /* shoot_telephony */
     "home-sms-banner",
@@ -1016,7 +1019,7 @@ static void shoot_telephony(nd_capture *cap)
  * canvas. That path is proved separately, out of process and with a real
  * SIGSEGV, in test/unit/test_proc.c.
  *
- * Two of the thirteen are rendered.
+ * Three of the thirteen apps are rendered, between them four frames.
  *
  *   app-phonebook   apps/PhoneBook is a real port. Its run() builds the
  *                   seven-item VerticalList, paints "Select" and blocks, and
@@ -1025,13 +1028,39 @@ static void shoot_telephony(nd_capture *cap)
  *                   widget-verticallist, and the two are drawn by different
  *                   code here -- one by the widget gallery, one by the app --
  *                   so agreeing is a real check rather than a tautology.
+ *   app-messages    apps/Messages is a real port. Its run() builds the
+ *                   three-item PagedList and blocks, and that frame is the
+ *                   reference -- byte-identical to widget-pagedlist, drawn
+ *                   here by the app rather than by the widget gallery.
+ *   app-messages-   the "No Messages" empty state, and the ONE case in this
+ *   inbox           table that is not app_run(). See below.
  *   app-clock       section 3.6 records app-clock as byte-identical to
  *                   widget-messagedialog because the Clock app IS a "This
  *                   application has not been implemented yet." dialog, so the
  *                   one shipped stub app.so draws it for real.
  *
- * The other eleven stock apps draw their own screens; the stub cannot stand
- * in for any of them and they stay skipped.
+ * The other ten stock apps draw their own screens; the stub cannot stand in
+ * for any of them and they stay skipped.
+ *
+ * ============ WHY THE INBOX FRAME GOES IN THROUGH open_inbox ============
+ *
+ * shoot_docs.py reaches it as run_app(ui, "Messages", keys=[ENTER]): Enter
+ * picks "Inbox" off the root menu, the inbox is empty, _show_empty_state
+ * paints "No Messages", and the next read_keypress raises ScriptExhausted
+ * with that frame already committed. C has no exception to raise out of a
+ * blocking read, and the empty state exits on key 14 ALONE -- so the only
+ * key that gets out of it sends the app straight back to the root menu,
+ * which redraws and becomes the last frame. Freezing the recording with the
+ * frame budget instead would mean hardcoding a frame count.
+ *
+ * So this frame is taken through app_open_inbox(), the entry point the core
+ * really calls when the notification banner is tapped with several unread
+ * messages (nd_app.h, spec-apps-core.md section C3). It is
+ * _show_inbox(ui, 2, 1) -- the same function with the same arguments that
+ * the root menu's `sel == 0` branch calls -- so the pixels are the same
+ * screen by construction, and the app is genuinely launched and genuinely
+ * draws it. It also gives that entry point its only coverage in the
+ * capture. OPEN-QUESTIONS.md MSG-5.
  *
  * ============ A FRESH UI PER CASE, AS THE RECIPE HAS ============
  *
