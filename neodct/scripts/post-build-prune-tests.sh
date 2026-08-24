@@ -152,6 +152,39 @@ done
 # runtime caches to /NeoDCT/User/.pycache instead (see run_neodct.sh).
 find "$TARGET_DIR/NeoDCT" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
+# Drop the Python from the image.
+#
+# The overlay still carries the whole Python OS -- 127 files, ~700 KB -- and
+# it is load-bearing IN THE REPOSITORY: it is the reference the C is checked
+# against and the only way to re-cut a golden frame (docs/c-rewrite/BUILDING.md
+# section 4). It is dead weight ON THE TARGET. Nothing on the device invokes
+# it: nd-core is the init process, nd-apprun dlopen()s app.so, and
+# ND_APP_SO_NAME is a compile-time constant -- the "exec": "main.py" line in
+# every manifest.json is never read by the C at all.
+#
+# Left in place it is worse than wasted bytes. `ls /NeoDCT/System/core` shows
+# ModemService/ and BatteryService/ full of .py and no sign of the services
+# that are actually running, which is exactly the wrong thing for the next
+# person debugging the phone over serial to find.
+#
+# Scoped to /NeoDCT so it cannot touch anything a package installed, and the
+# now-empty service directories under System/core go with them -- that tree is
+# Python and t9.dict, nothing else, so an empty directory there is a leftover
+# and not something somebody meant.
+if [ "${NEODCT_KEEP_PYTHON:-0}" != "1" ] && [ -d "$TARGET_DIR/NeoDCT" ]; then
+    py_count=$(find "$TARGET_DIR/NeoDCT" \
+        \( -name '*.py' -o -name '*.pyc' -o -name '*.pyo' -o -name '*.py.old' \) \
+        -type f | wc -l)
+    find "$TARGET_DIR/NeoDCT" \
+        \( -name '*.py' -o -name '*.pyc' -o -name '*.pyo' -o -name '*.py.old' \) \
+        -type f -delete 2>/dev/null || true
+    if [ -d "$TARGET_DIR/NeoDCT/System/core" ]; then
+        find "$TARGET_DIR/NeoDCT/System/core" -mindepth 1 -type d -empty -delete \
+            2>/dev/null || true
+    fi
+    echo "[post-build] dropped $py_count Python files from the image"
+fi
+
 # Strip the ELF files buildroot's own strip pass cannot reach.
 #
 # target-finalize runs its global strip BEFORE it copies BR2_ROOTFS_OVERLAY

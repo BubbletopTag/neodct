@@ -228,12 +228,36 @@ with more RAM will happily run things the phone cannot.
 
 ```sh
 cd buildroot
-make neodct-rebuild            # re-syncs neodct/src and rebuilds just our package
-make                           # re-roll the image
+make
 ```
 
 `SITE_METHOD = local` means the package builds straight from `neodct/src` with
 no version bump, no hash and no download. That is the whole edit loop.
+
+**This did not use to be true, and the failure was silent.** Buildroot gates
+the copy-from-working-tree step on a stamp file with no prerequisites
+(`pkg-generic.mk:222`), so once it existed, a plain `make` walked straight past
+this package: you pulled, you built, and you got a byte-identical image with
+nothing telling you nothing had been rebuilt. `neodct.mk` now checks the tree's
+mtimes itself and drops the stamps when `neodct/src` is newer than the last
+build, printing `neodct: source changed, will rebuild`. `make neodct-rebuild`
+still works and still forces it; `NEODCT_NO_AUTO_REBUILD=y` turns the check off.
+
+Three kinds of change, three different costs:
+
+| You changed | What to run | Cost |
+| --- | --- | --- |
+| `neodct/src` (C code) | `make` | a minute |
+| `neodct/overlay`, `neodct/scripts` | `make` | seconds — `target-finalize` re-copies the overlay and re-runs the post-build scripts every time |
+| a **defconfig** | `make neodct_qemu_defconfig && make` | see below |
+
+The defconfig one is the trap. `make` never regenerates `.config` from the
+tracked defconfig, so a pulled defconfig change does nothing at all until you
+re-run `make neodct_qemu_defconfig` — which overwrites `.config`, losing any
+local `menuconfig` edits. And if the pulled change touched the **toolchain or
+the CPU** (`BR2_cortex_a53`, `BR2_TOOLCHAIN_BUILDROOT_MUSL`, the FPU flags),
+buildroot cannot rebuild incrementally across it — that is a full tree rebuild,
+hours. If you only want the code changes, don't re-run the defconfig.
 
 ---
 
@@ -300,3 +324,12 @@ stay directly editable with no rebuild.
 **`neodct/overlay/NeoDCT/` is still the Python, and it is load-bearing.** It is
 the reference the C is checked against, and the only way to re-cut a golden
 frame. Do not delete it until the port is finished.
+
+It does **not** ship. `post-build-prune-tests.sh` deletes every `.py` from the
+target — 74 files, about 2 MB — because nothing on the device runs them:
+`nd-core` is the init process and `nd-apprun` dlopen()s `app.so` from a
+compile-time constant, so the `"exec": "main.py"` line in every
+`manifest.json` is never read by the C at all. It stays in the repository
+because the Python reference build does read it. `NEODCT_KEEP_PYTHON=1 make`
+keeps them in the image if you ever want to compare the two side by side on
+one device.

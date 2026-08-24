@@ -32,6 +32,42 @@ NEODCT_POST_RSYNC_HOOKS += NEODCT_COPY_LICENSE
 
 NEODCT_DEPENDENCIES = host-pkgconf freetype jpeg libpng sqlite zlib openssl
 
+# Make a plain `make` notice that the source changed.
+#
+# buildroot's rsync-from-override-srcdir step is
+#
+#     $(BUILD_DIR)/%/.stamp_rsynced:            (pkg-generic.mk:222)
+#
+# -- a stamp file with NO prerequisites. Once it exists make treats it as up
+# to date forever, so the rsync never runs again; .stamp_built is still there
+# too, and a top-level `make` walks straight past this package. You edit
+# neodct/src, run make, and get a byte-identical image with nothing saying
+# that nothing was rebuilt. The documented fix is to run `make neodct-rebuild`
+# first, but forgetting it is silent, and a silent no-op is the worst kind.
+#
+# So: at parse time -- which is every make in this tree -- if any source file
+# is newer than the last build, drop the three stamps that gate rsync, build
+# and install. That is exactly what neodct-rebuild does, triggered by the tree
+# instead of by remembering. Set NEODCT_NO_AUTO_REBUILD=y to turn it off.
+#
+# /build is the developer's HOST build tree (see the rsync exclusion above);
+# excluded here for the same reason, so that running `make` in neodct/src does
+# not force a cross rebuild it has nothing to do with. -print -quit stops the
+# find at the first hit, so this costs one truncated directory walk per make.
+NEODCT_STAMP_DIR = $(BUILD_DIR)/neodct-$(NEODCT_VERSION)
+
+ifneq ($(NEODCT_NO_AUTO_REBUILD),y)
+NEODCT_AUTO_REBUILD := $(shell \
+	stamp="$(NEODCT_STAMP_DIR)/.stamp_built"; \
+	[ -f "$$stamp" ] || exit 0; \
+	[ -n "$$(find '$(NEODCT_SITE)' -type f -not -path '$(NEODCT_SITE)/build/*' \
+		-newer "$$stamp" -print -quit 2>/dev/null)" ] || exit 0; \
+	rm -f "$(NEODCT_STAMP_DIR)"/.stamp_rsynced \
+	      "$(NEODCT_STAMP_DIR)"/.stamp_built \
+	      "$(NEODCT_STAMP_DIR)"/.stamp_target_installed; \
+	echo "neodct: source changed, will rebuild" >&2)
+endif
+
 # -Wconversion is in CODING-STANDARDS.md because implicit narrowing on 32-bit
 # ARM is a real source of pixel-offset bugs that do not reproduce on a desktop
 # build. -Werror keeps it honest.
