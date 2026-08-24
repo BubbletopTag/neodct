@@ -216,8 +216,8 @@ void nd_msg_wrap_text(nd_lines *out, nd_ui *ui, const char *text, int32_t max_wi
 
         /* str.split() with no argument: any run of whitespace is one
          * separator and no empty token is ever produced. */
-        while (*p != '\0' && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\v' ||
-                              *p == '\f'))
+        while (*p != '\0' &&
+               (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\v' || *p == '\f'))
             p++;
         if (*p == '\0')
             break;
@@ -227,7 +227,9 @@ void nd_msg_wrap_text(nd_lines *out, nd_ui *ui, const char *text, int32_t max_wi
                 word[wlen++] = *p;
             p++;
         }
-        word[wlen] = '\0';
+        word[wlen] = '\0'; /* a word past ND_TEXT_LINE_MAX is clipped here;
+                            * the column is 220 px, so one that long has no
+                            * renderable prefix anywhere near the cut */
         any_word = true;
 
         if (current[0] != '\0') {
@@ -496,7 +498,9 @@ bool nd_msg_send_flow(nd_ui *ui, const char *text, int32_t root_id, int32_t sub_
     char body[ND_MSG_TEXT_MAX];
     char raw[ND_TEXTINPUT_CAP];
     char number[ND_TEXTINPUT_CAP];
-    char msg[128];
+    /* "Send failed: " plus the modem's detail, which nd_modem.h caps at 128
+     * and Messages renders verbatim -- so this has to hold all of it. */
+    char msg[ND_MODEM_DETAIL_MAX + 32];
     char detail[ND_MODEM_DETAIL_MAX];
     size_t n_chars;
 
@@ -639,8 +643,8 @@ nd_msg_detail_result nd_msg_show_detail(nd_ui *ui, const char *title, const char
             /* NO softkey update before this: the bar still says "Options".
              * See note 4 in the file header. */
             if (is_inbox) {
-                nd_vlist_init(&options, ui, "Options", nd_msg_inbox_options,
-                              ND_MSG_INBOX_OPTIONS_N, ND_MESSAGES_ROOT_ID);
+                nd_vlist_init(&options, ui, "Options", nd_msg_inbox_options, ND_MSG_INBOX_OPTIONS_N,
+                              ND_MESSAGES_ROOT_ID);
                 nd_header_init(&options.header, ui, nz(root_id));
                 selection = nd_vlist_show(&options);
                 if (selection == 0 && message_id >= 0) {
@@ -658,8 +662,13 @@ nd_msg_detail_result nd_msg_show_detail(nd_ui *ui, const char *title, const char
                     dialog(ui, "Erased!");
                     return ND_MSG_DETAIL_DELETED;
                 }
-                if (selection == 1)
+                if (selection == 1) {
+                    /* The Python passes root_id here, which at this call site
+                     * is the STRING "2-2" and at the composer's is the
+                     * INTEGER 2. Neither is ever read, so the C passes the
+                     * integer in both places. */
                     (void)nd_msg_send_flow(ui, message, ND_MESSAGES_ROOT_ID, sub_index);
+                }
             }
             /* Any other title -- there is none today -- falls straight
              * through to the redraw, which is what the Python's if/elif with

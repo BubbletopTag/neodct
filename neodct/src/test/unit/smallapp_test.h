@@ -13,7 +13,7 @@
  *      goldenframe.py compares rather than by eye.
  *
  * Four copies of that would have been six hundred lines of duplicated
- * fixture. It is a header rather than a .c because test/unit/*.c is globbed
+ * fixture. It is a header rather than a .c because test/unit/ .c files are globbed
  * into one binary per file, so a shared .c there would become a test with no
  * main(); draw_ref.inc and platform_test.h are here for the same reason.
  *
@@ -385,13 +385,13 @@ static const nd_json_val *sa_frames;
 
 ND_UNUSED_FN static void sa_manifest_open(void)
 {
-    char path[ND_PATH_MAX + 32];
+    char path[ND_PATH_MAX + 64];
     uint8_t *buf = NULL;
     long len;
     FILE *f;
     char err[128];
 
-    (void)snprintf(path, sizeof path, "%.1000s/manifest.json", sa_golden);
+    (void)snprintf(path, sizeof path, "%.480s/manifest.json", sa_golden);
     /* Plain fopen: the reference set is not under NEODCT_ROOT. */
     f = fopen(path, "rb");
     if (f == NULL)
@@ -438,14 +438,14 @@ ND_UNUSED_FN static const char *sa_golden_sha(const char *name)
  * could not be read. */
 ND_UNUSED_FN static int32_t sa_diff_pixels(const nd_image *got, const char *name, nd_rect *box)
 {
-    char path[ND_PATH_MAX + 32];
+    char path[ND_PATH_MAX + 64];
     nd_image *ref;
     int32_t n = 0;
     int32_t x;
     int32_t y;
 
     *box = ND_RECT(0, 0, -1, -1);
-    (void)snprintf(path, sizeof path, "%.1000s/%.40s.png", sa_golden, name);
+    (void)snprintf(path, sizeof path, "%.480s/%.40s.png", sa_golden, name);
     ref = nd_image_load_png(path);
     if (ref == NULL) {
         fprintf(stderr, "smallapp_test: cannot read %s\n", path);

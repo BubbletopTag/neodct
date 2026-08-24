@@ -98,7 +98,7 @@ typedef struct {
 
 /* A negative id is C's spelling of Python's `message_id is None`, which the
  * detail screen tests before it deletes. Real sqlite rowids start at 1. */
-#define ND_MSG_NO_ID ((int64_t)-1)
+#define ND_MSG_NO_ID ((int64_t) - 1)
 
 /* ------------------------------------------------------------------ *
  * The seven statements (msg_db.c)
