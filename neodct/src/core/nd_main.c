@@ -89,10 +89,6 @@ void nd_rs_start_if_enabled(void);
 
 /* launcher.py: DejaVu, NOT the NeoDCT font. The splash predates the UI's own
  * face and never moved. */
-#define SPLASH_FONT_BOLD    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-#define SPLASH_FONT_REGULAR "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-#define SPLASH_TITLE        "Starting NeoDCT..."
-#define SPLASH_SECONDS      1.0
 
 static volatile sig_atomic_t g_quit;
 
@@ -199,83 +195,6 @@ static void print_banner(void)
     (void)printf("%s\n\n", line);
 }
 
-/* ------------------------------------------------------------------ *
- * The boot splash (launcher.py:show_boot_logo)
- * ------------------------------------------------------------------ */
-
-/* "System v" + system.os.versionnumber, or "System v?" when it is empty.
- * Read from the image's own version.prop rather than typed in here: this line
- * spent a release showing the version before the one it was running. */
-static void splash_version(char *out, size_t out_sz)
-{
-    const char *v = nd_settings_get(ND_SET_OS_VERSIONNUMBER, "");
-
-    if (v == NULL || v[0] == '\0')
-        v = "?";
-    (void)nd_snprintf(out, out_sz, "System v%s", v);
-}
-
-static void centre_text(nd_draw *d, int32_t screen_w, int32_t y, const char *text, const nd_font *f,
-                        nd_color colour)
-{
-    int32_t w = 0;
-    int32_t h = 0;
-
-    if (f == NULL)
-        return;
-    nd_text_size(f, text, &w, &h);
-    (void)nd_draw_text(d, (screen_w - w) / 2, y, text, f, colour);
-}
-
-static void show_boot_logo(nd_fb *fb)
-{
-    const int32_t screen_w = ND_UI_W;
-    const int32_t screen_h = ND_UI_H;
-    nd_image *canvas;
-    nd_draw draw;
-    nd_font *bold;
-    nd_font *regular;
-    nd_font *fallback = NULL;
-    char ver[64];
-    int32_t title_y;
-
-    canvas = nd_image_new_filled(screen_w, screen_h, ND_PIXFMT_RGB888, ND_BLACK);
-    if (canvas == NULL)
-        return;
-    if (nd_draw_bind(&draw, canvas) != ND_OK) {
-        nd_image_free(canvas);
-        return;
-    }
-
-    /* nd_font_load() takes a REAL path and does not resolve ND_ROOT -- these
-     * two live in the rootfs proper, not under /NeoDCT. */
-    bold = nd_font_load(SPLASH_FONT_BOLD, 20);
-    regular = nd_font_load(SPLASH_FONT_REGULAR, 14);
-    if (bold == NULL || regular == NULL) {
-        /* Python falls back to ImageFont.load_default(), a bundled bitmap face
-         * C has no equivalent of. The NeoDCT font is the nearest honest
-         * substitute; the splash is not a golden frame. See U-2 / P-6. */
-        char font_path[ND_PATH_MAX];
-
-        if (nd_path_resolve(font_path, sizeof font_path, ND_PATH_FONT) == ND_OK)
-            fallback = nd_font_load(font_path, 20);
-        nd_log(ND_LOG_LAUNCHER, "boot splash: DejaVu unavailable, using the UI face");
-    }
-
-    title_y = nd_max32(20, nd_trunc32((double)screen_h * 0.35)); /* = 61 */
-    centre_text(&draw, screen_w, title_y, SPLASH_TITLE, bold != NULL ? bold : fallback, ND_WHITE);
-
-    splash_version(ver, sizeof ver);
-    centre_text(&draw, screen_w, title_y + 30, ver, regular != NULL ? regular : fallback, ND_GRAY);
-
-    if (fb != NULL)
-        (void)nd_fb_update(fb, canvas);
-
-    nd_font_free(bold);
-    nd_font_free(regular);
-    nd_font_free(fallback);
-    nd_image_free(canvas);
-}
 
 static void nap(double seconds)
 {
@@ -447,11 +366,18 @@ int main(int argc, char **argv)
         nd_log(ND_LOG_FB, "headless: no panel will be written");
     }
 
-    /* 5. The splash, then exactly one second. */
-    if (splash) {
-        show_boot_logo(fb);
-        nap(SPLASH_SECONDS);
-    }
+    /* 5. No splash.
+     *
+     * launcher.py drew "Starting NeoDCT..." and then slept for exactly one
+     * second so it could be read. That predates the initramfs, which now
+     * shows its own boot screen -- so the splash is a second screen saying
+     * less, and the sleep is a second of doing nothing on a phone the owner
+     * wants booting in five.
+     *
+     * Removed at the owner's request. show_boot_logo() is kept, unreferenced
+     * by the boot path but still exercised by its unit test, because the
+     * cheapest way to bring it back is not to have deleted it. */
+    (void)splash;
 
     /* 6. The UI. */
     nd_log(ND_LOG_LAUNCHER, "Starting UI...");

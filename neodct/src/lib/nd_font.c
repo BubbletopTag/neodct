@@ -69,9 +69,16 @@ struct nd_font {
     int32_t ascent;  /* getmetrics()[0] -- 14/18/20/24 */
     int32_t descent; /* getmetrics()[1] -- 4/5/5/6      */
 
-    /* One allocation for every printable-ASCII coverage bitmap. Owned here,
-     * freed by nd_font_free(). */
-    uint8_t *ascii_arena;
+    /* Printable ASCII, rasterised ON FIRST USE rather than at load. Filling
+     * all 95 up front cost 17.55 ms across the four sizes, and nd_ui_init_app()
+     * pays that on EVERY app launch -- the child process rebuilds its own UI,
+     * so it is not a one-off boot cost. A menu touches perhaps thirty distinct
+     * characters, so most of that work was for glyphs nobody drew.
+     *
+     * ascii_buf[i] owns ascii[i].coverage. Both are freed by nd_font_free()
+     * and by nothing else. */
+    bool ascii_ready[FONT_ASCII_N];
+    uint8_t *ascii_buf[FONT_ASCII_N];
     nd_glyph ascii[FONT_ASCII_N];
 
     /* The side table. over_buf[i] owns over[i].coverage; both are freed by
@@ -314,56 +321,48 @@ static void slot_copy_ink(const FT_Bitmap *bm, int32_t src_x, int32_t src_y, int
  * The ASCII cache
  * ------------------------------------------------------------------ */
 
-static nd_err ascii_fill(nd_font *f)
+/* Rasterise one printable-ASCII glyph, once.
+ *
+ * Takes a const nd_font* because every metrics path already does, and the
+ * cache is not part of the font's observable value -- a filled glyph and an
+ * unfilled one answer identically. The cast is legal here: nd_font_load()
+ * malloc()s the object, so no caller can hold one that is genuinely const.
+ * This is what C++ would spell `mutable`.
+ *
+ * The glyph produced is bit-identical to the one the old eager pass produced;
+ * the only difference is when. */
+static bool ascii_ensure(const nd_font *cf, uint32_t cp)
 {
-    size_t total = 0;
-    size_t used = 0;
-    uint32_t cp;
-    size_t i;
+    nd_font *f = (nd_font *)(uintptr_t)cf; /* see above */
+    size_t i = (size_t)(cp - FONT_ASCII_LO);
+    nd_glyph *g;
+    int32_t sx;
+    int32_t sy;
+    size_t bytes;
 
-    /* Pass one sizes the arena exactly. Rendering twice costs about 200
-     * microseconds per font and saves carrying a realloc that would have to
-     * fix up 95 interior pointers afterwards. */
-    for (cp = FONT_ASCII_LO; cp <= FONT_ASCII_HI; cp++) {
-        int32_t sx;
-        int32_t sy;
-        nd_glyph *g = &f->ascii[cp - FONT_ASCII_LO];
+    if (f->ascii_ready[i])
+        return true;
 
-        if (!slot_render(f->face, cp))
-            return ND_ERR_IO;
-        slot_measure(f, cp, g, &sx, &sy);
-        total += (size_t)g->ink_w * (size_t)g->ink_h;
-    }
+    g = &f->ascii[i];
+    if (!slot_render(f->face, cp))
+        return false;
+    slot_measure(f, cp, g, &sx, &sy);
 
-    if (total > 0) {
+    bytes = (size_t)g->ink_w * (size_t)g->ink_h;
+    if (bytes == 0) {
+        g->coverage = NULL;             /* space and friends: metrics only */
+    } else {
         /* owned by the nd_font; freed by nd_font_free() */
-        f->ascii_arena = malloc(total);
-        if (!f->ascii_arena)
-            return ND_ERR_NOMEM;
+        uint8_t *buf = malloc(bytes);
+
+        if (!buf)
+            return false;
+        slot_copy_ink(&f->face->glyph->bitmap, sx, sy, g->ink_w, g->ink_h, buf);
+        f->ascii_buf[i] = buf;
+        g->coverage = buf;
     }
-
-    for (i = 0; i < FONT_ASCII_N; i++) {
-        nd_glyph *g = &f->ascii[i];
-        int32_t sx;
-        int32_t sy;
-        size_t bytes;
-
-        cp = FONT_ASCII_LO + (uint32_t)i;
-        if (!slot_render(f->face, cp))
-            return ND_ERR_IO;
-        slot_measure(f, cp, g, &sx, &sy);
-
-        bytes = (size_t)g->ink_w * (size_t)g->ink_h;
-        if (bytes == 0) {
-            g->coverage = NULL;
-            continue;
-        }
-        slot_copy_ink(&f->face->glyph->bitmap, sx, sy, g->ink_w, g->ink_h, f->ascii_arena + used);
-        g->coverage = f->ascii_arena + used;
-        used += bytes;
-    }
-
-    return ND_OK;
+    f->ascii_ready[i] = true;
+    return true;
 }
 
 /* ------------------------------------------------------------------ *
@@ -405,10 +404,6 @@ nd_font *nd_font_load(const char *path, int32_t px)
     f->ascent = ft_pixel(f->face->size->metrics.ascender);
     f->descent = -ft_pixel(f->face->size->metrics.descender);
 
-    if (ascii_fill(f) != ND_OK) {
-        nd_log_err(ND_LOG_UI, "cannot rasterise %s at %d px", path, (int)px);
-        goto done;
-    }
 
     ok = true;
 done:
@@ -433,7 +428,8 @@ void nd_font_free(nd_font *f)
 
     for (i = 0; i < FONT_OVER_N; i++)
         free(f->over_buf[i]);
-    free(f->ascii_arena);
+    for (i = 0; i < FONT_ASCII_N; i++)
+        free(f->ascii_buf[i]);
     if (f->face)
         FT_Done_Face(f->face);
     free(f);
@@ -468,8 +464,11 @@ const nd_glyph *nd_font_glyph(nd_font *f, uint32_t codepoint)
     if (!f)
         return NULL;
 
-    if (codepoint >= FONT_ASCII_LO && codepoint <= FONT_ASCII_HI)
+    if (codepoint >= FONT_ASCII_LO && codepoint <= FONT_ASCII_HI) {
+        if (!ascii_ensure(f, codepoint))
+            return NULL;
         return &f->ascii[codepoint - FONT_ASCII_LO];
+    }
 
     for (i = 0; i < f->n_over; i++) {
         if (f->over[i].codepoint == codepoint)
@@ -518,6 +517,8 @@ static bool measure_glyph(const nd_font *f, uint32_t cp, nd_glyph *out)
     size_t i;
 
     if (cp >= FONT_ASCII_LO && cp <= FONT_ASCII_HI) {
+        if (!ascii_ensure(f, cp))
+            return false;
         *out = f->ascii[cp - FONT_ASCII_LO];
         return true;
     }

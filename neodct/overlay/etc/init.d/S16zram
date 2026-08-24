@@ -5,17 +5,32 @@
 
 case "$1" in
     start)
-        [ -b /dev/zram0 ] || modprobe zram 2>/dev/null
-        [ -b /dev/zram0 ] || exit 0
-        grep -q zram0 /proc/swaps && exit 0
+        # IN THE BACKGROUND, on purpose.
+        #
+        # mkswap has to write a header across the whole 28 MB device, and it
+        # was measured as the single longest step in rcS. Nothing on the boot
+        # path needs swap: it exists so that a heavy browser page gets
+        # compressed instead of OOM-killed, which cannot happen before the UI
+        # is even up. Holding rcS for it delays the home screen for a service
+        # whose first use is minutes away.
+        #
+        # The subshell keeps every failure path exactly as it was -- each
+        # `exit 0` now ends the subshell rather than the script, which is the
+        # same thing from rcS's point of view, except that rcS is no longer
+        # waiting to find out.
+        (
+            [ -b /dev/zram0 ] || modprobe zram 2>/dev/null
+            [ -b /dev/zram0 ] || exit 0
+            grep -q zram0 /proc/swaps && exit 0
 
-        SIZE=$(awk '/MemTotal/{print int($2/2)"K"}' /proc/meminfo)
-        echo "$SIZE" > /sys/block/zram0/disksize || exit 0
-        mkswap /dev/zram0 >/dev/null 2>&1 || exit 0
-        # busybox swapon may lack -p support; plain swapon then
-        swapon -p 100 /dev/zram0 2>/dev/null || swapon /dev/zram0 || exit 0
-        echo 100 > /proc/sys/vm/swappiness
-        echo "zram: $SIZE swap on /dev/zram0"
+            SIZE=$(awk '/MemTotal/{print int($2/2)"K"}' /proc/meminfo)
+            echo "$SIZE" > /sys/block/zram0/disksize || exit 0
+            mkswap /dev/zram0 >/dev/null 2>&1 || exit 0
+            # busybox swapon may lack -p support; plain swapon then
+            swapon -p 100 /dev/zram0 2>/dev/null || swapon /dev/zram0 || exit 0
+            echo 100 > /proc/sys/vm/swappiness
+            echo "zram: $SIZE swap on /dev/zram0"
+        ) &
         ;;
     stop)
         swapoff /dev/zram0 2>/dev/null
