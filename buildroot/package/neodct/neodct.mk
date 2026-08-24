@@ -12,7 +12,23 @@ NEODCT_VERSION = custom
 NEODCT_SITE = $(TOPDIR)/../neodct/src
 NEODCT_SITE_METHOD = local
 NEODCT_LICENSE = GPL-3.0
-NEODCT_LICENSE_FILES = ../../LICENSE
+
+# neodct/src/build/ is the DEVELOPER'S host build tree: x86-64 objects and an
+# x86-64 libneodct.so, sitting in exactly the directories the cross build wants
+# to write into. `rsync -au` preserves timestamps, so without this exclusion
+# make finds those objects newer than the sources it just synced, decides
+# everything is up to date, and hands x86-64 .o files to the ARM linker.
+# Anyone who ran `make` in neodct/src before building the image hits it.
+NEODCT_OVERRIDE_SRCDIR_RSYNC_EXCLUSIONS = --exclude /build
+
+# The licence lives at the repository root, one level above NEODCT_SITE, and
+# <pkg>_LICENSE_FILES is resolved against $(@D) -- the rsynced copy -- so it
+# cannot be named with a relative path. Copy it in after the rsync instead.
+NEODCT_LICENSE_FILES = LICENSE
+define NEODCT_COPY_LICENSE
+	$(INSTALL) -m 0644 $(TOPDIR)/../LICENSE $(@D)/LICENSE
+endef
+NEODCT_POST_RSYNC_HOOKS += NEODCT_COPY_LICENSE
 
 NEODCT_DEPENDENCIES = host-pkgconf freetype jpeg libpng sqlite zlib openssl
 

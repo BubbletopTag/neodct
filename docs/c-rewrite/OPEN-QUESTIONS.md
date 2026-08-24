@@ -2299,3 +2299,227 @@ by pixel. Not touched here: `lib/nd_draw.c` belongs to another work package and 
 row-at-a-time fill is a change to the most pixel-critical function in the project. Raising
 it because it is the next lever, and because "the C is slower than Pillow at this one
 thing" is exactly the sort of fact that should not stay in a scratch buffer.
+
+---
+
+## Browser (`apps/Browser`, app 11)
+
+Ported for real, from `System/apps/Browser/main.py` (261 lines). NetSurf itself is
+untouched. Everything below is a decision taken while porting the launcher; the first
+three are the ones worth an answer.
+
+### BR-1. `_CpuSampler` indexes the whitespace split, and its own comment says not to
+
+`main.py` reads `/proc/<pid>/stat`, and the comment above the read says:
+
+> utime and stime are fields 14 and 15, after the comm field which may itself contain
+> spaces -- index from the closing ")".
+
+The code then does `parts = handle.read().split()` and `int(parts[13]) + int(parts[14])`,
+which is exactly the thing the comment warns against. It works because the only process
+this sampler is ever pointed at is `netsurf-fb`, whose `comm` has no space in it. The
+comment describes a fix that was never applied.
+
+**Ported as-is**, per CODING-STANDARDS.md section 9.4 and spec-apps-core.md's explicit
+"Bug preserved on purpose". `read_busy_ticks()` splits on whitespace and takes fields 13
+and 14. Pinned in `test_browser.c` with a `(netsurf-fb)` stat fixture. If the sampler is
+ever pointed at something else, it must be changed to scan forward from the last `)` —
+and that is a behaviour change, so it needs saying out loud first.
+
+### BR-2. The key bridge has no thread and no i2c, because an app process has neither
+
+This is the one structural difference between the Python launcher and the C one, and it
+is forced by a decision that was already settled.
+
+In Python, `Browser.run()` ran **inside the core**, so `_start_key_bridge(ui)` could hand
+`ui.matrix_input` — the live i2c scanner — to `T9BrowserBridge`, which then owned a thread
+that scanned the expander and typed into uinput. Neither half of that is available now:
+
+* apps are separate processes and **no app touches the i2c bus** (the settled
+  cross-process decision, restated at the top of `nd_keypad.h`). The core reads the keypad
+  and forwards presses *and* releases down the inherited channel;
+* this process `fork()`s, and CODING-STANDARDS.md 1.1 is about exactly what a thread does
+  to a `fork()`. Adding one here to read a pipe would be the worst possible place for it.
+
+So the launcher builds the bridge object with **`nd_t9_bridge_new_for_test()`** — the
+constructor `nd_keypad.h` documents as "the same object with no input source and no
+thread" — and drives `nd_t9_bridge_handle_code()` from its own `poll()` loop, on the same
+descriptor set as the stderr pump. Every keycode decision (2/4/6/8 as the d-pad, 5 as
+follow-link, `#` cycling through cursor mode) is still `lib/nd_t9_bridge.c`'s and is
+unchanged.
+
+**The question is only about the NAME.** `_for_test` in shipping code reads as a mistake.
+`lib/nd_t9_bridge.c` is another work package's file so it was not touched; the fix, when
+someone owns it, is a two-line alias — `nd_t9_bridge_new_manual()` /
+`nd_t9_bridge_free_manual()` — with the existing spellings kept for the tests.
+
+### BR-3. `ui->has_matrix_keypad` is always false inside an app, so the bridge gate moved
+
+`_start_key_bridge` returns `None` when `ui.matrix_input is None`, i.e. on QEMU and dev
+boards where a real keyboard already reaches netsurf. Bridging one there would double
+every press, because netsurf would see both the real device and the virtual one.
+
+The C cannot ask the same question the same way. `nd_ui_init_app()` sets
+`ui->has_matrix_keypad = nd_input_has_matrix(ui->input)`, and `ui->input` in an app is a
+**pipe**, which has no matrix by construction — so the flag is false in every app process
+on every device. (That also means the T9 mode indicator is never drawn inside an app,
+which is a separate bug in `lib/nd_ui.c` / `lib/nd_input.c` and is raised here because
+this is where it was found. Not fixed: those are not this work package's files.)
+
+`nd_browser_needs_key_bridge()` therefore trusts `ui->has_matrix_keypad` when it is true
+and otherwise asks the same file the core asks: `nd_keymap_load(ND_PATH_KEYMAP, ...)`
+succeeding means keypad-only hardware. That is the same evidence, read from the same
+place, one process further out. It is correct today and it becomes redundant the moment
+the core propagates the flag — at which point the second half can be deleted.
+
+### BR-4. The pipe is now drained even when `/dev/console` will not open
+
+`main.py`:
+
+```python
+proc = Popen([...], stderr=subprocess.PIPE)
+if stderr is not subprocess.DEVNULL:
+    _pump_browser_log(proc, stderr)
+proc.wait()
+```
+
+`stderr` is `DEVNULL` when `open("/dev/console")` failed. In that case nothing ever reads
+`proc.stderr`, and the pipe is the one the comment four lines above warns about:
+
+> the pipe has to be drained while netsurf is alive or it fills and blocks it.
+
+So on a phone with no console, the Python's browser wedges after roughly 64 KB of output
+and there is no diagnostic anywhere, because the diagnostic is what filled the pipe.
+
+**Deliberate deviation, and the task asked for it.** `nd_browser_pump()` treats
+`console_fd < 0` as "read and discard": the pipe is drained to EOF regardless, and nothing
+is written. Observable behaviour with a working console is identical. Covered by
+`t_run_without_a_console`, which pushes 3000 lines through a case root that has no
+`/dev/console` at all.
+
+### BR-5. `errors="replace"` is reproduced; NUL is the one byte that cannot be
+
+Python decodes each stderr line `utf-8` with `errors="replace"` and re-encodes it.
+`sanitise_utf8()` implements the same WHATWG "maximal subpart" algorithm CPython's decoder
+uses, so an ill-formed sequence becomes ONE U+FFFD covering its longest well-formed
+prefix, not one per byte.
+
+The single divergence is NUL. Python decodes `b"\x00"` to `U+0000` and writes it straight
+back out; a C string cannot carry it, so it becomes U+FFFD here. netsurf does not emit NUL
+on stderr, so this is a difference in a case that does not arise — recorded rather than
+hidden.
+
+### BR-6. `subprocess.run(["dmesg"])` is a PATH lookup; `execve` is not
+
+`_dump_dmesg_tail` relies on the shell-style PATH search `subprocess` does for a bare
+name. `execve` takes a path, and CODING-STANDARDS.md 1.1 rules out doing the search
+between the fork and the exec. `ND_BROWSER_DMESG` is therefore `/bin/dmesg`, which is
+where both busybox and util-linux install it, and where the target image has it. `argv[0]`
+is still the bare `"dmesg"` the Python passes. If an image ever puts it somewhere else the
+tail is simply not dumped, which is the same outcome the Python's bare `except` produces.
+
+### BR-7. Two fixed buffers replace two unbounded Python reads
+
+`readline()` on netsurf's stderr and `splitlines()` on dmesg's output are both unbounded.
+On a 53 MB phone the launcher allocates neither per line, so both are capped at
+`ND_BROWSER_LINE_MAX` (1024 bytes, matching `ND_LOG_LINE_MAX`):
+
+* a stderr line longer than the cap is emitted as its own tagged line and the remainder
+  becomes the next one — no bytes are lost, the split moves;
+* a dmesg line longer than the cap is truncated, because it is being echoed verbatim and
+  a half-line with a continuation would read worse than a short one.
+
+netsurf's longest real line is a certificate complaint carrying a URL and is well inside
+1024. Raised because it is a cap that did not exist before, not because it is expected to
+bite.
+
+### BR-8. `HOME` is passed unresolved, unlike every path the launcher opens
+
+`env.setdefault("HOME", "/NeoDCT/User")` hands a string to another program rather than
+opening it, so it is passed literally and does NOT go through `nd_path_resolve()`. Every
+path this module *opens* — the browser binary, `/dev/console`, `/dev/null`, `/bin/dmesg`,
+`/proc/<pid>/stat`, `keymap.json` — does go through it, which is what lets the whole
+launcher be tested against a fake netsurf in a scratch root. Noting the asymmetry because
+it is deliberate and looks like an oversight.
+
+### BR-9. `_log_console` opens `O_APPEND` where Python opened `"wb"`
+
+Python's `open(CONSOLE, "wb", buffering=0)` is `O_WRONLY|O_CREAT|O_TRUNC`. On
+`/dev/console`, a character device, `O_CREAT` and `O_TRUNC` are both no-ops, so the two
+are the same call on the phone. `O_APPEND` (and no `O_CREAT`) is used instead because it
+is the only spelling that also behaves sensibly when the "console" is the ordinary file a
+host test points `ND_ROOT` at. A missing console is still a silent return, which is what
+the Python's bare `except` does.
+
+
+---
+
+## The image: musl, the boot script, the package and the post-build hooks (WP image/boot)
+
+### IMG-1. `post-build-prune-tests.sh` was reading the wrong argument, so no luckfox
+image has ever had its own inittab
+
+Buildroot calls a post-build script as
+
+    script TARGET_DIR $BR2_ROOTFS_POST_SCRIPT_ARGS $BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS
+
+and **both** defconfigs set `BR2_ROOTFS_POST_SCRIPT_ARGS="$(BR2_DEFCONFIG)"` because the
+qemu board's post-image script needs the defconfig path. So `$2` is an absolute path on
+the build machine and the platform id (`luckfox-armv7` / `qemu-aarch64`) is **last**.
+
+`post-build-prune-tests.sh` read `$2`. `"${PLATFORM%%-*}" = "luckfox"` therefore never
+matched, and `etc/inittab.luckfox` was deleted at the end of the script without ever
+being copied over `etc/inittab` — every hardware image so far has booted the generic
+inittab instead of the luckfox one. `post-build-system-metadata.sh` had the identical bug
+and its header comment records it being fixed there (it wrote a build-machine path into
+`system.os.platform`); the sibling script was not fixed at the same time.
+
+Now takes the last argument, exactly as the metadata script does.
+
+**Flagging rather than assuming:** the two inittabs differ, and the phone has been
+shipping the generic one for long enough that the current behaviour may be what anybody
+has actually tested on hardware. If the luckfox console setup turns out to be wrong on a
+real board after this, this is the change that did it.
+
+### IMG-2. `PYTHONPYCACHEPREFIX` is kept in `run_neodct.sh` although nothing uses it yet
+
+Line 30 still exports it after the launch line became `/NeoDCT/System/bin/nd-core`. It is
+dead as far as the core is concerned. It is kept because the image still carries python3
+and Pillow (SESSION-SCOPE.md: both ship until the last app is real) and the rootfs is a
+read-only squashfs, so anything that does reach for python during the transition still
+needs a writable cache prefix. Deleting it belongs with removing python from the
+defconfigs, not before.
+
+### IMG-3. `verify-c-build.sh` does not musl-check `displayd/`
+
+Step 3 of the acceptance gate globs `lib core apprun apps tools` and stops there, so
+`displayd/neodctDisplay.c` — the one file whose libc dependency was the entire musl
+blocker — is the one file the musl check skips. Verified by hand instead: it compiles
+clean under `musl-gcc -std=c11 -Wall -Wextra -Werror` once the kernel UAPI headers are
+reachable (`-idirafter /usr/include -idirafter /usr/include/$(gcc -print-multiarch)`,
+which is what the gate already does for the other directories). Not changed here because
+`neodct/tools/` is another agent's file; one line added to that `find` closes it.
+
+### IMG-4. The neodct package rsynced the developer's host build tree into the cross build
+
+`NEODCT_SITE_METHOD = local` makes buildroot `rsync -au` the whole of `neodct/src` into
+`$(@D)`, timestamps preserved and no `--delete`. `neodct/src/build/` is the developer's
+**x86-64** build tree, and it lands in exactly the directories the cross build writes to,
+with mtimes newer than the sources beside it — so make would declare everything up to
+date and hand x86-64 objects to the ARM linker. Anybody who ran `make` in `neodct/src`
+before building an image would have hit it. Fixed with
+`NEODCT_OVERRIDE_SRCDIR_RSYNC_EXCLUSIONS = --exclude /build`.
+
+Also: `NEODCT_LICENSE_FILES = ../../LICENSE` could never resolve — the path is taken
+relative to `$(@D)`, which is inside `output/build/`, and the licence is at the repository
+root above `NEODCT_SITE`. A `POST_RSYNC` hook copies it in now, so `make legal-info` works.
+
+### IMG-5. Overlay ELF files never go through buildroot's strip
+
+`target-finalize` strips at Makefile:760, copies `BR2_ROOTFS_OVERLAY` at :791 and runs the
+post-build scripts at :802 — in that order. So a binary carried in the overlay is never
+stripped by buildroot and never will be. That gap held the 24 KB `neodct_displayd` blob
+until it started being built from source. The prune script now closes it with a narrow
+pass over `/NeoDCT` that honours `BR2_STRIP_none`, refuses to run without a cross strip
+out of the buildroot host tree, checks ELF magic per file and cannot fail the build.
+Package-installed binaries are already stripped by then, so it is a no-op on those.

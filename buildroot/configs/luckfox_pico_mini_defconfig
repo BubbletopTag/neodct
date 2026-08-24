@@ -11,6 +11,15 @@ BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y
 BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="board/qemu/busybox.fragment"
 BR2_SYSTEM_DHCP=""
 BR2_TOOLCHAIN_BUILDROOT_CXX=y
+# musl instead of the buildroot default (glibc). Approved by the project
+# owner for the C rewrite; docs/c-rewrite/MUSL.md has the reasoning and the
+# migration order. It is worth roughly 1-2 MB on a 64 MB device.
+#
+# The one thing that used to block this is gone: NeoDCT/System/hw/neodct_displayd
+# was a committed glibc-linked ARM binary whose interpreter
+# (/lib/ld-linux-armhf.so.3) does not exist under musl, so the kernel could not
+# exec it at all. It is now built from source by the neodct package below.
+BR2_TOOLCHAIN_BUILDROOT_MUSL=y
 BR2_TARGET_TZ_INFO=y
 BR2_ROOTFS_OVERLAY="../neodct/overlay"
 BR2_ROOTFS_POST_BUILD_SCRIPT="../neodct/scripts/post-build-prune-tests.sh ../neodct/scripts/post-build-system-metadata.sh"
@@ -83,3 +92,14 @@ BR2_PACKAGE_OPENSSH=y
 BR2_PACKAGE_OPENSSH_CLIENT=y
 BR2_PACKAGE_OPENSSH_SERVER=y
 BR2_PACKAGE_OPENSSH_KEY_UTILS=y
+
+# --- The C rewrite ---
+# nd-core, nd-apprun, libneodct, the app .so files and the ST7789 panel
+# daemon, built from neodct/src by buildroot/package/neodct. This is what
+# /bin/run_neodct.sh execs; python3 and Pillow stay in the image alongside it
+# until the last app is ported (docs/c-rewrite/SESSION-SCOPE.md).
+#
+# Selects sqlite explicitly, because today sqlite is only reachable through
+# BR2_PACKAGE_PYTHON3_SQLITE -- dropping python without it would build cleanly
+# and ship a phone with no phonebook.
+BR2_PACKAGE_NEODCT=y

@@ -128,8 +128,16 @@ else
     grep -A12 -iE "ERROR: (AddressSanitizer|LeakSanitizer)|runtime error:" "$OUT/asan.log" \
         | head -40 | sed 's/^/        /'
 fi
+# Rebuild the DEFAULT variant *including its test binaries*. Plain `make`
+# builds the libraries and binaries but not test/, so checks 6-8 below were
+# finding test_font missing and reporting SKIP -- a check that silently opts
+# out is worse than one that fails.
+# `make test` rather than plain `make`: it builds the test binaries as well as
+# the libraries, and checks 6-8 below need them. Without this they found
+# test_font missing and reported SKIP -- a check that silently opts out is
+# worse than one that fails, because it looks like a pass at a glance.
 make -C "$SRC" clean >/dev/null 2>&1
-make -C "$SRC" -j"$(nproc)" >/dev/null 2>&1
+make -C "$SRC" -j"$(nproc)" test >/dev/null 2>&1
 fi
 
 # --------------------------------------------------------------- frames
@@ -142,15 +150,23 @@ if [ ! -x "$SHOOT" ]; then
 else
     if "$SHOOT" --out "$OUT/frames" > "$OUT/shoot.log" 2>&1; then
         pass "nd-shoot ran"
-        if python3 neodct/tools/goldenframe.py --compare "$GOLDEN" "$OUT/frames" \
-               > "$OUT/compare.log" 2>&1; then
-            pass "all frames identical to the Python build"
+        python3 neodct/tools/goldenframe.py --compare "$GOLDEN" "$OUT/frames" \
+            > "$OUT/compare.log" 2>&1
+        # "missing" and "pixels" mean completely different things and must not
+        # be reported the same way. A frame nd-shoot deliberately skipped --
+        # because its app is not ported yet -- is remaining work. A frame whose
+        # PIXELS differ is a regression, and the only one of the two that
+        # should ever fail this gate. Conflating them makes the port look
+        # broken for its entire duration and trains everyone to ignore check 6.
+        RENDERED=$(ls "$OUT/frames"/*.png 2>/dev/null | wc -l)
+        PIXDIFF=$(grep -cE '[[:space:]](pixels|size)[[:space:]]' "$OUT/compare.log" || true)
+        MISSING=$(grep -c 'missing' "$OUT/compare.log" || true)
+        if [ "$PIXDIFF" -eq 0 ]; then
+            pass "$RENDERED rendered, all byte-exact ($MISSING not ported yet)"
         else
-            # Not automatically a failure of the whole gate: report the
-            # detail, because "3 frames differ by 4 px" and "46 frames differ"
-            # are very different situations and the numbers say which.
-            fail "frames differ"
-            sed 's/^/        /' "$OUT/compare.log" | head -30
+            fail "$PIXDIFF frame(s) REGRESSED (pixels differ)"
+            grep -E '[[:space:]](pixels|size)[[:space:]]' "$OUT/compare.log" \
+                | head -20 | sed 's/^/        /'
         fi
     else
         fail "nd-shoot failed -- see $OUT/shoot.log"

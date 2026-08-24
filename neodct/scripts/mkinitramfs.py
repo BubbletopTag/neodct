@@ -300,9 +300,14 @@ def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None):
         # The SPI panel daemon, so recovery is visible on hardware. The
         # phone's fb0 is vfb: the framebuffer console draws the recovery
         # menu into it, but the pixels only reach the ST7789 if something
-        # mirrors them. Optional -- it is a prebuilt binary carried in the
-        # overlay, so it is present even in target trees of another
-        # architecture, where it must not be shipped.
+        # mirrors them.
+        #
+        # Optional, and the architecture check stays even though the daemon
+        # is built from source now and so cannot be the wrong architecture
+        # any more. It costs one readelf and it is the check that would
+        # catch a stale target/ left over from a build for another board --
+        # shipping a binary the kernel cannot exec is exactly the failure
+        # this whole file has to avoid.
         panel = os.path.join(target_dir, PANEL_DAEMON)
         if os.path.exists(panel):
             try:

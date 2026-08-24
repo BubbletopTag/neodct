@@ -18,15 +18,26 @@ clear > /dev/tty0
 # 4. Run the UI
 #
 # /NeoDCT is inside the read-only squashfs, so the crash log goes to the
-# user-data partition. PYTHONPYCACHEPREFIX matters more than it looks: with
-# a read-only rootfs python cannot drop .pyc files next to the .py files, so
-# without a writable cache prefix every boot re-parses the whole UI.
+# user-data partition.
+#
+# PYTHONPYCACHEPREFIX is dead weight now that the UI is nd-core and not
+# python, and it is left here on purpose. The image still carries python3
+# and Pillow (SESSION-SCOPE.md: both ship until the last app is real), so an
+# app that shells out to python during the transition still needs a writable
+# cache prefix -- with a read-only rootfs python cannot drop .pyc files next
+# to the .py files, and without this it re-parses everything on every run.
+# Delete it when python leaves the defconfigs, not before.
 export PYTHONPYCACHEPREFIX=/NeoDCT/User/.pycache
 CRASH_LOG=/NeoDCT/User/logs/crash.log
 mkdir -p /NeoDCT/User/logs 2>/dev/null || CRASH_LOG=/tmp/crash.log
 
+# nd-core replaces `python3 /NeoDCT/launcher.py`. It is the same program:
+# nd_main.c is launcher.py's main() followed by System/core/main.py's run().
+# No LD_LIBRARY_PATH is needed -- the binary carries an RPATH of
+# /NeoDCT/System/lib, which is deliberate: the rootfs is a read-only squashfs
+# and ldconfig cannot rebuild its cache at runtime.
 echo "[NeoDCT] Booting..." > /dev/tty0
-python3 /NeoDCT/launcher.py 2> "$CRASH_LOG"
+/NeoDCT/System/bin/nd-core 2> "$CRASH_LOG"
 EXIT_CODE=$?
 
 # ==========================================================
