@@ -4236,3 +4236,153 @@ Python's set iteration reached first. That order is not reproducible in C
 and is not worth reproducing: the C names the first clash found scanning
 neighbours ascending. Same condition detected, same refusal, possibly two
 different pin numbers quoted at an engineer who is about to look at both.
+
+---
+
+## The update package reader and the manifest validator (`lib/nd_package.c`, `lib/nd_manifest.c`)
+
+*Ports of `System/core/UpdateService/package.py` (172 lines) and `manifest.py` (114).
+`signing.py`, `remote.py` and `verity.py` are other people's; `staging.py` is already in
+`apps/Update/staging.c`.*
+
+Both readers are checked against the Python they were ported from, not only against
+their own unit tests: `neodct/tests/test_c_manifest_matches_python.py` (90 cases) and
+`test_c_package_matches_python.py` (39) feed the same bytes to both sides and compare
+what comes out. Everything below is a place where they deliberately do not agree, and
+**every one of them is the C refusing something Python accepts.** The manifest suite
+asserts that direction explicitly, so a future change that made the C *accept* something
+Python refuses fails the test rather than joining this list.
+
+### U-1. `"image_blocks": true` is 1 in Python and a refusal in C
+
+`bool` is a subclass of `int`, so `isinstance(True, int)` is `True` and `True < 1` is
+`False` — `manifest.py` accepts `true` as a block count of one. `block_size: true` is
+already refused by Python, but only as a side effect of `True < 512`.
+
+`nd_json.h` keeps `ND_JSON_BOOL` distinct from `ND_JSON_INT` precisely so this is
+detectable, and a verity block count that arrived as a boolean is not one anybody meant
+to sign. Refused.
+
+### U-2. `changelog` and `min_kernel` must be strings when they are present
+
+`body.get(k) or ""` keeps *any* truthy object, and `Manifest` stores it unconverted;
+`check_compatible` later does `_version_tuple(str(text))`, so `"min_kernel": 99` means
+"needs kernel 99" in Python.
+
+Treating a non-string as `""` in C would **accept an update Python refuses** — the wrong
+direction on the one check that bricks a phone. Reproducing `str()` needs a formatter
+this module does not have and would be inventing a value nobody wrote. So both fields
+are refused when present, truthy and not a string. `null`, `false`, `0` and `""` still
+collapse to `""`, exactly as `or ""` does.
+
+### U-3. Every string field has a cap, and an oversized value is refused, not truncated
+
+`ND_MANIFEST_VERSION_MAX` 64, `ND_MANIFEST_PLATFORM_MAX` 64, `ND_MANIFEST_HEX_MAX` 65,
+`ND_MANIFEST_SALT_MAX` 513. The caps match `apps/Update/update_app.h`'s `nd_upd_manifest`
+field for field, so copying one struct into the other cannot truncate.
+
+Truncation here is not cosmetic. A shortened version string is written into
+`pending.prop`; a shortened salt builds a `verity_table()` line that does not match the
+image and the phone does not boot. P-2's rule, applied to a file that arrives on a card.
+
+One consequence worth naming: `bytes.fromhex` skips ASCII whitespace *between* byte
+pairs, so Python accepts `"aa aa aa …"` — 64 hex digits spread over 95 characters — and
+stores all 95 verbatim. That does not fit a 65-byte field and is refused.
+
+### U-4. An integer outside `int64` fails the whole document
+
+`nd_json` refuses `10 ** 30` with "number out of range" rather than saturating, so a
+manifest with such a `buildtime` is "not valid JSON" here and a valid timestamp in
+Python. That is `nd_json.c`'s decision (P-4) and this module inherits it.
+
+### U-5. `image_blocks * block_size` saturates at `UINT64_MAX`
+
+Python multiplies two arbitrary-precision integers. C must not be able to wrap a hostile
+block count into a small, plausible-looking image size, so `nd_manifest_image_bytes()`
+saturates instead. A manifest that reaches the ceiling is asking for an image sixteen
+million times the size of the flash. No bound is put on `image_blocks` itself, because
+`manifest.py` puts none and the derived value is where the arithmetic can go wrong.
+
+### U-6. A UTF-8 BOM before the manifest is refused
+
+`json.loads()` on `bytes` runs `detect_encoding` and strips a BOM; `nd_json` does not.
+Nothing in this project writes one — `mkupdate.py` encodes with `json.dumps(...)` — and
+a manifest with a BOM would be a file some other tool touched after signing.
+
+### U-7. The hex value is stored EXACTLY as written, including case and spaces
+
+Not a divergence — a quirk ported on purpose. `_hex()` returns its argument unmodified,
+so an uppercase `sha256` stays uppercase and never matches the lowercase digest computed
+during extraction. Normalising it would make a manifest the signer never produced start
+matching an image. Reproduced, with a test.
+
+### U-8. The zip reader lives inside `nd_package.c`, not a separate `nd_zip.c`
+
+`spec-update-system.md` gives it its own file. It is not exported, because it has one
+caller and no independent contract: the only archives NeoDCT opens are four-member
+`.ndsw` packages, every entry point is one of `package.py`'s, and a general-purpose zip
+API out of `libneodct` would be a promise nobody wants to keep. The file carries section
+markers where it splits if that changes.
+
+### U-9. Bounds the zip format does not impose
+
+| Limit | Value | Reached by |
+| --- | --- | --- |
+| `ND_PACKAGE_MAX_MEMBERS` | 64 | central-directory entries. A package has four. |
+| `ND_PACKAGE_NAME_MAX` | 256 | one member name |
+| `ND_PACKAGE_MAX_FILE_BYTES` | 1 GiB | the whole `.ndsw`. The real one is ~60 MB, and this keeps every offset inside a 32-bit `off_t`. |
+| `ND_PACKAGE_MAX_WHOLE_MEMBER` | 1 MiB | any read-the-whole-member call. `manifest.json` is under 2 KB and a 4096-bit signature is 512 bytes. |
+
+`rootfs.squashfs` has no whole-member read at all. `nd_package_extract_image()` streams
+it in 256 KB pieces, which is the only reason 51 MB of image fits in 53 MB of RAM.
+
+### U-10. An unsafe member name refuses the WHOLE archive
+
+An entry whose name is absolute, holds a `..` component, holds a backslash, starts with
+a drive letter, or holds a control character makes `nd_package_open()` fail. CPython's
+`zipfile` accepts all of these and sanitises at *extraction* time instead.
+
+Nothing here extracts by name — the four members are asked for by constant — so this is
+not exploitable today. It is refused anyway for two reasons: a package carrying such an
+entry was not written by `mkupdate.py`, and the next person to add an extract-all should
+not have to re-derive it.
+
+### U-11. A stored member whose two sizes disagree is refused
+
+A `ZIP_STORED` member *is* its own compressed form, so `compress_size != file_size` means
+the directory is lying about one of them. Python would read the shorter of the two and
+let the CRC decide; this refuses, because "declared size disagrees with content" is
+exactly the shape a tampered package has.
+
+### U-12. A deflate stream with output left after its declared size is refused
+
+The declared uncompressed size is a **ceiling**: inflate stops there and nothing larger
+is ever allocated or written. After the last byte, one more inflate is run into a
+one-byte buffer, and a member that still has something to give is refused. The CRC alone
+does not catch this — an attacker writes the CRC field too — so the check is separate
+and has its own test.
+
+### U-13. `ND_UPD_ERR_UNREADABLE` covers "not the package's fault", including out of memory
+
+`nd_update.h`'s taxonomy has no `ND_UPD_ERR_NOMEM` and that header is frozen. A failed
+allocation returns `ND_UPD_ERR_UNREADABLE` and the `why` string says which it was. The
+three failures Python flattens into one `InvalidUpdate` are kept apart —
+`ND_UPD_ERR_UNREADABLE` (missing or unopenable file), `ND_UPD_ERR_BAD_ZIP` (not an
+archive, corrupt directory, unsafe name, no image) and `ND_UPD_ERR_BAD_MANIFEST` (no
+`manifest.json`, or one that does not validate) — so the serial log says which. The app
+flattens them back into one screen.
+
+### U-14. `sha256` is a private copy, for now
+
+`lib/nd_capture.c` has one, `nd_package.c` now has a second, and the RSA verifier will
+want a third. All three want lifting into one `nd_sha256.c` when the signature work
+package lands; it is duplicated today rather than exported because exporting a symbol
+another agent is about to define is how two work packages collide in the same link.
+
+### U-15. `service.c` is deliberately NOT wired to any of this
+
+`apps/Update/service.c` still answers `ND_UPDSVC_UNAVAILABLE` everywhere. The install
+path checks compatibility BEFORE the signature — three Python tests depend on that order
+— and the signature half does not exist yet, so wiring only the reader would put the app
+in a state where a package opens, its platform is checked, and then the signature check
+says "unavailable". The boundary stays honest until both halves are there.

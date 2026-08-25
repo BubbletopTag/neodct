@@ -88,12 +88,17 @@ endif
 # Dependencies
 # ------------------------------------------------------------------ #
 
-# libcrypto is the update signature verifier (lib/nd_signing.c). It is NOT a
-# new dependency on the phone: libcrypto.so.3 is already in the image because
-# OpenSSH links it, and `openssl` is already in NEODCT_DEPENDENCIES in
-# buildroot/package/neodct/neodct.mk. See nd_signing.h for why the Python's
-# hand-rolled RSA is not ported instead.
-PKG_DEPS := freetype2 libpng libjpeg sqlite3 libcrypto
+# The two update-system libraries. NEITHER is new on the phone:
+#
+#   libcrypto  the signature verifier (lib/nd_signing.c). libcrypto.so.3 is
+#              already in the image because OpenSSH links it. See
+#              nd_signing.h for why the Python's hand-rolled RSA is not
+#              ported instead.
+#   zlib       the .ndsw reader's inflate (lib/nd_package.c).
+#
+# Both were already in NEODCT_DEPENDENCIES in buildroot/package/neodct/
+# neodct.mk before either was linked here.
+PKG_DEPS := freetype2 libpng libjpeg sqlite3 libcrypto zlib
 
 PKG_CFLAGS := $(shell $(PKG_CONFIG) --cflags $(PKG_DEPS) 2>/dev/null)
 PKG_LIBS   := $(shell $(PKG_CONFIG) --libs   $(PKG_DEPS) 2>/dev/null)
