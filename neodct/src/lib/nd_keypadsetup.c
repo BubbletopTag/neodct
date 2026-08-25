@@ -210,7 +210,7 @@ nd_err nd_kpsetup_scan_pairs(nd_pcf8575 *chip, nd_kpsetup_pair *out, size_t max,
 
             if (bit == drive)
                 continue;
-            if (((word >> bit) & 1u) != 0u)
+            if ((((uint32_t)word >> bit) & 1u) != 0u)
                 continue; /* still pulled high: nothing shorting it here */
 
             lo = (uint8_t)(drive < bit ? drive : bit);
@@ -350,7 +350,7 @@ bool nd_kpsetup_bipartition(const nd_kpsetup_pair *pairs, size_t n, uint8_t *sid
             uint32_t nb;
 
             for (nb = 0u; nb < (uint32_t)ND_KPSETUP_MAX_PINS; nb++) {
-                if (((adj[node] >> nb) & 1u) == 0u)
+                if ((((uint32_t)adj[node] >> nb) & 1u) == 0u)
                     continue;
                 if (colour[nb] < 0) {
                     colour[nb] = (int8_t)(1 - colour[node]);
