@@ -39,8 +39,10 @@
  * Python has arbitrary-precision integers, unbounded strings and no notion of
  * a hostile input. C has none of those luxuries and this file reads an
  * attacker-supplied SD card. Every divergence is in the direction of refusing
- * a manifest Python would have accepted, never the reverse, and each is
- * marked "DIVERGENCE" at its check in nd_manifest.c. In summary:
+ * a manifest Python would have accepted, never the reverse; each is marked
+ * "DIVERGENCE" at its check in nd_manifest.c, written up in
+ * OPEN-QUESTIONS.md U-1..U-7, and asserted -- including that direction -- by
+ * neodct/tests/test_c_manifest_matches_python.py. In summary:
  *
  *   1. Every string field has a length cap and a manifest that exceeds it is
  *      refused rather than truncated. A truncated version string would be

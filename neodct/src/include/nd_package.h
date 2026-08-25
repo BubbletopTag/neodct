@@ -96,10 +96,11 @@ extern "C" {
  * Bounds the Python does not have
  * ------------------------------------------------------------------ *
  *
- * OPEN-QUESTIONS.md P-2's rule again: the Python has no limits here and the C
- * needs them, because the input arrives on a card. Each is far above anything
- * the project ships -- mkupdate.py writes four members with names no longer
- * than fifteen characters into a file of about 60 MB.
+ * OPEN-QUESTIONS.md P-2's rule again, written up for this module as U-9: the
+ * Python has no limits here and the C needs them, because the input arrives
+ * on a card. Each is far above anything the project ships -- mkupdate.py
+ * writes four members with names no longer than fifteen characters into a
+ * file of about 60 MB.
  */
 
 /* Entries in the central directory. A package has four. */
