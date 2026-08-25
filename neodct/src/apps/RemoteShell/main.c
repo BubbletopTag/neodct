@@ -51,7 +51,7 @@
 #include "nd_widgets.h"
 
 #include "remote_app.h"
-#include "rshell.h"
+#include "nd_remoteshell.h"
 
 /* ------------------------------------------------------------------ *
  * The strings

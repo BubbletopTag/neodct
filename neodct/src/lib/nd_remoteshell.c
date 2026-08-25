@@ -103,7 +103,7 @@
 #include "nd_props.h"
 #include "nd_types.h"
 
-#include "rshell.h"
+#include "nd_remoteshell.h"
 
 extern char **environ;
 
