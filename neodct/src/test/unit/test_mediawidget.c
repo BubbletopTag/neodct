@@ -279,12 +279,42 @@ static void test_browser_command_line(void)
     size_t i;
 
     /* build/<variant>/bin/neodct-play, beside the test's own directory. */
-    /* access(), NOT nd_path_exists(): the path layer resolves against
-     * ND_ROOT, and this is a build artefact on the host, not a phone
-     * path. Using the wrong one made this test skip in silence -- which
-     * is exactly how a test for a shipped bug ends up proving nothing. */
-    if (nd_snprintf(exe, sizeof exe, "%s", "build/default/bin/neodct-play") != ND_OK)
-        return;
+    /* Find neodct-play IN THIS VARIANT'S build, via our own path.
+     *
+     * This said "build/default/bin/neodct-play" and that broke
+     * `make ASAN=1 test` for everybody: the sanitized test spawned the
+     * PLAIN binary, which then loaded build/asan/lib/libneodct.so through
+     * the RPATH and died with "ASan runtime does not come first in initial
+     * library list". The failure looked like it belonged to whoever ran
+     * into it next, which is the worst kind.
+     *
+     * /proc/self/exe is build/<variant>/test/test_mediawidget, so
+     * ../bin/neodct-play beside it is right for every variant with no
+     * table of them to keep current.
+     *
+     * access(), not nd_path_exists(): the path layer resolves against
+     * ND_ROOT and this is a host build artefact, not a phone path. Using
+     * the wrong one made this test skip in silence -- which is how a test
+     * for a shipped bug ends up proving nothing. */
+    {
+        char self[ND_PATH_MAX];
+        ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1u);
+        char *slash;
+
+        if (n <= 0) {
+            (void)fprintf(stderr, "SKIP browser command line: no /proc/self/exe\n");
+            return;
+        }
+        self[n] = '\0';
+        slash = strrchr(self, '/');
+        if (slash == NULL) {
+            (void)fprintf(stderr, "SKIP browser command line: odd argv0\n");
+            return;
+        }
+        *slash = '\0';
+        if (nd_snprintf(exe, sizeof exe, "%s/../bin/neodct-play", self) != ND_OK)
+            return;
+    }
     if (access(exe, X_OK) != 0) {
         (void)fprintf(stderr, "SKIP browser command line: no %s\n", exe);
         return;
