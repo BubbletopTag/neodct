@@ -165,7 +165,20 @@ typedef enum {
     ND_UPDSVC_INVALID,       /* InvalidUpdate       -- nothing installable  */
     ND_UPDSVC_BAD_SIGNATURE, /* BadSignature        -- unsigned or wrong    */
     ND_UPDSVC_INCOMPATIBLE,  /* IncompatibleUpdate  -- the brick case       */
-    ND_UPDSVC_UNAVAILABLE    /* no libndupdate in this build                */
+    ND_UPDSVC_UNAVAILABLE,   /* no libndupdate in this build                */
+
+    /* remote.NetworkError, and the two local failures that reach the same
+     * screen: no room on the card, and the card refusing the write. All
+     * three end the same way -- the download did not happen and `why` says
+     * what stopped it -- which is exactly the page _check_online draws.
+     *
+     * NOT folded into ND_UPDSVC_UNAVAILABLE, which it briefly was: that one
+     * means "this build has no downloader", and telling the owner of a
+     * working phone that their software cannot do updates because the
+     * carrier dropped is the wrong sentence. remote.NoRelease keeps
+     * ND_UPDSVC_INVALID, because _check_online tests for exactly that value
+     * to draw "Nothing published". */
+    ND_UPDSVC_NETWORK
 } nd_updsvc_err;
 
 /* An opened .ndsw. Opaque, and today nothing can produce one. */

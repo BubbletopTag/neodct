@@ -41,10 +41,19 @@
  *     rather than reproducing forty lines of string comparison;
  *   - the image is never held in memory: 51 MB against 53 MB usable.
  *
- * The remote.* entry points still return ND_UPDSVC_UNAVAILABLE. remote.py
- * needs HTTP and TLS that this tree does not have, and a half-built
- * downloader is worse than an honest refusal. Card updates -- which is how
- * this phone is actually updated -- work.
+ * ============ AND THE REMOTE HALF LANDED TOO ============
+ *
+ * lib/nd_remote.c is the port of remote.py. It gets its HTTP and its TLS by
+ * spawning /usr/bin/curl -- which is already in both defconfigs along with
+ * the CA bundle -- rather than by linking libcurl into libneodct.so, because
+ * linking OpenSSL for the signature verifier already cost +1.3 MB of idle
+ * RSS in every process that maps this library, and a download happens a few
+ * times a year. nd_remote.h has the whole argument.
+ *
+ * So all four remote.* entry points below are now real. What they still do
+ * NOT do is decide whether what they downloaded is trustworthy: the file
+ * lands on the card and the ordinary card path -- open, verify, stage --
+ * takes it from there, signature check included.
  */
 
 #include <stdio.h>
@@ -55,23 +64,13 @@
 #include "nd_manifest.h"
 #include "nd_package.h"
 #include "nd_paths.h"
+#include "nd_remote.h"
 #include "nd_signing.h"
 #include "nd_types.h"
 #include "nd_update.h"
+#include "nd_widgets.h"
 
 #include "update_app.h"
-
-/* The single sentence the remote.* entry points still hand back as str(exc).
- * It reaches the screen after "Download failed.\n" and inside the "No
- * connection" page. The package path no longer uses it. */
-static const char *const UNAVAILABLE_WHY = "this build has no network stack";
-
-static nd_updsvc_err unavailable(char *why, size_t why_sz)
-{
-    if (why != NULL && why_sz > 0u)
-        (void)nd_strlcpy(why, UNAVAILABLE_WHY, why_sz);
-    return ND_UPDSVC_UNAVAILABLE;
-}
 
 /* nd_update.h's taxonomy onto __init__.py's three exception classes.
  *
@@ -273,15 +272,14 @@ nd_updsvc_err nd_upd_package_thumbnail_path(nd_upd_package *pkg, char *out, size
 
     /* Already extracted for this package: hand back the same file. */
     if (pkg->thumb_path[0] != '\0')
-        return nd_strlcpy(out, pkg->thumb_path, out_sz) == ND_OK ? ND_UPDSVC_OK
-                                                                 : ND_UPDSVC_INVALID;
+        return nd_strlcpy(out, pkg->thumb_path, out_sz) == ND_OK ? ND_UPDSVC_OK : ND_UPDSVC_INVALID;
 
     /* nd_package_read_thumbnail() returns art ONLY when the manifest names a
      * thumbnail_sha256 and the bytes hash to it -- the signature covers
      * manifest.json alone, so unhashed art is unsigned art. Any refusal here
      * is "there is no picture", which the caller draws around. */
-    if (nd_package_read_thumbnail(pkg->pkg, &art, &art_len, NULL, 0u) != ND_UPD_OK ||
-        art == NULL || art_len == 0u) {
+    if (nd_package_read_thumbnail(pkg->pkg, &art, &art_len, NULL, 0u) != ND_UPD_OK || art == NULL ||
+        art_len == 0u) {
         free(art);
         return ND_UPDSVC_INVALID;
     }
@@ -349,40 +347,87 @@ nd_updsvc_err nd_upd_manifest_check_compatible(const nd_upd_manifest *m, const c
  * remote.py
  * ------------------------------------------------------------------ */
 
+/* nd_remote.c's errors onto the app's, and it is a DIFFERENT mapping from
+ * map_err() above.
+ *
+ * The one distinction _check_online actually tests for is NoRelease, which
+ * it draws as "Nothing published" rather than as a failure -- a release
+ * whose assets are still uploading is a normal Tuesday. Everything else is
+ * "the download did not happen, and here is the sentence to print": the
+ * carrier dropped, GitHub answered 503, the card is full, the card refused
+ * the write. One screen, one value.
+ *
+ * ND_UPDSVC_UNAVAILABLE is deliberately not reachable from here any more.
+ * It means "this build cannot do updates", which is no longer true. */
+static nd_updsvc_err map_remote_err(nd_update_err e)
+{
+    switch (e) {
+    case ND_UPD_OK:
+        return ND_UPDSVC_OK;
+    case ND_UPD_ERR_NO_PACKAGE:
+        return ND_UPDSVC_INVALID; /* remote.NoRelease */
+    default:
+        return ND_UPDSVC_NETWORK;
+    }
+}
+
 nd_updsvc_err nd_upd_remote_latest(const char *platform, nd_upd_release *out, char *why,
                                    size_t why_sz)
 {
-    ND_UNUSED(platform);
-    if (out != NULL)
-        memset(out, 0, sizeof *out);
-    return unavailable(why, why_sz);
+    nd_release found;
+    nd_update_err rc;
+
+    if (out == NULL)
+        return ND_UPDSVC_NETWORK;
+    memset(out, 0, sizeof *out);
+
+    rc = nd_remote_latest(platform, &found, why, why_sz);
+    if (rc != ND_UPD_OK)
+        return map_remote_err(rc);
+
+    /* Both structs size these fields identically -- ND_REMOTE_VERSION_MAX is
+     * ND_UPDATE_VERSION_MAX and ND_REMOTE_URL_MAX is ND_PATH_MAX, and
+     * nd_remote.h says so at each of them -- so neither copy can truncate.
+     * The app has no field for the tag, the notes or the prerelease flag;
+     * nothing above this line reads them. */
+    (void)nd_strlcpy(out->version, found.version, sizeof out->version);
+    (void)nd_strlcpy(out->url, found.url, sizeof out->url);
+    out->size = found.size;
+    return ND_UPDSVC_OK;
 }
 
 bool nd_upd_remote_is_newer(const char *found, const char *installed)
 {
-    ND_UNUSED(found);
-    ND_UNUSED(installed);
-    /* remote.is_newer() compares two release tags with rules of its own
-     * (remote.py). Answering "yes" here would offer a download that cannot
-     * happen; answering "no" would claim the phone is up to date on no
-     * evidence. Neither is reachable -- nd_upd_remote_latest() fails first --
-     * so this answers the one that never puts a claim on screen. */
-    return false;
+    return nd_remote_is_newer(found, installed);
 }
 
 nd_updsvc_err nd_upd_remote_asset_name(const char *platform, char *out, size_t out_sz)
 {
-    ND_UNUSED(platform);
-    if (out != NULL && out_sz > 0u)
-        out[0] = '\0';
-    return ND_UPDSVC_UNAVAILABLE;
+    /* ND_ERR_TOOLONG rather than a truncated name: a truncated asset name
+     * matches nothing and would read as "nothing published for this phone",
+     * which is a lie about the release rather than about the buffer. */
+    return nd_remote_asset_name(platform, out, out_sz) == ND_OK ? ND_UPDSVC_OK : ND_UPDSVC_NETWORK;
+}
+
+/* The ProgressScreen behind nd_remote's callback. nd_progress_draw() already
+ * refuses to repaint when the percentage has not moved, so calling it once
+ * per 64 KiB chunk costs one integer division for all but a hundred of them
+ * -- which is why the download does not need its own throttle. */
+static void progress_bridge(void *ctx, int64_t done, int64_t total)
+{
+    (void)nd_progress_draw((nd_progress *)ctx, done, total);
 }
 
 nd_updsvc_err nd_upd_remote_download(const nd_upd_release *rel, const char *destination,
                                      nd_progress *progress, char *why, size_t why_sz)
 {
-    ND_UNUSED(rel);
-    ND_UNUSED(destination);
-    ND_UNUSED(progress);
-    return unavailable(why, why_sz);
+    nd_update_err rc;
+
+    if (rel == NULL || destination == NULL)
+        return ND_UPDSVC_NETWORK;
+
+    rc = nd_remote_download(rel->url, destination, rel->size,
+                            (progress != NULL) ? progress_bridge : NULL, progress,
+                            ND_REMOTE_DOWNLOAD_ATTEMPTS, NULL, why, why_sz);
+    return map_remote_err(rc);
 }

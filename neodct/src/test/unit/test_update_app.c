@@ -763,8 +763,8 @@ static void test_service_is_present(void)
      * when it can is the more confusing of the two lies. */
     why[0] = '\0';
     pkg = NULL;
-    CHECK_INT(api.svc_open("/media/does-not-exist.ndsw", &pkg, why, sizeof why),
-              ND_UPDSVC_INVALID, "a missing package is INVALID, not unavailable");
+    CHECK_INT(api.svc_open("/media/does-not-exist.ndsw", &pkg, why, sizeof why), ND_UPDSVC_INVALID,
+              "a missing package is INVALID, not unavailable");
     CHECK(pkg == NULL, "and hands back nothing");
     CHECK(why[0] != '\0', "with a reason");
 
@@ -785,9 +785,31 @@ static void test_service_is_present(void)
     CHECK_INT(api.svc_verify(NULL, ND_UPDATE_RELEASE_KEY, why, sizeof why), ND_UPDSVC_INVALID,
               "verifying nothing is INVALID, not BAD_SIGNATURE");
 
-    /* The one entry point that IS still unavailable, and honestly so. */
-    CHECK_INT(api.svc_latest("qemu", &rel, why, sizeof why), ND_UPDSVC_UNAVAILABLE,
-              "remote.latest has no network stack under it");
+    /* remote.* is wired now, so this no longer answers UNAVAILABLE -- and it
+     * must not reach a network to prove it. PATH is nd_remote's transport
+     * seam: with no curl anywhere on it, nd_remote_latest() stops at
+     * "cannot reach GitHub" without opening a socket, which is a real code
+     * path (a broken image) and a deterministic one. test_remote.c drives
+     * the rest of it against a stand-in curl serving committed fixtures. */
+    {
+        char *saved = getenv("PATH");
+        char keep[ND_PATH_MAX];
+
+        keep[0] = '\0';
+        if (saved != NULL)
+            (void)nd_strlcpy(keep, saved, sizeof keep);
+        (void)setenv("PATH", "/nonexistent-so-there-is-no-curl", 1);
+
+        why[0] = '\0';
+        CHECK_INT(api.svc_latest("qemu", &rel, why, sizeof why), ND_UPDSVC_NETWORK,
+                  "remote.latest is wired, and a phone with no curl says so");
+        CHECK(strstr(why, "cannot reach GitHub") != NULL, "with the Python's own wording");
+
+        if (keep[0] != '\0')
+            (void)setenv("PATH", keep, 1);
+        else
+            (void)unsetenv("PATH");
+    }
 }
 
 /* ------------------------------------------------------------------ *
