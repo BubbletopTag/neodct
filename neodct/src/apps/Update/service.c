@@ -18,60 +18,53 @@
  * update system today is include/nd_update.h -- an enum, some string
  * constants, and one function (nd_update_message()) that lib/ never defines.
  *
- * ============ WHY THIS FILE IS STUBS AND NOT AN IMPLEMENTATION ============
+ * ============ IT IS NO LONGER STUBS ============
  *
- * Because the shape of the failure matters more than the presence of the
- * feature. Everything above this boundary -- the screens, the refusals, the
- * ordering, the staging record -- fails safe: a bug there shows the wrong
- * words or refuses a good update. Everything below it fails unsafe: a zip
- * reader that misreads a local header, or an RSA verifier that checks the
- * DigestInfo by searching the decrypted block instead of rebuilding the
- * padding whole, hands `dd` an image that nobody signed and turns a phone
- * into a brick that cannot be talked out of it afterwards.
+ * The library landed. lib/nd_package.c reads the zip, lib/nd_manifest.c
+ * validates and answers check_compatible(), and lib/nd_signing.c verifies
+ * the RSA signature through OpenSSL. This file is now the thin adapter it
+ * was always meant to be: it maps their error taxonomy onto the app's,
+ * copies the manifest into the app's own struct, and owns the one thing
+ * neither side does -- writing the thumbnail somewhere the widget layer can
+ * open by path.
  *
- * The Python knows this. signing.py's docstring names Bleichenbacher'06
- * forgeries; the app's own docstring says of the BAD SIGNATURE case that
- * "an image nobody signed is how you end up stuck on a phone that will not
- * boot". Writing a second, unreviewed copy of that check inside one app's
- * .so -- while a first copy is specified to live in a shared library that
- * Downgrade will also link -- is worse than having none.
+ * What has NOT changed is the reason the boundary exists. Everything above
+ * it fails safe: a bug shows the wrong words or refuses a good update.
+ * Everything below it fails unsafe. So the rules the stubs were written to
+ * protect are still the rules, and each one is enforced by the library
+ * rather than restated here:
  *
- * So the boundary is honest. nd_upd_service_available() is false, every entry
- * point returns ND_UPDSVC_UNAVAILABLE with a reason, and nd_update_install()
- * stops on its first call and says so on screen. When libndupdate lands, this
- * file is the only one that changes: the declarations in update_app.h are
- * already the Python's own call shapes.
+ *   - the signature is over the manifest bytes EXACTLY AS STORED
+ *     (nd_package_manifest_raw), never a re-encoding of the parsed object;
+ *   - check_compatible is THE BRICK CASE and has exactly one
+ *     implementation, in nd_manifest.c, which this file delegates to
+ *     rather than reproducing forty lines of string comparison;
+ *   - the image is never held in memory: 51 MB against 53 MB usable.
  *
- * ============ WHAT A REPLACEMENT HAS TO GET RIGHT ============
- *
- * Recorded here so it is not re-derived from scratch. All of it is in
- * spec-update-system.md sections 1-4 and was read out of the Python:
- *
- *   - Members: rootfs.squashfs (ZIP_STORED in a real package, ZIP_DEFLATED in
- *     the test fixtures -- both methods are mandatory), manifest.json,
- *     manifest.sig, thumbnail.png.
- *   - The data offset of a member comes from the LOCAL header's name and
- *     extra lengths, never the central directory's.
- *   - Zip64 must be tolerated, duplicate names resolve to the last entry, and
- *     the CRC-32 of every member is checked at EOF.
- *   - The signature is over the manifest bytes EXACTLY AS STORED, never a
- *     re-encoding of the parsed object.
- *   - The image is never held in memory: 51 MB against 53 MB usable.
- *   - read_thumbnail() returns art only when manifest.thumbnail_sha256 is
- *     present AND the bytes hash to it, because the signature covers
- *     manifest.json alone.
+ * The remote.* entry points still return ND_UPDSVC_UNAVAILABLE. remote.py
+ * needs HTTP and TLS that this tree does not have, and a half-built
+ * downloader is worse than an honest refusal. Card updates -- which is how
+ * this phone is actually updated -- work.
  */
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
+#include "nd_manifest.h"
+#include "nd_package.h"
+#include "nd_paths.h"
+#include "nd_signing.h"
 #include "nd_types.h"
+#include "nd_update.h"
 
 #include "update_app.h"
 
-/* The single sentence every entry point hands back as str(exc). It reaches
- * the screen in two places: after "Download failed.\n", and inside the "No
- * connection" page where the Python prints the NetworkError. */
-static const char *const UNAVAILABLE_WHY = "this build has no update package reader";
+/* The single sentence the remote.* entry points still hand back as str(exc).
+ * It reaches the screen after "Download failed.\n" and inside the "No
+ * connection" page. The package path no longer uses it. */
+static const char *const UNAVAILABLE_WHY = "this build has no network stack";
 
 static nd_updsvc_err unavailable(char *why, size_t why_sz)
 {
@@ -80,9 +73,70 @@ static nd_updsvc_err unavailable(char *why, size_t why_sz)
     return ND_UPDSVC_UNAVAILABLE;
 }
 
+/* nd_update.h's taxonomy onto __init__.py's three exception classes.
+ *
+ * UNREADABLE, BAD_ZIP and BAD_MANIFEST all collapse into InvalidUpdate,
+ * exactly as Python flattens them -- the app says "INVALID UPDATE! UPDATE
+ * MAY BE CORRUPT!!" for all three. They stayed apart in the library so the
+ * serial log can say which it was; they must not stay apart here, because
+ * the app has three refusal screens and not six.
+ *
+ * The default is INVALID and not UNAVAILABLE on purpose: an error this
+ * function has not been taught about is a broken package, not a missing
+ * feature, and telling the owner their build cannot read updates when it
+ * can is the more confusing of the two lies. */
+static nd_updsvc_err map_err(nd_update_err e)
+{
+    switch (e) {
+    case ND_UPD_OK:
+        return ND_UPDSVC_OK;
+    case ND_UPD_ERR_INCOMPATIBLE:
+        return ND_UPDSVC_INCOMPATIBLE;
+    case ND_UPD_ERR_BAD_SIGNATURE:
+        return ND_UPDSVC_BAD_SIGNATURE;
+    default:
+        return ND_UPDSVC_INVALID;
+    }
+}
+
+/* The app's manifest struct is not the library's. Every char array is sized
+ * identically on both sides (nd_manifest.h and update_app.h agree field for
+ * field), so these copies cannot truncate -- with ONE exception, called out
+ * below. */
+static void copy_manifest(nd_upd_manifest *dst, const nd_manifest *src)
+{
+    memset(dst, 0, sizeof *dst);
+    (void)nd_strlcpy(dst->version, src->version, sizeof dst->version);
+    dst->buildtime = src->buildtime;
+    (void)nd_strlcpy(dst->platform, src->platform, sizeof dst->platform);
+    (void)nd_strlcpy(dst->sha256, src->sha256, sizeof dst->sha256);
+
+    /* THE exception. A release note is the one field with no natural bound,
+     * so the library heap-allocates it; the app declared a 1024-byte array
+     * long before the library existed. Truncating here is right: the app
+     * cannot show more than its own screen holds, and the alternative is
+     * changing a struct the whole Update app is written against. */
+    (void)nd_strlcpy(dst->changelog, src->changelog != NULL ? src->changelog : "",
+                     sizeof dst->changelog);
+
+    (void)nd_strlcpy(dst->min_kernel, src->min_kernel, sizeof dst->min_kernel);
+    (void)nd_strlcpy(dst->thumbnail_sha256, src->thumbnail_sha256, sizeof dst->thumbnail_sha256);
+    (void)nd_strlcpy(dst->verity_root_hash, src->verity_root_hash, sizeof dst->verity_root_hash);
+    dst->verity_block_size = src->verity_block_size;
+    dst->verity_image_blocks = src->verity_image_blocks;
+    (void)nd_strlcpy(dst->verity_salt, src->verity_salt, sizeof dst->verity_salt);
+}
+
+struct nd_upd_package {
+    nd_package *pkg;
+    nd_upd_manifest m;
+    /* "" until the thumbnail is asked for. Unlinked by close(). */
+    char thumb_path[ND_PATH_MAX];
+};
+
 bool nd_upd_service_available(void)
 {
-    return false;
+    return true;
 }
 
 /* ------------------------------------------------------------------ *
@@ -91,58 +145,177 @@ bool nd_upd_service_available(void)
 
 nd_updsvc_err nd_upd_package_open(const char *path, nd_upd_package **out, char *why, size_t why_sz)
 {
-    ND_UNUSED(path);
-    if (out != NULL)
-        *out = NULL;
-    return unavailable(why, why_sz);
+    nd_upd_package *p;
+    nd_update_err rc;
+
+    if (out == NULL)
+        return ND_UPDSVC_INVALID;
+    *out = NULL;
+
+    p = calloc(1u, sizeof *p);
+    if (p == NULL) {
+        if (why != NULL && why_sz > 0u)
+            (void)nd_strlcpy(why, "out of memory", why_sz);
+        return ND_UPDSVC_INVALID;
+    }
+
+    rc = nd_package_open(path, &p->pkg, why, why_sz);
+    if (rc != ND_UPD_OK) {
+        free(p);
+        return map_err(rc);
+    }
+    copy_manifest(&p->m, nd_package_manifest(p->pkg));
+    *out = p;
+    return ND_UPDSVC_OK;
 }
 
 void nd_upd_package_close(nd_upd_package *pkg)
 {
-    /* Nothing can be open, so there is nothing to close. Kept because the
-     * caller's `with pkg:` has to have a matching call somewhere, and a
-     * replacement will need it. */
-    ND_UNUSED(pkg);
+    if (pkg == NULL)
+        return;
+    /* The thumbnail is ours and nobody else's; it does not outlive the
+     * package that produced it. */
+    if (pkg->thumb_path[0] != '\0') {
+        char resolved[ND_PATH_MAX];
+
+        if (nd_path_resolve(resolved, sizeof resolved, pkg->thumb_path) == ND_OK)
+            (void)unlink(resolved);
+    }
+    nd_package_close(pkg->pkg);
+    free(pkg);
 }
 
 const nd_upd_manifest *nd_upd_package_manifest(const nd_upd_package *pkg)
 {
-    ND_UNUSED(pkg);
-    return NULL;
+    return pkg != NULL ? &pkg->m : NULL;
 }
 
 const char *nd_upd_package_path(const nd_upd_package *pkg)
 {
-    ND_UNUSED(pkg);
-    return "";
+    return pkg != NULL ? nd_package_path(pkg->pkg) : "";
 }
 
 int64_t nd_upd_package_image_size(const nd_upd_package *pkg)
 {
-    ND_UNUSED(pkg);
-    return -1;
+    return pkg != NULL ? nd_package_image_size(pkg->pkg) : -1;
 }
 
 bool nd_upd_package_signed(const nd_upd_package *pkg)
 {
-    ND_UNUSED(pkg);
-    return false;
+    return pkg != NULL && nd_package_is_signed(pkg->pkg);
 }
 
 nd_updsvc_err nd_upd_package_verify_signature(nd_upd_package *pkg, const char *key_path, char *why,
                                               size_t why_sz)
 {
-    ND_UNUSED(pkg);
-    ND_UNUSED(key_path);
-    return unavailable(why, why_sz);
+    const uint8_t *raw;
+    size_t raw_len = 0u;
+    uint8_t *sig = NULL;
+    size_t sig_len = 0u;
+    nd_pubkey *key;
+    nd_update_err rc;
+    bool ok;
+
+    if (pkg == NULL)
+        return ND_UPDSVC_INVALID;
+
+    /* THE BYTES AS STORED. Not a re-encoding of the parsed manifest --
+     * re-serialising is how a verifier starts accepting documents nobody
+     * signed, and package.py is explicit about it. */
+    raw = nd_package_manifest_raw(pkg->pkg, &raw_len);
+    if (raw == NULL || raw_len == 0u) {
+        if (why != NULL && why_sz > 0u)
+            (void)nd_strlcpy(why, "update is not signed", why_sz);
+        return ND_UPDSVC_BAD_SIGNATURE;
+    }
+
+    rc = nd_package_read_signature(pkg->pkg, &sig, &sig_len, why, why_sz);
+    if (rc != ND_UPD_OK)
+        return map_err(rc);
+
+    key = nd_sign_load_public_key(key_path);
+    if (key == NULL) {
+        /* No key on this phone verifies nothing, and it must NOT read as
+         * "unsigned" -- engineering mode may acknowledge an unsigned
+         * package and continue, and a missing release key is not a thing
+         * an operator should be able to click past. */
+        free(sig);
+        if (why != NULL && why_sz > 0u)
+            (void)nd_strlcpy(why, "no release key on this phone", why_sz);
+        return ND_UPDSVC_INVALID;
+    }
+
+    ok = nd_sign_verify(raw, raw_len, sig, sig_len, key);
+    nd_sign_free_public_key(key);
+    free(sig);
+
+    if (!ok) {
+        if (why != NULL && why_sz > 0u)
+            (void)nd_strlcpy(why, "signature does not match", why_sz);
+        return ND_UPDSVC_BAD_SIGNATURE;
+    }
+    nd_package_mark_signed(pkg->pkg);
+    return ND_UPDSVC_OK;
 }
 
 nd_updsvc_err nd_upd_package_thumbnail_path(nd_upd_package *pkg, char *out, size_t out_sz)
 {
-    ND_UNUSED(pkg);
-    if (out != NULL && out_sz > 0u)
-        out[0] = '\0';
-    return ND_UPDSVC_UNAVAILABLE;
+    uint8_t *art = NULL;
+    size_t art_len = 0u;
+    char resolved[ND_PATH_MAX];
+    FILE *f;
+
+    if (out == NULL || out_sz == 0u)
+        return ND_UPDSVC_INVALID;
+    out[0] = '\0';
+    if (pkg == NULL)
+        return ND_UPDSVC_INVALID;
+
+    /* Already extracted for this package: hand back the same file. */
+    if (pkg->thumb_path[0] != '\0')
+        return nd_strlcpy(out, pkg->thumb_path, out_sz) == ND_OK ? ND_UPDSVC_OK
+                                                                 : ND_UPDSVC_INVALID;
+
+    /* nd_package_read_thumbnail() returns art ONLY when the manifest names a
+     * thumbnail_sha256 and the bytes hash to it -- the signature covers
+     * manifest.json alone, so unhashed art is unsigned art. Any refusal here
+     * is "there is no picture", which the caller draws around. */
+    if (nd_package_read_thumbnail(pkg->pkg, &art, &art_len, NULL, 0u) != ND_UPD_OK ||
+        art == NULL || art_len == 0u) {
+        free(art);
+        return ND_UPDSVC_INVALID;
+    }
+
+    /* Why a file at all: nd_detailpage_init() takes a PATH, and the widget
+     * fills its image field during layout, so handing it bytes afterwards
+     * lays the page out for the wrong size (update_app.h records this).
+     *
+     * Why HERE: /NeoDCT/User/.ndsys is the update system's own state
+     * directory. It is on the writable partition, it already exists by the
+     * time a package is open, and it is the one place a leftover file would
+     * be looked for. The name is fixed rather than temporary so a crash
+     * leaves exactly one stale file that the next run overwrites, instead of
+     * a directory that fills up. */
+    if (nd_snprintf(pkg->thumb_path, sizeof pkg->thumb_path, "%s/thumbnail.png",
+                    ND_UPDATE_STATE_DIR) != ND_OK ||
+        nd_path_resolve(resolved, sizeof resolved, pkg->thumb_path) != ND_OK) {
+        free(art);
+        pkg->thumb_path[0] = '\0';
+        return ND_UPDSVC_INVALID;
+    }
+
+    f = fopen(resolved, "wb");
+    if (f == NULL || fwrite(art, 1u, art_len, f) != art_len) {
+        if (f != NULL)
+            (void)fclose(f);
+        free(art);
+        pkg->thumb_path[0] = '\0';
+        return ND_UPDSVC_INVALID;
+    }
+    (void)fclose(f);
+    free(art);
+
+    return nd_strlcpy(out, pkg->thumb_path, out_sz) == ND_OK ? ND_UPDSVC_OK : ND_UPDSVC_INVALID;
 }
 
 /* ------------------------------------------------------------------ *
@@ -152,18 +325,24 @@ nd_updsvc_err nd_upd_package_thumbnail_path(nd_upd_package *pkg, char *out, size
 nd_updsvc_err nd_upd_manifest_check_compatible(const nd_upd_manifest *m, const char *platform,
                                                const char *kernel, char *why, size_t why_sz)
 {
-    ND_UNUSED(m);
-    ND_UNUSED(platform);
-    ND_UNUSED(kernel);
-    /* Deliberately NOT implemented here even though it is pure string
-     * comparison and would compile in forty lines. It is the check that
-     * decides whether an image built for other hardware is written over this
-     * phone's system partition, and the Python's own comment calls it "the
-     * brick case". Two implementations of that -- one here, one in the
-     * nd_manifest.c the spec asks for -- is exactly how the two drift apart.
-     * It belongs beside the manifest parser that produces the struct it
-     * reads. */
-    return unavailable(why, why_sz);
+    nd_manifest probe;
+
+    if (m == NULL)
+        return ND_UPDSVC_INVALID;
+
+    /* DELEGATED, not reimplemented.
+     *
+     * This is the brick check -- it decides whether an image built for other
+     * hardware is written over this phone's system partition -- and two
+     * copies of it is exactly how the two drift apart. nd_manifest.c reads
+     * only `platform` and `min_kernel` (verified, not assumed), so a zeroed
+     * stack manifest carrying those two fields reaches the same code the
+     * package path reaches, with the same wording. */
+    memset(&probe, 0, sizeof probe);
+    (void)nd_strlcpy(probe.platform, m->platform, sizeof probe.platform);
+    (void)nd_strlcpy(probe.min_kernel, m->min_kernel, sizeof probe.min_kernel);
+
+    return map_err(nd_manifest_check_compatible(&probe, platform, kernel, why, why_sz));
 }
 
 /* ------------------------------------------------------------------ *

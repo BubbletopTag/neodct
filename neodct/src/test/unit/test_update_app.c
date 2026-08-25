@@ -744,31 +744,50 @@ static void test_which(void)
  * 8. The service boundary
  * ------------------------------------------------------------------ */
 
-static void test_service_is_absent(void)
+static void test_service_is_present(void)
 {
     nd_upd_package *pkg = (nd_upd_package *)(void *)&api;
     nd_upd_manifest m;
     nd_upd_release rel;
     char why[ND_UPDATE_WHY_MAX];
 
-    /* There is no C zip reader, manifest parser or RSA verifier in this tree.
-     * The boundary says so rather than approximating any of them; service.c
-     * explains why an approximate signature check is worse than none. */
-    CHECK(!api.svc_available(), "the update service is not in this build");
+    /* This used to assert the opposite of every line below it, and was
+     * right to: there was no zip reader, manifest parser or RSA verifier in
+     * the tree, and the boundary said so rather than approximating any of
+     * them. All three landed, so the assertions invert -- but only the
+     * CARD path. remote.* still has no HTTP or TLS underneath it. */
+    CHECK(api.svc_available(), "the update service is in this build");
 
+    /* A path that is not a package is INVALID -- a broken package -- and
+     * never UNAVAILABLE. Telling the owner their build cannot read updates
+     * when it can is the more confusing of the two lies. */
     why[0] = '\0';
-    CHECK_INT(api.svc_open("/media/UPDATE.ndsw", &pkg, why, sizeof why), ND_UPDSVC_UNAVAILABLE,
-              "open_package is unavailable");
+    pkg = NULL;
+    CHECK_INT(api.svc_open("/media/does-not-exist.ndsw", &pkg, why, sizeof why),
+              ND_UPDSVC_INVALID, "a missing package is INVALID, not unavailable");
     CHECK(pkg == NULL, "and hands back nothing");
     CHECK(why[0] != '\0', "with a reason");
 
+    /* check_compatible is delegated to nd_manifest.c -- the brick check has
+     * exactly one implementation. fill_manifest() builds a qemu manifest. */
     fill_manifest(&m);
-    CHECK_INT(api.svc_compat(&m, "qemu", "6.12.47", why, sizeof why), ND_UPDSVC_UNAVAILABLE,
-              "check_compatible is unavailable");
-    CHECK_INT(api.svc_verify(NULL, ND_UPDATE_RELEASE_KEY, why, sizeof why), ND_UPDSVC_UNAVAILABLE,
-              "verify_signature is unavailable");
+    CHECK_INT(api.svc_compat(&m, "qemu", "6.12.47", why, sizeof why), ND_UPDSVC_OK,
+              "a matching platform and new enough kernel is compatible");
+
+    why[0] = '\0';
+    CHECK_INT(api.svc_compat(&m, "luckfox-armv7", "6.12.47", why, sizeof why),
+              ND_UPDSVC_INCOMPATIBLE, "the wrong platform is THE BRICK CASE");
+    CHECK(why[0] != '\0', "and says which way round");
+
+    /* A NULL package cannot be verified, and the answer is not "unsigned":
+     * engineering mode may acknowledge an unsigned package and continue, so
+     * BAD_SIGNATURE must mean the signature was examined. */
+    CHECK_INT(api.svc_verify(NULL, ND_UPDATE_RELEASE_KEY, why, sizeof why), ND_UPDSVC_INVALID,
+              "verifying nothing is INVALID, not BAD_SIGNATURE");
+
+    /* The one entry point that IS still unavailable, and honestly so. */
     CHECK_INT(api.svc_latest("qemu", &rel, why, sizeof why), ND_UPDSVC_UNAVAILABLE,
-              "remote.latest is unavailable");
+              "remote.latest has no network stack under it");
 }
 
 /* ------------------------------------------------------------------ *
@@ -1187,7 +1206,7 @@ int main(void)
     RUN(test_engineering_mode);
     RUN(test_has_network);
     RUN(test_which);
-    RUN(test_service_is_absent);
+    RUN(test_service_is_present);
     RUN(test_confirm_and_refuse);
     RUN(test_page);
     RUN(test_choose_package);
