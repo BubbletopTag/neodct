@@ -65,7 +65,7 @@
 #include "smallapp_test.h"
 
 #include "../../apps/RemoteShell/remote_app.h"
-#include "../../apps/RemoteShell/rshell.h"
+#include "nd_remoteshell.h"
 
 static struct {
     int (*run)(nd_ui *);
