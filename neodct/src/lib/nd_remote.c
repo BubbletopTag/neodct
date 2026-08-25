@@ -875,9 +875,12 @@ reap:
 
     if (pid > 0) {
         memset(&status, 0, sizeof status);
-        if (nd_proc_wait(pid, -1.0, &status) != ND_OK) {
+        /* Bounded, not -1. All three pipes are already at EOF, so curl has
+         * finished writing and is on its way out -- ten seconds is a tear-
+         * down that has gone wrong, and hanging the update screen for ever
+         * on it would be worse than killing it. */
+        if (nd_proc_wait(pid, 10.0, &status) != ND_OK)
             (void)nd_proc_terminate(pid, 2.0, &status);
-        }
         if (aborted) {
             /* Already refused for a reason of our own; curl's exit code adds
              * nothing. */
