@@ -399,3 +399,273 @@ actually saved), and add one `run_app_inproc(cap, ui, "Koki Mobile", 400,
 - **Playing it on real hardware.** Nothing here has run on a phone or in
   QEMU; there was no framebuffer to run against. Every claim above is from
   the host, against the Python.
+
+---
+
+# The in-process mixer (0.4.x): music and effects at the same time
+
+Deviation 2 above is now paid off. `koki_audio.c` no longer starts a media
+player per sound; it decodes and **mixes in this process** and feeds **one**
+`aplay`. This section is the design, written before the code, and it is the
+part to read before changing any of the four numbers in it.
+
+## Why there can only be one player
+
+`neodct/overlay/etc/init.d/S17audio`, generated on the real device, is the
+whole constraint:
+
+> ALSA's stock "default" mixes through dmix, and dmix needs an ALSA timer
+> this kernel does not provide. Opening it fails outright. So the slave here
+> is plain **hw** -- one program at a time gets the card.
+
+The game corroborates it twice from the other side, in `engine.py`'s own
+comments: `mpg123` "stuttered and reset whenever aplay grabbed the card",
+and "two concurrent mpvs OOM'd a 72 MB VM". So overlapping sound cannot be
+two processes. It has to be one stream, summed before it leaves us --
+which is exactly what `engine.py`'s preferred backend, `_MiniaudioMixer`,
+already does. This is a port of THAT, not an invention.
+
+## What replaces what
+
+| was | is |
+| --- | --- |
+| `mpv` per music track, ~24 MB private RSS, respawned on every change | one voice inside this process, streamed |
+| `aplay` per sound effect, fork+exec+ALSA-open per effect | one voice inside this process, no fork |
+| up to four processes fighting for a non-mixing `hw` device | one `aplay`, started once, for the app's whole life |
+
+The decoders are `lib/vendor/dr_mp3.h` and `dr_wav.h`, **already vendored and
+already compiled** -- `lib/nd_notify.c` is the one translation unit that
+defines their implementations and `libneodct` exports the symbols.
+`apps/MusicPlayer/audio.c` reuses them exactly this way today. This adds no
+third-party code, which is what made the earlier deviation necessary.
+
+## Decision 1 -- latency, which is the owner's actual complaint
+
+The owner says the current audio is "very laggy". Replacing spawn latency
+with buffer latency would only move the lag, so the buffer is sized first
+and everything else fits around it.
+
+Koki runs at 30 FPS: **33.3 ms per frame**. An effect must land within a
+frame or two of the frame that triggered it.
+
+The only thing that delays an effect is audio that has ALREADY been handed
+onward, because a sound started now can only be mixed into samples not yet
+written. So the design minimises exactly that, and it is the sum of three
+queues:
+
+| queue | named constant | frames | ms |
+| --- | --- | --- | --- |
+| the chunk currently being mixed | `KOKI_MIX_CHUNK_FRAMES` = 128 | 128 | **5.8** |
+| our end of the socket to `aplay` | `KOKI_MIX_SOCK_BYTES` = 2048 requested | 512 | **23.2** *(measured)* |
+| `aplay`'s ALSA ring | `KOKI_MIX_ALSA_MS` = 30 | 662 | **30.0** |
+| | | **total** | **59.0 ms = 1.8 frames** |
+
+At `KOKI_MIX_RATE` = 22050 Hz mono s16, one millisecond is 44.1 bytes, and
+`KOKI_MIX_CHUNK_FRAMES` = 128 frames is 256 bytes = 5.805 ms. That chunk is
+both the mix granularity and the write size, so a sound started at any
+instant is mixed into the next chunk: the quantisation cost is 5.8 ms, not a
+buffer.
+
+**The socket number is measured, not assumed.** A default `AF_UNIX`
+`SOCK_STREAM` send buffer on Linux is 212,992 bytes, which at 44,100 B/s is
+**969 ms** of audio in flight -- nearly a second of lag, and precisely the
+trap a naive "just stream it to aplay" falls into. `SO_SNDBUF` is therefore
+requested at `KOKI_MIX_SOCK_BYTES`. The kernel clamps `sk_sndbuf` up to its
+`SOCK_MIN_SNDBUF` floor (4608 bytes here) and charges each `skb`'s
+*truesize*, not its payload, so what a 256-byte write actually gets is:
+
+```
+SO_SNDBUF requested 2048 -> sk_sndbuf 4608 -> 1024 bytes of payload = 23.2 ms
+```
+
+measured on this kernel with a socketpair and non-blocking writes. The code
+reads the value back with `getsockopt` and logs the real figure rather than
+the requested one, because that floor is a kernel constant and may differ on
+the phone.
+
+`aplay` is given `--buffer-time` = `KOKI_MIX_ALSA_MS` x 1000 and
+`--period-time` = one chunk, so its ring is a few periods deep.
+
+**The tunable.** `NEODCT_KOKI_ABUF_MS` -- the same environment variable
+`engine.py` already has -- moves `KOKI_MIX_ALSA_MS`, clamped to
+`[KOKI_MIX_ALSA_MS_MIN, KOKI_MIX_ALSA_MS_MAX]` = [10, 500]. Note the
+Python's default for it is **150 ms**; 30 ms is deliberately five times
+tighter, and raising it is the first thing to try if the phone crackles.
+
+**Underrun: what happens, and how we know.** If the feeder is late, `aplay`
+runs the ALSA ring dry and ALSA repeats or drops -- audibly, a click. There
+is no recovery to attempt: the samples were needed and are gone, and the
+stream resumes by itself on the next write, which is what an underrun
+already is.
+
+We detect it *from inside the feeder*, without parsing `aplay`'s stderr
+(which goes to `/dev/null`, and which would need a second reader thread).
+The feeder knows two numbers exactly: `written_ms`, the audio it has handed
+over, and `elapsed_ms` since the first byte went out. The card cannot have
+consumed more than we wrote, so as long as the pipeline is fed,
+`elapsed_ms < written_ms`. When `elapsed_ms > written_ms + KOKI_MIX_ALSA_MS`
+the sink has been waiting on us -- the guard term is one ALSA buffer,
+because playback really starts a period or so after our first write and
+without it every startup would look like an underrun. Each crossing bumps a
+counter and logs once:
+
+```
+[Koki] audio underrun: the mixer fell N ms behind -- raise NEODCT_KOKI_ABUF_MS
+```
+
+`koki_sound_check()`, which the main loop already calls every 30 frames,
+reports the counter, so an underrun reaches the serial console the same way
+a dead music player does today. `koki_mixer_underruns()` exposes it to the
+tests.
+
+## Decision 2 -- how many effects overlap, and what happens to the fourth
+
+**Three**, `KOKI_SND_MAX_SFX`, which is `_MiniaudioMixer.MAX_SFX = 3`, plus
+one looping music voice: four voices total.
+
+Beyond three, **the NEW effect is dropped. Nothing is stolen from the
+oldest.** That is `engine.py`:
+
+```python
+self.voices = [v for v in self.voices if not v.done]
+if len(self.voices) < self.MAX_SFX:
+    self.voices.append(self._Voice(self, path, False))
+```
+
+-- prune finished voices, then append *only if there is room*. There is no
+queue and no eviction. It is also what Scratch does, and what the outgoing
+subprocess path in this file already did. Cutting an effect off mid-way to
+start a newer one would be a change to the game's sound, so it is not made.
+
+Note `NEODCT_KOKI_MAX_SFX` and the "MemTotal < 72 MB drops MAX_SFX to 1"
+rule do **not** apply here, and that is also fidelity: in the Python both
+live in the subprocess fallback's constructor, after the mixer branch has
+already returned. They existed because mpv's cost is per PROCESS. There are
+no processes here.
+
+## Decision 3 -- the mix rate, and disagreement between a WAV and an MP3
+
+Output is fixed: **22050 Hz, mono, signed 16-bit**, `KOKI_MIX_RATE`. That is
+`_MiniaudioMixer.RATE`, and it is not a guess about the assets -- it is what
+they are. Measured over all 57 files in `assets/snd`:
+
+| | count | format |
+| --- | --- | --- |
+| WAV | 38 | PCM, 1 channel, 22050 Hz, 16-bit -- every one |
+| MP3 | 19 | MPEG-2 Layer III, mono, 22050 Hz -- every one |
+
+So nothing "wins" a disagreement, because each voice is converted to the mix
+format *before* it reaches the sum. A voice whose file rate differs is
+resampled by the same integer linear interpolator `lib/nd_notify.c` already
+uses for ringtones: a `frac` accumulator counted in units of 1/22050 of an
+output frame and advanced by the source rate, so it is exact integer
+arithmetic that cannot drift over a track looped for three minutes -- a
+float accumulator does. At 22050 Hz in, `frac` is zero on every output frame
+and the loop degenerates to a copy: **every shipped asset is bit-exact, and
+no resampling runs at all.** A file with more than one channel is averaged
+down to mono, which is what miniaudio's converter does for `nchannels=1`;
+no shipped asset needs it either.
+
+## Decision 4 -- clipping
+
+**Saturating 16-bit add, applied PAIRWISE, in voice order.** Per sample:
+
+```
+s = a + b   in int32;  s > 32767 -> 32767;  s < -32768 -> -32768
+```
+
+This is `audioop.add(a, b, 2)`, and `_MiniaudioMixer._mix`'s pure-Python
+fallback spells out the same clamp for the stdlib >= 3.13 case.
+
+Pairwise is load-bearing and is **not** the same as summing everything in a
+wider accumulator and clamping once. With three voices at 30000, 30000 and
+-30000, pairwise gives `sat(sat(30000+30000) + -30000)` = `sat(32767-30000)`
+= **2767**; a single int32 sum gives **30000**. The Python folds voice by
+voice (`mixed = data if mixed is None else self._mix(mixed, data)`), so the
+port folds voice by voice, and the order it folds in is the Python's too:
+**the sfx voices in the order they started, then music last**. With no live
+voice the chunk is silence.
+
+There is no per-voice gain and none is added: `engine.py` has none, and
+introducing one would change every sound in the game.
+
+## Where the code lives, and why none of it is in `lib/`
+
+| file | what |
+| --- | --- |
+| `koki_mixer.c` | the mixer proper: voices, streaming decode, resample, the saturating fold, `koki_mixer_pull()`. No thread, no process, no I/O to a player. |
+| `koki_audio.c` | `SoundManager` unchanged in shape: the backend ladder, plus the `aplay` sink and the feeder thread that turns `koki_mixer_pull()` into bytes. |
+
+A `lib/nd_mixer.c` was permitted and is **not** taken. Nothing else in the
+system mixes: `nd_notify.c` plays one ringtone, `apps/MusicPlayer` plays one
+track, `nd_modem_audio.c` bridges a call -- and the phone's own rule is that
+those never overlap anyway ("a ringtone and a call are not supposed to
+overlap", S17audio). A shared mixer would be a new public surface in a
+library every process maps, with exactly one caller, to hold semantics that
+are `engine.py`'s and not the system's: 22050 mono, three voices, drop the
+fourth, fold pairwise. When a second caller appears, `koki_mixer.c` is
+thirty minutes from being that library. Today it would be speculative
+generality paid for in every process's mapping.
+
+Splitting the mixer away from the sink is what makes it testable on a
+machine with no sound card: `koki_mixer_pull()` is a pure function of the
+voices and returns samples to the caller's buffer, so a unit test can start
+music and three effects from the real shipped assets and check the output
+sample by sample against the individual voices. That is how "they genuinely
+overlap" is demonstrated here rather than asserted.
+
+## Memory
+
+Streaming, never whole-file: the longest track is 183.07 s, which is 8.1 MB
+decoded (risk R-9) and 4 KB at a time here.
+
+| | bytes |
+| --- | --- |
+| `drmp3` decoder state, per MP3 voice | 32,376 *(measured, `sizeof`)* |
+| `drwav` decoder state, per WAV voice | 408 *(measured)* |
+| source staging, per voice: `KOKI_MIX_STAGE_FRAMES` 1024 x 2 ch x 2 B | 4,096 |
+| the mixer's own chunk buffers (accumulator + one voice scratch) | 512 |
+| **peak, 4 live voices, worst case all MP3** | **~146 KB** |
+
+Voice state is heap-allocated when a sound starts and freed when it ends, so
+a silent game holds none of it, and the cap is the four slots. That sits
+inside `spec-koki.md`'s own ~200 KB audio line, against the ~24 MB it
+replaces.
+
+## Fork safety
+
+CODING-STANDARDS 1.1: a `fork()` from a threaded process is only safe
+because the child does nothing but `execve`. The ordering here keeps even
+that off the table -- **`aplay` is spawned BEFORE the feeder thread is
+created, exactly once, and the mixer never forks again**. If the mixer
+starts, the process has one extra thread and no further children. If it
+fails to start, it tears the thread down before returning, and only then may
+the subprocess ladder fork. The two paths are never both live.
+
+A consequence, stated plainly: if `aplay` dies mid-game the mixer stops and
+logs, and the game continues silent. It does not fall back to spawning
+players, because that would fork with the feeder thread running. This is the
+same outcome the current code has when the music player dies.
+
+## What `app_shutdown()` does
+
+Unchanged in shape and still the contract in `nd_app.h`: `app_shutdown()`
+-> `koki_engine_teardown()` -> `koki_sound_shutdown()`, which stops the
+feeder, terminates `aplay` and closes the socket, in the order
+`lib/nd_notify.c` establishes and for its reasons -- kill the player first
+so a blocked `send()` returns, shut our end down as a second way out, then
+**join, and only then close** the descriptor, because closing a descriptor
+another thread is sitting in `send()` on is how a number gets recycled
+underneath it. It is idempotent, so the normal path calling teardown first
+costs nothing.
+
+## What is NOT verified
+
+**There is no sound card on the machine this was written on**, and no
+`aplay` binary either. What is verified here is the arithmetic and the
+plumbing: the saturating fold, the fold order, the resampler, the voice
+policy, the latency and underrun sums, that four voices genuinely appear in
+one stream, and the resident memory. Whether it *sounds* right -- whether
+30 ms of ALSA ring is enough on the phone's USB card, whether the effects
+feel on-time to the person holding it -- has not been and cannot be checked
+here.
