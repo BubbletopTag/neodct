@@ -361,8 +361,8 @@ STUB_STOCK_APPS := \
 	Browser Calculator CallLog Clock Games Koki Messages MusicPlayer \
 	PhoneBook Power Settings Tones Update
 STUB_ENG_APPS := \
-	Crash CubeBench Downgrade FuelGauge KeypadMapper KeypadMapperI2C \
-	LCDTest LinuxShell Modem RemoteShell TestsApp
+	Crash CubeBench Downgrade FuelGauge KeypadMapperI2C \
+	LCDTest LinuxShell Modem RemoteShell
 
 STUB_SO := $(BUILD)/apps/Stub/app.so
 

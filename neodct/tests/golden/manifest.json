@@ -171,14 +171,6 @@
       ]
     },
     {
-      "name": "eng-tests",
-      "sha256": "4194a2e3d8008d4ef1e1e732640ca7e379c22737f6c6b3d1f9672f295962a49a",
-      "size": [
-        240,
-        175
-      ]
-    },
-    {
       "name": "game-memory",
       "sha256": "24fa549f9b29e59868406695f40ed042e8de6a0def130ff2fd8307f91bb3cf01",
       "size": [
@@ -245,7 +237,7 @@
     },
     {
       "name": "menu-browser",
-      "sha256": "2a799bfc61c5f0c8af59c0a0a4e1a5bfd07c227f29038f6e4a0d7294e0664c31",
+      "sha256": "1bf38d2736a36627b3a7605235966a284e647a41512f4929210d925a42dfa2f9",
       "size": [
         240,
         175
@@ -253,7 +245,7 @@
     },
     {
       "name": "menu-calculator",
-      "sha256": "3770493e63bc23afbc722897c0552dffe138a7f413d3c275611c7ef6c8dc96be",
+      "sha256": "b36a90526fc00c61143f0af78dd8fe54ae5ea048281cb348307a9a635da243e2",
       "size": [
         240,
         175
@@ -261,7 +253,7 @@
     },
     {
       "name": "menu-games",
-      "sha256": "8e17991c6c1f2507dfcad7d2f9baf556671ff7ebe60a1bb837af5a0e3542179c",
+      "sha256": "3d15e2be99348586999687b19fac5f112e1eb8de84e9769d51bcc5c853d68af2",
       "size": [
         240,
         175
@@ -269,7 +261,7 @@
     },
     {
       "name": "menu-koki-mobile",
-      "sha256": "3e8b6cca90efa67b87ea7634fe95d536fbef667c471f87b77d996ba186cdaac7",
+      "sha256": "b343b3d8e1b39e0f563b9e4685fbadfdc6f8be0088065beafc1906a50ea2be22",
       "size": [
         240,
         175
@@ -285,7 +277,7 @@
     },
     {
       "name": "menu-music",
-      "sha256": "bf138a5a19933f5d3b6e186dc18c4f1f9b8336b23613c05a8bc4e6d172da68e5",
+      "sha256": "ee220e274939e91e665c4f8502f9532b370056994c65c901fd40652afc74bb5f",
       "size": [
         240,
         175
@@ -309,7 +301,7 @@
     },
     {
       "name": "menu-settings",
-      "sha256": "150a8b630012cf395b2e1d0400880266b249d6818d725854c3f9d626768b98d2",
+      "sha256": "61717cb7db7cefaa7700ee6a774c46ed2863c4cdac699ceffdb2c913a20c8cea",
       "size": [
         240,
         175

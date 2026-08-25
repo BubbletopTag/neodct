@@ -319,7 +319,6 @@ static const struct {
     {971, "Power", "/NeoDCT/System/apps/Power"},
     {999, "Linux Shell", "/NeoDCT/System/engineering/apps/LinuxShell"},
     {9001, "LCD Test", "/NeoDCT/System/engineering/apps/LCDTest"},
-    {9002, "KeyMap", "/NeoDCT/System/engineering/apps/KeypadMapper"},
     {9003, "KeyMapI2C", "/NeoDCT/System/engineering/apps/KeypadMapperI2C"},
     {9004, "FuelGauge", "/NeoDCT/System/engineering/apps/FuelGauge"},
     {9005, "ModemInfo", "/NeoDCT/System/engineering/apps/Modem"},
@@ -327,7 +326,6 @@ static const struct {
     {9990, "Remote Shell", "/NeoDCT/System/engineering/apps/RemoteShell"},
     {9997, "Crash", "/NeoDCT/System/engineering/apps/Crash"},
     {9998, "Cube Bench", "/NeoDCT/System/engineering/apps/CubeBench"},
-    {9999, "Tests", "/NeoDCT/System/engineering/apps/TestsApp"},
 };
 
 static size_t index_of(nd_ui *ui, const char *name)
@@ -399,7 +397,7 @@ static void test_engineering_off(void)
     stock = nd_ui_scan_apps(ND_PATH_APPS_DIR, apps, ND_APP_MAX);
     eng = nd_ui_scan_apps(ND_PATH_ENG_APPS_DIR, apps, ND_APP_MAX);
     CHECK_INT(stock, 13, "thirteen stock apps");
-    CHECK_INT(eng, 11, "eleven engineering apps");
+    CHECK_INT(eng, 9, "nine engineering apps");
 }
 
 /* ------------------------------------------------------------------ *

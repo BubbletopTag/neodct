@@ -225,7 +225,6 @@ static const char *const RENDERED[] = {
     "eng-fuelgauge",
     "eng-lcdtest",
     "eng-cubebench",
-    "eng-tests",
     /* shoot_widgets */
     "widget-verticallist",
     "widget-verticallist-scrolled",
@@ -1596,7 +1595,6 @@ static const struct {
     {"FuelGauge", 240, "eng-fuelgauge", ND_KEY_CLEAR},
     {"LCD Test", 240, "eng-lcdtest", ND_KEY_CLEAR},
     {"Cube Bench", ENG_IDLE_BUDGET, "eng-cubebench", ND_KEY_NONE},
-    {"Tests", 240, "eng-tests", ND_KEY_ENTER},
 };
 
 static void shoot_engineering_apps(nd_capture *cap)

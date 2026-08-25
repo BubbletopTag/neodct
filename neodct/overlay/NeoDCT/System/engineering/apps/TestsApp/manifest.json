@@ -1,6 +1,0 @@
-{
-	"name":	"Tests",
-	"id":	"9999",
-	"icon": "icon.png",
-	"exec": "main.py"
-}

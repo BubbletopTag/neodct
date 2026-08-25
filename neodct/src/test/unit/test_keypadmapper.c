@@ -75,7 +75,6 @@
 
 #include "smallapp_test.h"
 
-#include "../../apps/KeypadMapper/keypadmapper.h"
 #include "../../apps/KeypadMapperI2C/keypadmapper_i2c.h"
 
 /* ------------------------------------------------------------------ *
@@ -113,14 +112,6 @@ static struct {
     const char *const *softkey_text;
 } i2c;
 
-static struct {
-    int (*run)(nd_ui *);
-    void (*shutdown)(void);
-    bool (*available)(void);
-    const char *const *required_msg;
-    const char *const *gpiozero_required_msg;
-    const char *const *import_error;
-} gpio;
 
 static bool i2c_api_open(void *h)
 {
@@ -160,19 +151,6 @@ static bool i2c_api_open(void *h)
            i2c.format != NULL && i2c.driver != NULL && i2c.softkey_text != NULL;
 }
 
-static bool gpio_api_open(void *h)
-{
-    *(void **)&gpio.run = sa_sym(h, "app_run");
-    *(void **)&gpio.shutdown = sa_sym(h, "app_shutdown");
-    *(void **)&gpio.available = sa_sym(h, "nd_kmgpio_available");
-    gpio.required_msg = sa_sym(h, "nd_kmgpio_required_msg");
-    gpio.gpiozero_required_msg = sa_sym(h, "nd_kmgpio_gpiozero_required_msg");
-    gpio.import_error = sa_sym(h, "nd_kmgpio_import_error");
-
-    return gpio.run != NULL && gpio.shutdown != NULL && gpio.available != NULL &&
-           gpio.required_msg != NULL && gpio.gpiozero_required_msg != NULL &&
-           gpio.import_error != NULL;
-}
 
 /* ------------------------------------------------------------------ *
  * A scratch ND_ROOT, so /dev can be invented
@@ -281,14 +259,6 @@ static void test_constants(void)
     CHECK_INT(ND_I2C_BUS_DEFAULT, 3, "DEFAULT_BUS");
     CHECK_INT(ND_I2C_ADDR_DEFAULT, 0x20, "DEFAULT_ADDR");
 
-    CHECK_STR(*gpio.required_msg,
-              "This app requires GPIO. GPIO devices not found. "
-              "This application can not run in QEMU.",
-              "GPIO_REQUIRED_MSG");
-    CHECK_STR(*gpio.gpiozero_required_msg,
-              "gpiozero is missing. Install python3-gpiozero to run keypad mapping.",
-              "GPIOZERO_REQUIRED_MSG");
-    CHECK_STR(*gpio.import_error, "No module named 'gpiozero'", "str(the ImportError)");
 }
 
 /* ------------------------------------------------------------------ *
@@ -974,58 +944,10 @@ static void test_i2c_gate(void)
     root_restore();
 }
 
-static void test_gpio_gates(void)
-{
-    sa_fixture fx;
-    char shown[65];
-    char expect[65];
-
-    root_to_scratch();
-    unlink_virtual("/dev/gpiochip0");
-    CHECK(!gpio.available(), "no /dev/gpiochip* under QEMU");
-
-    if (!sa_fx_init(&fx)) {
-        CHECK(false, "fixture");
-        sa_fx_free(&fx);
-        root_restore();
-        return;
-    }
-    CHECK(sa_hold(&fx, ND_KEY_ENTER), "held ENTER");
-    CHECK_INT(gpio.run(&fx.ui), 0, "app_run returns cleanly");
-    CHECK(digest_of_recent(&fx, shown, sizeof shown), "a frame was committed");
-    CHECK(digest_of_dialog(&fx, *gpio.required_msg, expect, sizeof expect), "reference dialog");
-    CHECK_STR(shown, expect, "GPIO_REQUIRED_MSG when there are no gpiochips");
-    sa_fx_free(&fx);
-
-    /* And on the Luckfox, where five gpiochips exist and gpiozero does not.
-     * This is the ONLY other thing this app can do on a shipped image. */
-    CHECK(touch_virtual("/dev/gpiochip0"), "a fake gpiochip");
-    CHECK(gpio.available(), "the first gate now passes");
-
-    if (!sa_fx_init(&fx)) {
-        CHECK(false, "fixture");
-        sa_fx_free(&fx);
-        root_restore();
-        return;
-    }
-    CHECK(sa_hold(&fx, ND_KEY_ENTER), "held ENTER");
-    CHECK_INT(gpio.run(&fx.ui), 0, "app_run returns cleanly");
-    CHECK(digest_of_recent(&fx, shown, sizeof shown), "a frame was committed");
-    CHECK(digest_of_dialog(&fx, *gpio.gpiozero_required_msg, expect, sizeof expect),
-          "reference dialog");
-    CHECK_STR(shown, expect, "GPIOZERO_REQUIRED_MSG when they do");
-    sa_fx_free(&fx);
-
-    unlink_virtual("/dev/gpiochip0");
-    root_restore();
-}
-
 static void test_null_safety(void)
 {
     CHECK_INT(i2c.run(NULL), 1, "KeypadMapperI2C refuses a NULL context");
-    CHECK_INT(gpio.run(NULL), 1, "KeypadMapper refuses a NULL context");
     i2c.shutdown(); /* both must be safe with nothing held */
-    gpio.shutdown();
     sa_checks++;
 }
 
@@ -1036,8 +958,6 @@ static void test_null_safety(void)
 int main(void)
 {
     void *h_i2c = sa_begin("KeypadMapperI2C", "ndkeymap");
-    void *h_gpio = NULL;
-    char so[ND_PATH_MAX];
     sa_fixture fx;
     int rc;
 
@@ -1047,21 +967,7 @@ int main(void)
         (void)dlclose(h_i2c);
         return 1;
     }
-    /* sa_begin() opens one app; the sibling is opened the same way it does. */
-    if (!sa_resolve_app_so("KeypadMapper", so, sizeof so)) {
-        (void)dlclose(h_i2c);
-        return 1;
-    }
-    h_gpio = dlopen(so, RTLD_NOW | RTLD_LOCAL);
-    if (h_gpio == NULL || !gpio_api_open(h_gpio)) {
-        fprintf(stderr, "test_keypadmapper: dlopen %s: %s\n", so, dlerror());
-        if (h_gpio != NULL)
-            (void)dlclose(h_gpio);
-        (void)dlclose(h_i2c);
-        return 1;
-    }
     if (!sa_tmpdir("ndkeymap-root", g_root, sizeof g_root)) {
-        (void)dlclose(h_gpio);
         (void)dlclose(h_i2c);
         return 1;
     }
@@ -1090,11 +996,9 @@ int main(void)
     RUN(test_saved_file_loads_back);
     RUN(test_save_reports_a_bad_path);
     RUN(test_i2c_gate);
-    RUN(test_gpio_gates);
     RUN(test_null_safety);
 
     rc = sa_end(h_i2c, "test_keypadmapper");
-    (void)dlclose(h_gpio);
     sa_rmtree(g_root);
     return rc;
 }

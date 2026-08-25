@@ -1,14 +1,14 @@
 /* test_appreg.c -- the app registry against manifests nobody shipped, and the
  * scrollbar at every index the shipped registry can produce.
  *
- * test_appsel.c already pins the nine golden frames and the twenty-four
+ * test_appsel.c already pins the nine golden frames and the twenty-two
  * shipped manifests. This file covers the two things that file cannot:
  *
  * 1. THE MANIFESTS THAT DO NOT EXIST YET. `manifest.json` is user-supplied
  *    data -- an app can be side-loaded, and the update system writes these
  *    files -- so every default and every rejection branch in
  *    `_scan_apps_from_dir` (main.py:652) is reachable in production and none
- *    of them is exercised by the shipped set, which is twenty-four files that
+ *    of them is exercised by the shipped set, which is twenty-two files that
  *    all spell every key. A synthetic app tree under its own ND_ROOT drives
  *    them: the id default of 999, the name default of the folder name, the
  *    icon default of "icon.png", the exec default, and the six ways an entry
@@ -422,7 +422,7 @@ static bool stage_overlay(void)
     (void)mkdir(user, 0755);
 
     /* The ack file skips the first-boot modal; engineering mode ON is what
-     * puts all twenty-four apps in the carousel. No wallpaper: the frames
+     * puts all twenty-two apps in the carousel. No wallpaper: the frames
      * here are measured, not hashed, and a black background makes the
      * scrollbar the only white in its columns. */
     {
@@ -653,7 +653,12 @@ static void test_scrollbar_every_index(nd_capture *cap, nd_ui *ui)
         int32_t bottom = -1;
 
         measure_notch(frame, bar_x, &top, &bottom);
-        CHECK_INT(top, 84, "index 12 keeps the notch clear of both ends");
+        /* 89, not 84: the notch's step is
+         * (track_bottom - track_top) / (n_apps - 1), so dropping TestsApp
+         * and KeypadMapper from twenty-four apps to twenty-two widens it.
+         * The number is the C's, and the re-cut menu-* frames captured
+         * from the Python agree with it. */
+        CHECK_INT(top, 89, "index 12 keeps the notch clear of both ends");
         CHECK(nd_image_get_px(frame, bar_x, track_bottom).r == 255u, "track reaches row 135");
         CHECK(nd_image_get_px(frame, bar_x + 1, track_bottom).r == 255u, "and column 233");
         CHECK(nd_image_get_px(frame, bar_x + 2, track_bottom).r == 0u, "but not column 234");
@@ -753,7 +758,7 @@ static void run_overlay_half(void)
     }
 
     CHECK(nd_ui_engineering_mode(&ui), "engineering mode came from settings.prop");
-    CHECK_INT(nd_ui_app_count(&ui), 24, "twenty-four apps with engineering mode on");
+    CHECK_INT(nd_ui_app_count(&ui), 22, "twenty-two apps with engineering mode on");
     CHECK(nd_ui_wallpaper(&ui) == NULL, "no wallpaper configured, so the background is black");
 
     test_icon_geometry(&ui);
