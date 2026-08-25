@@ -65,6 +65,7 @@
 #include "nd_paths.h"
 #include "nd_proc.h"
 #include "nd_settings.h"
+#include "nd_svc.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_ui_sim.h"
@@ -216,6 +217,16 @@ bool nd_ui_status_battery_hardware(const nd_ui *ui)
         return true; /* simulate_status() sets ui.battery.hardware = True */
     if (ui != NULL && ui->battery != NULL && nd_battery_has_hardware != NULL)
         return nd_battery_has_hardware(ui->battery);
+    /* An APP process: no handle, but possibly a core to ask. Reached only
+     * when the override is inactive AND the handle is NULL, so neither the
+     * core nor nd-shoot's in-process app runs ever get here and no reference
+     * frame can move. nd_svc.h; OPEN-QUESTIONS.md MSG-1. */
+    if (nd_svc_client_active()) {
+        nd_svc_battery b;
+
+        if (nd_svc_battery_read(ui, &b))
+            return b.hardware;
+    }
     return false;
 }
 
@@ -225,6 +236,15 @@ int32_t nd_ui_status_signal_level(const nd_ui *ui)
         return g_sim.signal_level;
     if (ui != NULL && ui->modem != NULL && nd_modem_signal_level != NULL)
         return nd_modem_signal_level(ui->modem);
+    /* See nd_ui_status_battery_hardware() for why this cannot reach the
+     * capture harness. The core's ModemService derives its own bars the same
+     * way, so the app sees the number the home screen would draw. */
+    if (nd_svc_client_active()) {
+        nd_modem_status st;
+
+        if (nd_svc_modem_status(ui, &st))
+            return st.signal_level;
+    }
     return -1; /* "unknown", which is NOT zero bars */
 }
 
@@ -940,7 +960,14 @@ nd_err nd_ui_init_app(nd_ui *ui, nd_fb *fb, int keypad_fd)
 
     /* No modem, no battery, no notify: those live in the core and an app that
      * needs them asks across the boundary. An incoming call arrives here as
-     * SIGTERM, not as a key -- see nd_app.h. */
+     * SIGTERM, not as a key -- see nd_app.h.
+     *
+     * THIS is the asking: NEODCT_SERVICE_FD, the fourth inherited descriptor,
+     * carrying the four operations in nd_svc.h. Absent is not an error -- a
+     * hand-run nd-apprun has no core to ask, and every nd_svc_* call answers
+     * "not present", which is the sentence Messages and the Modem app already
+     * draw. OPEN-QUESTIONS.md MSG-1. */
+    nd_svc_client_open_from_env();
     if (keypad_fd >= 0 && nd_input_open_pipe(&ui->input, keypad_fd) == ND_OK) {
         ui->has_matrix_keypad = nd_input_has_matrix(ui->input);
     } else {
@@ -963,6 +990,9 @@ void nd_ui_teardown(nd_ui *ui)
 {
     if (ui == NULL)
         return;
+
+    /* Idempotent, and a no-op in the core, which never opened one. */
+    nd_svc_client_close();
 
     if (ui->notify != NULL && nd_notify_close != NULL)
         nd_notify_close(ui->notify);

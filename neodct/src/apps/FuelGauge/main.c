@@ -66,6 +66,7 @@
 #include "nd_battery.h"
 #include "nd_draw.h"
 #include "nd_keycodes.h"
+#include "nd_svc.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_ui_sim.h"
@@ -248,8 +249,15 @@ int app_run(nd_ui *ui)
         return 1;
 
     /* `if battery is None or not battery.hardware`. Both halves, in this
-     * order; see the header comment for why the second is the sim-aware one. */
-    if (ui->battery == NULL || !nd_ui_status_battery_hardware(ui)) {
+     * order; see the header comment for why the second is the sim-aware one.
+     *
+     * The first half used to be `ui->battery == NULL`, which in an app
+     * process is ALWAYS true (nd_app.h) -- so this app refused to run on a
+     * phone with a gauge on the bus. nd_svc_battery_present() asks the core.
+     * The second half is deliberately unchanged: nd_ui_status_battery_
+     * hardware() is where the capture override lives, and it is what makes
+     * golden/eng-fuelgauge.png exist at all. OPEN-QUESTIONS.md MSG-1. */
+    if (!nd_svc_battery_present(ui) || !nd_ui_status_battery_hardware(ui)) {
         nd_msgdialog dlg;
 
         nd_msgdialog_init(&dlg, ui, nd_fg_hw_required_msg);
@@ -268,30 +276,33 @@ int app_run(nd_ui *ui)
             last_draw = 0.0;
         }
         if (now - last_draw >= ND_FG_REFRESH_S) {
-            nd_battery_snap snap;
+            nd_svc_battery b;
             bool ok;
             int saved_errno;
             char reason[ND_FG_VALUE_MAX];
             size_t n_rows;
 
-            errno = 0;
-            ok = nd_battery_debug_snapshot(ui->battery, &snap);
-            saved_errno = errno;
+            /* main.py makes three separate reads here -- debug_snapshot(),
+             * .hardware and .vcell -- and draws them on ONE frame. In the
+             * core they are three calls into one live object and cannot
+             * disagree; across a process boundary they would be three round
+             * trips at three different instants. So they are one request,
+             * and the errno rides in it explicitly because errno does not
+             * cross a socket and the ERROR row is strerror() of it. The
+             * order of the three reads is preserved inside that request --
+             * see nd_svc.h. */
+            ok = nd_svc_battery_read(ui, &b) && b.ok;
+            saved_errno = (int)b.err;
             if (ok)
                 reason[0] = '\0';
-            else if (!nd_battery_has_hardware(ui->battery))
+            else if (!b.hardware)
                 (void)nd_strlcpy(reason, nd_fg_forced_hw_error, sizeof reason);
             else
                 (void)nd_strlcpy(reason, strerror(saved_errno), sizeof reason);
 
-            {
-                double smoothed = 0.0;
-                bool have_smoothed = nd_battery_vcell(ui->battery, &smoothed);
-
-                n_rows = nd_fg_rows(&snap, ok, reason, have_smoothed, smoothed, rows,
-                                    ND_ARRAY_LEN(rows));
-            }
-            draw_readout(ui, rows, n_rows, true, &snap, flash);
+            n_rows =
+                nd_fg_rows(&b.snap, ok, reason, b.have_vcell, b.vcell, rows, ND_ARRAY_LEN(rows));
+            draw_readout(ui, rows, n_rows, true, &b.snap, flash);
             nd_softkey_update(&softkey, "QStart", false);
             if (nd_ui_present(ui) != ND_OK)
                 return 0;
@@ -302,7 +313,7 @@ int app_run(nd_ui *ui)
         if (key == FG_KEY_BACK)
             return 0;
         if (key == FG_KEY_NAV) {
-            bool ok = nd_battery_quickstart(ui->battery);
+            bool ok = nd_svc_battery_quickstart(ui);
 
             flash = ok ? "quick-start sent" : "quick-start FAILED";
             /* main.py reads the clock a SECOND time here rather than reusing

@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "nd_media.h"
+#include "nd_paths.h"
 #include "nd_types.h"
 
 static int g_fail;
@@ -276,14 +277,36 @@ static void test_browser_command_line(void)
         "-",
     };
     char exe[ND_PATH_MAX];
+    char self[ND_PATH_MAX];
+    ssize_t got;
+    char *slash;
     size_t i;
 
-    /* build/<variant>/bin/neodct-play, beside the test's own directory. */
-    /* access(), NOT nd_path_exists(): the path layer resolves against
-     * ND_ROOT, and this is a build artefact on the host, not a phone
-     * path. Using the wrong one made this test skip in silence -- which
-     * is exactly how a test for a shipped bug ends up proving nothing. */
-    if (nd_snprintf(exe, sizeof exe, "%s", "build/default/bin/neodct-play") != ND_OK)
+    /* build/<variant>/bin/neodct-play, found FROM THIS BINARY rather than
+     * from the working directory.
+     *
+     * It used to be the literal "build/default/bin/neodct-play", and that is
+     * wrong the moment there is more than one variant: `make ASAN=1 test`
+     * runs build/asan/test/test_mediawidget with LD_LIBRARY_PATH pointing at
+     * the ASan libneodct, and popen()ing the UNinstrumented neodct-play
+     * against it fails to load -- so the child printed nothing and all four
+     * hostile-argv checks failed for a reason that had nothing to do with
+     * argv. nd_proc.c's apprun_path() has the same note for the same reason:
+     * an ASan run has to drive the ASan binary.
+     *
+     * access(), NOT nd_path_exists(): the path layer resolves against
+     * ND_ROOT, and this is a build artefact on the host, not a phone path.
+     * Using the wrong one made this test skip in silence -- which is exactly
+     * how a test for a shipped bug ends up proving nothing. */
+    got = readlink("/proc/self/exe", self, sizeof self - 1u);
+    if (got <= 0)
+        return;
+    self[got] = '\0';
+    slash = strrchr(self, '/');
+    if (slash == NULL)
+        return;
+    *slash = '\0';
+    if (nd_snprintf(exe, sizeof exe, "%s/../bin/neodct-play", self) != ND_OK)
         return;
     if (access(exe, X_OK) != 0) {
         (void)fprintf(stderr, "SKIP browser command line: no %s\n", exe);

@@ -50,6 +50,7 @@
 #include "nd_log.h"
 #include "nd_paths.h"
 #include "nd_proc.h"
+#include "nd_svc.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 
@@ -386,8 +387,8 @@ static const char *apprun_path(char *buf, size_t buf_sz)
  * process that reads NEODCT_ROOT for itself -- so it gets the UNRESOLVED
  * /NeoDCT/System/apps/<Name> and resolves it the same way we would. */
 static nd_err app_env(char *keypad, size_t keypad_sz, char *crash, size_t crash_sz, char *fbv,
-                      size_t fb_sz, char *rootv, size_t root_sz, int keypad_fd, int crash_fd,
-                      int fb_fd)
+                      size_t fb_sz, char *rootv, size_t root_sz, char *svcv, size_t svc_sz,
+                      int keypad_fd, int crash_fd, int fb_fd, int svc_fd)
 {
     const char *root = nd_path_root();
 
@@ -413,22 +414,31 @@ static nd_err app_env(char *keypad, size_t keypad_sz, char *crash, size_t crash_
     } else {
         fbv[0] = '\0';
     }
+    /* Absent when the socketpair could not be made. An app without it simply
+     * gets "no service", which is the sentence it drew before this existed --
+     * a degraded app beats a launch that failed. */
+    if (svc_fd >= 0) {
+        if (nd_snprintf(svcv, svc_sz, "%s=%d", ND_ENV_SERVICE_FD, svc_fd) != ND_OK)
+            return ND_ERR_TOOLONG;
+    } else {
+        svcv[0] = '\0';
+    }
     return ND_OK;
 }
 
 #define APP_ENVP_MAX 64
 
-/* environ plus our three, with any inherited copy of ours removed so the child
+/* environ plus our four, with any inherited copy of ours removed so the child
  * cannot pick up a stale descriptor number from a previous launch. */
 static size_t build_envp(const char **envp, size_t max, const char *keypad, const char *crash,
-                         const char *fbv, const char *rootv)
+                         const char *fbv, const char *rootv, const char *svcv)
 {
     static const char *const OURS[] = {ND_ENV_KEYPAD_FD "=", ND_ENV_CRASH_FD "=", ND_ENV_FB_FD "=",
-                                       ND_ENV_ROOT "="};
+                                       ND_ENV_ROOT "=", ND_ENV_SERVICE_FD "="};
     size_t n = 0u;
     size_t i;
 
-    for (i = 0u; environ[i] != NULL && n + 5u < max; i++) {
+    for (i = 0u; environ[i] != NULL && n + 6u < max; i++) {
         size_t k;
         bool ours = false;
 
@@ -445,6 +455,8 @@ static size_t build_envp(const char **envp, size_t max, const char *keypad, cons
         envp[n++] = fbv;
     if (rootv[0] != '\0')
         envp[n++] = rootv;
+    if (svcv[0] != '\0')
+        envp[n++] = svcv;
     envp[n] = NULL;
     return n;
 }
@@ -480,9 +492,12 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
     char keypad_env[64];
     char crash_env[64];
     char fb_env[64];
+    char svc_env[64];
     char root_env[ND_PATH_MAX + 32];
     nd_input_channel ch = {-1, -1};
     int crash_pipe[2] = {-1, -1};
+    nd_svc_server *svc = NULL;
+    int svc_fd = -1;
     int fb_fd = -1;
     nd_proc_spec spec;
     nd_proc_status st;
@@ -513,6 +528,18 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
     if (ui->fb != NULL)
         fb_fd = ui->fb->fd;
 
+    /* The route back to the core's services (nd_svc.h). Created HERE, before
+     * the fork, because the descriptor has to exist to be listed in the plan
+     * below -- but the thread that serves it is started AFTER the fork, so
+     * that CODING-STANDARDS.md 1.1 keeps its guarantee and no mutex of ours
+     * can be held by a thread at the instant the child is made.
+     *
+     * A failure is not fatal: the app runs without a channel and every
+     * nd_svc_* call answers "not present", which is the sentence Messages
+     * and the Modem app drew before this existed. */
+    if (nd_svc_server_open(&svc) == ND_OK)
+        svc_fd = nd_svc_server_child_fd(svc);
+
     path = apprun_path(runner, sizeof runner);
     argv[0] = path;
     argv[1] = app->path;
@@ -521,11 +548,12 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
     argv[4] = NULL;
 
     if (app_env(keypad_env, sizeof keypad_env, crash_env, sizeof crash_env, fb_env, sizeof fb_env,
-                root_env, sizeof root_env, ch.read_fd, crash_pipe[1], fb_fd) != ND_OK) {
+                root_env, sizeof root_env, svc_env, sizeof svc_env, ch.read_fd, crash_pipe[1],
+                fb_fd, svc_fd) != ND_OK) {
         rc = ND_ERR_TOOLONG;
         goto done;
     }
-    (void)build_envp(envp, ND_ARRAY_LEN(envp), keypad_env, crash_env, fb_env, root_env);
+    (void)build_envp(envp, ND_ARRAY_LEN(envp), keypad_env, crash_env, fb_env, root_env, svc_env);
 
     memset(&spec, 0, sizeof spec);
     spec.argv = argv;
@@ -548,6 +576,11 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
         spec.fds[spec.n_fds].our_fd = fb_fd;
         spec.n_fds++;
     }
+    if (svc_fd >= 0) {
+        spec.fds[spec.n_fds].child_fd = svc_fd;
+        spec.fds[spec.n_fds].our_fd = svc_fd;
+        spec.n_fds++;
+    }
 
     nd_log(ND_LOG_OS, "Launching %s: %s %s %s", app->name, path, app->path, argv[2]);
 
@@ -561,6 +594,17 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
     nd_input_channel_close_read(&ch);
     (void)close(crash_pipe[1]);
     crash_pipe[1] = -1;
+
+    /* AFTER the fork, never before it. nd_svc_server_start() closes our copy
+     * of the child's socket end too, for the same reason the two lines above
+     * exist: while we hold it, the child exiting would not look like EOF. */
+    if (svc != NULL) {
+        svc_fd = -1;
+        if (nd_svc_server_start(svc, ui) != ND_OK) {
+            nd_svc_server_free(svc);
+            svc = NULL;
+        }
+    }
 
     /* The child can exit at any instant, and the next key we forward then hits
      * a pipe with no reader. nd-core ignores SIGPIPE for exactly this reason,
@@ -585,6 +629,12 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
         if (restore)
             (void)sigaction(SIGPIPE, &prev, NULL);
     }
+
+    /* The child is gone, so nothing can ask for a service any more. Bounded:
+     * a request still in flight is left to finish on its own thread rather
+     * than made the core's problem. See ND_SVC_JOIN_S. */
+    nd_svc_server_stop(svc);
+    svc = NULL;
 
     memset(&info, 0, sizeof info);
     if (nd_crash_read_report(crash_pipe[0], &info)) {
@@ -622,6 +672,8 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
         *crash_out = info;
 
 done:
+    if (svc != NULL)
+        nd_svc_server_free(svc); /* only reached when the launch never happened */
     if (crash_pipe[0] >= 0)
         (void)close(crash_pipe[0]);
     if (crash_pipe[1] >= 0)

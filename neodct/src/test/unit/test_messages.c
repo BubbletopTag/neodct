@@ -39,8 +39,11 @@
  *     "deleted", which is what makes the list screen loop rather than return.
  *
  *  7. THE SEND FLOW REFUSES an empty message, a message over 160 CODE POINTS
- *     -- not bytes -- and a UI with no modem behind it, and takes none of
- *     those decisions after asking for a number it will not use.
+ *     -- not bytes -- and a UI with no modem AND NO ROUTE TO ONE behind it,
+ *     and takes none of those decisions after asking for a number it will
+ *     not use. With a modem reachable it SENDS: OPEN-QUESTIONS.md MSG-1 is
+ *     answered and "ModemService is not running." is no longer what a real
+ *     Write Message -> Options -> Send arrives at.
  */
 
 #include <dlfcn.h>
@@ -64,7 +67,9 @@
 #include "nd_json.h"
 #include "nd_keycodes.h"
 #include "nd_keypad.h"
+#include "nd_modem.h"
 #include "nd_paths.h"
+#include "nd_svc.h"
 #include "nd_text.h"
 #include "nd_types.h"
 #include "nd_ui.h"
@@ -1060,6 +1065,10 @@ static void test_send_flow_refuses_over_160(void)
     fx_free(&fx);
 }
 
+/* No modem AND no service channel: the case the dialog was written for, and
+ * the only one that still reaches it. An app process gets ui->modem == NULL
+ * by nd_app.h's rules; what changed with MSG-1 is that it now also gets a
+ * route to the core's modem, and this fixture deliberately has neither. */
 static void test_send_flow_without_a_modem(void)
 {
     fixture fx;
@@ -1069,9 +1078,8 @@ static void test_send_flow_without_a_modem(void)
         fx_free(&fx);
         return;
     }
-    /* An app process has ui->modem == NULL by nd_app.h's rules; see
-     * OPEN-QUESTIONS.md MSG-1. */
     CHECK(fx.ui.modem == NULL);
+    CHECK(!nd_svc_client_active());
 
     script_key(&fx, ND_KEY_1);
     script_key(&fx, ND_KEY_2);
@@ -1080,6 +1088,47 @@ static void test_send_flow_without_a_modem(void)
 
     CHECK(!g_api.send_flow(&fx.ui, "hello", ND_MESSAGES_ROOT_ID, 3));
 
+    fx_free(&fx);
+}
+
+/* THE ANSWER TO MSG-1, from the app's own side.
+ *
+ * With a modem reachable the flow gets past the guard, draws "Sending...",
+ * hands the text to the service and reports "Message sent!". On this host
+ * the ModemService runs in simulation mode, which is still do_send_sms()'s
+ * own branch and still returns the modem's own (ok, detail) -- so what is
+ * pinned here is the app's decision, which is the half that was broken.
+ *
+ * The fixture attaches the handle rather than a socket, because that is the
+ * shape nd-shoot and the core have and it is the path nd_svc.h guarantees is
+ * unchanged. The SOCKET path -- a real child talking to a real core -- is
+ * proved end to end in test_svc.c, where both processes exist. */
+static void test_send_flow_reaches_a_modem(void)
+{
+    fixture fx;
+    nd_modem *modem = NULL;
+
+    if (!fx_init(&fx) || !fx_keys(&fx)) {
+        CHECK(false);
+        fx_free(&fx);
+        return;
+    }
+    if (nd_modem_open(&modem) != ND_OK || modem == NULL) {
+        fprintf(stderr, "test_messages: no ModemService; skipping the send case\n");
+        fx_free(&fx);
+        return;
+    }
+    fx.ui.modem = modem;
+
+    script_key(&fx, ND_KEY_1);
+    script_key(&fx, ND_KEY_2);
+    script_key(&fx, ND_KEY_3);
+    hold_key(&fx, ND_KEY_ENTER); /* confirms the number, then the dialog */
+
+    CHECK(g_api.send_flow(&fx.ui, "hello", ND_MESSAGES_ROOT_ID, 3));
+
+    fx.ui.modem = NULL;
+    nd_modem_close(modem);
     fx_free(&fx);
 }
 
@@ -1290,6 +1339,7 @@ int main(void)
     RUN(test_send_flow_refuses_empty);
     RUN(test_send_flow_refuses_over_160);
     RUN(test_send_flow_without_a_modem);
+    RUN(test_send_flow_reaches_a_modem);
     RUN(test_send_flow_refuses_a_blank_number);
     RUN(test_inbox_marks_read_on_open);
     RUN(test_outbox_empty_state);

@@ -57,7 +57,7 @@
  *
  * ============ INHERITED DESCRIPTORS ============
  *
- * The child inherits three descriptors, whose numbers arrive in the
+ * The child inherits four descriptors, whose numbers arrive in the
  * environment because the numbers themselves are not fixed:
  *
  *     NEODCT_KEYPAD_FD   read end of the key channel; press AND release
@@ -67,6 +67,12 @@
  *                        address and a backtrace here before re-raising
  *     NEODCT_FB_FD       the already-open framebuffer, so the child does not
  *                        need /dev/fb0 permission
+ *     NEODCT_SERVICE_FD  an AF_UNIX SOCK_SEQPACKET socketpair to the core,
+ *                        on which the app asks the core to do the four
+ *                        things it cannot do itself -- send an SMS, snapshot
+ *                        the modem, snapshot the battery, quick-start the
+ *                        gauge. See nd_svc.h; ABSENT is not an error, it
+ *                        just means there is nobody to ask.
  *
  * Everything else is closed on exec.
  *
@@ -74,7 +80,10 @@
  *
  * All of libneodct: the widgets, the rasterizer, settings, storage, the
  * databases, JSON. NOT the modem, battery or notify handles -- those live in
- * the core and are NULL in an app's context.
+ * the core and are NULL in an app's context. What an app needs from the first
+ * two it asks for over NEODCT_SERVICE_FD, through nd_svc.h, which is a
+ * DELIBERATELY NARROW surface: four operations, no dial, no answer, no
+ * hang-up and no raw AT.
  *
  * An app MUST NOT write to the core's state. Settings used to assign
  * ui->wallpaper and rewrite ui->apps; it now writes the setting and the core
@@ -101,9 +110,10 @@ extern "C" {
 #define ND_APP_SYM_OPEN_MESSAGE "app_open_message"
 #define ND_APP_SYM_OPEN_INBOX   "app_open_inbox"
 
-#define ND_ENV_KEYPAD_FD "NEODCT_KEYPAD_FD"
-#define ND_ENV_CRASH_FD  "NEODCT_CRASH_FD"
-#define ND_ENV_FB_FD     "NEODCT_FB_FD"
+#define ND_ENV_KEYPAD_FD  "NEODCT_KEYPAD_FD"
+#define ND_ENV_CRASH_FD   "NEODCT_CRASH_FD"
+#define ND_ENV_FB_FD      "NEODCT_FB_FD"
+#define ND_ENV_SERVICE_FD "NEODCT_SERVICE_FD"
 
 /* The file an app's compiled code lives in, beside its manifest.json. */
 #define ND_APP_SO_NAME "app.so"

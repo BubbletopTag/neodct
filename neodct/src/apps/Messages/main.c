@@ -55,6 +55,7 @@
 #include "nd_keycodes.h"
 #include "nd_log.h"
 #include "nd_modem.h"
+#include "nd_svc.h"
 #include "nd_t9.h"
 #include "nd_text.h"
 #include "nd_types.h"
@@ -534,12 +535,19 @@ bool nd_msg_send_flow(nd_ui *ui, const char *text, int32_t root_id, int32_t sub_
         return false;
     }
 
-    /* getattr(ui, "modem", None). In an app process this is ALWAYS NULL --
-     * nd_app.h gives the modem, battery and notify handles to the core only
-     * -- so the dialog below is what a real send reaches today. The Python
-     * had the same branch for the same reason and never took it, because
-     * Messages ran inside the core. OPEN-QUESTIONS.md MSG-1. */
-    if (ui->modem == NULL) {
+    /* getattr(ui, "modem", None), and the answer to OPEN-QUESTIONS.md MSG-1.
+     *
+     * In an app process ui->modem is ALWAYS NULL -- nd_app.h gives the three
+     * service handles to the core only -- so this branch used to be the end
+     * of every send, and the Python's identical branch was never taken only
+     * because Messages ran inside the core. nd_svc_modem_present() asks
+     * across the process boundary instead: true when THIS process owns a
+     * modem (the core, and nd-shoot's in-process runs) or when the core owns
+     * one and answered.
+     *
+     * The dialog still fires for the case it was written for -- a phone with
+     * no ModemService at all -- and for that case only. */
+    if (!nd_svc_modem_present(ui)) {
         dialog(ui, "ModemService is not running.");
         return false;
     }
@@ -547,7 +555,10 @@ bool nd_msg_send_flow(nd_ui *ui, const char *text, int32_t root_id, int32_t sub_
     nd_msg_draw_sending(ui, number);
 
     detail[0] = '\0';
-    if (nd_modem_send_sms(ui->modem, number, body, detail, sizeof detail)) {
+    /* The core does the CMGS transaction on our behalf and hands back the
+     * modem's own (ok, detail), so "Send failed: <reason>" still names the
+     * reason the modem gave. nd_svc.h; spec-app-services.md. */
+    if (nd_svc_send_sms(ui, number, body, detail, sizeof detail)) {
         dialog(ui, "Message sent!");
         return true;
     }

@@ -55,6 +55,7 @@
 #include "nd_draw.h"
 #include "nd_keycodes.h"
 #include "nd_modem.h"
+#include "nd_svc.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_ui_sim.h"
@@ -432,7 +433,12 @@ int app_run(nd_ui *ui)
     if (ui == NULL || ui->draw == NULL || ui->canvas == NULL)
         return 1;
 
-    if (ui->modem == NULL) {
+    /* `if modem is None`. In an app process ui->modem is NULL by nd_app.h's
+     * rules, so this used to be the whole app: the dialog fired with a modem
+     * plugged in and a SIM registered. nd_svc_modem_present() asks the core
+     * instead, and the dialog is left for the case the Python wrote it for --
+     * a phone with no ModemService. OPEN-QUESTIONS.md MSG-1. */
+    if (!nd_svc_modem_present(ui)) {
         nd_msgdialog dlg;
 
         nd_msgdialog_init(&dlg, ui, nd_modemapp_no_service_msg);
@@ -450,13 +456,27 @@ int app_run(nd_ui *ui)
             nd_modem_status st;
             size_t n_rows;
 
-            nd_modem_status_snapshot(ui->modem, &st);
+            (void)nd_svc_modem_status(ui, &st);
             if (page == ND_MODEMAPP_PAGE_RADIO) {
                 /* BARS is the PATCHED signal_level(); see the header. */
                 n_rows = nd_modemapp_radio_rows(&st, nd_ui_status_signal_level(ui), rows,
                                                 ND_ARRAY_LEN(rows));
             } else if (page == ND_MODEMAPP_PAGE_SIM) {
                 if (!have_sim_cache) {
+                    /* ui->modem is NULL in an app process, and RAW AT IS
+                     * DELIBERATELY NOT ON THE SERVICE WIRE -- an app that
+                     * could choose the command could type ATH at a live call
+                     * (spec-app-services.md section 4).
+                     *
+                     * nd_modem_send_at(NULL, ...) returns ND_ERR_INVAL, which
+                     * transact() already turns into final == "" -- the
+                     * Python's `final is None`, the no-modem-or-locked-port
+                     * case this app was written to render. So the page comes
+                     * out SIM "no reply", NUM "(not on SIM)", ICCID/IMSI/FW
+                     * "--", with IMEI still real because it comes from the
+                     * status snapshot beside them. Every one of those strings
+                     * already existed for a modem that would not answer, and
+                     * that is what has happened: it was not asked. */
                     n_sim_cache = st.hardware
                                       ? sim_rows_present(ui->modem, &st, sim_cache,
                                                          ND_ARRAY_LEN(sim_cache))
