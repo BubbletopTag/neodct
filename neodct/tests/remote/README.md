@@ -63,6 +63,29 @@ twenty-five version strings including `0.3.9a` / `0.3.10a`, `0.4.0a` /
 and surrounding whitespace. Regenerate it with the loop at the top of the
 file if `remote.py` ever changes; do not hand-edit it.
 
+## What was established with the real curl, and what was not
+
+Four things were checked by hand against curl 8.5.0, outside any test:
+
+- the exact argv the library builds is accepted — every option, in order, exits with a
+  transfer code and never exit 2 ("option unknown");
+- `-D /proc/self/fd/3` works on a pipe, and curl **flushes** the header block before it
+  writes any body: with the body throttled to nine seconds, the header write landed at
+  15 ms. That measurement is why the poll loop can read the status before the bytes it
+  describes;
+- `-H "Range: bytes=N-"` survives a 302 to another host and the second response is a 206;
+- `--proto '=https'` really does refuse an `http` URL, exit 1.
+
+One request was aimed at `api.github.com` with that argv. It reached an HTTP proxy,
+which answered 403 on GitHub's behalf — so **GitHub itself has never replied to this
+code**. It was not wasted: curl dumped the proxy's `HTTP/1.1 200 Connection Established`
+as a header block ahead of the real `403`, which is `fake-curl`'s `connect` mode and
+OPEN-QUESTIONS G-12.
+
+Still unproven, and the owner will be the first to find out: that GitHub answers the way
+these fixtures do, that TLS verifies against the phone's own CA bundle, and that a 53 MB
+transfer over a carrier behaves like a 4000-byte one.
+
 ## The one place the C deliberately disagrees
 
 `releases-insecure-url.json`. `remote.py` offers `0.3.12a` and its `http://`

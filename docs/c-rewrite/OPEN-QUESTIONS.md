@@ -4518,6 +4518,35 @@ non-numeric string; the C reads 0, which downstream means "size unknown" and dis
 the room check and the truncation check — exactly what Python does with a genuine 0.
 Neither field decides whether anything is installed.
 
+### G-12. An HTTP proxy's CONNECT response appears in the header dump
+
+Found by making a real request, which is the only reason it is here.
+
+The exact argv `nd_remote.c` builds was run by hand against
+`https://api.github.com/repos/BubbletopTag/neodct/releases?per_page=30` from a machine
+behind an HTTP proxy. curl dumped **two** header blocks to its `-D` target:
+
+```
+HTTP/1.1 200 Connection Established
+<blank>
+HTTP/1.1 403 Forbidden
+Content-Length: 215
+```
+
+The tunnel's `200` is not the answer to anything, and a reader holding only that block
+would classify the 403's error page as a package and append it to the `.part` file. The
+header descriptor is therefore drained to `EAGAIN` before the body descriptor is touched
+in every wakeup, so the classification never depends on how much of the pipe one `read()`
+happened to return.
+
+The phone dials a carrier bearer with no proxy in front of it, so this cannot arise
+there today — but `http_proxy`/`https_proxy` in the environment would produce it, and
+"the answer depends on a read boundary" is not a property to leave in code that hands a
+file to `dd`.
+
+*(That request reached the proxy and no further: it answered 403 on GitHub's behalf.
+**api.github.com has never replied to this code or to this argv.**)*
+
 ### G-11. `verity.py` is still not ported, and is still not wanted
 
 `ndsys-apply.sh:281` only *reads* the four verity parameters out of `installed.prop`,

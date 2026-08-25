@@ -3,12 +3,12 @@
  *
  * ============ WHAT IS AND IS NOT BEING TESTED ============
  *
- * NO HTTP REQUEST HAS EVER LEFT THIS CODE. Not here and not anywhere else:
- * nd_remote.c has never spoken to api.github.com, and nothing below claims
- * it has. What is exercised is everything up to and including the process
- * boundary -- the argv nd_remote.c builds, the three pipes it opens, the
- * header parsing, the status classification, the resume arithmetic, the
- * backoff, and the bytes that end up on the card.
+ * NO BUILD OF nd_remote.c HAS EVER SPOKEN TO GITHUB. Not here, not by hand,
+ * not once -- and nothing below claims otherwise. What is exercised is
+ * everything up to and including the process boundary: the argv nd_remote.c
+ * builds, the three pipes it opens, the header parsing, the status
+ * classification, the resume arithmetic, the backoff, and the bytes that
+ * end up on the card.
  *
  * The way that is arranged is the same trick the Koki audio work used for
  * aplay: a stand-in `curl` is put first on PATH. nd_remote.c finds it with
@@ -23,22 +23,30 @@
  * bytes are a known pattern, so a download that is reassembled wrongly
  * shows up as a wrong byte and not merely as a wrong length.
  *
- * ============ WHAT THIS CANNOT SHOW ============
+ * ============ WHAT WAS ESTABLISHED WITH THE REAL curl, BY HAND ============
  *
- *   - that the REAL curl accepts this argv. Its flags were checked against
- *     curl 8.5.0 by hand, including that --proto '=https' refuses http and
- *     that -H "Range:" survives a 302; but no build of this file has ever
- *     run the real one.
- *   - that GitHub answers the way the fixtures do.
- *   - that TLS verifies against the phone's CA bundle.
+ * Four things, against curl 8.5.0, outside this file:
+ *
+ *   - the exact argv is accepted. Every option, in the order the library
+ *     writes them, exits with a transfer code and never exit 2 ("option
+ *     unknown").
+ *   - -D /proc/self/fd/3 works on a pipe, and curl FLUSHES the header block
+ *     before it writes any body: with the body throttled to nine seconds,
+ *     the header write landed at 15 ms. That measurement is why the poll
+ *     loop can read the status before the bytes it describes.
+ *   - -H "Range: bytes=N-" survives a 302 to another host, and the second
+ *     response is a 206.
+ *   - --proto '=https' really does refuse an http URL, exit 1.
+ *
+ * ============ WHAT NOTHING HAS SHOWN ============
+ *
+ *   - that GitHub answers the way the fixtures do. The one attempt to ask
+ *     it reached a proxy, which answered 403 on GitHub's behalf; api.github
+ *     .com itself has never replied to this argv. It did teach the CONNECT
+ *     lesson below.
+ *   - that TLS verifies against the phone's own CA bundle.
+ *   - that a 53 MB transfer over a carrier behaves like a 4000-byte one.
  *   - anything at all about the phone's bearer.
- *
- * One thing WAS measured against the real curl rather than assumed: that it
- * writes and flushes the header block to its -D target before it writes any
- * body to stdout. nd_remote.c's poll loop reads the header descriptor first
- * in every wakeup on the strength of that, and stashes body bytes that
- * arrive before a status anyway, so that a curl which buffered differently
- * would be slow rather than wrong.
  *
  * ============ THE PYTHON IS THE ORACLE FOR ORDERING ============
  *
@@ -385,6 +393,12 @@ static void clear_downloads(void)
     (void)run("rm -f '%s/dl/'*", g_sandbox);
 }
 
+/* The one download this test ever writes, as a virtual path under the
+ * sandbox root, and the size of the committed package fixture. */
+#define DEST     "/dl/UPDATE.ndsw"
+#define DESTPART "/dl/UPDATE.ndsw.part"
+#define PKG_SIZE 4000
+
 /* ------------------------------------------------------------------ *
  * 1. Naming
  * ------------------------------------------------------------------ */
@@ -671,6 +685,66 @@ static void test_a_redirect_chain_reports_the_last_status(void)
     CHECK_STR(rel.version, "0.3.11a", "and the body still arrives");
 }
 
+static void test_a_proxy_connect_response_is_not_the_answer(void)
+{
+    nd_release rel;
+    char why[ND_REMOTE_WHY_MAX];
+
+    /* NOT hypothetical. The exact argv nd_remote.c builds was run by hand
+     * against api.github.com from a machine behind an HTTP proxy, and curl
+     * dumped two header blocks to its -D target:
+     *
+     *     HTTP/1.1 200 Connection Established     <- the CONNECT tunnel
+     *     HTTP/1.1 403 Forbidden                  <- the actual answer
+     *
+     * The tunnel's 200 is not the answer to anything, and a reader holding
+     * only that would write a 403's error page into the .part file
+     * believing it had a package. nd_remote.c therefore drains the header
+     * descriptor to EAGAIN before it looks at the body, so the answer never
+     * depends on how much of the pipe one read happened to return.
+     *
+     * WHAT THIS TEST DOES AND DOES NOT PIN. It pins the outcome: a proxied
+     * 403 is reported as 403, no error page reaches the card, and a tunnel
+     * in front of a good response is invisible. It does NOT reproduce the
+     * interleaving that makes a one-read-per-wakeup reader lose the second
+     * block -- that needs both header blocks and the first body bytes to
+     * land between two poll() wakeups, which one process can do and a shell
+     * script cannot. The fixture writes its headers in a single copy and
+     * pads the tunnel block past 20 kB to get as close as a shell can. The
+     * drain-to-EAGAIN is what actually removes the dependence; this test is
+     * the regression net around the behaviour it protects. */
+    scenario_reset();
+    ctl_body("not-json.html");
+    ctl_set("connect", "");
+    ctl_set("status", "403");
+    why[0] = '\0';
+
+    CHECK_INT(nd_remote_latest("luckfox-armv7", &rel, why, sizeof why), ND_UPD_ERR_NETWORK,
+              "the tunnel's 200 does not hide the 403 behind it");
+    CHECK_STR(why, "GitHub said 403 Forbidden", "the real status is the one reported");
+
+    /* And the same through the download path, where getting it wrong puts
+     * an error page on the card under the package's name. */
+    scenario_reset();
+    clear_downloads();
+    ctl_body("not-json.html");
+    ctl_set("connect", "");
+    ctl_set("status", "403");
+
+    CHECK_INT(nd_remote_download("https://example.invalid/pkg", DEST, PKG_SIZE, NULL, NULL, 1, NULL,
+                                 why, sizeof why),
+              ND_UPD_ERR_NETWORK, "a proxied 403 fails the download");
+    CHECK_INT(size_of(real_of(DESTPART)), 0, "with no error page written to the card");
+
+    /* A tunnel ahead of a good response must still work. */
+    scenario_reset();
+    ctl_body("releases.json");
+    ctl_set("connect", "");
+    CHECK_INT(nd_remote_latest("luckfox-armv7", &rel, why, sizeof why), ND_UPD_OK,
+              "and a proxy in front of a working request is invisible");
+    CHECK_STR(rel.version, "0.3.11a", "with the listing intact");
+}
+
 static void test_an_insecure_asset_url_is_skipped(void)
 {
     nd_release rel;
@@ -732,10 +806,6 @@ static void test_no_curl_at_all(void)
 /* ------------------------------------------------------------------ *
  * 4. Downloading
  * ------------------------------------------------------------------ */
-
-#define DEST     "/dl/UPDATE.ndsw"
-#define DESTPART "/dl/UPDATE.ndsw.part"
-#define PKG_SIZE 4000
 
 /* The reassembled file must equal the fixture byte for byte. A length check
  * alone would pass a package whose first 200 bytes were written twice. */
@@ -1092,6 +1162,7 @@ int main(void)
     test_garbage_and_the_wrong_shape();
     test_http_statuses();
     test_a_redirect_chain_reports_the_last_status();
+    test_a_proxy_connect_response_is_not_the_answer();
     test_an_insecure_asset_url_is_skipped();
     test_a_bad_repository_override_is_refused();
     test_no_curl_at_all();

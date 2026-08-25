@@ -114,7 +114,28 @@ case "$status" in
 esac
 
 # ---- the headers, on their own descriptor ----------------------------
+# The header text is built in a file first and copied across in one go,
+# rather than printf'd line by line down the pipe. A reader that empties the
+# header descriptor one 1 kB read per wakeup keeps up easily with a shell
+# writing a line at a time; the real curl writes the whole block at once and
+# then starts the body immediately, and that is the ordering worth
+# reproducing.
+HDRTMP="$D/hdr.$$"
 {
+    if [ -f "$D/connect" ]; then
+        # What curl dumps when it goes through an HTTP proxy: the CONNECT
+        # tunnel's own response, ahead of the real one. Its 200 is NOT the
+        # answer to the request -- observed against api.github.com from
+        # behind exactly such a proxy, where the real answer was a 403 in
+        # the block after it. Padded well past one read on purpose.
+        printf 'HTTP/1.1 200 Connection Established\r\n'
+        i=0
+        while [ "$i" -lt 400 ]; do
+            printf 'X-Proxy-Padding-%03d: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n' "$i"
+            i=$((i + 1))
+        done
+        printf '\r\n'
+    fi
     if [ -f "$D/redirect" ]; then
         printf 'HTTP/1.1 302 Found\r\n'
         printf 'Location: https://objects.example.invalid/pkg\r\n'
@@ -128,7 +149,9 @@ esac
     fi
     printf 'Content-Type: application/octet-stream\r\n'
     printf '\r\n'
-} > "$hdr"
+} > "$HDRTMP"
+cat "$HDRTMP" > "$hdr"
+rm -f "$HDRTMP"
 
 # ---- the body, on stdout ---------------------------------------------
 # tail -c +N / head -c M rather than dd bs=1: byte-exact, and it writes in

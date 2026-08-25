@@ -523,23 +523,29 @@ static bool url_is_usable(const char *url)
 static bool drain(int fd, char *store, size_t store_sz, size_t *store_len)
 {
     char buf[1024];
-    ssize_t n;
 
-    do {
-        n = read(fd, buf, sizeof buf);
-    } while (n < 0 && errno == EINTR);
+    for (;;) {
+        ssize_t n = read(fd, buf, sizeof buf);
 
-    if (n <= 0)
-        return false; /* EOF, or an error we treat as one */
-    if (store != NULL && *store_len + 1u < store_sz) {
-        size_t room = store_sz - *store_len - 1u;
-        size_t take = ((size_t)n < room) ? (size_t)n : room;
+        if (n > 0) {
+            if (store != NULL && *store_len + 1u < store_sz) {
+                size_t room = store_sz - *store_len - 1u;
+                size_t take = ((size_t)n < room) ? (size_t)n : room;
 
-        memcpy(store + *store_len, buf, take);
-        *store_len += take;
-        store[*store_len] = '\0';
+                memcpy(store + *store_len, buf, take);
+                *store_len += take;
+                store[*store_len] = '\0';
+            }
+            /* Keep reading even once the store is full, so curl is never
+             * blocked writing to a pipe nobody is emptying. */
+            continue;
+        }
+        if (n == 0)
+            return false; /* EOF */
+        if (errno == EINTR)
+            continue;
+        return true; /* EAGAIN: nothing more available right now */
     }
-    return true;
 }
 
 /* curl's complaint, with its own prefix removed: "curl: (6) Could not
@@ -718,6 +724,12 @@ static nd_update_err http_get(const char *url, int32_t speed_time, int64_t range
     (void)close(hdr_fd[1]);
     hdr_fd[1] = -1;
 
+    /* The two small descriptors are drained to EAGAIN on every wakeup, so
+     * they must be able to say EAGAIN. stdout stays blocking: it is read
+     * once per wakeup, only when poll has already said it is ready. */
+    (void)fcntl(hdr_fd[0], F_SETFL, fcntl(hdr_fd[0], F_GETFL, 0) | O_NONBLOCK);
+    (void)fcntl(err_fd[0], F_SETFL, fcntl(err_fd[0], F_GETFL, 0) | O_NONBLOCK);
+
     /* All three are polled together because any one of them can fill its
      * pipe. Draining only stdout would let a hostile server stall the whole
      * transfer by sending 64 kB of headers. */
@@ -746,20 +758,41 @@ static nd_update_err http_get(const char *url, int32_t speed_time, int64_t range
         }
 
         /* The header descriptor is serviced before the body descriptor in
-         * every wakeup, so that a wakeup carrying both gives up the status
-         * line before the bytes it describes. curl writes and flushes the
-         * header block before it writes any body, which was measured rather
-         * than assumed -- see test/unit/test_remote.c. */
+         * every wakeup, and it is DRAINED TO EAGAIN rather than read once.
+         *
+         * curl writes and flushes all of a response's headers before it
+         * writes any of that response's body -- measured, not assumed, see
+         * test/unit/test_remote.c. So everything the status classification
+         * needs is already in this pipe by the time a body byte exists, and
+         * emptying it here is what makes that guarantee usable.
+         *
+         * Reading once was not enough, and the case that proved it was real
+         * rather than imagined. Through an HTTP proxy curl dumps TWO header
+         * blocks: the CONNECT tunnel's "HTTP/1.1 200 Connection Established"
+         * and then the real response. A single 1024-byte read can stop
+         * between them, leaving the real status -- a 403, a 404 -- sitting
+         * in the pipe while the tunnel's 200 says "start writing this to
+         * the card". An error page is not a package. */
         if (pfd[0].fd >= 0 && (pfd[0].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
             char buf[1024];
-            ssize_t got;
+            bool eof = false;
 
-            do {
-                got = read(hdr_fd[0], buf, sizeof buf);
-            } while (got < 0 && errno == EINTR);
-            if (got > 0) {
-                header_feed(&hdr, buf, (size_t)got);
-            } else {
+            for (;;) {
+                ssize_t got = read(hdr_fd[0], buf, sizeof buf);
+
+                if (got > 0) {
+                    header_feed(&hdr, buf, (size_t)got);
+                    continue;
+                }
+                if (got == 0) {
+                    eof = true;
+                    break;
+                }
+                if (errno == EINTR)
+                    continue;
+                break; /* EAGAIN */
+            }
+            if (eof) {
                 /* No more headers are coming, so whatever status was last
                  * seen is the final one -- this is what makes a chain that
                  * ends on a 3xx work rather than hang. */
