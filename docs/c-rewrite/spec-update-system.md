@@ -2005,3 +2005,82 @@ exist** — only the 12 golden-frame tests need the real UI. Recommend exactly t
 6. `nd_remote.c` + 36 tests behind the transport seam
 7. `apps/Update/app.c` against fake widgets + 48 policy tests
 8. Golden frames, once the UI framework lands
+
+---
+
+## AS BUILT: the signature verifier, 2026-08-25
+
+`lib/nd_signing.c` + `include/nd_signing.h`. **OpenSSL, not a port of
+`signing.py`'s arithmetic.**
+
+### Why
+
+`signing.py` implements RSA PKCS#1 v1.5 from scratch and is right to be
+strict about it:
+
+> Deliberately strict: the expected encoded message is rebuilt in full and
+> compared whole. Verifiers that instead go looking for a DigestInfo inside
+> the decrypted block are the ones that fall to Bleichenbacher'06 forgeries.
+
+Python has arbitrary-precision integers, so `pow(value, e, n)` is one line.
+C does not. A faithful port means hand-written modular exponentiation over a
+4096-bit modulus — new, unreviewed, security-critical arithmetic guarding
+the step that hands an image to `dd`. **Three separate agents were asked to
+build this system and all three refused to hand-roll this function.** They
+were right to.
+
+`libcrypto.so.3` is already in the image because OpenSSH links it, and
+`openssl` was already in `NEODCT_DEPENDENCIES`. So the "no dependencies"
+argument in the Python's docstring — true and well-judged for Python — does
+not carry: the dependency is already on the phone. `EVP_DigestVerify` with
+`RSA_PKCS1_PADDING` performs precisely the full-encoded-message
+reconstruction `signing.py` hand-built.
+
+The only Makefile change is `libcrypto` on the `PKG_DEPS` line.
+
+### Key loading
+
+`OSSL_DECODER_CTX_new_for_pkey()` with a NULL format and NULL structure
+covers all four shapes `load_public_key()` accepts — PEM or DER, SPKI or
+bare PKCS#1 — in one pass. The obvious four-call translation
+(`PEM_read_bio_RSAPublicKey`, `d2i_RSAPublicKey`, …) is the low-level RSA
+API that OpenSSL 3.0 deprecated, and this project builds with
+`-Werror=deprecated-declarations`. Pinning the type to `"RSA"` reproduces
+the Python's "public key is not an RSA key" refusal.
+
+The shipped key is a 4096-bit RSA key in PEM SPKI form.
+
+### How it is checked
+
+`test_signing.c`, 20 checks. **Every expectation was first established by
+running the real Python**, not by reading the C:
+
+| case | Python | C |
+| --- | --- | --- |
+| valid signature | True | True |
+| one character changed in the message | False | False |
+| a different key | False | False |
+| signature one byte short | False | False |
+| empty signature | False | False |
+
+Plus: a signature one byte *long*, NULL key/data/signature, a missing key
+file, a missing signature file, a file that is not a key, and the shipped
+release key loading and correctly refusing a foreign signature.
+
+And the one that matters most for the forgery class the docstring names:
+**every single-bit flip across all 256 bytes of the signature is refused.**
+Bleichenbacher forgeries live in the bytes a lazy verifier never inspects,
+so the test walks the whole block rather than sampling it.
+
+Fixtures are in `neodct/tests/signing/`. **The private keys are not
+committed** — they were generated in a temporary directory, used once, and
+discarded. A test that needs a signing key is a test that has put a signing
+key in a repository.
+
+### Not done here
+
+The zip reader (`package.py`), the manifest validator (`manifest.py`), the
+dm-verity parameters (`verity.py`) and the online path (`remote.py`).
+`service.c` is therefore still a boundary returning `ND_UPDSVC_UNAVAILABLE`:
+**a signature verifier alone cannot install an update, and nothing here
+claims it can.**
