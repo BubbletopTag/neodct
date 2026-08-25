@@ -142,13 +142,32 @@ typedef struct {
 } zmember;
 
 typedef struct {
-    bool zip64;         /* saturate the 32-bit fields and add the records */
-    bool break_cd_sig;  /* corrupt the first central directory signature  */
-    bool break_lfh_sig; /* corrupt the first local header signature       */
-    int64_t cd_off;     /* -1: the real offset                            */
-    int64_t entries;    /* -1: the real count                             */
-    size_t chop;        /* bytes to cut off the end of the finished file  */
+    bool zip64;             /* saturate the 32-bit fields and add the records */
+    bool zip64_short_extra; /* a 0x0001 field too small for its placeholders  */
+    bool zip64_bad_extra;   /* a 0x0001 field of an impossible size           */
+    bool break_cd_sig;      /* corrupt the first central directory signature  */
+    bool break_lfh_sig;     /* corrupt the first local header signature       */
+    bool nul_in_cd_name;    /* a NUL inside the first directory entry's name  */
+    uint16_t disk;          /* the disk numbers in the end record             */
+    int64_t cd_off;         /* -1: the real offset                            */
+    int64_t entries;        /* -1: the real count                             */
+    size_t chop;            /* bytes to cut off the end of the finished file  */
 } zopts;
+
+#define CENTRAL_HEADER_SIZE 46u
+
+/* The Zip64 extra field carries one 8-byte count per saturated 32-bit field,
+ * in a fixed order. 24 is all three; the malformed variants are a field too
+ * small for the placeholders that are actually present, and a field of a size
+ * the format does not define. */
+static uint16_t zip64_extra_payload(const zopts *opt)
+{
+    if (opt->zip64_bad_extra)
+        return 7u;
+    if (opt->zip64_short_extra)
+        return 8u;
+    return 24u;
+}
 
 /* Builds the archive into `out`. Layout is the ordinary one: every member's
  * local header and data, then the central directory, then (for zip64) the
@@ -234,22 +253,35 @@ static void zip_build(buf *out, const zmember *ms, size_t n, const zopts *opt)
             buf_u32(out, (uint32_t)(usizes[i] & 0xffffffffu));
         }
         buf_u16(out, (uint16_t)strlen(m->name));
-        buf_u16(out, opt->zip64 ? 28u : 0u); /* extra len */
-        buf_u16(out, 0u);                    /* comment len */
-        buf_u16(out, 0u);                    /* disk start */
-        buf_u16(out, 0u);                    /* internal attrs */
-        buf_u32(out, 0u);                    /* external attrs */
+        buf_u16(out, opt->zip64 ? (uint16_t)(4u + zip64_extra_payload(opt)) : 0u);
+        buf_u16(out, 0u); /* comment len */
+        buf_u16(out, 0u); /* disk start */
+        buf_u16(out, 0u); /* internal attrs */
+        buf_u32(out, 0u); /* external attrs */
         buf_u32(out, opt->zip64 ? 0xffffffffu : (uint32_t)(lho[i] & 0xffffffffu));
         buf_put(out, m->name, strlen(m->name));
         if (opt->zip64) {
+            uint16_t payload = zip64_extra_payload(opt);
+
             buf_u16(out, 0x0001u);
-            buf_u16(out, 24u);
-            buf_u64(out, usizes[i]);
-            buf_u64(out, csizes[i]);
-            buf_u64(out, lho[i]);
+            buf_u16(out, payload);
+            if (opt->zip64_bad_extra) {
+                uint8_t junk[7];
+
+                memset(junk, 0, sizeof junk);
+                buf_put(out, junk, sizeof junk);
+            } else {
+                buf_u64(out, usizes[i]);
+                if (payload >= 16u)
+                    buf_u64(out, csizes[i]);
+                if (payload >= 24u)
+                    buf_u64(out, lho[i]);
+            }
         }
         if (opt->break_cd_sig && i == 0u)
             out->p[sig_at] = 0xffu;
+        if (opt->nul_in_cd_name && i == 0u && strlen(m->name) > 1u)
+            out->p[sig_at + CENTRAL_HEADER_SIZE + 1u] = 0u;
     }
     cd_size = out->n - cd_start;
 
@@ -276,8 +308,8 @@ static void zip_build(buf *out, const zmember *ms, size_t n, const zopts *opt)
     eocd_at = out->n;
     ND_UNUSED(eocd_at);
     buf_u32(out, 0x06054b50u);
-    buf_u16(out, 0u);
-    buf_u16(out, 0u);
+    buf_u16(out, opt->disk);
+    buf_u16(out, opt->disk);
     buf_u16(out, opt->zip64 ? 0xffffu
                             : (uint16_t)(opt->entries >= 0 ? (uint16_t)opt->entries : (uint16_t)n));
     buf_u16(out, opt->zip64 ? 0xffffu
@@ -356,7 +388,7 @@ static void write_package(const char *vpath, const zmember *ms, size_t n, const 
     buf_free(&b);
 }
 
-static const zopts SANE = {false, false, false, -1, -1, 0u};
+static const zopts SANE = {false, false, false, false, false, false, 0u, -1, -1, 0u};
 
 /* The ordinary four-member package: the image STORED (a squashfs is already
  * compressed) and everything else DEFLATED, which is what mkupdate.py does. */
@@ -1347,6 +1379,99 @@ static void test_zip64_is_tolerated(void)
     nd_package_close(pkg);
 }
 
+static void test_the_end_record_must_describe_one_disk(void)
+{
+    /* CPython refuses a multi-disk archive outright. Nothing that reaches a
+     * phone is one, and a reader that ignored the field would read the wrong
+     * central directory out of a file that says its directory is elsewhere. */
+    char manifest[2048];
+    zmember ms[4];
+    size_t n;
+    zopts opt = SANE;
+
+    manifest_text(manifest, sizeof manifest, g_image_sha, NULL, "qemu-aarch64");
+    n = standard_members(ms, manifest, strlen(manifest), false, true);
+    opt.disk = 3u;
+    write_package("/multidisk.ndsw", ms, n, &opt);
+    refuse_open("/multidisk.ndsw", ND_UPD_ERR_BAD_ZIP, "multiple disks");
+}
+
+static void test_a_malformed_zip64_extra_field_is_refused(void)
+{
+    char manifest[2048];
+    zmember ms[4];
+    size_t n;
+    zopts opt;
+
+    manifest_text(manifest, sizeof manifest, g_image_sha, NULL, "qemu-aarch64");
+
+    /* Every one of usize, csize and lho is 0xFFFFFFFF, so all three need a
+     * count -- and the field carries one. CPython raises here rather than
+     * reading past the end of its own buffer. */
+    n = standard_members(ms, manifest, strlen(manifest), false, true);
+    opt = SANE;
+    opt.zip64 = true;
+    opt.zip64_short_extra = true;
+    write_package("/z64short.ndsw", ms, n, &opt);
+    refuse_open("/z64short.ndsw", ND_UPD_ERR_BAD_ZIP, "corrupt zip64 extra field");
+
+    /* A length the format does not define at all. */
+    n = standard_members(ms, manifest, strlen(manifest), false, true);
+    opt = SANE;
+    opt.zip64 = true;
+    opt.zip64_bad_extra = true;
+    write_package("/z64bad.ndsw", ms, n, &opt);
+    refuse_open("/z64bad.ndsw", ND_UPD_ERR_BAD_ZIP, "corrupt extra field");
+}
+
+static void test_impossible_member_names_are_refused(void)
+{
+    char manifest[2048];
+    char longname[400];
+    zmember ms[4];
+    size_t n;
+    zopts opt;
+
+    manifest_text(manifest, sizeof manifest, g_image_sha, NULL, "qemu-aarch64");
+
+    memset(longname, 'n', sizeof longname - 1u);
+    longname[sizeof longname - 1u] = '\0';
+    n = standard_members(ms, manifest, strlen(manifest), false, true);
+    ms[SIGNATURE_AT].name = longname;
+    write_package("/longname.ndsw", ms, n, &SANE);
+    refuse_open("/longname.ndsw", ND_UPD_ERR_BAD_ZIP, "longer than");
+
+    /* A NUL inside a directory entry's name. Everything downstream compares
+     * names with strcmp, so a name that ends early in C and does not in the
+     * archive is a name that means two different things to two readers. */
+    n = standard_members(ms, manifest, strlen(manifest), false, true);
+    opt = SANE;
+    opt.nul_in_cd_name = true;
+    write_package("/nulname.ndsw", ms, n, &opt);
+    refuse_open("/nulname.ndsw", ND_UPD_ERR_BAD_ZIP, "NUL");
+}
+
+static void test_reading_a_member_that_is_not_there(void)
+{
+    char manifest[2048];
+    char why[ND_PACKAGE_WHY_MAX];
+    nd_package *pkg;
+    uint8_t *out = (uint8_t *)0x1;
+    size_t len = 99u;
+
+    (void)good_package("/UPDATE.ndsw", manifest, sizeof manifest, false);
+    pkg = open_ok("/UPDATE.ndsw");
+    if (pkg == NULL)
+        return;
+    why[0] = '\0';
+    CHECK_INT(nd_package_read_member(pkg, "nothing.txt", 1024u, &out, &len, why, sizeof why),
+              ND_UPD_ERR_BAD_ZIP);
+    CHECK_STR(why, "package has no nothing.txt");
+    CHECK(out == NULL);
+    CHECK_INT(len, 0);
+    nd_package_close(pkg);
+}
+
 static void test_null_arguments_do_not_crash(void)
 {
     char why[ND_PACKAGE_WHY_MAX];
@@ -1586,6 +1711,10 @@ int main(int argc, char **argv)
     RUN(test_too_many_members_is_refused);
     RUN(test_duplicate_names_resolve_to_the_last_entry);
     RUN(test_zip64_is_tolerated);
+    RUN(test_the_end_record_must_describe_one_disk);
+    RUN(test_a_malformed_zip64_extra_field_is_refused);
+    RUN(test_impossible_member_names_are_refused);
+    RUN(test_reading_a_member_that_is_not_there);
     RUN(test_null_arguments_do_not_crash);
     return pt_report("test_package");
 }
