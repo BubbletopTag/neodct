@@ -105,6 +105,7 @@ typedef struct koki_voice {
     int16_t a;
     int16_t b;
     bool primed;
+    bool eof; /* the source is spent but `a` has not been emitted yet */
 } koki_voice;
 
 static size_t voice_decode(koki_voice *v, int16_t *out, size_t frames)
@@ -245,9 +246,13 @@ static size_t voice_read(koki_voice *v, int16_t *out, size_t frames)
         return 0u;
 
     if (!v->primed) {
-        if (!voice_pull(v, &v->a) || !voice_pull(v, &v->b)) {
+        if (!voice_pull(v, &v->a)) {
             v->done = true;
             return 0u;
+        }
+        if (!voice_pull(v, &v->b)) {
+            v->eof = true;
+            v->b = v->a;
         }
         v->primed = true;
         v->frac = 0u;
@@ -260,9 +265,24 @@ static size_t voice_read(koki_voice *v, int16_t *out, size_t frames)
         while (v->frac >= (uint32_t)KOKI_MIX_RATE) {
             v->frac -= (uint32_t)KOKI_MIX_RATE;
             v->a = v->b;
-            if (!voice_pull(v, &v->b)) {
+            /* THE LAST FRAME. `b` is prefetched, so a reader that stops the
+             * moment the prefetch fails emits N-1 of N frames and quietly
+             * clips the tail off every effect. It is 45 microseconds and
+             * nobody would hear it, but it is also wrong and a unit test
+             * comparing against the file catches it immediately. So the
+             * first failure holds the last sample in `b` and the NEXT
+             * advance ends the voice, which makes the count exact at equal
+             * rates and a sub-source-period hold when resampling.
+             *
+             * lib/nd_notify.c's reader has the same off-by-one; it loops a
+             * ringtone forever and never reaches EOF, so it never shows. */
+            if (v->eof) {
                 v->done = true;
                 return i + 1u;
+            }
+            if (!voice_pull(v, &v->b)) {
+                v->eof = true;
+                v->b = v->a;
             }
         }
     }
