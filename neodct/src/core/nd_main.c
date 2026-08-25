@@ -59,6 +59,7 @@
 #include "nd_font.h"
 #include "nd_image.h"
 #include "nd_keycodes.h"
+#include "nd_keypadsetup.h"
 #include "nd_log.h"
 #include "nd_paths.h"
 #include "nd_proc.h"
@@ -251,8 +252,14 @@ static void core_run(nd_fb *fb, bool idle_measure)
         ack_security_notice_for_measurement();
 
     /* First boot with an i2c keypad but no keymap runs the on-screen setup
-     * wizard here, which exec-restarts the UI and may never return. It is
-     * System/hw's, not this package's; when it lands it goes on this line. */
+     * wizard here, which exec-restarts the UI and may never return. Same
+     * position as run()'s own call, which is above `ui = NeoDCT_UI(fb)` and
+     * takes fb rather than the UI for that reason.
+     *
+     * The Python wraps it in a try/except that prints one line and carries
+     * on. There is nothing here to wrap: every failure is logged, announced
+     * on the panel where the Python announces it, and comes back as false. */
+    (void)nd_kpsetup_maybe_run(fb, true);
 
     if (nd_ui_init(&ui, fb) != ND_OK) {
         nd_log_err(ND_LOG_CORE, "UI initialisation failed; nothing to run");
