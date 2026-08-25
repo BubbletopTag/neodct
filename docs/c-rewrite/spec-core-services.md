@@ -10,6 +10,12 @@ Companion documents: `ARCHITECTURE.md` (why processes, why threads),
 banner pixels and the crash/shutdown screens. Where the two overlap I say so and
 give the number rather than assuming the other spec did.
 
+**These services live in the core process and are NULL in an app's.** What an app is
+allowed to ask of the modem and the battery across that boundary — four operations, and
+why it is only four — is `spec-app-services.md`. Nothing in this document changes for
+it: the service channel is a *caller* of the API below, not a second implementation of
+it.
+
 ---
 
 ## What this does (plain English, for a reader who is not a C programmer)

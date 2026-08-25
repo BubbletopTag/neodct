@@ -2823,6 +2823,13 @@ hand-drawn screen that the real `call_screen` would replace outright, which chan
 pixels. Should this wait for the Dialer work package, or is the intended behaviour "hand
 the number back to the core and let it dial"?
 
+> **Half-answered by MSG-1, and still open.** The route to the core now exists
+> (`nd_svc.h`), but **dial is deliberately not on it**: the whole point of that channel
+> is a surface an app cannot hang up a live call through. So the first obstacle is now a
+> decision rather than a gap, and the second — the hand-drawn screen the real
+> `call_screen` would replace, and the pixels that moves — is untouched. Still the
+> owner's.
+
 ### PB-6. `delete_contact_action()` has no exception handling at all
 
 **Found in:** `PhoneBook/main.py:147-157`.
@@ -2926,8 +2933,41 @@ back into the core the way `nd_contacts.c` did? A send takes up to 30 s
 (`ND_SMS_SEND_TIMEOUT_S`), so whichever it is has to be asynchronous or the core stops
 polling the modem while an app is texting.
 
-Until it is answered, `test_send_flow_without_a_modem` pins the current behaviour so the
-day it changes, it changes deliberately.
+> **RESOLVED — the first of the two, built as `nd_svc.h` / `lib/nd_svc.c`.**
+> Messages stays an app process; the route is a request/response protocol on a
+> **fourth inherited descriptor**, `NEODCT_SERVICE_FD`, an `AF_UNIX` `SOCK_SEQPACKET`
+> socketpair created per launch beside the key channel and the crash pipe. The full
+> design, with the reasoning for every choice, is **`docs/c-rewrite/spec-app-services.md`**.
+> The four points that matter here:
+>
+> - **Not on the pump loop.** The 30 s worry above is real and is worse than stated: the
+>   core's UI thread is what *scans the i2c key matrix* (`nd_input.c` polls it
+>   synchronously inside `nd_input_read_event()`), and that matrix has no kernel queue —
+>   so a key pressed while nobody is scanning is **lost, not delayed**. Serving inline
+>   would cost the user every key they pressed during a send, on hardware only. The core
+>   therefore serves on **its own thread**, created after the fork and stopped after the
+>   `waitpid()`, and `pump_keys()` is untouched.
+> - **Four operations and no more.** Send an SMS, snapshot the modem, snapshot the
+>   battery, quick-start the gauge. `dial`, `answer`, **`hangup`**, `fetch_sms`,
+>   `read_stored_sms` and raw `send_at` are deliberately absent: an app must not be able
+>   to hang up a live call by accident or type `ATH` on purpose.
+> - **Timeouts.** The app gives a send 45 s (above the core's own 37 s worst case) and
+>   everything else 5 s; a dead core is noticed sooner than that because `recv()` returns
+>   0. The core gives its own thread 2 s to stop, then detaches it to finish a send that
+>   cannot be aborted anyway rather than freezing the phone to watch.
+> - **The child is validated.** Lengths, framing, encoding and the phone number, which is
+>   *rejected* rather than filtered: only `0-9 * # +`, `+` leading only.
+>
+> `test_send_flow_without_a_modem` still pins the no-route case — that dialog is still
+> what a phone with no `ModemService` shows. `test_send_flow_reaches_a_modem` pins the
+> other half, and `test/unit/test_svc.c` proves the whole thing across a real process
+> boundary with `test/apps/SvcApp`.
+>
+> **What is still open:** PB-5 and DL-10. Dial is not on this wire, so PhoneBook's "Call"
+> still draws its own screen. And the engineering Modem app's SIM page is six *raw* AT
+> transactions, so in an app process it now shows "no reply" for the rows it could not
+> ask for rather than being served — spec-app-services.md §4 records the fifth op that
+> would fix it properly.
 
 ### MSG-2. The list screens read at most 128 rows
 
@@ -3735,6 +3775,10 @@ since 0.3.0. Now that `nd_dialer_show_calling()` exists, the fix is four lines,
 but it is still blocked on the same thing PB-5 named: an app process has
 `ui->modem == NULL`, so PhoneBook cannot dial without a route to the core that
 does not exist yet. Unchanged, and still the owner's call.
+
+**Update (MSG-1).** The route exists now, and dial is still not on it on purpose —
+see PB-5's note and `spec-app-services.md` section 4. Nothing in this package
+changed PhoneBook.
 
 ### DL-11. The fitter assertions pin INK, and ink is not the font's metric
 
