@@ -828,8 +828,136 @@ static void test_free_tolerates_null(void)
     CHECK_INT(nd_manifest_parse(NULL, 0u, NULL, NULL, 0u), ND_UPD_ERR_BAD_MANIFEST);
 }
 
-int main(void)
+/* ------------------------------------------------------------------ *
+ * --parse: the cross-check against the real manifest.py
+ * ------------------------------------------------------------------ *
+ *
+ * neodct/tests/test_c_manifest_matches_python.py feeds the same bytes to both
+ * and compares field by field, and the refusal word for word. The escaping is
+ * the same as test_package.c's --dump: a changelog holds newlines.
+ */
+
+static void put_field(const char *key, const char *value)
 {
+    printf("mf\t%s\t", key);
+    for (; *value != '\0'; value++) {
+        switch (*value) {
+        case '\n':
+            fputs("\\n", stdout);
+            break;
+        case '\r':
+            fputs("\\r", stdout);
+            break;
+        case '\t':
+            fputs("\\t", stdout);
+            break;
+        case '\\':
+            fputs("\\\\", stdout);
+            break;
+        default:
+            putchar((int)(unsigned char)*value);
+            break;
+        }
+    }
+    putchar('\n');
+}
+
+static void put_num(const char *key, long long value)
+{
+    printf("mf\t%s\t%lld\n", key, value);
+}
+
+/* image_bytes saturates at UINT64_MAX; printed signed it would read -1 and
+ * the cross-check would be comparing the wrong thing. */
+static void put_unum(const char *key, unsigned long long value)
+{
+    printf("mf\t%s\t%llu\n", key, value);
+}
+
+static size_t slurp(const char *path, uint8_t *out, size_t out_sz, bool *ok)
+{
+    FILE *f = fopen(path, "rb");
+    size_t n;
+
+    *ok = false;
+    if (f == NULL)
+        return 0u;
+    n = fread(out, 1u, out_sz, f);
+    (void)fclose(f);
+    *ok = true;
+    return n;
+}
+
+static int parse_file(const char *path)
+{
+    static uint8_t raw[1u << 21];
+    nd_manifest *m = NULL;
+    char why[ND_MANIFEST_WHY_MAX];
+    bool ok = false;
+    size_t n = slurp(path, raw, sizeof raw, &ok);
+
+    if (!ok) {
+        printf("parse\tERR\n");
+        put_field("why", "cannot open the file");
+        return 0;
+    }
+    why[0] = '\0';
+    if (nd_manifest_parse(raw, n, &m, why, sizeof why) != ND_UPD_OK) {
+        printf("parse\tERR\n");
+        put_field("why", why);
+        return 0;
+    }
+    printf("parse\tOK\n");
+    put_field("version", m->version);
+    put_num("buildtime", (long long)m->buildtime);
+    put_field("platform", m->platform);
+    put_field("sha256", m->sha256);
+    put_field("changelog", m->changelog);
+    put_field("min_kernel", m->min_kernel);
+    put_field("thumbnail_sha256", m->thumbnail_sha256);
+    put_field("root_hash", m->verity_root_hash);
+    put_num("block_size", (long long)m->verity_block_size);
+    put_num("image_blocks", (long long)m->verity_image_blocks);
+    put_field("salt", m->verity_salt);
+    put_unum("image_bytes", (unsigned long long)nd_manifest_image_bytes(m));
+    put_num("raw_len", (long long)m->raw_len);
+    nd_manifest_free(m);
+    return 0;
+}
+
+static int compat_file(const char *path, const char *platform, const char *kernel)
+{
+    static uint8_t raw[1u << 21];
+    nd_manifest *m = NULL;
+    char why[ND_MANIFEST_WHY_MAX];
+    bool ok = false;
+    size_t n = slurp(path, raw, sizeof raw, &ok);
+    nd_update_err rc;
+
+    if (!ok) {
+        printf("compat\tPARSE_ERR\n");
+        return 0;
+    }
+    why[0] = '\0';
+    if (nd_manifest_parse(raw, n, &m, why, sizeof why) != ND_UPD_OK) {
+        printf("compat\tPARSE_ERR\n");
+        return 0;
+    }
+    why[0] = '\0';
+    rc = nd_manifest_check_compatible(m, platform, kernel, why, sizeof why);
+    printf("compat\t%s\n", rc == ND_UPD_OK ? "OK" : "ERR");
+    put_field("why", why);
+    nd_manifest_free(m);
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc >= 3 && strcmp(argv[1], "--parse") == 0)
+        return parse_file(argv[2]);
+    if (argc >= 4 && strcmp(argv[1], "--compat") == 0)
+        return compat_file(argv[2], argv[3], argc >= 5 ? argv[4] : NULL);
+
     RUN(test_parses_a_well_formed_manifest);
     RUN(test_keeps_the_exact_bytes_it_was_given);
     RUN(test_derives_the_hash_offset_from_the_image_size);

@@ -28,7 +28,9 @@
 
 #include <zlib.h>
 
+#include "nd_manifest.h"
 #include "nd_package.h"
+#include "nd_paths.h"
 
 #include "platform_test.h"
 
@@ -1380,6 +1382,46 @@ static void test_null_arguments_do_not_crash(void)
  * --dump: the cross-check against the real Python
  * ------------------------------------------------------------------ */
 
+/* A changelog holds newlines and a hostile manifest could hold a tab, so one
+ * field per line with the three characters that would break the framing
+ * escaped. The Python side reverses it. */
+static void put_field(const char *key, const char *value)
+{
+    printf("mf\t%s\t", key);
+    for (; *value != '\0'; value++) {
+        switch (*value) {
+        case '\n':
+            fputs("\\n", stdout);
+            break;
+        case '\r':
+            fputs("\\r", stdout);
+            break;
+        case '\t':
+            fputs("\\t", stdout);
+            break;
+        case '\\':
+            fputs("\\\\", stdout);
+            break;
+        default:
+            putchar((int)(unsigned char)*value);
+            break;
+        }
+    }
+    putchar('\n');
+}
+
+static void put_num(const char *key, long long value)
+{
+    printf("mf\t%s\t%lld\n", key, value);
+}
+
+/* image_bytes saturates at UINT64_MAX; printed signed it would read -1 and
+ * the cross-check would be comparing the wrong thing. */
+static void put_unum(const char *key, unsigned long long value)
+{
+    printf("mf\t%s\t%llu\n", key, value);
+}
+
 static int dump(const char *path)
 {
     char why[ND_PACKAGE_WHY_MAX];
@@ -1408,11 +1450,18 @@ static int dump(const char *path)
                (int)nd_package_member_method(pkg, name));
     }
     m = nd_package_manifest(pkg);
-    printf("manifest\t%s\t%lld\t%s\t%s\t%s\t%s\t%s\t%s\t%lld\t%lld\t%s\t%llu\n", m->version,
-           (long long)m->buildtime, m->platform, m->sha256, m->changelog, m->min_kernel,
-           m->thumbnail_sha256, m->verity_root_hash, (long long)m->verity_block_size,
-           (long long)m->verity_image_blocks, m->verity_salt,
-           (unsigned long long)nd_manifest_image_bytes(m));
+    put_field("version", m->version);
+    put_num("buildtime", (long long)m->buildtime);
+    put_field("platform", m->platform);
+    put_field("sha256", m->sha256);
+    put_field("changelog", m->changelog);
+    put_field("min_kernel", m->min_kernel);
+    put_field("thumbnail_sha256", m->thumbnail_sha256);
+    put_field("root_hash", m->verity_root_hash);
+    put_num("block_size", (long long)m->verity_block_size);
+    put_num("image_blocks", (long long)m->verity_image_blocks);
+    put_field("salt", m->verity_salt);
+    put_unum("image_bytes", (unsigned long long)nd_manifest_image_bytes(m));
     printf("manifest_raw_len\t%zu\n", m->raw_len);
     {
         char digest[ND_MANIFEST_HEX_MAX];
@@ -1453,10 +1502,59 @@ static int dump(const char *path)
     return 0;
 }
 
+/* extract_image and check_compatible, for the same cross-check. The two
+ * variants mkbadupdate calls the brick case (wrong-platform, future-kernel)
+ * and the two it calls the corrupt case (corrupt-image, truncated-image) all
+ * open cleanly and are only refused HERE, so a cross-check that stops at
+ * open() never reaches them. */
+static int extract(const char *path, const char *dest)
+{
+    char why[ND_PACKAGE_WHY_MAX];
+    nd_package *pkg = NULL;
+    nd_update_err rc;
+
+    (void)nd_path_set_root(NULL);
+    why[0] = '\0';
+    if (nd_package_open(path, &pkg, why, sizeof why) != ND_UPD_OK) {
+        printf("extract\tERR\t%s\n", why);
+        return 0;
+    }
+    rc = nd_package_extract_image(pkg, dest, NULL, NULL, -1, why, sizeof why);
+    if (rc == ND_UPD_OK)
+        printf("extract\tOK\n");
+    else
+        printf("extract\tERR\t%s\n", why);
+    printf("left_behind\t%d\n", nd_path_exists(dest) ? 1 : 0);
+    nd_package_close(pkg);
+    return 0;
+}
+
+static int compat(const char *path, const char *platform, const char *kernel)
+{
+    char why[ND_PACKAGE_WHY_MAX];
+    nd_package *pkg = NULL;
+    nd_update_err rc;
+
+    (void)nd_path_set_root(NULL);
+    why[0] = '\0';
+    if (nd_package_open(path, &pkg, why, sizeof why) != ND_UPD_OK) {
+        printf("compat\tERR\t%s\n", why);
+        return 0;
+    }
+    rc = nd_manifest_check_compatible(nd_package_manifest(pkg), platform, kernel, why, sizeof why);
+    printf("compat\t%s\t%s\n", rc == ND_UPD_OK ? "OK" : "ERR", why);
+    nd_package_close(pkg);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 3 && strcmp(argv[1], "--dump") == 0)
         return dump(argv[2]);
+    if (argc >= 4 && strcmp(argv[1], "--extract") == 0)
+        return extract(argv[2], argv[3]);
+    if (argc >= 4 && strcmp(argv[1], "--compat") == 0)
+        return compat(argv[2], argv[3], argc >= 5 ? argv[4] : NULL);
 
     fixtures_init();
     RUN(test_sha256_known_answers);
