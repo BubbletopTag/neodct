@@ -793,10 +793,20 @@ static void test_footprint(const asset *w, size_t n_wav, const asset *mp3, bool 
 
     printf("test_koki_audio: RSS idle %ld kB, four voices %ld kB (+%ld), after free %ld kB\n",
            before, peak, peak - before, after);
+#if defined(__SANITIZE_ADDRESS__)
+    /* Under ASAN the number is the sanitizer's, not the phone's: redzones
+     * round every allocation up and the quarantine holds freed chunks, so
+     * the same four voices measure about 1.1 MB. Print it and move on --
+     * asserting on it would only be asserting about ASAN. */
+    ND_UNUSED(after);
+#else
     /* spec-koki.md budgets ~200 kB for audio; the design table works out at
-     * ~146 kB for four voices. Half a megabyte is a loose ceiling that still
-     * catches "somebody decoded the whole track". */
+     * ~146 kB for four voices and the measurement lands near 68 kB, because
+     * only the music voice is an MP3 and drwav's state is 408 bytes. Half a
+     * megabyte is a loose ceiling that still catches the failure that
+     * matters: somebody decoding a whole 183-second track into memory. */
     CHECK(peak - before < 512, "four live voices cost well under half a megabyte");
+#endif
 }
 
 /* ------------------------------------------------------------------ *
