@@ -14,6 +14,18 @@ MPV_LICENSE_FILES = LICENSE.GPL
 MPV_CPE_ID_VENDOR = mpv
 MPV_INSTALL_STAGING = YES
 
+# NeoDCT: mpv 0.35 has no framebuffer output at all -- the only way onto a
+# screen without a window system is --vo=drm, and the Luckfox Pico Mini B
+# has no DRM driver behind its SPI panel. apply.sh adds one, plus the
+# keypad bindings that let the C key leave a video on a phone with no other
+# way out. Source and unit tests live in neodct/mpv-neodct.
+MPV_NEODCT_DIR = $(TOPDIR)/../neodct/mpv-neodct
+
+define MPV_NEODCT_SOURCES
+	$(MPV_NEODCT_DIR)/apply.sh $(@D)
+endef
+MPV_POST_EXTRACT_HOOKS += MPV_NEODCT_SOURCES
+
 # Some of these options need testing and/or tweaks
 MPV_CONF_OPTS = \
 	-Dcaca=disabled \
