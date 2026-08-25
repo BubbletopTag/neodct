@@ -246,18 +246,18 @@ void nd_package_sha256_hex(const void *data, size_t len, char *out, size_t out_s
  * ==================== the zip reader starts here ====================
  * ------------------------------------------------------------------ */
 
-#define SIG_EOCD     0x06054b50u
-#define SIG_EOCD64   0x06064b50u
-#define SIG_LOCATOR  0x07064b50u
-#define SIG_CENTRAL  0x02014b50u
-#define SIG_LOCAL    0x04034b50u
+#define SIG_EOCD    0x06054b50u
+#define SIG_EOCD64  0x06064b50u
+#define SIG_LOCATOR 0x07064b50u
+#define SIG_CENTRAL 0x02014b50u
+#define SIG_LOCAL   0x04034b50u
 
-#define EOCD_SIZE     22u
-#define EOCD64_SIZE   56u
-#define LOCATOR_SIZE  20u
-#define CENTRAL_SIZE  46u
-#define LOCAL_SIZE    30u
-#define MAX_COMMENT   65535u
+#define EOCD_SIZE    22u
+#define EOCD64_SIZE  56u
+#define LOCATOR_SIZE 20u
+#define CENTRAL_SIZE 46u
+#define LOCAL_SIZE   30u
+#define MAX_COMMENT  65535u
 
 /* General-purpose bit flags that decide whether a member can be read at all. */
 #define FLAG_ENCRYPTED        0x0001u
@@ -664,8 +664,7 @@ static bool read_central_directory(nd_package *pkg, char *why, size_t why_sz)
             say(why, why_sz, "package member name is unsafe: %s", e.name);
             goto done;
         }
-        if (!apply_zip64(&e, cd + p + CENTRAL_SIZE + name_len, (size_t)extra_len, why,
-                         why_sz))
+        if (!apply_zip64(&e, cd + p + CENTRAL_SIZE + name_len, (size_t)extra_len, why, why_sz))
             goto done;
 
         if (e.lho > (uint64_t)INT64_MAX - (uint64_t)concat) {

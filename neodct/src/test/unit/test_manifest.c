@@ -775,9 +775,9 @@ static void test_version_tuples(void)
         uint32_t part[4];
     } cases[] = {
         {"6.12.47", 3u, {6u, 12u, 47u, 0u}},
-        {"6.12.47-rt", 3u, {6u, 12u, 47u, 0u}},  /* trailing junk ignored     */
-        {"6.x.3", 1u, {6u, 0u, 0u, 0u}},         /* a chunk with no digits    */
-        {"", 0u, {0u, 0u, 0u, 0u}},              /* STOPS the walk entirely   */
+        {"6.12.47-rt", 3u, {6u, 12u, 47u, 0u}}, /* trailing junk ignored     */
+        {"6.x.3", 1u, {6u, 0u, 0u, 0u}},        /* a chunk with no digits    */
+        {"", 0u, {0u, 0u, 0u, 0u}},             /* STOPS the walk entirely   */
         {"x.1", 0u, {0u, 0u, 0u, 0u}},
         {"5", 1u, {5u, 0u, 0u, 0u}},
         {"0.0.0", 3u, {0u, 0u, 0u, 0u}},

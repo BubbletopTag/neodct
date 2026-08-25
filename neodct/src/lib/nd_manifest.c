@@ -377,8 +377,7 @@ nd_update_err nd_manifest_parse(const uint8_t *raw, size_t len, nd_manifest **ou
 
     /* ---- block_size ---- */
     if (!read_int_field(verity, ND_UPD_KEY_BLOCK_SIZE, &m->verity_block_size) ||
-        m->verity_block_size < 512 ||
-        (m->verity_block_size & (m->verity_block_size - 1)) != 0) {
+        m->verity_block_size < 512 || (m->verity_block_size & (m->verity_block_size - 1)) != 0) {
         say(why, why_sz, "block_size must be a power of two >= 512");
         goto done;
     }

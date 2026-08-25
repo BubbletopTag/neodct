@@ -847,9 +847,9 @@ static void test_extracts_the_image_and_checks_its_hash(void)
 
     g_progress_n = 0u;
     why[0] = '\0';
-    CHECK_INT(nd_package_extract_image(pkg, "/pending.img", note_progress, NULL, -1, why,
-                                       sizeof why),
-              ND_UPD_OK);
+    CHECK_INT(
+        nd_package_extract_image(pkg, "/pending.img", note_progress, NULL, -1, why, sizeof why),
+        ND_UPD_OK);
     CHECK(nd_path_resolve(resolved, sizeof resolved, "/pending.img") == ND_OK);
     f = fopen(resolved, "rb");
     CHECK(f != NULL);
@@ -1130,9 +1130,9 @@ static void test_a_bad_crc_is_refused(void)
         pkg = open_ok("/badimagecrc.ndsw");
         if (pkg != NULL) {
             why[0] = '\0';
-            CHECK_INT(nd_package_extract_image(pkg, "/pending.img", NULL, NULL, -1, why,
-                                               sizeof why),
-                      ND_UPD_ERR_BAD_ZIP);
+            CHECK_INT(
+                nd_package_extract_image(pkg, "/pending.img", NULL, NULL, -1, why, sizeof why),
+                ND_UPD_ERR_BAD_ZIP);
             CHECK(strstr(why, "bad CRC-32") != NULL);
             CHECK(!nd_path_exists("/pending.img"));
             nd_package_close(pkg);
@@ -1146,8 +1146,8 @@ static void test_unsafe_member_names_are_refused(void)
      * today -- it is refused so that the next person to add an extract-all
      * does not have to re-derive it, and because a package carrying such an
      * entry was not written by mkupdate.py. */
-    static const char *const EVIL[] = {"../evil", "a/../../evil", "/etc/passwd",
-                                       "..\\evil",  "C:/evil",       ".."};
+    static const char *const EVIL[] = {"../evil",  "a/../../evil", "/etc/passwd",
+                                       "..\\evil", "C:/evil",      ".."};
     char manifest[2048];
     zmember ms[4];
     size_t n;
