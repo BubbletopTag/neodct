@@ -64,6 +64,24 @@ typedef struct {
     nd_fd_map fds[ND_PROC_MAX_FDS];
     size_t n_fds;
     nd_proc_owner owner;
+
+    /* setsid() in the child, between the fork and the execve. Python spells
+     * this start_new_session=True, and for anything the core may later
+     * signal by PROCESS GROUP it is not optional.
+     *
+     * The failure it prevents is on the record, in RemoteShell's own
+     * _owns() docstring: the phone left sshd.pid=244 and tunnel.pid=246
+     * behind, came back up, and Remote Shell killed the process group those
+     * numbers had been handed to by then -- its own launcher. The UI never
+     * started and the serial log stopped mid-boot.
+     *
+     * With a new session the child's group contains the child and its own
+     * descendants and nothing else, so killing that group cannot reach back
+     * into the core. It is off by default because an app SHOULD stay in the
+     * core's session: nd_proc_terminate() signals a single pid, and an app
+     * that outlives its session leader is exactly the orphan the crash
+     * screen exists to catch. */
+    bool new_session;
 } nd_proc_spec;
 
 /* fork + execve, in that order and nothing in between. *pid_out receives the

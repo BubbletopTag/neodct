@@ -460,6 +460,113 @@ static bool crash_log_contains(const char *needle)
  * nd_proc_spawn / wait / terminate on their own
  * ------------------------------------------------------------------ */
 
+/* spec.new_session must actually call setsid(), not merely be stored.
+ *
+ * This is the flag that stops a kill(-pgid) reaching back into the core.
+ * RemoteShell's _owns() docstring records what happens without it: stale
+ * pid files, a boot that reused those numbers, and Remote Shell killing
+ * the process group they now belonged to -- its own launcher. No UI, and
+ * the serial log stopped mid-boot.
+ *
+ * `ps -o sid=` is not portable enough to rely on, so the child reports its
+ * own session id: getsid(0) differs from the parent's exactly when setsid()
+ * ran, which is the property that matters and the only one worth asserting.
+ */
+static void test_spawn_new_session(void)
+{
+    static const char *const SH_ARGV[] = {"/bin/sh", "-c", "exec ps -o sid= -p $$", NULL};
+    nd_proc_spec spec;
+    nd_proc_status st;
+    pid_t pid = -1;
+    int pipefd[2];
+    char buf[64];
+    ssize_t got;
+    long child_sid = -1;
+    long our_sid = (long)getsid(0);
+
+    if (pipe(pipefd) != 0) {
+        CHECK(pipefd[0] >= 0); /* no pipe: nothing to observe the child with */
+        return;
+    }
+
+    memset(&spec, 0, sizeof spec);
+    spec.argv = SH_ARGV;
+    spec.owner = ND_OWNER_SYSTEM;
+    spec.new_session = true;
+    spec.fds[0].child_fd = 1; /* the child's stdout is our pipe */
+    spec.fds[0].our_fd = pipefd[1];
+    spec.n_fds = 1u;
+
+    CHECK_INT(nd_proc_spawn("/bin/sh", &spec, &pid), ND_OK);
+    (void)close(pipefd[1]);
+    if (pid > 0) {
+        got = read(pipefd[0], buf, sizeof buf - 1u);
+        if (got > 0) {
+            buf[got] = '\0';
+            child_sid = strtol(buf, NULL, 10);
+        }
+        CHECK_INT(nd_proc_wait(pid, 5.0, &st), ND_OK);
+    }
+    (void)close(pipefd[0]);
+
+    if (child_sid <= 0) {
+        /* No usable ps on this host: the flag cannot be observed from here,
+         * and a test that silently passes is worse than one that says so. */
+        fprintf(stderr, "SKIP new_session: ps gave no session id\n");
+        return;
+    }
+    /* Its own session, and the leader of it. */
+    CHECK(child_sid != our_sid);
+    CHECK(child_sid == (long)pid);
+}
+
+static void test_spawn_same_session(void)
+{
+    static const char *const SH_ARGV[] = {"/bin/sh", "-c", "exec ps -o sid= -p $$", NULL};
+    nd_proc_spec spec;
+    nd_proc_status st;
+    pid_t pid = -1;
+    int pipefd[2];
+    char buf[64];
+    ssize_t got;
+    long child_sid = -1;
+    long our_sid = (long)getsid(0);
+
+    if (pipe(pipefd) != 0) {
+        CHECK(pipefd[0] >= 0);
+        return;
+    }
+
+    memset(&spec, 0, sizeof spec);
+    spec.argv = SH_ARGV;
+    spec.owner = ND_OWNER_SYSTEM;
+    /* new_session left false: an APP must stay in the core's session, so
+     * that nd_proc_terminate()'s single-pid signal is the whole story and
+     * an orphaned app cannot outlive the session leader. */
+    spec.fds[0].child_fd = 1;
+    spec.fds[0].our_fd = pipefd[1];
+    spec.n_fds = 1u;
+
+    CHECK_INT(nd_proc_spawn("/bin/sh", &spec, &pid), ND_OK);
+    (void)close(pipefd[1]);
+    if (pid > 0) {
+        got = read(pipefd[0], buf, sizeof buf - 1u);
+        if (got > 0) {
+            buf[got] = '\0';
+            child_sid = strtol(buf, NULL, 10);
+        }
+        CHECK_INT(nd_proc_wait(pid, 5.0, &st), ND_OK);
+    }
+    (void)close(pipefd[0]);
+
+    if (child_sid <= 0) {
+        fprintf(stderr, "SKIP same_session: ps gave no session id\n");
+        return;
+    }
+    /* The default leaves the child in our session. */
+    CHECK(child_sid == our_sid);
+}
+
 static void test_spawn_and_wait(void)
 {
     static const char *const TRUE_ARGV[] = {"/bin/true", NULL};
@@ -806,6 +913,8 @@ int main(void)
         return 0;
     }
 
+    test_spawn_new_session();
+    test_spawn_same_session();
     test_spawn_and_wait();
     test_reaper_keeps_the_status();
     test_summary_is_capped_at_ninety();

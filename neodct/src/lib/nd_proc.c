@@ -309,6 +309,17 @@ nd_err nd_proc_spawn(const char *path, const nd_proc_spec *spec, pid_t *pid_out)
 
     if (pid == 0) {
         /* ==== ASYNC-SIGNAL-SAFE ONLY FROM HERE TO THE execve ==== */
+
+        /* setsid() first, before anything that can fail in a way worth
+         * reporting: a child that is going to be signalled by process group
+         * must be in its own group BEFORE it can spawn anything of its own.
+         * setsid() is async-signal-safe, and its only failure is EPERM when
+         * we are already a group leader -- which for a fresh fork() cannot
+         * happen. Ignoring the return is deliberate; there is nothing a
+         * child between fork and exec could usefully do about it. */
+        if (spec->new_session)
+            (void)setsid();
+
         for (i = 0u; i < n_fds; i++) {
             if (child_fd[i] != our_fd[i]) {
                 if (dup2(our_fd[i], child_fd[i]) < 0)
