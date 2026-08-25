@@ -80,6 +80,7 @@
 #include "nd_types.h"
 
 #include "koki.h"
+#include "koki_audio_priv.h"
 
 /* Memory trims, probed against the installed mpv at init and dropped
  * wholesale if its build rejects any of them: an unknown option is an
@@ -344,7 +345,7 @@ static void *sink_feed(void *arg)
     return NULL;
 }
 
-static void sink_stop(struct koki_sink *s)
+void koki_sink_stop(struct koki_sink *s)
 {
     if (s == NULL)
         return;
@@ -376,7 +377,7 @@ static void sink_stop(struct koki_sink *s)
 
 /* aplay, told the mix format and nothing else. `why` receives a short reason
  * for the log line that sends the game to the external players. */
-static struct koki_sink *sink_start(koki_mixer *mixer, const char **why)
+struct koki_sink *koki_sink_start(koki_mixer *mixer, const char **why)
 {
     char exe[ND_PATH_MAX];
     char rate[16];
@@ -418,7 +419,7 @@ static struct koki_sink *sink_start(koki_mixer *mixer, const char **why)
      * clears the flag on the copy, and nothing else may leak into aplay. */
     if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) < 0) {
         *why = strerror(errno);
-        sink_stop(s);
+        koki_sink_stop(s);
         return NULL;
     }
 
@@ -445,7 +446,7 @@ static struct koki_sink *sink_start(koki_mixer *mixer, const char **why)
         *why = "cannot build aplay's arguments";
         (void)close(sv[0]);
         (void)close(sv[1]);
-        sink_stop(s);
+        koki_sink_stop(s);
         return NULL;
     }
 
@@ -486,7 +487,7 @@ static struct koki_sink *sink_start(koki_mixer *mixer, const char **why)
         (void)close(sv[0]);
         (void)close(sv[1]);
         s->pid = -1;
-        sink_stop(s);
+        koki_sink_stop(s);
         return NULL;
     }
     if (devnull >= 0)
@@ -499,7 +500,7 @@ static struct koki_sink *sink_start(koki_mixer *mixer, const char **why)
 
     if (pthread_attr_init(&attr) != 0) {
         *why = "pthread_attr_init";
-        sink_stop(s);
+        koki_sink_stop(s);
         return NULL;
     }
     stack = KOKI_SINK_STACK;
@@ -524,10 +525,20 @@ static struct koki_sink *sink_start(koki_mixer *mixer, const char **why)
 
     if (!s->thread_live) {
         *why = "cannot start the feeder thread";
-        sink_stop(s);
+        koki_sink_stop(s);
         return NULL;
     }
     return s;
+}
+
+int32_t koki_sink_sock_bytes(const struct koki_sink *s)
+{
+    return (s != NULL) ? s->sock_bytes : 0;
+}
+
+int32_t koki_sink_alsa_ms(const struct koki_sink *s)
+{
+    return (s != NULL) ? s->alsa_ms : 0;
 }
 
 /* Build the whole in-process path: mixer, then aplay, then the thread. Any
@@ -540,7 +551,7 @@ static bool mixer_backend_start(koki_sound_mgr *sm, const char **why)
         *why = "out of memory";
         return false;
     }
-    sm->sink = sink_start(sm->mixer, why);
+    sm->sink = koki_sink_start(sm->mixer, why);
     if (sm->sink == NULL) {
         koki_mixer_free(sm->mixer);
         sm->mixer = NULL;
@@ -555,7 +566,7 @@ static bool mixer_backend_start(koki_sound_mgr *sm, const char **why)
  * app_shutdown() -- it terminates one child and joins one thread. */
 static void mixer_backend_stop(koki_sound_mgr *sm)
 {
-    sink_stop(sm->sink);
+    koki_sink_stop(sm->sink);
     sm->sink = NULL;
     koki_mixer_free(sm->mixer);
     sm->mixer = NULL;

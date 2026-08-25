@@ -39,12 +39,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "nd_paths.h"
 #include "nd_types.h"
 
 #include "../../apps/Koki/koki.h"
+#include "../../apps/Koki/koki_audio_priv.h"
 
 #define KOKI_ASSETS "/NeoDCT/System/apps/Koki/assets"
 
@@ -91,6 +93,10 @@ static struct {
     int16_t (*mix_add)(int16_t, int16_t);
     int32_t (*latency_ms)(int32_t, int32_t);
     bool (*underrun)(double, double, int32_t);
+    struct koki_sink *(*sink_start)(koki_mixer *, const char **);
+    void (*sink_stop)(struct koki_sink *);
+    int32_t (*sink_sock_bytes)(const struct koki_sink *);
+    int32_t (*sink_alsa_ms)(const struct koki_sink *);
 } api;
 
 static void *g_so_handle;
@@ -124,12 +130,17 @@ static bool api_open(const char *so)
     *(void **)&api.mix_add = dlsym(h, "koki_mix_add");
     *(void **)&api.latency_ms = dlsym(h, "koki_mix_latency_ms");
     *(void **)&api.underrun = dlsym(h, "koki_mix_underrun");
+    *(void **)&api.sink_start = dlsym(h, "koki_sink_start");
+    *(void **)&api.sink_stop = dlsym(h, "koki_sink_stop");
+    *(void **)&api.sink_sock_bytes = dlsym(h, "koki_sink_sock_bytes");
+    *(void **)&api.sink_alsa_ms = dlsym(h, "koki_sink_alsa_ms");
 
     return api.mixer_new != NULL && api.mixer_free != NULL && api.music != NULL &&
            api.sfx != NULL && api.stop_music != NULL && api.stop_all != NULL && api.pull != NULL &&
            api.live_sfx != NULL && api.music_live != NULL && api.note_underrun != NULL &&
            api.underruns != NULL && api.mix_add != NULL && api.latency_ms != NULL &&
-           api.underrun != NULL;
+           api.underrun != NULL && api.sink_start != NULL && api.sink_stop != NULL &&
+           api.sink_sock_bytes != NULL && api.sink_alsa_ms != NULL;
 }
 
 /* ------------------------------------------------------------------ *
@@ -810,6 +821,248 @@ static void test_footprint(const asset *w, size_t n_wav, const asset *mp3, bool 
 }
 
 /* ------------------------------------------------------------------ *
+ * 6. The sink -- the half that has a fork and a thread in it
+ * ------------------------------------------------------------------ *
+ *
+ * There is no aplay on this machine and no /dev/snd, so koki_sound_open()
+ * would stop long before any of this. The test therefore puts its OWN
+ * `aplay` on PATH -- a two-line shell script that keeps the first 64 kB of
+ * its stdin and exits -- and drives koki_sink_start() directly through
+ * koki_audio_priv.h.
+ *
+ * What that actually exercises is the risky part: the socketpair and the
+ * SO_SNDBUF the whole latency design depends on, a fork that must happen
+ * before the feeder thread exists, the feeder unwinding on EPIPE when the
+ * player goes away, and a teardown whose order decides whether a descriptor
+ * is closed under a thread still sitting in send(). Under ASAN and with the
+ * bytes compared against a reference mixer, all four of those are checked at
+ * once.
+ *
+ * What it does NOT check is that a real aplay accepts these arguments, or
+ * that 30 ms of ALSA ring survives the phone's USB card. Neither is knowable
+ * here.
+ */
+
+#define FAKE_PLAYER_BYTES 65536
+
+static char g_fakedir[ND_PATH_MAX];
+static char g_capture[ND_PATH_MAX];
+
+/* A stand-in for aplay: read raw PCM on stdin, keep a bounded prefix, exit.
+ * Exiting on its own is the point -- it makes the feeder meet a real EPIPE
+ * instead of only ever being torn down from the outside. */
+static bool fake_player_install(void)
+{
+    char script[ND_PATH_MAX];
+    char path[ND_PATH_MAX * 2];
+    const char *old_path = getenv("PATH");
+    const char *base = getenv("TMPDIR");
+    FILE *f;
+
+    if (base == NULL || base[0] == '\0')
+        base = "/tmp";
+    if (nd_snprintf(g_fakedir, sizeof g_fakedir, "%s/ndkokibin-XXXXXX", base) != ND_OK)
+        return false;
+    if (mkdtemp(g_fakedir) == NULL)
+        return false;
+    if (nd_snprintf(g_capture, sizeof g_capture, "%s/pcm.raw", g_fakedir) != ND_OK)
+        return false;
+    if (nd_snprintf(script, sizeof script, "%s/aplay", g_fakedir) != ND_OK)
+        return false;
+
+    f = fopen(script, "w");
+    if (f == NULL)
+        return false;
+    (void)fprintf(f, "#!/bin/sh\nexec head -c %d > '%s'\n", FAKE_PLAYER_BYTES, g_capture);
+    if (fclose(f) != 0)
+        return false;
+    if (chmod(script, 0755) != 0)
+        return false;
+
+    if (old_path == NULL)
+        old_path = "/usr/bin:/bin";
+    if (nd_snprintf(path, sizeof path, "%s:%s", g_fakedir, old_path) != ND_OK)
+        return false;
+    return setenv("PATH", path, 1) == 0;
+}
+
+static void fake_player_remove(void)
+{
+    if (g_fakedir[0] != '\0')
+        (void)nftw(g_fakedir, unlink_cb, 16, FTW_DEPTH | FTW_PHYS);
+    g_fakedir[0] = '\0';
+}
+
+static long file_size(const char *path)
+{
+    struct stat st;
+
+    return (stat(path, &st) == 0) ? (long)st.st_size : -1;
+}
+
+static void nap_ms(long ms)
+{
+    struct timespec ts;
+
+    ts.tv_sec = ms / 1000L;
+    ts.tv_nsec = (ms % 1000L) * 1000000L;
+    (void)nanosleep(&ts, NULL);
+}
+
+/* NEODCT_KOKI_ABUF_MS is read inside koki_sink_start(), so the clamp is
+ * checked through a real start rather than by re-implementing the parse. */
+static void check_abuf(const char *value, int32_t want, const char *what, const asset *w)
+{
+    koki_mixer *m = api.mixer_new(KOKI_ASSETS);
+    struct koki_sink *s;
+    const char *why = "";
+
+    if (m == NULL) {
+        CHECK(false, "mixer_new");
+        return;
+    }
+    if (value != NULL)
+        (void)setenv("NEODCT_KOKI_ABUF_MS", value, 1);
+    else
+        (void)unsetenv("NEODCT_KOKI_ABUF_MS");
+
+    api.sfx(m, w->rel);
+    s = api.sink_start(m, &why);
+    if (s == NULL) {
+        CHECK(false, what);
+        api.mixer_free(m);
+        return;
+    }
+    CHECK_INT(api.sink_alsa_ms(s), want, what);
+    api.sink_stop(s);
+    api.mixer_free(m);
+    (void)unsetenv("NEODCT_KOKI_ABUF_MS");
+}
+
+static void test_sink(const asset *w, size_t n_wav, const asset *mp3, bool have_mp3)
+{
+    koki_mixer *m;
+    struct koki_sink *s;
+    const char *why = "";
+    const size_t n = (size_t)FAKE_PLAYER_BYTES / sizeof(int16_t);
+    int16_t *want;
+    int16_t *got;
+    const asset *music_src;
+    int32_t sock_bytes;
+    int32_t alsa_ms;
+    int32_t latency;
+    size_t bad = 0u;
+    size_t i;
+    long waited = 0;
+    FILE *f;
+
+    if (n_wav < 3u) {
+        CHECK(false, "need three WAVs for the sink test");
+        return;
+    }
+    music_src = have_mp3 ? mp3 : &w[2];
+
+    /* The oracle: what the mixer produces for exactly these voices, with no
+     * socket and no thread anywhere near it. */
+    want = calloc(n, sizeof *want);
+    got = calloc(n, sizeof *got);
+    CHECK(want != NULL && got != NULL, "sink buffers");
+    if (want == NULL || got == NULL) {
+        free(want);
+        free(got);
+        return;
+    }
+    m = api.mixer_new(KOKI_ASSETS);
+    if (m == NULL) {
+        CHECK(false, "mixer_new");
+        free(want);
+        free(got);
+        return;
+    }
+    api.music(m, music_src->rel);
+    api.sfx(m, w[0].rel);
+    api.sfx(m, w[1].rel);
+    (void)api.pull(m, want, n);
+    api.mixer_free(m);
+
+    /* The same voices again, this time through the socket and the thread. */
+    m = api.mixer_new(KOKI_ASSETS);
+    if (m == NULL) {
+        CHECK(false, "mixer_new");
+        free(want);
+        free(got);
+        return;
+    }
+    api.music(m, music_src->rel);
+    api.sfx(m, w[0].rel);
+    api.sfx(m, w[1].rel);
+
+    s = api.sink_start(m, &why);
+    CHECK(s != NULL, "the sink starts against a player on PATH");
+    if (s == NULL) {
+        fprintf(stderr, "  (sink_start: %s)\n", why);
+        api.mixer_free(m);
+        free(want);
+        free(got);
+        return;
+    }
+
+    sock_bytes = api.sink_sock_bytes(s);
+    alsa_ms = api.sink_alsa_ms(s);
+    latency = api.latency_ms(sock_bytes, alsa_ms);
+    printf("test_koki_audio: socket holds %d bytes (%.1f ms), ALSA ring %d ms, total %d ms "
+           "(%.1f frames at 30 FPS)\n",
+           sock_bytes, (double)sock_bytes / 2.0 * 1000.0 / (double)KOKI_MIX_RATE, alsa_ms, latency,
+           (double)latency / (1000.0 / 30.0));
+
+    CHECK(sock_bytes > 0, "the granted send buffer is readable");
+    CHECK_INT(alsa_ms, KOKI_MIX_ALSA_MS, "the ALSA ring is the default");
+    /* The design's whole claim. If a kernel's SOCK_MIN_SNDBUF floor were
+     * ever big enough to break it, this is where it would be found rather
+     * than on the phone. */
+    CHECK(latency < 100, "end-to-end latency stays inside three frames");
+
+    /* Wait for the player to take its fill and exit on its own. */
+    while (file_size(g_capture) < (long)FAKE_PLAYER_BYTES && waited < 10000) {
+        nap_ms(10);
+        waited += 10;
+    }
+    CHECK(waited < 10000, "the feeder fed the player without wedging");
+
+    /* THE TEARDOWN ORDER. Under ASAN a descriptor closed under a blocked
+     * send(), or a thread left running past the free, is a report rather
+     * than a rare flake. */
+    api.sink_stop(s);
+    api.mixer_free(m);
+
+    CHECK_INT(file_size(g_capture), FAKE_PLAYER_BYTES, "the player received a full buffer");
+    f = fopen(g_capture, "rb");
+    CHECK(f != NULL, "the captured PCM is readable");
+    if (f != NULL) {
+        size_t rd = fread(got, sizeof *got, n, f);
+
+        (void)fclose(f);
+        CHECK_INT(rd, n, "captured the whole prefix");
+        for (i = 0u; i < rd; i++) {
+            if (got[i] != want[i])
+                bad++;
+        }
+        CHECK_INT(bad, 0, "what reached the player is exactly the mixed stream");
+    }
+
+    free(want);
+    free(got);
+
+    /* engine.py's own knob, and the clamp a malloc-sized-by-environment
+     * needs (CODING-STANDARDS 1.5). */
+    check_abuf(NULL, KOKI_MIX_ALSA_MS, "ABUF_MS unset -> the default", &w[0]);
+    check_abuf("77", 77, "ABUF_MS honoured", &w[0]);
+    check_abuf("1", KOKI_MIX_ALSA_MS_MIN, "ABUF_MS clamped up", &w[0]);
+    check_abuf("100000", KOKI_MIX_ALSA_MS_MAX, "ABUF_MS clamped down", &w[0]);
+    check_abuf("banana", KOKI_MIX_ALSA_MS, "ABUF_MS unparseable is ignored", &w[0]);
+}
+
+/* ------------------------------------------------------------------ *
  * main
  * ------------------------------------------------------------------ */
 
@@ -848,6 +1101,14 @@ int main(void)
     test_overlap(wav, n_wav, &mp3[0], n_mp3 > 0u);
     test_voice_policy(wav, n_wav);
     test_footprint(wav, n_wav, &mp3[0], n_mp3 > 0u);
+
+    if (fake_player_install()) {
+        test_sink(wav, n_wav, &mp3[0], n_mp3 > 0u);
+        fake_player_remove();
+    } else {
+        fprintf(stderr, "test_koki_audio: cannot install the fake player; sink not covered\n");
+        g_failures++;
+    }
 
     unstage();
     if (g_so_handle != NULL)

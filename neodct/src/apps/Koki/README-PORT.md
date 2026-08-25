@@ -252,7 +252,9 @@ Registration order — which decides initial run order and
 | `koki_collide.c` | `screen_rect`, `_alpha_mask`, `_paste_origin`, `touching` |
 | `koki_sched.c` | handlers, `active`, `broadcast`, the per-frame pass |
 | `koki_input.c` | `Input` over the inherited keypad channel |
-| `koki_audio.c` | `SoundManager` |
+| `koki_mixer.c` | `_MiniaudioMixer`: the voices, the streaming decode and the fold |
+| `koki_audio.c` | `SoundManager`: the backend ladder, and the mixer's one `aplay` |
+| `koki_audio_priv.h` | the sink's three entry points, for `test_koki_audio.c` |
 | `koki_rng.c` | CPython-compatible MT19937 |
 | `koki_engine.c` | construction, `now()`, the main loop, the pause menu |
 | `koki_game.h` | the game's shared declarations |
@@ -279,13 +281,15 @@ because it was convenient.
    remains is the evdev drain, which is what the pipe carries. The single-key
    backend's latching-release bug (spec §8, step 3) therefore cannot occur
    and is not reproduced.
-2. **The in-process miniaudio mixer is not ported; sound runs through the
-   external-player fallback or is disabled.** A `dr_mp3`-class decoder and an
-   ALSA writer thread are a new third-party dependency in `lib/`, which this
-   task's scope forbids without asking. `/dev/snd` does not exist on the host
-   or in QEMU today, so the shipped code path here is the `_disable()` one —
-   which is also the path the golden frame was captured through. See
-   "What is not done".
+2. ~~**The in-process miniaudio mixer is not ported; sound runs through the
+   external-player fallback or is disabled.**~~ **PAID OFF.** It was true
+   when this was written — a `dr_mp3`-class decoder was then a new
+   third-party dependency — but `lib/vendor/dr_mp3.h` and `dr_wav.h` have
+   since been vendored for the ringtone and `lib/nd_notify.c` compiles them,
+   so the decoder was already in the image. The mixer is `koki_mixer.c` and
+   its sink is in `koki_audio.c`; see "The in-process mixer" at the end of
+   this file. The external-player ladder and both disable paths are still
+   there, still reached exactly as `engine.py` reaches them.
 3. **`malloc_trim(0)` is `#ifdef __GLIBC__`,** as CODING-STANDARDS and the
    Python comment both anticipate; musl has no equivalent and the process
    exit that replaces it is free.
@@ -388,12 +392,13 @@ actually saved), and add one `run_app_inproc(cap, ui, "Koki Mobile", 400,
 
 ### What is NOT done
 
-- **The in-process audio mixer.** Deviation 2 above: it needs an MP3 decoder
-  and an ALSA writer thread in `lib/`, which is a new third-party dependency
-  and outside this task's scope. The external-player fallback and both
-  disable paths ARE ported, and on the host and in QEMU (no `/dev/snd`) the
-  disable path is the one that runs -- which is also how the reference frame
-  was captured. Sound reaches no pixel and no timing.
+- ~~**The in-process audio mixer.**~~ Done; see "The in-process mixer" at
+  the end of this file. What is still not done there is **hearing it**: no
+  machine this port has run on has a sound card or an `aplay`, so the sink
+  is exercised against a stand-in player and the mix against a reference
+  mixer. On the host and in QEMU (no `/dev/snd`) the disable path is still
+  the one that runs, which is also how the reference frame was captured, so
+  sound continues to reach no pixel and no timing.
 - **The i2c matrix keypad branch.** Deviation 1: `nd_input.h` removes it from
   app code by design.
 - **Playing it on real hardware.** Nothing here has run on a phone or in
@@ -481,7 +486,20 @@ SO_SNDBUF requested 2048 -> sk_sndbuf 4608 -> 1024 bytes of payload = 23.2 ms
 measured on this kernel with a socketpair and non-blocking writes. The code
 reads the value back with `getsockopt` and logs the real figure rather than
 the requested one, because that floor is a kernel constant and may differ on
-the phone.
+the phone. It estimates payload as `sk_sndbuf / 4`, which on this kernel
+gives 1152 bytes against the 1024 a direct measurement gives -- deliberately
+the conservative direction, so the reported latency is never flattering.
+
+**Measured end to end** by `test_koki_audio.c`, which starts the real sink
+against a stand-in player on `PATH`:
+
+```
+socket holds 1152 bytes (26.1 ms), ALSA ring 30 ms, total 62 ms
+  = 1.9 frames at 30 FPS
+```
+
+and the bytes that reach the player are compared to a reference mixer's
+output: **byte-identical**.
 
 `aplay` is given `--buffer-time` = `KOKI_MIX_ALSA_MS` x 1000 and
 `--period-time` = one chunk, so its ring is a few periods deep.
@@ -595,6 +613,7 @@ introducing one would change every sound in the game.
 | --- | --- |
 | `koki_mixer.c` | the mixer proper: voices, streaming decode, resample, the saturating fold, `koki_mixer_pull()`. No thread, no process, no I/O to a player. |
 | `koki_audio.c` | `SoundManager` unchanged in shape: the backend ladder, plus the `aplay` sink and the feeder thread that turns `koki_mixer_pull()` into bytes. |
+| `koki_audio_priv.h` | three sink entry points, for the test only. `lib/`'s own `nd_*_priv.h` pattern: the sink has no business in `koki.h`, which is what the game is written against, but it is also the half most able to go wrong on the phone and it cannot be reached through `koki_sound_open()` on a machine with no `/dev/snd`. |
 
 A `lib/nd_mixer.c` was permitted and is **not** taken. Nothing else in the
 system mixes: `nd_notify.c` plays one ringtone, `apps/MusicPlayer` plays one
@@ -626,6 +645,13 @@ decoded (risk R-9) and 4 KB at a time here.
 | source staging, per voice: `KOKI_MIX_STAGE_FRAMES` 1024 x 2 ch x 2 B | 4,096 |
 | the mixer's own chunk buffers (accumulator + one voice scratch) | 512 |
 | **peak, 4 live voices, worst case all MP3** | **~146 KB** |
+| **measured**, 3 WAV effects over 1 MP3 track, `/proc/self/statm` | **68 KB** |
+
+The measurement is lower than the table because only music is an MP3 in
+practice -- 38 of the 57 assets are WAV and `drwav`'s state is 408 bytes
+against `drmp3`'s 32 KB. `test_koki_audio.c` prints the figure on every run
+and fails if it passes half a megabyte, which is the ceiling that catches
+"somebody decoded the whole 183-second track".
 
 Voice state is heap-allocated when a sound starts and freed when it ends, so
 a silent game holds none of it, and the cap is the four slots. That sits
@@ -665,7 +691,15 @@ costs nothing.
 `aplay` binary either. What is verified here is the arithmetic and the
 plumbing: the saturating fold, the fold order, the resampler, the voice
 policy, the latency and underrun sums, that four voices genuinely appear in
-one stream, and the resident memory. Whether it *sounds* right -- whether
-30 ms of ALSA ring is enough on the phone's USB card, whether the effects
-feel on-time to the person holding it -- has not been and cannot be checked
-here.
+one stream, that the bytes leaving the socket are exactly those four voices
+mixed, and the resident memory. Whether it *sounds* right -- whether 30 ms
+of ALSA ring is enough on the phone's USB card, whether a real `aplay`
+accepts these arguments, whether the effects feel on-time to the person
+holding it -- has not been and cannot be checked here.
+
+The first thing to do on the phone is run with `NEODCT_KOKI_SOUND_DEBUG=1`,
+so `aplay`'s own complaints reach the console, and watch for the underrun
+line. If it appears, raise `NEODCT_KOKI_ABUF_MS` before changing anything in
+the code. `NEODCT_KOKI_AUDIO=subprocess` puts the old external players back
+without a rebuild, which is the escape hatch if the mixer turns out to be
+wrong on hardware.
