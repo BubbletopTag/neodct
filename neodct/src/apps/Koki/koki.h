@@ -216,11 +216,67 @@ typedef struct {
  * Sound
  * ------------------------------------------------------------------ */
 
+/* _MiniaudioMixer.MAX_SFX. Three effects over one looping music voice; a
+ * fourth effect is DROPPED rather than queued, and nothing is stolen from
+ * the oldest. See README-PORT.md, "Decision 2". */
 #define KOKI_SND_MAX_SFX 3
+
+/* ---- the in-process mixer's four numbers ----
+ *
+ * All of README-PORT.md's "Decision 1" lands here. Read that table before
+ * moving any of them: the two buffer sizes are a latency budget, not a
+ * performance tuning, and the owner's complaint about the audio is latency.
+ *
+ * KOKI_MIX_RATE is _MiniaudioMixer.RATE, and it is also, measured, what
+ * every one of the 57 files in assets/snd already is: 22050 Hz, mono, s16.
+ * A source that disagrees is resampled per voice before the fold, so the
+ * output format never depends on which file started first. */
+#define KOKI_MIX_RATE 22050
+
+/* The mix granularity AND the write size: 128 frames = 256 bytes = 5.805 ms
+ * at 22050 Hz. An effect started at any instant is in the next chunk, so
+ * quantisation costs 5.8 ms rather than a buffer. */
+#define KOKI_MIX_CHUNK_FRAMES 128u
+
+/* Source frames decoded per refill, per voice: 1024 x channels x 2 B. */
+#define KOKI_MIX_STAGE_FRAMES 1024u
+
+/* What SO_SNDBUF is asked for on our end of the socket to aplay. THIS IS THE
+ * ONE THAT BITES: a default AF_UNIX SOCK_STREAM send buffer is 212,992
+ * bytes, which at 44,100 B/s is 969 ms of audio already handed onward --
+ * a second of lag, from a line of code nobody writes. The kernel clamps
+ * sk_sndbuf up to SOCK_MIN_SNDBUF (4608 here) and charges skb truesize
+ * rather than payload, so 2048 buys about 1024 bytes of real payload =
+ * 23.2 ms. koki_audio.c reads the granted value back and logs it. */
+#define KOKI_MIX_SOCK_BYTES 2048
+
+/* aplay's ALSA ring, in milliseconds; --period-time is one chunk.
+ * NEODCT_KOKI_ABUF_MS moves it, clamped to [MIN, MAX]. engine.py's default
+ * for that variable is 150; 30 is deliberately five times tighter, and
+ * raising it is the first thing to try if the phone crackles. */
+#define KOKI_MIX_ALSA_MS     30
+#define KOKI_MIX_ALSA_MS_MIN 10
+#define KOKI_MIX_ALSA_MS_MAX 500
+
+/* Opaque: koki_mixer.c owns the voices, koki_audio.c owns the one aplay and
+ * the feeder thread. Neither type puts pthread.h in this header. */
+typedef struct koki_mixer koki_mixer;
+struct koki_sink;
 
 typedef struct {
     bool enabled;
     char disabled_reason[128];
+
+    /* The in-process path. Both NULL means the external players below, or
+     * silence; they are never live at the same time, which is also what
+     * keeps fork() away from a threaded process (CODING-STANDARDS 1.1). */
+    koki_mixer *mixer;
+    struct koki_sink *sink;
+    int32_t alsa_ms;    /* what aplay was actually asked for */
+    int32_t latency_ms; /* the end-to-end figure that was logged */
+    uint32_t underruns; /* last count reported by koki_sound_check() */
+
+    /* The external-player fallback, unchanged. */
     bool have_wav_player;
     bool have_mp3_player;
     char wav_player[64];
@@ -513,6 +569,53 @@ void koki_sound_stop_music(koki_sound_mgr *sm);
 void koki_sound_stop_all(koki_sound_mgr *sm);
 void koki_sound_check(koki_sound_mgr *sm);
 void koki_sound_shutdown(koki_sound_mgr *sm);
+
+/* ------------------------------------------------------------------ *
+ * The mixer -- engine.py's _MiniaudioMixer
+ * ------------------------------------------------------------------ *
+ *
+ * Deliberately free of any device: koki_mixer_pull() hands finished samples
+ * to whoever asked, and koki_audio.c is the only caller that puts them in a
+ * socket. That is what lets test_koki_audio.c prove four voices really do
+ * end up in one stream on a machine with no sound card, which is every
+ * machine this port has run on.
+ *
+ * `rel` is a path under the assets directory given to koki_mixer_new(), the
+ * same "snd/<md5>.wav" the manifest carries.
+ */
+
+/* owned by the caller; free with koki_mixer_free() */
+koki_mixer *koki_mixer_new(const char *base_dir);
+void koki_mixer_free(koki_mixer *m);
+
+void koki_mixer_music(koki_mixer *m, const char *rel); /* loops; REPLACES */
+void koki_mixer_sfx(koki_mixer *m, const char *rel);   /* one-shot; may be dropped */
+void koki_mixer_stop_music(koki_mixer *m);
+void koki_mixer_stop_all(koki_mixer *m);
+
+/* Always produces exactly `frames` frames of 22050 Hz mono s16 -- silence
+ * when nothing is playing. Returns `frames`. Safe from any one thread at a
+ * time; the mixer's lock covers the voice list. */
+size_t koki_mixer_pull(koki_mixer *m, int16_t *out, size_t frames);
+
+int32_t koki_mixer_live_sfx(koki_mixer *m);
+bool koki_mixer_music_live(koki_mixer *m);
+void koki_mixer_note_underrun(koki_mixer *m);
+uint32_t koki_mixer_underruns(koki_mixer *m);
+
+/* The three pure sums the design rests on, exported so a test can check the
+ * arithmetic rather than the prose. */
+
+/* audioop.add(a, b, 2): saturating s16, applied PAIRWISE and in voice order.
+ * Not the same as one wide accumulator -- see README-PORT.md, "Decision 4". */
+int16_t koki_mix_add(int16_t a, int16_t b);
+
+/* One chunk + the socket's payload capacity + aplay's ring, in ms. */
+int32_t koki_mix_latency_ms(int32_t sock_bytes, int32_t alsa_ms);
+
+/* True when the sink must have run dry: the wall clock has overtaken the
+ * audio clock by more than one ALSA buffer. */
+bool koki_mix_underrun(double elapsed_ms, double written_ms, int32_t guard_ms);
 
 /* ------------------------------------------------------------------ *
  * The game
