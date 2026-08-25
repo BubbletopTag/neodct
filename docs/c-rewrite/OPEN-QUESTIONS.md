@@ -4150,3 +4150,45 @@ So the recording is stopped after the dialog's single present and the
 scroller's page is refused by `nd_capture` with `ND_ERR_BUSY` — the same
 mechanism as `CALC_FRAMES`. `test_musicplayer.c` takes the frame the same way,
 so both sides agree on the arithmetic.
+
+### KS-1. The first-boot wizard's payload drops two fields nothing reads
+
+`nd_keymap_save()` writes the keymap, and an `nd_keymap` has nowhere to put
+`generated_at_unix` or the per-key `label` that
+`hw/i2c_keypad_setup._build_payload` includes. So the wizard's file is the
+Python's minus those two.
+
+Nothing reads either one — not `nd_keymap_load()`, not the Python's own
+`_load_matrix_keymap`. `KeypadMapperI2C` renders its own JSON precisely
+because it *does* carry them and is asserted byte-exact against CPython;
+this one is asserted through the loader instead, which is the check that
+matters: a keymap the wizard writes that the core cannot read is a phone
+with no keys, and the test enrols sixteen keys and loads the result back.
+
+**Decision: accepted.** Two write-only fields are not worth widening
+`nd_keymap` for. If a future tool wants provenance, add both at once and
+give `KeypadMapperI2C` the same writer.
+
+### KS-2. The exec restart is kept, and is now belt-and-braces
+
+`maybe_run_first_time_setup` ends with `os.execv` — the Python restarts the
+UI so it re-reads the keymap it just wrote.
+
+In C the call site is already ahead of `nd_ui_init()`, so the UI would pick
+up the fresh keymap without any restart. It is ported anyway because the
+Python does it and because it is harmless: the second pass finds a keymap
+and skips. A library cannot reach the core's `argv`, so it re-execs
+`/proc/self/exe` with `/proc/self/cmdline`.
+
+Worth knowing: the keymap is written BEFORE the exec, so a failed exec is
+logged and boot continues — the enrolment is not lost. `nd_fb`'s descriptor
+has no `O_CLOEXEC` and is inherited across the exec; harmless, because the
+new `nd-core` opens its own, but Python's would not have been.
+
+### KS-3. The pin-conflict message names a different edge than CPython
+
+`_bipartition`'s `"P{a}/P{b} conflict"` names whichever clashing edge the
+Python's set iteration reached first. That order is not reproducible in C
+and is not worth reproducing: the C names the first clash found scanning
+neighbours ascending. Same condition detected, same refusal, possibly two
+different pin numbers quoted at an engineer who is about to look at both.
