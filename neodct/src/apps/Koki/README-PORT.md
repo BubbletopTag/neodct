@@ -633,6 +633,35 @@ music and three effects from the real shipped assets and check the output
 sample by sample against the individual voices. That is how "they genuinely
 overlap" is demonstrated here rather than asserted.
 
+## The three log lines that changed, and the one that did not
+
+`spec-koki.md` §10 quotes `engine.py`'s startup lines. Two of the three are
+reproduced verbatim because they are what a bug report will quote:
+
+```
+[Koki] SOUND DISABLED: NEODCT_KOKI_NOSOUND set -- game continues silent
+[Koki] SOUND DISABLED: /dev/snd missing (no ALSA device; kernel audio not implemented yet?)
+```
+
+The success line is **not** kept verbatim. The Python prints
+
+```
+[Koki] audio: in-process miniaudio mixer
+```
+
+and there is no miniaudio here; saying so would send the next person reading
+a serial log looking for a library that is not in the image. It prints the
+numbers that actually matter instead:
+
+```
+[Koki] audio: in-process mixer -> aplay (22050 Hz mono, 62 ms, 3 sfx + music)
+```
+
+The environment variable keeps its documented spelling, though:
+`NEODCT_KOKI_AUDIO=miniaudio` still means "the mixer is mandatory, not
+preferred", because that value is in `spec-koki.md`'s table and somebody's
+notes.
+
 ## Memory
 
 Streaming, never whole-file: the longest track is 183.07 s, which is 8.1 MB
@@ -672,6 +701,20 @@ A consequence, stated plainly: if `aplay` dies mid-game the mixer stops and
 logs, and the game continues silent. It does not fall back to spawning
 players, because that would fork with the feeder thread running. This is the
 same outcome the current code has when the music player dies.
+
+## One consequence worth stating: the card is held for the whole game
+
+The feeder never stops. When nothing is playing it mixes silence and hands
+that to `aplay` at real time, so **`aplay` holds the sound card from the
+moment Koki starts until it exits**, rather than only while something is
+audible. That is deliberate and it is the reference's behaviour too --
+`engine.py` opens one `miniaudio.PlaybackDevice` in `_MiniaudioMixer`'s
+constructor and closes it in `close()`. Re-acquiring a `hw` device per
+effect is exactly the cost this change exists to remove.
+
+It does mean the release path is not optional, which is why
+`app_shutdown()` below is the part to keep working: an incoming call needs
+the card, and on this phone nothing can take it while `aplay` has it.
 
 ## What `app_shutdown()` does
 
