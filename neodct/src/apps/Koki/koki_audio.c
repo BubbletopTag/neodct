@@ -1,26 +1,45 @@
-/* koki_audio.c -- SoundManager: the external-player backend and the two ways
- * of having no sound at all.
+/* koki_audio.c -- SoundManager: the in-process mixer's sink, the
+ * external-player backend, and the two ways of having no sound at all.
  *
- * ============ WHAT IS HERE AND WHAT IS NOT ============
+ * ============ THE THREE BACKENDS, IN THE PYTHON'S ORDER ============
  *
- * engine.py has TWO backends. The preferred one is _MiniaudioMixer: an
- * in-process mixer that decodes every asset itself, sums up to three sfx over
- * one looping music voice with saturating int16 adds, and hands 22,050 Hz
- * mono s16 to a single ALSA device. THAT ONE IS NOT PORTED. It needs an MP3
- * decoder (seventeen of the fifty-seven assets are MP3, the longest 183 s and
- * therefore something that must be STREAMED, never decoded whole -- 8.1 MB)
- * and an ALSA writer thread. Both are new third-party code in lib/, which is
- * outside this task's scope; asking was the right call rather than vendoring
- * a decoder unreviewed. See README-PORT.md and the session report.
+ * engine.py prefers _MiniaudioMixer -- an in-process mixer that decodes
+ * every asset itself, sums up to three sfx over one looping music voice with
+ * saturating int16 adds, and hands 22,050 Hz mono s16 to a single ALSA
+ * device -- and falls back to external player processes when it cannot be
+ * built. Both are here now.
  *
- * What IS here is the fallback engine.py itself falls back to -- aplay,
- * mpg123 and mpv as child processes -- plus the disable paths. On this host
- * and in QEMU today, /dev/snd does not exist, so the path actually taken is
- * _disable(), which is also the path the golden frame was captured through:
- * sound reaches no pixel and no timing (play_until_done waits the manifest's
- * declared duration, not the device's).
+ * The mixer proper is koki_mixer.c. What THIS file adds is its sink: one
+ * `aplay` reading raw PCM from a socket, and one feeder thread that turns
+ * koki_mixer_pull() into bytes. The fallback ladder below it is unchanged.
  *
- * ============ WHY MPV FOR MUSIC AND APLAY FOR SFX ============
+ * ============ WHY THE SUM HAS TO HAPPEN IN HERE ============
+ *
+ * /etc/init.d/S17audio, written on the real device:
+ *
+ *     ALSA's stock "default" mixes through dmix, and dmix needs an ALSA
+ *     timer this kernel does not provide. Opening it fails outright. So the
+ *     slave here is plain hw -- one program at a time gets the card.
+ *
+ * engine.py's own comments corroborate from the other side: mpg123
+ * "stuttered and reset whenever aplay grabbed the card", and "two concurrent
+ * mpvs OOM'd a 72 MB VM". Two players cannot overlap on this phone. One
+ * player fed a pre-mixed stream can.
+ *
+ * ============ LATENCY IS THE POINT, NOT A DETAIL ============
+ *
+ * The owner's complaint about the shipped audio is that it is laggy, so
+ * replacing spawn latency with buffer latency would be no fix at all. The
+ * three queues between a mixed sample and the speaker are sized in koki.h
+ * and justified in README-PORT.md: 5.8 ms of chunk, ~23 ms of socket and
+ * 30 ms of ALSA ring -- about 59 ms, under two frames at 30 FPS.
+ *
+ * The socket is the one that has to be asked for. A default AF_UNIX
+ * SOCK_STREAM send buffer holds 969 ms of 22050 Hz mono audio, so a stream
+ * that simply writes until it blocks is a second behind the game and nobody
+ * would guess why.
+ *
+ * ============ WHY MPV FOR MUSIC AND APLAY FOR SFX (fallback only) ============
  *
  * engine.py's comment, kept because the reasoning is not recoverable from
  * the code: aplay starts in milliseconds and its RSS is trivial, which
@@ -29,13 +48,30 @@
  * not -- it stuttered and reset whenever aplay grabbed QEMU's emulated card.
  * And mpv's footprint is per PROCESS, so if sfx ever fall back to mpv on a
  * small-RAM system MAX_SFX drops to one: two concurrent mpvs OOM'd a 72 MB VM.
+ *
+ * ============ fork() AND THE FEEDER THREAD ============
+ *
+ * CODING-STANDARDS 1.1. `aplay` is spawned BEFORE the feeder thread exists,
+ * exactly once, and the mixer never forks again -- so no fork in this
+ * process ever happens with that thread running. The two backends are never
+ * both live: if the mixer fails to start it joins its thread before
+ * returning, and only then may the ladder spawn players.
+ *
+ * The consequence is stated where it bites: if aplay dies mid-game the mixer
+ * stops and the game goes silent with a log line, rather than falling back
+ * to spawning players from a threaded process.
  */
 
+#include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "nd_log.h"
@@ -187,6 +223,345 @@ static bool probe_mpv(const char *mpv_path)
 }
 
 /* ------------------------------------------------------------------ *
+ * The sink: one aplay, one feeder thread
+ * ------------------------------------------------------------------ */
+
+/* The feeder holds two pointers and one chunk. 128 kB is musl's default and
+ * glibc's is 8 MB; setting it explicitly is what MUSL.md asks for, so the
+ * difference stops mattering. */
+#define KOKI_SINK_STACK (128u * 1024u)
+
+/* nd_notify.c gives its player 0.3 s between SIGTERM and SIGKILL. Same
+ * number here, and app_shutdown() must not block for longer than a moment. */
+#define KOKI_SINK_GRACE 0.3
+
+struct koki_sink {
+    koki_mixer *mixer; /* borrowed; koki_sound_mgr owns it */
+    int fd;            /* our end of the socketpair; -1 when idle */
+    pid_t pid;         /* aplay; -1 when idle                     */
+    pthread_t thread;
+    bool thread_live;
+    volatile sig_atomic_t stop;
+    int32_t alsa_ms;    /* what aplay was asked for      */
+    int32_t sock_bytes; /* payload the socket really holds */
+
+    /* One chunk, on the heap with the rest of the sink. Never on a stack and
+     * never sized by input. */
+    int16_t buf[KOKI_MIX_CHUNK_FRAMES];
+};
+
+static double now_ms(void)
+{
+    struct timespec ts;
+
+    (void)clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
+/* NEODCT_KOKI_ABUF_MS, engine.py's own knob. Its Python default is 150; this
+ * port's is five times tighter because the complaint is latency. Clamped
+ * because it sizes a device buffer (CODING-STANDARDS 1.5). */
+static int32_t alsa_ms_from_env(void)
+{
+    const char *env = getenv("NEODCT_KOKI_ABUF_MS");
+    long ms = KOKI_MIX_ALSA_MS;
+
+    if (env != NULL && env[0] != '\0') {
+        char *end = NULL;
+        long v = strtol(env, &end, 10);
+
+        /* Unparseable is ignored, as the Python's except ValueError is. */
+        if (end != NULL && end != env && *end == '\0')
+            ms = v;
+    }
+    if (ms < KOKI_MIX_ALSA_MS_MIN)
+        ms = KOKI_MIX_ALSA_MS_MIN;
+    if (ms > KOKI_MIX_ALSA_MS_MAX)
+        ms = KOKI_MIX_ALSA_MS_MAX;
+    return (int32_t)ms;
+}
+
+/* Mix a chunk, hand it over, and notice if we were late doing it.
+ *
+ * The send() is deliberately OUTSIDE koki_mixer_pull(): this is where the
+ * thread spends its life blocked, and blocking there while holding the
+ * mixer's lock would make every koki_sound_sfx() call on the game thread
+ * wait for the sound card. */
+static void *sink_feed(void *arg)
+{
+    struct koki_sink *s = (struct koki_sink *)arg;
+    uint64_t frames_written = 0u;
+    double t0 = 0.0;
+    bool started = false;
+
+    while (s->stop == 0) {
+        size_t bytes = KOKI_MIX_CHUNK_FRAMES * sizeof s->buf[0];
+        size_t sent = 0u;
+
+        (void)koki_mixer_pull(s->mixer, s->buf, KOKI_MIX_CHUNK_FRAMES);
+
+        while (sent < bytes && s->stop == 0) {
+            /* MSG_NOSIGNAL, not write(): when the sink is torn down the
+             * player dies and this send is what notices, and on a pipe that
+             * would be a process-wide SIGPIPE landing in an app with no
+             * handler. lib/nd_notify.c's reason, verbatim. */
+            ssize_t n = send(s->fd, (const char *)s->buf + sent, bytes - sent, MSG_NOSIGNAL);
+
+            if (n < 0) {
+                if (errno == EINTR)
+                    continue;
+                return NULL; /* EPIPE: aplay is gone. So are we. */
+            }
+            if (n == 0)
+                return NULL;
+            sent += (size_t)n;
+        }
+        if (sent < bytes)
+            break; /* stopping */
+
+        if (!started) {
+            t0 = now_ms();
+            started = true;
+        }
+        frames_written += KOKI_MIX_CHUNK_FRAMES;
+
+        {
+            double written_ms = (double)frames_written * 1000.0 / (double)KOKI_MIX_RATE;
+            double elapsed_ms = now_ms() - t0;
+
+            if (koki_mix_underrun(elapsed_ms, written_ms, s->alsa_ms)) {
+                koki_mixer_note_underrun(s->mixer);
+                /* An underrun IS the resynchronisation -- the samples the
+                 * card wanted are gone and it has already moved on -- so the
+                 * accounting restarts here. Without this one starve would
+                 * keep testing true and count once per chunk forever. */
+                t0 = now_ms();
+                frames_written = 0u;
+                started = true;
+            }
+        }
+    }
+    return NULL;
+}
+
+static void sink_stop(struct koki_sink *s)
+{
+    if (s == NULL)
+        return;
+
+    s->stop = 1;
+
+    /* ORDER MATTERS, and it is lib/nd_notify.c's order for its reasons:
+     *   1. the player dies, which is what makes a blocked send() return --
+     *      audio plays in real time, so the socket is full within a chunk or
+     *      two and stays full, and the stop flag is not looked at until that
+     *      send comes back;
+     *   2. shut our end down as a second way out of that send;
+     *   3. join, THEN close -- closing a descriptor another thread is
+     *      sitting in send() on is how a number gets recycled underneath it.
+     */
+    if (s->pid > 0)
+        (void)nd_proc_terminate(s->pid, KOKI_SINK_GRACE, NULL);
+    s->pid = -1;
+    if (s->fd >= 0)
+        (void)shutdown(s->fd, SHUT_RDWR);
+    if (s->thread_live)
+        (void)pthread_join(s->thread, NULL);
+    s->thread_live = false;
+    if (s->fd >= 0)
+        (void)close(s->fd);
+    s->fd = -1;
+    free(s);
+}
+
+/* aplay, told the mix format and nothing else. `why` receives a short reason
+ * for the log line that sends the game to the external players. */
+static struct koki_sink *sink_start(koki_mixer *mixer, const char **why)
+{
+    char exe[ND_PATH_MAX];
+    char rate[16];
+    char buftime[32];
+    char pertime[32];
+    const char *argv[14];
+    struct koki_sink *s;
+    nd_proc_spec spec;
+    pthread_attr_t attr;
+    sigset_t all;
+    sigset_t saved;
+    socklen_t optlen;
+    int sv[2];
+    int sndbuf;
+    int devnull;
+    size_t stack;
+    int32_t period_us;
+
+    *why = "internal error";
+
+    if (!which("aplay", exe, sizeof exe)) {
+        *why = "no aplay";
+        return NULL;
+    }
+
+    /* owned here; freed by sink_stop() on every path out */
+    s = calloc(1u, sizeof *s);
+    if (s == NULL) {
+        *why = "out of memory";
+        return NULL;
+    }
+    s->mixer = mixer;
+    s->fd = -1;
+    s->pid = -1;
+    s->alsa_ms = alsa_ms_from_env();
+
+    /* SOCK_STREAM, not a pipe, so the feeder can use MSG_NOSIGNAL. CLOEXEC
+     * on both ends: nd_proc_spawn dup2()s the one the child needs, which
+     * clears the flag on the copy, and nothing else may leak into aplay. */
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) < 0) {
+        *why = strerror(errno);
+        sink_stop(s);
+        return NULL;
+    }
+
+    /* THE LATENCY KNOB. Left alone, this socket would hold 969 ms of audio
+     * and every effect would arrive a second late. The kernel clamps
+     * sk_sndbuf up to its own floor and charges skb truesize rather than
+     * payload, so what is granted is read back and what is LOGGED is the
+     * real figure -- the floor is a kernel constant and the phone's may
+     * differ from the one this was measured on. */
+    sndbuf = KOKI_MIX_SOCK_BYTES;
+    if (setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &sndbuf, (socklen_t)sizeof sndbuf) != 0)
+        snd_log_once("cannot shrink the audio socket; effects may lag");
+    optlen = (socklen_t)sizeof sndbuf;
+    if (getsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &sndbuf, &optlen) != 0)
+        sndbuf = KOKI_MIX_SOCK_BYTES * 2;
+    /* getsockopt reports the doubled kernel figure, and roughly half of it
+     * is skb overhead at this write size. Halved twice, measured. */
+    s->sock_bytes = (int32_t)(sndbuf / 4);
+
+    period_us = (int32_t)((int64_t)KOKI_MIX_CHUNK_FRAMES * 1000000 / KOKI_MIX_RATE);
+    if (nd_snprintf(rate, sizeof rate, "%d", KOKI_MIX_RATE) != ND_OK ||
+        nd_snprintf(buftime, sizeof buftime, "--buffer-time=%d", s->alsa_ms * 1000) != ND_OK ||
+        nd_snprintf(pertime, sizeof pertime, "--period-time=%d", period_us) != ND_OK) {
+        *why = "cannot build aplay's arguments";
+        (void)close(sv[0]);
+        (void)close(sv[1]);
+        sink_stop(s);
+        return NULL;
+    }
+
+    argv[0] = "aplay";
+    argv[1] = "-q";
+    argv[2] = "-t";
+    argv[3] = "raw";
+    argv[4] = "-f";
+    argv[5] = "S16_LE";
+    argv[6] = "-c";
+    argv[7] = "1";
+    argv[8] = "-r";
+    argv[9] = rate;
+    argv[10] = buftime;
+    argv[11] = pertime;
+    argv[12] = NULL;
+
+    /* THE FORK. It happens here, before any thread exists in this process,
+     * and it is the only one the mixer path ever performs. */
+    devnull = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    memset(&spec, 0, sizeof spec);
+    spec.argv = argv;
+    spec.owner = ND_OWNER_AUDIO;
+    spec.fds[0].child_fd = 0;
+    spec.fds[0].our_fd = sv[1];
+    spec.n_fds = 1u;
+    if (devnull >= 0) {
+        spec.fds[1].child_fd = 1;
+        spec.fds[1].our_fd = devnull;
+        spec.fds[2].child_fd = 2;
+        spec.fds[2].our_fd = devnull;
+        spec.n_fds = (getenv("NEODCT_KOKI_SOUND_DEBUG") != NULL) ? 2u : 3u;
+    }
+    if (nd_proc_spawn(exe, &spec, &s->pid) != ND_OK) {
+        *why = strerror(errno);
+        if (devnull >= 0)
+            (void)close(devnull);
+        (void)close(sv[0]);
+        (void)close(sv[1]);
+        s->pid = -1;
+        sink_stop(s);
+        return NULL;
+    }
+    if (devnull >= 0)
+        (void)close(devnull);
+    (void)close(sv[1]);
+    s->fd = sv[0];
+    /* We never read from the player; shutting the read side down means an
+     * aplay that exits is noticed by the next send() rather than by nothing. */
+    (void)shutdown(s->fd, SHUT_RD);
+
+    if (pthread_attr_init(&attr) != 0) {
+        *why = "pthread_attr_init";
+        sink_stop(s);
+        return NULL;
+    }
+    stack = KOKI_SINK_STACK;
+#ifdef PTHREAD_STACK_MIN
+    if (stack < (size_t)PTHREAD_STACK_MIN)
+        stack = (size_t)PTHREAD_STACK_MIN;
+#endif
+    (void)pthread_attr_setstacksize(&attr, stack);
+
+    /* A new thread inherits the creator's signal mask, so blocking
+     * everything across pthread_create leaves the feeder unable to receive a
+     * signal at all. That is what we want: nd-apprun's SIGTERM handler
+     * belongs on the main thread, and a signal landing here would only turn
+     * a send() into an EINTR. Python got this free -- CPython delivers to
+     * the main thread. */
+    (void)sigfillset(&all);
+    (void)pthread_sigmask(SIG_SETMASK, &all, &saved);
+    if (pthread_create(&s->thread, &attr, sink_feed, s) == 0)
+        s->thread_live = true;
+    (void)pthread_sigmask(SIG_SETMASK, &saved, NULL);
+    (void)pthread_attr_destroy(&attr);
+
+    if (!s->thread_live) {
+        *why = "cannot start the feeder thread";
+        sink_stop(s);
+        return NULL;
+    }
+    return s;
+}
+
+/* Build the whole in-process path: mixer, then aplay, then the thread. Any
+ * failure leaves nothing running and nothing to join, which is what lets the
+ * caller fall through to the ladder and fork safely. */
+static bool mixer_backend_start(koki_sound_mgr *sm, const char **why)
+{
+    sm->mixer = koki_mixer_new(sm->base_dir);
+    if (sm->mixer == NULL) {
+        *why = "out of memory";
+        return false;
+    }
+    sm->sink = sink_start(sm->mixer, why);
+    if (sm->sink == NULL) {
+        koki_mixer_free(sm->mixer);
+        sm->mixer = NULL;
+        return false;
+    }
+    sm->alsa_ms = sm->sink->alsa_ms;
+    sm->latency_ms = koki_mix_latency_ms(sm->sink->sock_bytes, sm->sink->alsa_ms);
+    return true;
+}
+
+/* Take the whole in-process path down. Idempotent, and safe to call from
+ * app_shutdown() -- it terminates one child and joins one thread. */
+static void mixer_backend_stop(koki_sound_mgr *sm)
+{
+    sink_stop(sm->sink);
+    sm->sink = NULL;
+    koki_mixer_free(sm->mixer);
+    sm->mixer = NULL;
+}
+
+/* ------------------------------------------------------------------ *
  * Construction
  * ------------------------------------------------------------------ */
 
@@ -226,14 +601,24 @@ void koki_sound_open(koki_sound_mgr *sm, const char *assets_dir)
         return;
     }
 
-    /* The in-process mixer's slot. It is never available in this build, so
-     * NEODCT_KOKI_AUDIO=miniaudio is a hard disable and anything else falls
-     * through -- which is exactly what engine.py does when python-miniaudio
-     * is not installed. */
+    /* THE PREFERRED BACKEND, with engine.py's branch structure exactly:
+     * NEODCT_KOKI_AUDIO=subprocess forces the external players, =miniaudio
+     * makes the mixer mandatory rather than preferred, and anything else
+     * tries the mixer and falls through on failure. The token stays spelled
+     * "miniaudio" because that is the documented value (spec-koki.md's
+     * environment table) even though what it now selects is ours. */
     forced = getenv("NEODCT_KOKI_AUDIO");
     if (forced == NULL || strcmp(forced, "subprocess") != 0) {
-        const char *msg = "miniaudio unavailable (not built into the C port)";
+        const char *why = "";
+        char msg[160];
 
+        if (mixer_backend_start(sm, &why)) {
+            nd_log(ND_LOG_KOKI,
+                   "audio: in-process mixer -> aplay (%d Hz mono, %d ms, %d sfx + music)",
+                   KOKI_MIX_RATE, sm->latency_ms, KOKI_SND_MAX_SFX);
+            return;
+        }
+        (void)nd_snprintf(msg, sizeof msg, "in-process mixer unavailable (%s)", why);
         if (forced != NULL && strcmp(forced, "miniaudio") == 0) {
             snd_disable(sm, msg);
             return;
@@ -409,6 +794,14 @@ void koki_sound_music(koki_sound_mgr *sm, const char *rel)
 {
     if (sm == NULL || !sm->enabled || rel == NULL)
         return;
+    /* The mixer replaces the music voice in place: no player is killed, no
+     * player is started, and whatever effects are sounding keep sounding
+     * over the new track. That is the whole difference from the line below
+     * it, where a change of music is a SIGKILL and a fork. */
+    if (sm->mixer != NULL) {
+        koki_mixer_music(sm->mixer, rel);
+        return;
+    }
     koki_sound_stop_music(sm);
     sm->music_pid = snd_spawn(sm, rel, true);
     sm->music_death_logged = false;
@@ -422,6 +815,10 @@ void koki_sound_sfx(koki_sound_mgr *sm, const char *rel)
 
     if (sm == NULL || !sm->enabled || rel == NULL)
         return;
+    if (sm->mixer != NULL) {
+        koki_mixer_sfx(sm->mixer, rel);
+        return;
+    }
     /* Prune finished voices first, then refuse rather than queue: a fourth
      * simultaneous sfx is DROPPED, which is what Scratch does too. */
     for (i = 0u; i < KOKI_SND_MAX_SFX; i++) {
@@ -444,7 +841,13 @@ void koki_sound_sfx(koki_sound_mgr *sm, const char *rel)
 
 void koki_sound_stop_music(koki_sound_mgr *sm)
 {
-    if (sm == NULL || sm->music_pid <= 0)
+    if (sm == NULL)
+        return;
+    if (sm->mixer != NULL) {
+        koki_mixer_stop_music(sm->mixer);
+        return;
+    }
+    if (sm->music_pid <= 0)
         return;
     (void)nd_proc_terminate(sm->music_pid, 0.0, NULL);
     sm->music_pid = -1;
@@ -456,6 +859,13 @@ void koki_sound_stop_all(koki_sound_mgr *sm)
 
     if (sm == NULL)
         return;
+    if (sm->mixer != NULL) {
+        /* The grade screens call this mid-game, so it drops the voices and
+         * leaves the sink running: the card is not released and re-acquired
+         * to go quiet for two seconds. */
+        koki_mixer_stop_all(sm->mixer);
+        return;
+    }
     koki_sound_stop_music(sm);
     for (i = 0u; i < KOKI_SND_MAX_SFX; i++) {
         if (sm->sfx_pid[i] > 0)
@@ -464,13 +874,47 @@ void koki_sound_stop_all(koki_sound_mgr *sm)
     }
 }
 
+/* Called every 30 frames from the main loop. */
 void koki_sound_check(koki_sound_mgr *sm)
 {
     nd_proc_status st;
 
+    if (sm == NULL)
+        return;
+
+    if (sm->mixer != NULL) {
+        uint32_t n = koki_mixer_underruns(sm->mixer);
+
+        if (n != sm->underruns) {
+            sm->underruns = n;
+            /* Once, not once per crossing: a phone that is short of CPU will
+             * do this steadily and a per-event log would be the reason it is
+             * short of CPU. */
+            snd_log_once("audio underrun: the mixer fell behind the card -- "
+                         "raise NEODCT_KOKI_ABUF_MS");
+        }
+        if (sm->sink != NULL && sm->sink->pid > 0) {
+            memset(&st, 0, sizeof st);
+            if (nd_proc_wait(sm->sink->pid, 0.0, &st) == ND_OK) {
+                /* aplay is gone: OOM kill, a device that went away, or a
+                 * format it could not open. The feeder is already unblocked
+                 * by the EPIPE, so this only has to join it.
+                 *
+                 * It does NOT fall back to the external players. That path
+                 * forks, this process now has a thread, and CODING-STANDARDS
+                 * 1.1 is not negotiable. The game continues silent. */
+                sm->sink->pid = -1;
+                mixer_backend_stop(sm);
+                snd_disable(sm, "aplay died -- OOM kill or a device that went away? "
+                                "check dmesg / NEODCT_KOKI_SOUND_DEBUG=1");
+            }
+        }
+        return;
+    }
+
     /* Looping music should never exit on its own, so an exit here means the
-     * player crashed or the OOM killer got it. Called every 30 frames. */
-    if (sm == NULL || sm->music_pid <= 0)
+     * player crashed or the OOM killer got it. */
+    if (sm->music_pid <= 0)
         return;
     memset(&st, 0, sizeof st);
     if (nd_proc_wait(sm->music_pid, 0.0, &st) != ND_OK)
@@ -483,10 +927,21 @@ void koki_sound_check(koki_sound_mgr *sm)
     }
 }
 
+/* THE ONE THAT RELEASES THE CARD. Reached from koki_engine_teardown(), which
+ * app_shutdown() calls after SIGTERM so the ringtone can have the device --
+ * see the teardown contract in nd_app.h. Idempotent: the normal exit path
+ * runs teardown first and this costs nothing the second time. */
 void koki_sound_shutdown(koki_sound_mgr *sm)
 {
     if (sm == NULL)
         return;
+    if (sm->mixer != NULL) {
+        /* Voices first so the last chunk the feeder mixes is silence, then
+         * the sink, which kills aplay, joins the thread and closes the
+         * socket in that order. */
+        koki_mixer_stop_all(sm->mixer);
+        mixer_backend_stop(sm);
+    }
     koki_sound_stop_all(sm);
     sm->enabled = false;
 }
