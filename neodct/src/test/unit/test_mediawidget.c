@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "nd_media.h"
 #include "nd_types.h"
@@ -248,12 +249,87 @@ static void test_input_conf_matches_keymap(void)
                   ND_ARRAY_LEN(MPV_KEY_NAMES));
 }
 
+/* ------------------------------------- the browser's exact command line */
+
+/* NetSurf builds precisely
+ *
+ *     neodct-play -- <url>
+ *
+ * (neodct_media_argv(), netsurf-neodct/.../neodct_media.c), and it passes
+ * the "--" ON PURPOSE: a src is text off a web page, and one reading
+ * "--parent 1" would otherwise be taken as options.
+ *
+ * This ran against a neodct-play that did not know "--", so every <video>
+ * on the web answered "unknown option --" and the browser reported it
+ * could not play anything. Python's argparse had handled it for free; the
+ * hand-written C parser had to be told. That is what this test pins.
+ *
+ * It spawns the real binary rather than testing a parser in isolation,
+ * because the bug was in main() and only an end-to-end call would have
+ * caught it. */
+static void test_browser_command_line(void)
+{
+    static const char *const HOSTILE[] = {
+        "http://h/clip.avi",
+        "--parent 1",  /* the exact shape the browser's "--" defends against */
+        "--dry-run",   /* our own flag, as a url */
+        "-",
+    };
+    char exe[ND_PATH_MAX];
+    size_t i;
+
+    /* build/<variant>/bin/neodct-play, beside the test's own directory. */
+    /* access(), NOT nd_path_exists(): the path layer resolves against
+     * ND_ROOT, and this is a build artefact on the host, not a phone
+     * path. Using the wrong one made this test skip in silence -- which
+     * is exactly how a test for a shipped bug ends up proving nothing. */
+    if (nd_snprintf(exe, sizeof exe, "%s", "build/default/bin/neodct-play") != ND_OK)
+        return;
+    if (access(exe, X_OK) != 0) {
+        (void)fprintf(stderr, "SKIP browser command line: no %s\n", exe);
+        return;
+    }
+
+    for (i = 0u; i < ND_ARRAY_LEN(HOSTILE); i++) {
+        char cmd[ND_PATH_MAX + 256];
+        char line[1024];
+        FILE *p;
+        bool saw_url = false;
+
+        /* --dry-run so nothing is played and no process is suspended. */
+        if (nd_snprintf(cmd, sizeof cmd, "%s --dry-run --no-suspend -- '%s' 2>&1", exe,
+                        HOSTILE[i]) != ND_OK)
+            continue;
+        p = popen(cmd, "r");
+        if (p == NULL) {
+            CHECK(false, "popen neodct-play");
+            continue;
+        }
+        while (fgets(line, (int)sizeof line, p) != NULL) {
+            size_t n = strlen(line);
+
+            while (n > 0u && (line[n - 1u] == '\n' || line[n - 1u] == '\r'))
+                line[--n] = '\0';
+            /* The url must be the LAST word, immediately after mpv's own
+             * "--". Anything else means it was parsed as an option. */
+            if (n > strlen(HOSTILE[i]) &&
+                strcmp(line + n - strlen(HOSTILE[i]), HOSTILE[i]) == 0)
+                saw_url = true;
+            if (strstr(line, "unknown option") != NULL)
+                CHECK(false, "neodct-play rejected the browser's argv");
+        }
+        (void)pclose(p);
+        CHECK(saw_url, HOSTILE[i]);
+    }
+}
+
 int main(void)
 {
     test_kind_for();
     test_build_argv();
     test_ipc_command();
     test_input_conf_matches_keymap();
+    test_browser_command_line();
 
     if (g_fail != 0) {
         (void)fprintf(stderr, "test_mediawidget: %d of %d checks FAILED\n", g_fail, g_checks);

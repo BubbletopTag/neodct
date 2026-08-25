@@ -54,13 +54,34 @@ int main(int argc, char **argv)
     char discovered[ND_PATH_MAX];
     bool no_suspend = false;
     bool dry_run = false;
+    bool end_of_options = false;
     long parent = -1;
     pid_t suspend_pid;
     int keypad_fd = -1;
     int i;
 
     for (i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--no-suspend") == 0) {
+        /* "--" ends the options. THE BROWSER DEPENDS ON THIS.
+         *
+         * neodct_media_argv() in the NetSurf fork builds exactly
+         *
+         *     neodct-play -- <url>
+         *
+         * and its comment says why: "A src is text off a web page and
+         * '--parent 1' in one would otherwise be read as options." That is
+         * the right thing to do, and Python's argparse handled it for free.
+         * This hand-written parser did not, so every <video> on the web
+         * died on "unknown option --" until it did. */
+        if (end_of_options) {
+            if (url == NULL) {
+                url = argv[i];
+            } else {
+                (void)fprintf(stderr, "neodct-play: one url at a time\n");
+                return 2;
+            }
+        } else if (strcmp(argv[i], "--") == 0) {
+            end_of_options = true;
+        } else if (strcmp(argv[i], "--no-suspend") == 0) {
             no_suspend = true;
         } else if (strcmp(argv[i], "--dry-run") == 0) {
             dry_run = true;
