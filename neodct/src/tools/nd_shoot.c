@@ -122,7 +122,17 @@ typedef struct {
  * pixels across would have made the count look better and would have been a
  * lie, because nothing would have launched an app. Now something does, and
  * the two sides agreeing is a real check rather than a tautology. */
+/* Nothing is skipped any more. Koki was the last entry, and it renders.
+ *
+ * The {NULL, NULL} sentinel is not decoration: an empty initialiser is a
+ * GNU extension whose sizeof is 0, which turns every `i < ND_ARRAY_LEN(
+ * SKIPPED)` into an always-false unsigned comparison and -Wtype-limits
+ * (via -Wextra -Werror) rejects the file. The three readers below skip a
+ * NULL name, so the table stays usable the day something needs skipping
+ * again -- which is better than deleting the machinery and rebuilding it
+ * from memory later. */
 static const shoot_skip SKIPPED[] = {
+    {NULL, NULL},
     /* Group 3 -- shoot_stock_apps. SESSION-SCOPE.md keeps all 25 apps with
      * their real manifest and icon, and stubs every one of them except
      * CubeBench and the Browser: what is behind these eleven manifests is
@@ -132,7 +142,6 @@ static const shoot_skip SKIPPED[] = {
      * app-clock is NOT here: the Clock app IS that dialog (section 3.6
      * records app-clock as byte-identical to widget-messagedialog), so the
      * stub renders it for real. */
-    {"app-koki", "Koki is out of scope this session (SESSION-SCOPE.md)"},
 
     /* Group 4 -- shoot_games. Both are rendered now: apps/Games is a real
      * port and shoot_games() below launches it. Decision 4 allowed BOTH to
@@ -157,6 +166,19 @@ static const shoot_skip SKIPPED[] = {
  * saved against it and fails the run if the two have drifted apart, because
  * this list was two names short of the truth for as long as the skip table
  * was wrong and nothing noticed. --list prints it. */
+/* Real entries, i.e. not the sentinel. */
+static size_t n_skipped(void)
+{
+    size_t i;
+    size_t n = 0u;
+
+    for (i = 0u; i < ND_ARRAY_LEN(SKIPPED); i++) {
+        if (SKIPPED[i].name != NULL)
+            n++;
+    }
+    return n;
+}
+
 static const char *const RENDERED[] = {
     /* shoot_home */
     "home",
@@ -182,6 +204,7 @@ static const char *const RENDERED[] = {
     "app-settings",
     "app-settings-wallpaper",
     "app-games",
+    "app-koki",
     "app-calculator",
     "app-calculator-options",
     "app-clock",
@@ -1273,6 +1296,10 @@ static const struct {
     int32_t hold;
     const char *entry;
 } STOCK_CASES[] = {
+    /* Koki is the one case with no way out but the budget: it is a game
+     * loop, not a widget, so there is no held key that ends it. 400 frames
+     * is what the reference was captured at. */
+    {"Koki Mobile", 400, "app-koki", NULL, 0u, ND_KEY_NONE, ND_APP_SYM_RUN},
     {"Phone book", 240, "app-phonebook", NULL, 0u, ND_KEY_CLEAR, ND_APP_SYM_RUN},
     {"Messages", 240, "app-messages", NULL, 0u, ND_KEY_CLEAR, ND_APP_SYM_RUN},
     {"Messages", 240, "app-messages-inbox", NULL, 0u, ND_KEY_CLEAR, ND_APP_SYM_OPEN_INBOX},
@@ -1811,9 +1838,11 @@ static nd_err write_skip_list(void)
 
     (void)fprintf(f, "{\n  \"skipped\": [\n");
     for (i = 0u; i < ND_ARRAY_LEN(SKIPPED); i++) {
+        if (SKIPPED[i].name == NULL)
+            continue; /* the sentinel */
         (void)fprintf(f, "    {\n      \"name\": \"%s\",\n      \"reason\": \"%s\"\n    }%s\n",
                       SKIPPED[i].name, SKIPPED[i].reason,
-                      i + 1u < ND_ARRAY_LEN(SKIPPED) ? "," : "");
+                      i + 1u < ND_ARRAY_LEN(SKIPPED) && SKIPPED[i + 1u].name != NULL ? "," : "");
     }
     (void)fprintf(f, "  ]\n}");
 
@@ -1857,9 +1886,11 @@ static void print_list(void)
     printf("rendered (%zu):\n", ND_ARRAY_LEN(RENDERED));
     for (i = 0u; i < ND_ARRAY_LEN(RENDERED); i++)
         printf("  %s\n", RENDERED[i]);
-    printf("skipped (%zu):\n", ND_ARRAY_LEN(SKIPPED));
-    for (i = 0u; i < ND_ARRAY_LEN(SKIPPED); i++)
-        printf("  %-24s %s\n", SKIPPED[i].name, SKIPPED[i].reason);
+    printf("skipped (%zu):\n", n_skipped());
+    for (i = 0u; i < ND_ARRAY_LEN(SKIPPED); i++) {
+        if (SKIPPED[i].name != NULL)
+            printf("  %-24s %s\n", SKIPPED[i].name, SKIPPED[i].reason);
+    }
 }
 
 int main(int argc, char **argv)
@@ -1953,7 +1984,7 @@ int main(int argc, char **argv)
         g_failed++;
     }
 
-    printf("[shoot] wrote %zu frames, skipped %zu, %zu failed\n", g_saved, ND_ARRAY_LEN(SKIPPED),
+    printf("[shoot] wrote %zu frames, skipped %zu, %zu failed\n", g_saved, n_skipped(),
            g_failed);
     printf("[shoot] compare with:\n"
            "  python3 neodct/tools/goldenframe.py --compare neodct/tests/golden %s\n",
