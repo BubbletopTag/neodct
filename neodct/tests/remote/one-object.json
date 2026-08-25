@@ -1,0 +1,22 @@
+{
+ "url": "https://api.github.com/repos/BubbletopTag/neodct/releases/1",
+ "tag_name": "0.3.7a",
+ "name": "NeoDCT 0.3.7a",
+ "draft": false,
+ "prerelease": true,
+ "created_at": "2026-07-27T00:00:00Z",
+ "published_at": "2026-07-27T00:00:00Z",
+ "body": "notes",
+ "assets": [
+  {
+   "url": "https://api.github.com/repos/BubbletopTag/neodct/releases/assets/1",
+   "name": "UPDATE-luckfox-armv7.ndsw",
+   "label": null,
+   "content_type": "application/octet-stream",
+   "state": "uploaded",
+   "size": 5,
+   "download_count": 3,
+   "browser_download_url": "https://github.com/BubbletopTag/neodct/releases/download/0.3.7a/UPDATE-luckfox-armv7.ndsw"
+  }
+ ]
+}

@@ -1,0 +1,152 @@
+#!/bin/sh
+#
+# A stand-in for curl, so that lib/nd_remote.c can be driven over real
+# pipes, with real argv and real HTTP framing, on a machine with no network.
+#
+# test/unit/test_remote.c copies this to <tmpdir>/curl and puts <tmpdir>
+# first on PATH. nd_remote.c finds it exactly the way it finds the real one,
+# spawns it exactly the way it spawns the real one, and cannot tell the
+# difference -- which is the point. Nothing in the C is stubbed out or
+# compiled differently for the tests; the only thing that changes is which
+# executable is called `curl`.
+#
+# It speaks the same three descriptors the real curl is asked for:
+#
+#     stdout          the response body
+#     the -D target   the response headers, status line first
+#     stderr          the complaint, in curl's own "curl: (N) text" shape
+#
+# and it exits with curl's own codes: 0, 6 (could not resolve host), 18
+# (transfer closed early).
+#
+# ============ HOW A SCENARIO IS SET UP ============
+#
+# $NDCURL_DIR is a directory of one-line control files. The test writes
+# them; this script reads them. Everything is optional.
+#
+#   body          path of the file to send as the response body
+#   status        the status code to report (default 200, or 206 for a
+#                 Range request that is being honoured)
+#   exit          the exit code (default 0)
+#   cut           send only this many bytes of the body, then exit 18 --
+#                 what a carrier dropping mid-transfer looks like
+#   ignore_range  if this file exists, answer a Range request with 200 and
+#                 THE WHOLE BODY. This is the trap nd_remote.c exists to
+#                 avoid appending.
+#   redirect      if this file exists, emit a 302 header block before the
+#                 real one, so the "last status line of the chain wins"
+#                 parsing is exercised
+#   fail_first    fail the first N invocations with exit 6, as a bearer
+#                 that has taken DNS with it does
+#
+# and it writes back:
+#
+#   calls         one line per invocation: "<url>|<range header value>"
+#   n             how many times it has been called
+#
+# Not a mock: it serves committed fixture files off the disk, and the test
+# compares what came out against those same bytes.
+
+D="$NDCURL_DIR"
+if [ -z "$D" ]; then
+    echo "curl: (2) fake-curl needs NDCURL_DIR" >&2
+    exit 2
+fi
+
+# ---- read the argv nd_remote.c actually builds -----------------------
+hdr=""
+range=""
+url=""
+want=""
+for arg in "$@"; do
+    case "$want" in
+        D) hdr="$arg"; want=""; continue ;;
+        H) case "$arg" in
+               Range:*) range=$(echo "$arg" | sed 's/^Range:[ ]*//') ;;
+           esac
+           want=""; continue ;;
+        skip) want=""; continue ;;
+    esac
+    case "$arg" in
+        -D) want=D ;;
+        -H) want=H ;;
+        --connect-timeout|--speed-limit|--speed-time|--max-redirs|--proto|--proto-redir)
+            want=skip ;;
+        https://*) url="$arg" ;;
+        *) ;;
+    esac
+done
+
+n=$(cat "$D/n" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" > "$D/n"
+printf '%s|%s\n' "$url" "$range" >> "$D/calls"
+
+fail_first=$(cat "$D/fail_first" 2>/dev/null || echo 0)
+if [ "$n" -le "$fail_first" ]; then
+    # The owner's report, verbatim: "It'll say it timed out then lose
+    # internet completely. Temporary failure in name resolution."
+    echo "curl: (6) Could not resolve host: api.github.com" >&2
+    exit 6
+fi
+
+status=$(cat "$D/status" 2>/dev/null || echo "")
+body=$(cat "$D/body" 2>/dev/null || echo "")
+cut=$(cat "$D/cut" 2>/dev/null || echo "")
+code=$(cat "$D/exit" 2>/dev/null || echo 0)
+
+start=0
+if [ -n "$range" ] && [ ! -f "$D/ignore_range" ]; then
+    start=$(echo "$range" | sed 's/^bytes=//; s/-.*$//')
+    [ -n "$status" ] || status=206
+fi
+[ -n "$status" ] || status=200
+
+reason="OK"
+case "$status" in
+    200) reason="OK" ;;
+    206) reason="Partial Content" ;;
+    301|302) reason="Found" ;;
+    404) reason="Not Found" ;;
+    403) reason="Forbidden" ;;
+    500) reason="Internal Server Error" ;;
+    503) reason="Service Unavailable" ;;
+esac
+
+# ---- the headers, on their own descriptor ----------------------------
+{
+    if [ -f "$D/redirect" ]; then
+        printf 'HTTP/1.1 302 Found\r\n'
+        printf 'Location: https://objects.example.invalid/pkg\r\n'
+        printf 'Content-Length: 0\r\n'
+        printf '\r\n'
+    fi
+    printf 'HTTP/1.1 %s %s\r\n' "$status" "$reason"
+    printf 'Server: fake-curl\r\n'
+    if [ "$status" = "206" ]; then
+        printf 'Content-Range: bytes %s-/-\r\n' "$start"
+    fi
+    printf 'Content-Type: application/octet-stream\r\n'
+    printf '\r\n'
+} > "$hdr"
+
+# ---- the body, on stdout ---------------------------------------------
+# tail -c +N / head -c M rather than dd bs=1: byte-exact, and it writes in
+# blocks the way a socket does, instead of one write() per byte.
+if [ -n "$body" ] && [ -f "$body" ]; then
+    if [ -n "$cut" ]; then
+        tail -c "+$((start + 1))" "$body" | head -c "$cut"
+        # A carrier that drops mid-transfer is curl exit 18. A response that
+        # is simply shorter than it claimed is exit 0 with fewer bytes, which
+        # is what the Python's own fixtures model -- setting `exit` picks
+        # that one instead.
+        if [ -f "$D/exit" ]; then
+            exit "$code"
+        fi
+        echo "curl: (18) transfer closed with bytes remaining to read" >&2
+        exit 18
+    fi
+    tail -c "+$((start + 1))" "$body"
+fi
+
+exit "$code"

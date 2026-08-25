@@ -1,0 +1,120 @@
+[
+ {
+  "url": "https://api.github.com/repos/BubbletopTag/neodct/releases/1",
+  "tag_name": "0.3.2a",
+  "name": "NeoDCT 0.3.2a",
+  "draft": false,
+  "prerelease": true,
+  "created_at": "2026-07-27T00:00:00Z",
+  "published_at": "2026-07-27T00:00:00Z",
+  "body": "notes",
+  "assets": [
+   {
+    "url": "https://api.github.com/repos/BubbletopTag/neodct/releases/assets/1",
+    "name": "UPDATE-luckfox-armv7.ndsw",
+    "label": null,
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 11,
+    "download_count": 3,
+    "browser_download_url": "https://github.com/BubbletopTag/neodct/releases/download/0.3.2a/UPDATE-luckfox-armv7.ndsw"
+   },
+   {
+    "url": "https://api.github.com/repos/BubbletopTag/neodct/releases/assets/1",
+    "name": "UPDATE-qemu-aarch64.ndsw",
+    "label": null,
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 12,
+    "download_count": 3,
+    "browser_download_url": "https://github.com/BubbletopTag/neodct/releases/download/0.3.2a/UPDATE-qemu-aarch64.ndsw"
+   }
+  ]
+ },
+ {
+  "url": "https://api.github.com/repos/BubbletopTag/neodct/releases/1",
+  "tag_name": "v0.3.11a",
+  "name": "NeoDCT 0.3.11a",
+  "draft": false,
+  "prerelease": true,
+  "created_at": "2026-07-27T00:00:00Z",
+  "published_at": "2026-07-27T00:00:00Z",
+  "body": "the newest one",
+  "assets": [
+   {
+    "url": "https://api.github.com/repos/BubbletopTag/neodct/releases/assets/1",
+    "name": "UPDATE-luckfox-armv7.ndsw",
+    "label": null,
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 4000,
+    "download_count": 3,
+    "browser_download_url": "https://github.com/BubbletopTag/neodct/releases/download/v0.3.11a/UPDATE-luckfox-armv7.ndsw"
+   },
+   {
+    "url": "https://api.github.com/repos/BubbletopTag/neodct/releases/assets/1",
+    "name": "UPDATE-qemu-aarch64.ndsw",
+    "label": null,
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 4001,
+    "download_count": 3,
+    "browser_download_url": "https://github.com/BubbletopTag/neodct/releases/download/v0.3.11a/UPDATE-qemu-aarch64.ndsw"
+   }
+  ]
+ },
+ {
+  "url": "https://api.github.com/repos/BubbletopTag/neodct/releases/1",
+  "tag_name": "0.3.9a",
+  "name": "NeoDCT 0.3.9a",
+  "draft": false,
+  "prerelease": true,
+  "created_at": "2026-07-27T00:00:00Z",
+  "published_at": "2026-07-27T00:00:00Z",
+  "body": "notes",
+  "assets": [
+   {
+    "url": "https://api.github.com/repos/BubbletopTag/neodct/releases/assets/1",
+    "name": "UPDATE-qemu-aarch64.ndsw",
+    "label": null,
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 21,
+    "download_count": 3,
+    "browser_download_url": "https://github.com/BubbletopTag/neodct/releases/download/0.3.9a/UPDATE-qemu-aarch64.ndsw"
+   }
+  ]
+ },
+ {
+  "url": "https://api.github.com/repos/BubbletopTag/neodct/releases/1",
+  "tag_name": "0.3.10a",
+  "name": "NeoDCT 0.3.10a",
+  "draft": false,
+  "prerelease": true,
+  "created_at": "2026-07-27T00:00:00Z",
+  "published_at": "2026-07-27T00:00:00Z",
+  "body": "notes",
+  "assets": [
+   {
+    "url": "https://api.github.com/repos/BubbletopTag/neodct/releases/assets/1",
+    "name": "UPDATE-luckfox-armv7.ndsw",
+    "label": null,
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 31,
+    "download_count": 3,
+    "browser_download_url": "https://github.com/BubbletopTag/neodct/releases/download/0.3.10a/UPDATE-luckfox-armv7.ndsw"
+   },
+   {
+    "url": "https://api.github.com/repos/BubbletopTag/neodct/releases/assets/1",
+    "name": "UPDATE-qemu-aarch64.ndsw",
+    "label": null,
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 32,
+    "download_count": 3,
+    "browser_download_url": "https://github.com/BubbletopTag/neodct/releases/download/0.3.10a/UPDATE-qemu-aarch64.ndsw"
+   }
+  ]
+ }
+]

@@ -1438,12 +1438,24 @@ nd_update_err nd_remote_download(const char *url, const char *destination, int64
             say_why(why, why_sz, "%s", last_why);
             return rc;
         }
-        if (rc != ND_UPD_OK) {
+        if (rc != ND_UPD_OK && !(size > 0 && done == size)) {
             last_rc = rc;
             /* The bytes already on the card stay where they are. */
             have = file_size(partial_real);
             continue;
         }
+        /* The `done == size` half of that condition is not decoration. curl
+         * exits 18 when the connection closed with bytes it was still
+         * expecting -- and a server that closed after sending the last byte
+         * of the package looks exactly like that. Without this, the file
+         * would be complete on the card and every remaining attempt would
+         * ask for "bytes=<size>-", get nothing, be complained about again,
+         * and the download would fail with the whole package sitting beside
+         * it. The length is the thing that decides, and the sha256 that
+         * follows is what decides whether the length was telling the truth.
+         *
+         * remote.py has no equivalent branch because its network failures
+         * can only come out of _open(), before a single byte is read. */
 
         if (size > 0 && done != size) {
             /* Short, but the bytes are good as far as they go. Pick it up. */
