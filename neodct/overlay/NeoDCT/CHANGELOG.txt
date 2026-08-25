@@ -28,6 +28,15 @@ Fixed
 - The screen driver was being shipped as a prebuilt file that nobody
   rebuilt. It is now compiled from its source with everything else.
 
+0.3.14a
+Fixed
+- Sound comes out of the USB sound card instead of the socket on the board
+  that nothing is plugged into. The phone was playing everything into a
+  speaker that does not exist.
+- The two programs a phone call needs to carry sound were missing from the
+  phone altogether. They were built but never installed, so a call could
+  never have had audio in either direction.
+
 0.3.13a
 Fixed
 - Downloading an update over mobile data now carries on where it stopped.
