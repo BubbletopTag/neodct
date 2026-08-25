@@ -88,7 +88,7 @@ endif
 # Dependencies
 # ------------------------------------------------------------------ #
 
-PKG_DEPS := freetype2 libpng libjpeg sqlite3
+PKG_DEPS := freetype2 libpng libjpeg sqlite3 zlib
 
 PKG_CFLAGS := $(shell $(PKG_CONFIG) --cflags $(PKG_DEPS) 2>/dev/null)
 PKG_LIBS   := $(shell $(PKG_CONFIG) --libs   $(PKG_DEPS) 2>/dev/null)
