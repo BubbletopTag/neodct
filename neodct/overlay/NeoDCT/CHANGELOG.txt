@@ -1,5 +1,40 @@
 # NeoDCT OS Changelog
 
+Unreleased
+Messages can look like a chat app now.
+
+Settings has a new entry, Messages Style, with two choices. Classic is
+the inbox-and-outbox the phone has always had, and it is still what you
+get if you never touch the setting. Chat replaces it with a list of
+conversations and a transcript of bubbles, the way a phone made this
+century does it.
+
+Added
+- Messages Style, in Settings. Classic or Chat.
+- Chat opens on your conversations rather than on a menu: one row per
+  person, their name from the phone book, and the last thing either of
+  you said underneath it as a preview. An unread conversation is marked
+  with a *, and "You:" in front of a preview means the last word was
+  yours. Newest conversation first.
+- New Message sits at the top of that list and opens the same composer
+  Classic uses.
+- Opening a conversation shows it as bubbles -- yours filled and on the
+  right, theirs outlined and on the left. Up and Down walk from the
+  message box at the bottom back through the transcript.
+- Delete and Forward on any single message, in BOTH styles. Forward
+  opens the composer with the message already typed in, so you only
+  have to pick who it goes to. This replaces the old "Erase", which
+  could only do the one thing.
+- A tool for putting fake conversations on a development phone,
+  System/engineering/tools/debug_sms_seed_chats.py -- several people,
+  both directions, and contacts to go with them.
+
+Fixed
+- Sent messages are now saved. The phone used to hand a text to the
+  modem and forget it ever existed, which meant the screen called
+  "Outbox" never contained anything you had actually sent. It does now,
+  in Classic as well as in Chat.
+
 0.4.1a
 The Music app grew a library.
 

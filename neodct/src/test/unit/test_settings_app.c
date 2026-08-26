@@ -73,6 +73,7 @@ static struct {
     const char *const *sdcard_help;
     const char *const *menu;
     const char *const *eng_options;
+    const char *const *msgstyle_options;
     const char *const *exts;
 } api;
 
@@ -92,13 +93,14 @@ static bool api_open(void *h)
     api.sdcard_help = dlsym(h, "nd_setapp_sdcard_help");
     api.menu = dlsym(h, "nd_setapp_menu");
     api.eng_options = dlsym(h, "nd_setapp_eng_options");
+    api.msgstyle_options = dlsym(h, "nd_setapp_msgstyle_options");
     api.exts = dlsym(h, "nd_setapp_exts");
 
     return api.run != NULL && api.shutdown != NULL && api.is_supported != NULL &&
            api.display_name != NULL && api.dirs != NULL && api.scan != NULL && api.wrap != NULL &&
            api.draw_about != NULL && api.get_more_label != NULL && api.get_more_help != NULL &&
            api.get_more_help_with_card != NULL && api.sdcard_help != NULL && api.menu != NULL &&
-           api.eng_options != NULL && api.exts != NULL;
+           api.eng_options != NULL && api.msgstyle_options != NULL && api.exts != NULL;
 }
 
 static char g_root[ND_PATH_MAX];   /* the controlled tree              */
@@ -113,8 +115,13 @@ static void test_strings(void)
 {
     CHECK_STR(api.menu[0], "Wallpaper", "the root menu's first row");
     CHECK_STR(api.menu[1], "Memory card", "second");
-    CHECK_STR(api.menu[2], "Engineering Mode", "third");
-    CHECK_STR(api.menu[3], "About", "fourth");
+    /* WAS four rows. "Messages Style" is new and sits third, before the two
+     * engineering-ish rows, so the Python's own four keep their order. */
+    CHECK_STR(api.menu[2], "Messages Style", "third");
+    CHECK_STR(api.menu[3], "Engineering Mode", "fourth");
+    CHECK_STR(api.menu[4], "About", "fifth");
+    CHECK_STR(api.msgstyle_options[0], "Classic", "Msg. Style[0]");
+    CHECK_STR(api.msgstyle_options[1], "Chat", "Msg. Style[1]");
     CHECK_STR(api.eng_options[0], "On", "Eng. Mode[0]");
     CHECK_STR(api.eng_options[1], "Off", "Eng. Mode[1]");
     CHECK_STR(*api.get_more_label, "Get more...", "GET_MORE_LABEL");
@@ -490,12 +497,37 @@ static void test_wallpaper_writes_the_setting(void)
                    "\"Get more...\" writes nothing");
 }
 
+/* Settings WRITES this key and the Messages app READS it. They are two
+ * separate .so files and cannot share a header, so the only thing stopping
+ * them drifting into writing a key nobody reads is this test -- the same
+ * reason ND_SETAPP_ENG_KEY is asserted equal to ND_SET_UI_ENGINEERING. */
+static void test_messages_style_writes_the_setting(void)
+{
+    /* 3 picks "Messages Style"; then 2 picks "Chat" and 1 picks "Classic". */
+    static const int32_t PICK_CHAT[] = {ND_KEY_3, ND_KEY_2};
+    static const int32_t PICK_CLASSIC[] = {ND_KEY_3, ND_KEY_1};
+    int rc = -1;
+    uint64_t frames = 0u;
+
+    CHECK_STR(ND_SETAPP_MSGSTYLE_KEY, "system.ui.messages_style",
+              "the key the Messages app reads");
+
+    run_script(PICK_CHAT, ND_ARRAY_LEN(PICK_CHAT), &rc, &frames);
+    CHECK_INT(rc, 0, "Back out returns 0");
+    expect_setting(ND_SETAPP_MSGSTYLE_KEY, "CHAT", "Chat writes CHAT");
+
+    run_script(PICK_CLASSIC, ND_ARRAY_LEN(PICK_CLASSIC), &rc, &frames);
+    CHECK_INT(rc, 0, "and again");
+    expect_setting(ND_SETAPP_MSGSTYLE_KEY, "CLASSIC", "Classic writes CLASSIC");
+}
+
 static void test_engineering_mode_writes_the_setting(void)
 {
-    /* 3 picks "Engineering Mode" off the root list; then 2 picks "Off" and
-     * 1 picks "On" -- VerticalList's digit shortcuts are 1-based. */
-    static const int32_t TURN_OFF[] = {ND_KEY_3, ND_KEY_2};
-    static const int32_t TURN_ON[] = {ND_KEY_3, ND_KEY_1};
+    /* 4 picks "Engineering Mode" off the root list -- it MOVED from third to
+     * fourth when Messages Style was added -- then 2 picks "Off" and 1 picks
+     * "On". VerticalList's digit shortcuts are 1-based. */
+    static const int32_t TURN_OFF[] = {ND_KEY_4, ND_KEY_2};
+    static const int32_t TURN_ON[] = {ND_KEY_4, ND_KEY_1};
     int rc = -1;
     uint64_t frames = 0u;
 
@@ -699,6 +731,7 @@ int main(void)
     RUN(test_wrap_text);
     RUN(test_about);
     RUN(test_wallpaper_writes_the_setting);
+    RUN(test_messages_style_writes_the_setting);
     RUN(test_engineering_mode_writes_the_setting);
     RUN(test_memory_card_absent);
     RUN(test_golden_root);

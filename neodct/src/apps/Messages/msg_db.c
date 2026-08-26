@@ -34,6 +34,7 @@
 #include <sqlite3.h>
 
 #include "nd_db.h"
+#include "nd_log.h"
 #include "nd_paths.h"
 #include "nd_types.h"
 #include "nd_vclock.h"
@@ -122,6 +123,8 @@ size_t nd_msg_fetch_inbox(nd_msg_rec *out, size_t max)
     return n;
 }
 
+static void ensure_recipient_column(sqlite3 *db);
+
 size_t nd_msg_fetch_outbox(nd_msg_rec *out, size_t max)
 {
     sqlite3 *db;
@@ -135,7 +138,16 @@ size_t nd_msg_fetch_outbox(nd_msg_rec *out, size_t max)
     if (db == NULL)
         return 0u;
 
-    if (sqlite3_prepare_v2(db, "SELECT id, message, timestamp FROM outbox ORDER BY timestamp DESC",
+    /* The recipient is selected with a COALESCE rather than by asking whether
+     * the column exists: on a phone whose outbox predates it the ALTER has
+     * not run yet, and a SELECT naming a missing column fails the whole
+     * statement. So the column is added here first -- reading the outbox is
+     * also the moment to bring it up to date. */
+    ensure_recipient_column(db);
+
+    if (sqlite3_prepare_v2(db,
+                           "SELECT id, message, timestamp, COALESCE(recipient, '') "
+                           "FROM outbox ORDER BY timestamp DESC",
                            -1, &st, NULL) == SQLITE_OK) {
         while (n < max && sqlite3_step(st) == SQLITE_ROW) {
             nd_msg_rec *r = &out[n];
@@ -144,6 +156,7 @@ size_t nd_msg_fetch_outbox(nd_msg_rec *out, size_t max)
             r->id = (int64_t)sqlite3_column_int64(st, 0);
             take_text(r->message, sizeof r->message, st, 1);
             r->timestamp = (int64_t)sqlite3_column_int64(st, 2);
+            take_text(r->recipient, sizeof r->recipient, st, 3);
             n++;
         }
     }
@@ -212,6 +225,43 @@ void nd_msg_delete_outbox(int64_t id)
 
 nd_err nd_msg_save_outbox(const char *text)
 {
+    return nd_msg_save_outbox_to(text, NULL);
+}
+
+/* ------------------------------------------------------------------ *
+ * The recipient column -- NOT a port
+ * ------------------------------------------------------------------ */
+
+/* The Python's outbox is (id, message, timestamp): a sent message has no
+ * record of who it went to, because _send_message_flow() asks for a number
+ * and then throws it away. Chat style cannot attribute a sent message to a
+ * conversation without one.
+ *
+ * sqlite has no ADD COLUMN IF NOT EXISTS, so the ALTER is simply run every
+ * time and its "duplicate column name" is swallowed. Reading sqlite_master
+ * back to decide first would be more code arriving at the same place, and
+ * PRAGMA table_info would be more still.
+ *
+ * The column is nullable and NOT backfilled: rows written before it existed
+ * genuinely have no recipient, and inventing one would be worse than showing
+ * them under ND_MSG_PEER_UNKNOWN, which is what nd_msg_threads() does. */
+static void ensure_recipient_column(sqlite3 *db)
+{
+    char *err = NULL;
+
+    if (sqlite3_exec(db, "ALTER TABLE outbox ADD COLUMN recipient TEXT", NULL, NULL, &err) !=
+        SQLITE_OK) {
+        /* Already there is the expected case, not a failure. Anything else is
+         * worth a line in the log, but never worth refusing to save a
+         * message the user has already written. */
+        if (err != NULL && strstr(err, "duplicate column") == NULL)
+            nd_log(ND_LOG_MESSAGES, "outbox ALTER: %s", err);
+    }
+    sqlite3_free(err);
+}
+
+nd_err nd_msg_save_outbox_to(const char *text, const char *recipient)
+{
     sqlite3 *db = NULL;
     sqlite3_stmt *st = NULL;
     nd_err rc;
@@ -243,8 +293,11 @@ nd_err nd_msg_save_outbox(const char *text)
         goto done;
     }
 
-    if (sqlite3_prepare_v2(db, "INSERT INTO outbox (message, timestamp) VALUES (?, ?)", -1, &st,
-                           NULL) != SQLITE_OK) {
+    ensure_recipient_column(db);
+
+    if (sqlite3_prepare_v2(db,
+                           "INSERT INTO outbox (message, timestamp, recipient) VALUES (?, ?, ?)",
+                           -1, &st, NULL) != SQLITE_OK) {
         rc = ND_ERR_IO;
         goto done;
     }
@@ -253,6 +306,13 @@ nd_err nd_msg_save_outbox(const char *text)
     now = (int64_t)nd_time_now();
     (void)sqlite3_bind_text(st, 1, text, -1, SQLITE_STATIC);
     (void)sqlite3_bind_int64(st, 2, (sqlite3_int64)now);
+    /* NULL rather than "" for an absent recipient, so that a row saved by the
+     * ported nd_msg_save_outbox() is indistinguishable from one written
+     * before the column existed -- both are genuinely "we do not know". */
+    if (recipient != NULL && recipient[0] != '\0')
+        (void)sqlite3_bind_text(st, 3, recipient, -1, SQLITE_STATIC);
+    else
+        (void)sqlite3_bind_null(st, 3);
     if (sqlite3_step(st) != SQLITE_DONE)
         rc = ND_ERR_IO;
 

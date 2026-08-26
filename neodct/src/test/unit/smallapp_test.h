@@ -446,7 +446,34 @@ ND_UNUSED_FN static int32_t sa_diff_pixels(const nd_image *got, const char *name
 
     *box = ND_RECT(0, 0, -1, -1);
     (void)snprintf(path, sizeof path, "%.480s/%.40s.png", sa_golden, name);
-    ref = nd_image_load_png(path);
+
+    /* NOT nd_image_load_png(): that resolves through ND_ROOT, and the golden
+     * set is not under it -- sa_resolve_font() has the same note for the same
+     * reason. The bug was invisible until a frame first differed, because the
+     * byte-exact path returns before ever reaching here, and it turned every
+     * future mismatch into "cannot measure the delta" at exactly the moment
+     * the pixel count is what you want. Read the bytes and decode those. */
+    {
+        FILE *f = fopen(path, "rb");
+        uint8_t *buf = NULL;
+        long len;
+        size_t got_bytes;
+
+        ref = NULL;
+        if (f != NULL) {
+            if (fseek(f, 0, SEEK_END) == 0 && (len = ftell(f)) > 0 &&
+                fseek(f, 0, SEEK_SET) == 0) {
+                buf = malloc((size_t)len);
+                if (buf != NULL) {
+                    got_bytes = fread(buf, 1u, (size_t)len, f);
+                    if (got_bytes == (size_t)len)
+                        ref = nd_image_open_mem(buf, got_bytes);
+                }
+            }
+            (void)fclose(f);
+        }
+        free(buf);
+    }
     if (ref == NULL) {
         fprintf(stderr, "smallapp_test: cannot read %s\n", path);
         return -1;

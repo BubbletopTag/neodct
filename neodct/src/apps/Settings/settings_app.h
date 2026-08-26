@@ -102,8 +102,12 @@ extern const char *const nd_setapp_get_more_help_with_card;
 /* SDCARD_HELP, the TextScroller behind every memory-card message. */
 extern const char *const nd_setapp_sdcard_help;
 
-/* run()'s VerticalList and _show_engineering_mode()'s. */
-#define ND_SETAPP_MENU_ITEMS 4
+/* run()'s VerticalList and _show_engineering_mode()'s.
+ *
+ * WAS 4. "Messages Style" is new and is placed BEFORE Engineering Mode so
+ * that the two engineering-ish rows stay together at the end; the Python's
+ * four are otherwise in their original order. */
+#define ND_SETAPP_MENU_ITEMS 5
 extern const char *const nd_setapp_menu[ND_SETAPP_MENU_ITEMS];
 #define ND_SETAPP_ENG_ITEMS 2
 extern const char *const nd_setapp_eng_options[ND_SETAPP_ENG_ITEMS];
@@ -112,6 +116,15 @@ extern const char *const nd_setapp_eng_options[ND_SETAPP_ENG_ITEMS];
  * to nd_settings.h's ND_SET_UI_ENGINEERING by the test, so the two cannot
  * drift into writing a key the core does not read. */
 #define ND_SETAPP_ENG_KEY "system.ui.engineering_mode"
+
+/* Messages Style. The key and the two labels belong to the Messages app --
+ * apps/Messages/messages.h owns them, and it is what READS the setting --
+ * so they are spelled here only as the string Settings writes, and
+ * test_settings_app.c asserts the two spellings match. Settings cannot
+ * include messages.h: they are two separate .so files. */
+#define ND_SETAPP_MSGSTYLE_KEY "system.ui.messages_style"
+#define ND_SETAPP_MSGSTYLE_ITEMS 2
+extern const char *const nd_setapp_msgstyle_options[ND_SETAPP_MSGSTYLE_ITEMS];
 
 /* ------------------------------------------------------------------ *
  * The scan

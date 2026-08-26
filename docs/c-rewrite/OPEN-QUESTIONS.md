@@ -2966,10 +2966,15 @@ what it did not do before.
 ## Messages (`apps/Messages/`, work package MSG)
 
 Landed as `apps/Messages/main.c`, `apps/Messages/msg_db.c` and
-`apps/Messages/messages.h`, with `test/unit/test_messages.c` (150 checks) and the two
+`apps/Messages/messages.h`, with `test/unit/test_messages.c` (326 checks) and the two
 golden frames `app-messages` and `app-messages-inbox` now rendered by `nd-shoot`. Both
 match the reference byte for byte: **0 differing pixels each**, confirmed by the SHA-256
 over raw RGB inside `test_messages.c` and again by `goldenframe.py --compare`.
+
+A second front end, the Chat style, was added later in `apps/Messages/chat.c` and
+`apps/Messages/threads.c`; see MSG-16 through MSG-22 at the end of this section.
+Classic is unchanged and remains the default, which is why both golden frames above
+still match.
 
 ### MSG-1. Sending an SMS from an app process cannot reach the modem
 
@@ -3244,6 +3249,159 @@ Checking `nd_msg_wrap_text` against `_wrap_lines` gives the wrong answer in both
 directions. Check every text routine against *its own* Python original.
 
 **Answer:** _(no owner decision needed — this is a test fix)_
+
+---
+
+### MSG-16. The Chat style is a second front end, not a rewrite of the first
+
+`system.ui.messages_style` (Settings ▸ Messages Style) selects `CLASSIC` or
+`CHAT`. Classic is the ported Nokia inbox/outbox and is **unchanged and still
+the default**, so both its golden frames still match byte for byte. Chat is a
+second pair of screens in `apps/Messages/chat.c`, entered from the same three
+places Classic is — `app_run()`, `app_open_message()` and `app_open_inbox()` —
+each of which branches once on `nd_msg_style_current()`.
+
+Parsing is deliberately one-sided: only the exact string `chat`
+(case-insensitive) selects Chat. A missing file, an empty value or a typo all
+give Classic, because the failure that matters is a phone whose Messages app
+will not open the way its owner expects.
+
+**Answer:** _(no owner decision needed — the owner asked for both styles)_
+
+---
+
+### MSG-17. Conversations are grouped in C, not in SQL
+
+`nd_msg_threads()` reads the inbox and the outbox separately and groups them in
+memory. A `GROUP BY` would be shorter and is not available: inbox and outbox
+are **separate database files** (`sms_inbox.db`, `sms_outbox.db`, per
+`nd_db.h`), so no single statement sees both, and the grouping key is not a
+column — it is `nd_msg_peer_key()`, which strips punctuation so `555-1234` and
+`5551234` are one conversation.
+
+`nd_msg_peer_key()` keeps digits, `+`, `*` and `#` and drops everything else.
+It deliberately does **not** try to reconcile `+353870000001` with
+`0870000001`: doing so means guessing a country code, and guessing wrong merges
+two people's conversations, which is worse than showing two rows.
+
+A number with no digits at all (an alphanumeric sender ID such as `INFO`) falls
+back to the raw text, so those still group.
+
+**Caps** — both from CODING-STANDARDS.md 1.5, nothing sized by the database:
+
+| Cap | Value | Cost |
+|---|---|---|
+| `ND_MSG_THREADS_MAX` | 64 conversations | ~29 KB, heap, for the life of one screen |
+| `ND_MSG_BUBBLES_MAX` | 128 messages per conversation | ~21 KB, same lifetime |
+| `ND_MSG_PREVIEW_MAX` | 96 bytes of preview text | in the row |
+
+64 conversations is more than a 250-contact SIM can produce from people you
+have actually texted; 128 is the newest 128 of one conversation.
+
+**Answer:** _(no owner decision needed)_
+
+---
+
+### MSG-18. `nd_msg_thread` carries both the key and the raw number
+
+`peer` is the normalised key and `number` is the number **as last seen**. Both
+are needed: the key groups, and the raw number is what the phone book is looked
+up by — contacts are stored punctuated (`555-1234`), so a lookup on the key
+would miss and every conversation would be titled with a bare number.
+
+`display` is the contact name when there is one and `number` when there is not.
+
+**Answer:** _(no owner decision needed)_
+
+---
+
+### MSG-19. Sent messages were never recorded anywhere
+
+Found while building the conversation list. `_send_message_flow()` handed the
+text to the modem and dropped it: nothing wrote to `outbox`, which only ever
+held hand-saved drafts. Classic's screen called "Outbox" therefore did not
+contain what had been sent, and Chat could not show an outgoing bubble at all.
+
+A successful send now calls `nd_msg_save_outbox_to(body, number)`. That needs a
+recipient, and the ported `outbox` schema has no such column, so `msg_db.c`
+adds one with `ALTER TABLE outbox ADD COLUMN recipient TEXT` and swallows the
+duplicate-column error — sqlite has no `ADD COLUMN IF NOT EXISTS`. A phone
+upgrading from an older build gets the column on first use; rows written before
+it exists read back as `''` and group under `(unknown)`.
+
+This changes Classic's Outbox too, which is the point: it now lists what was
+sent.
+
+**Answer:** _(no owner decision needed — the old behaviour was a bug)_
+
+---
+
+### MSG-20. "Erase" became "Delete" and "Forward", in both styles
+
+The owner asked for Delete and Forward on individual messages in Chat, and for
+the same to replace Classic's bare "Erase". Forward opens the ordinary Write
+Message composer with the body pre-filled, which is why
+`nd_msg_show_write_prefill()` exists and `nd_msg_show_write()` is now a call to
+it with no prefill.
+
+**Answer:** _(owner asked for this)_
+
+---
+
+### MSG-21. The Chat transcript scrolls a whole bubble at a time
+
+`chat_view.first` is the **index** of the topmost bubble drawn, not a pixel
+offset. A pixel offset slices whichever bubble straddles the top edge, and on a
+175-pixel panel a bubble with no top border and its first text row cut through
+the middle of the glyphs reads as a rendering fault rather than as scrolling.
+
+The cost is a few pixels of slack above the message box. The exception is a
+bubble taller than the viewport, which becomes the window on its own and runs
+off the bottom — the same thing Classic's detail page does with a long message.
+
+The vertical geometry of both Chat screens is derived from where the fonts
+actually put **ink**, measured, not from their em sizes; the constants and the
+arithmetic are in the comment at the top of `chat.c`. Using the em size is what
+makes a row rule saw through the descenders of the line above it.
+
+**Answer:** _(no owner decision needed)_
+
+---
+
+### MSG-22. Golden frames are no longer a gate for these screens
+
+The owner's decision, stated twice: the golden frames were the benchmark for
+getting the port *functionally* close to the Python, and applications are now
+being changed deliberately to look different. `app-messages` and
+`app-messages-inbox` still match byte for byte because Classic is untouched,
+and they are kept for exactly that reason — they are the regression test that
+adding Chat did not disturb Classic. No golden frame was cut for Chat.
+
+**Answer:** _(owner decision, recorded)_
+
+---
+
+### MSG-23. The T9 mode indicator is already there, and is invisible on QEMU on purpose
+
+Asked for during the Chat work: the composer should say which input mode you
+are in. It already does, and has since the port — `nd_t9ind_draw()` is called
+from `nd_textlong_draw()` (`lib/nd_textlong.c:422`, top right, just left of the
+character count) and from `nd_textinput_draw()` (`lib/nd_textinput.c:160`). All
+four modes render: `abc`, `ABC`, `123`, and predictive as a drawn pencil beside
+`abc`, since the font has no U+270F. `#` cycles them. `test_widgets_text.c`
+already pins the width of each.
+
+It is not visible **on QEMU**, and that is correct rather than a bug:
+`t9_active()` is `ui->has_matrix_keypad`, and without the i2c matrix keypad
+`nd_textlong_key()` never reaches the T9 engine at all — it takes the
+`nd_key_dev_char()` branch and maps a QWERTY key straight to a character. There
+is genuinely no mode to report on a development keyboard, and `#` there types a
+`#`. Drawing an indicator would be reporting a state the input path is not in.
+
+So: on the Luckfox with its keypad, it shows. On QEMU, there is nothing to show.
+
+**Answer:** _(no change made — this was a question, and the answer is "already
+done, and hidden on QEMU deliberately")_
 
 ---
 

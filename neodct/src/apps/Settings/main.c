@@ -113,8 +113,12 @@ const char *const nd_setapp_sdcard_help =
     "You can make one on a computer, or let the phone do it. Setting up only "
     "adds the folders. Formatting erases everything on the card.";
 
-const char *const nd_setapp_menu[ND_SETAPP_MENU_ITEMS] = {"Wallpaper", "Memory card",
-                                                          "Engineering Mode", "About"};
+const char *const nd_setapp_menu[ND_SETAPP_MENU_ITEMS] = {
+    "Wallpaper", "Memory card", "Messages Style", "Engineering Mode", "About"};
+
+/* Must read the same way round as nd_msg_style_options in the Messages app:
+ * index 0 is CLASSIC. test_settings_app.c pins the strings this writes. */
+const char *const nd_setapp_msgstyle_options[ND_SETAPP_MSGSTYLE_ITEMS] = {"Classic", "Chat"};
 
 const char *const nd_setapp_eng_options[ND_SETAPP_ENG_ITEMS] = {"On", "Off"};
 
@@ -686,6 +690,55 @@ static void show_engineering_mode(nd_ui *ui)
 }
 
 /* ------------------------------------------------------------------ *
+ * Messages Style -- NOT a port
+ * ------------------------------------------------------------------ */
+
+/* Chooses between the ported Inbox/Outbox app and the conversation view.
+ * Shaped exactly like show_engineering_mode() above -- the current value
+ * preselected, "Select" on the softkey, a dialog confirming what was set --
+ * because a settings app whose rows behave differently from each other is a
+ * settings app people misread.
+ *
+ * The KEY and the two LABELS are the Messages app's; apps/Messages/
+ * messages.h owns them and is what reads the setting. Settings and Messages
+ * are separate .so files and cannot share a header, so test_settings_app.c
+ * asserts the spellings match rather than trusting them to. */
+static void show_messages_style(nd_ui *ui)
+{
+    char stored[64];
+    nd_vlist menu;
+    nd_softkey softkey;
+    nd_msgdialog dialog;
+    bool chat;
+    int32_t selection;
+
+    (void)nd_settings_get_copy(ND_SETAPP_MSGSTYLE_KEY, "CLASSIC", stored, sizeof stored);
+    /* Only the literal "CHAT" preselects Chat, which is the same one-sided
+     * tolerance nd_msg_style_parse() applies: anything unrecognised is
+     * CLASSIC, so an upgraded phone opens on the app it had before. */
+    chat = (stored[0] == 'C' || stored[0] == 'c') &&
+           (stored[1] == 'H' || stored[1] == 'h');
+
+    nd_vlist_init(&menu, ui, "Msg. Style", nd_setapp_msgstyle_options, ND_SETAPP_MSGSTYLE_ITEMS,
+                  ND_SETAPP_ROOT_ID);
+    menu.selected_index = chat ? 1u : 0u;
+
+    nd_softkey_init(&softkey, ui, false);
+    nd_softkey_update(&softkey, "Select", false);
+
+    selection = nd_vlist_show(&menu);
+    if (selection == ND_WIDGET_BACK)
+        return;
+
+    chat = (selection == 1);
+    (void)nd_settings_set(ND_SETAPP_MSGSTYLE_KEY, chat ? "CHAT" : "CLASSIC");
+
+    nd_msgdialog_init(&dialog, ui,
+                      chat ? "Messages will open as chats." : "Messages will open as Inbox.");
+    (void)nd_msgdialog_show(&dialog);
+}
+
+/* ------------------------------------------------------------------ *
  * _show_about()
  * ------------------------------------------------------------------ */
 
@@ -984,8 +1037,10 @@ int app_run(nd_ui *ui)
         else if (selection == 1)
             show_memory_card(ui);
         else if (selection == 2)
-            show_engineering_mode(ui);
+            show_messages_style(ui);
         else if (selection == 3)
+            show_engineering_mode(ui);
+        else if (selection == 4)
             show_about(ui);
 
         if (nd_app_should_exit())

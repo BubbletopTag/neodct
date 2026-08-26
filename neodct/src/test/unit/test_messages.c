@@ -58,6 +58,7 @@
 #include <sqlite3.h>
 
 #include "nd_capture.h"
+#include "nd_settings.h"
 #include "nd_contacts.h"
 #include "nd_db.h"
 #include "nd_draw.h"
@@ -199,6 +200,16 @@ typedef struct {
     void (*del_outbox)(int64_t);
     nd_err (*save_outbox)(const char *);
 
+    /* ---- style + conversations: new, not a port ---- */
+    nd_msg_style (*style_parse)(const char *);
+    nd_msg_style (*style_current)(void);
+    nd_err (*save_outbox_to)(const char *, const char *);
+    void (*peer_key)(char *, size_t, const char *);
+    size_t (*threads)(nd_msg_thread *, size_t);
+    size_t (*thread_messages)(const char *, nd_msg_bubble *, size_t);
+    void (*thread_mark_read)(const char *);
+    const char *const *style_options;
+
     void (*wrap_text)(nd_lines *, nd_ui *, const char *, int32_t, const nd_font *);
     void (*format_timestamp)(int64_t, char *, size_t);
     size_t (*codepoints)(const char *);
@@ -208,11 +219,15 @@ typedef struct {
     void (*draw_sending)(nd_ui *, const char *);
     const char *(*number_input)(nd_ui *, const char *, const char *, char *, size_t);
     bool (*send_flow)(nd_ui *, const char *, int32_t, int32_t);
+    bool (*send_flow_to)(nd_ui *, const char *, int32_t, int32_t, const char *);
+    bool (*show_write_prefill)(nd_ui *, int32_t, int32_t, const char *, const char *);
     nd_msg_detail_result (*show_detail)(nd_ui *, const char *, const char *, int32_t, const char *,
                                         int64_t, const char *, int64_t);
     void (*show_inbox)(nd_ui *, int32_t, int32_t);
     void (*show_outbox)(nd_ui *, int32_t, int32_t);
     void (*show_write)(nd_ui *, int32_t, int32_t);
+    void (*show_threads)(nd_ui *);
+    void (*show_thread)(nd_ui *, const char *, const char *);
 
     const char *const *menu_items;
     const char *const *inbox_options;
@@ -258,6 +273,15 @@ static bool api_open(void)
     *(void **)&g_api.del_outbox = sym(h, "nd_msg_delete_outbox");
     *(void **)&g_api.save_outbox = sym(h, "nd_msg_save_outbox");
 
+    *(void **)&g_api.style_parse = sym(h, "nd_msg_style_parse");
+    *(void **)&g_api.style_current = sym(h, "nd_msg_style_current");
+    *(void **)&g_api.save_outbox_to = sym(h, "nd_msg_save_outbox_to");
+    *(void **)&g_api.peer_key = sym(h, "nd_msg_peer_key");
+    *(void **)&g_api.threads = sym(h, "nd_msg_threads");
+    *(void **)&g_api.thread_messages = sym(h, "nd_msg_thread_messages");
+    *(void **)&g_api.thread_mark_read = sym(h, "nd_msg_thread_mark_read");
+    g_api.style_options = dlsym(h, "nd_msg_style_options");
+
     *(void **)&g_api.wrap_text = sym(h, "nd_msg_wrap_text");
     *(void **)&g_api.format_timestamp = sym(h, "nd_msg_format_timestamp");
     *(void **)&g_api.codepoints = sym(h, "nd_msg_codepoints");
@@ -267,17 +291,27 @@ static bool api_open(void)
     *(void **)&g_api.draw_sending = sym(h, "nd_msg_draw_sending");
     *(void **)&g_api.number_input = sym(h, "nd_msg_number_input_show");
     *(void **)&g_api.send_flow = sym(h, "nd_msg_send_flow");
+    *(void **)&g_api.send_flow_to = sym(h, "nd_msg_send_flow_to");
+    *(void **)&g_api.show_write_prefill = sym(h, "nd_msg_show_write_prefill");
     *(void **)&g_api.show_detail = sym(h, "nd_msg_show_detail");
     *(void **)&g_api.show_inbox = sym(h, "nd_msg_show_inbox");
     *(void **)&g_api.show_outbox = sym(h, "nd_msg_show_outbox");
     *(void **)&g_api.show_write = sym(h, "nd_msg_show_write");
+    *(void **)&g_api.show_threads = sym(h, "nd_msg_show_threads");
+    *(void **)&g_api.show_thread = sym(h, "nd_msg_show_thread");
 
     g_api.menu_items = dlsym(h, "nd_msg_menu_items");
     g_api.inbox_options = dlsym(h, "nd_msg_inbox_options");
     g_api.outbox_options = dlsym(h, "nd_msg_outbox_options");
     g_api.arrow_keys = dlsym(h, "nd_msg_arrow_keys");
 
-    return g_api.run != NULL && g_api.open_message != NULL && g_api.open_inbox != NULL &&
+    return g_api.style_parse != NULL && g_api.style_current != NULL &&
+           g_api.save_outbox_to != NULL && g_api.peer_key != NULL && g_api.threads != NULL &&
+           g_api.thread_messages != NULL && g_api.thread_mark_read != NULL &&
+           g_api.style_options != NULL && g_api.send_flow_to != NULL &&
+           g_api.show_write_prefill != NULL && g_api.show_threads != NULL &&
+           g_api.show_thread != NULL &&
+           g_api.run != NULL && g_api.open_message != NULL && g_api.open_inbox != NULL &&
            g_api.shutdown != NULL && g_api.fetch_inbox != NULL && g_api.fetch_outbox != NULL &&
            g_api.fetch_inbox_one != NULL && g_api.mark_read != NULL && g_api.del_inbox != NULL &&
            g_api.del_outbox != NULL && g_api.save_outbox != NULL && g_api.wrap_text != NULL &&
@@ -432,6 +466,26 @@ static void hold_key(fixture *fx, int32_t code)
 static bool keys_drained(fixture *fx)
 {
     return nd_input_read_key(fx->input, 0.0) == ND_KEY_NONE;
+}
+
+/* This fixture has no nd_capture behind it -- ui.fb is NULL and the canvas IS
+ * the frame -- so "did the screen draw?" cannot be asked as a frame count.
+ * The canvas starts filled ND_BLACK, and every screen here paints white on
+ * it, so a single non-black pixel is the same evidence. */
+static bool canvas_has_ink(const nd_image *img)
+{
+    int32_t x;
+    int32_t y;
+
+    for (y = 0; y < ND_UI_H; y++) {
+        for (x = 0; x < ND_UI_W; x++) {
+            nd_color px = nd_image_get_px(img, x, y);
+
+            if (px.r != 0u || px.g != 0u || px.b != 0u)
+                return true;
+        }
+    }
+    return false;
 }
 
 /* ------------------------------------------------------------------ *
@@ -830,10 +884,13 @@ static void test_menu_tables(void)
     CHECK_STR(g_api.menu_items[1], "Outbox");
     CHECK_STR(g_api.menu_items[2], "Write Message");
 
-    /* Yes, really. That string is on the phone today. */
-    CHECK_STR(g_api.inbox_options[0], "Just Erase for now");
-    CHECK_STR(g_api.outbox_options[0], "Erase");
-    CHECK_STR(g_api.outbox_options[1], "Send");
+    /* WAS {"Just Erase for now"} and {"Erase", "Send"} -- the Python's
+     * placeholder wording, replaced deliberately. Forward is new in both. */
+    CHECK_STR(g_api.inbox_options[0], "Delete");
+    CHECK_STR(g_api.inbox_options[1], "Forward");
+    CHECK_STR(g_api.outbox_options[0], "Delete");
+    CHECK_STR(g_api.outbox_options[1], "Forward");
+    CHECK_STR(g_api.outbox_options[2], "Send");
 
     CHECK_INT(g_api.arrow_keys[0], 103);
     CHECK_INT(g_api.arrow_keys[1], 105);
@@ -979,7 +1036,7 @@ static void test_detail_erase_inbox(void)
     id = seed_inbox("+353870000001", "hello", 1000, 0);
     CHECK(id > 0);
 
-    /* Enter opens Options, Enter picks "Just Erase for now", and the "Erased!"
+    /* Enter opens Options, Enter picks "Delete" (index 0), and the "Deleted!"
      * dialog is dismissed by the held key's first repeat. */
     script_key(&fx, ND_KEY_ENTER);
     script_key(&fx, ND_KEY_ENTER);
@@ -1007,7 +1064,7 @@ static void test_detail_erase_outbox(void)
 
     script_key(&fx, ND_KEY_ENTER); /* Options            */
     script_key(&fx, ND_KEY_ENTER); /* "Erase" is index 0 */
-    hold_key(&fx, ND_KEY_ENTER);   /* the "Erased!" dialog */
+    hold_key(&fx, ND_KEY_ENTER);   /* the "Deleted!" dialog */
 
     CHECK_INT(g_api.show_detail(&fx.ui, "Outbox", "2-2", 1, "draft", rows[0].id, NULL, 0),
               ND_MSG_DETAIL_DELETED);
@@ -1125,7 +1182,76 @@ static void test_send_flow_reaches_a_modem(void)
     script_key(&fx, ND_KEY_3);
     hold_key(&fx, ND_KEY_ENTER); /* confirms the number, then the dialog */
 
+    db_init();
     CHECK(g_api.send_flow(&fx.ui, "hello", ND_MESSAGES_ROOT_ID, 3));
+
+    /* A SENT MESSAGE IS NOW RECORDED. The Python wrote nothing on success --
+     * the Outbox held only drafts saved by hand -- which meant a screen
+     * called "Outbox" did not contain what had been sent, and a conversation
+     * could not show your own half of it at all. */
+    {
+        nd_msg_rec rows[8];
+        size_t n = g_api.fetch_outbox(rows, 8u);
+        size_t i;
+        bool found = false;
+
+        for (i = 0u; i < n; i++) {
+            if (strcmp(rows[i].message, "hello") == 0) {
+                found = true;
+                /* With the number the flow just asked for, so it lands in a
+                 * conversation rather than under (unknown). */
+                CHECK_STR(rows[i].recipient, "123");
+            }
+        }
+        CHECK(found);
+    }
+
+    fx.ui.modem = NULL;
+    nd_modem_close(modem);
+    fx_free(&fx);
+}
+
+/* The same send with the number already known -- which is what a reply from
+ * inside a conversation is. It must NOT ask for one. */
+static void test_send_flow_to_skips_the_number_prompt(void)
+{
+    fixture fx;
+    nd_modem *modem = NULL;
+
+    if (!fx_init(&fx) || !fx_keys(&fx)) {
+        CHECK(false);
+        fx_free(&fx);
+        return;
+    }
+    if (nd_modem_open(&modem) != ND_OK || modem == NULL) {
+        fprintf(stderr, "test_messages: no ModemService; skipping\n");
+        fx_free(&fx);
+        return;
+    }
+    fx.ui.modem = modem;
+    db_init();
+
+    /* ONE held Enter, for the "Message sent!" dialog. If the flow asked for a
+     * number it would consume this on the Send To field and then block. */
+    hold_key(&fx, ND_KEY_ENTER);
+
+    CHECK(g_api.send_flow_to(&fx.ui, "reply body", ND_MESSAGES_ROOT_ID, 3, "555-4321"));
+
+    {
+        nd_msg_rec rows[8];
+        size_t n = g_api.fetch_outbox(rows, 8u);
+        size_t i;
+        bool found = false;
+
+        for (i = 0u; i < n; i++) {
+            if (strcmp(rows[i].message, "reply body") == 0) {
+                found = true;
+                /* The number is filtered the same way the typed one is. */
+                CHECK_STR(rows[i].recipient, "5554321");
+            }
+        }
+        CHECK(found);
+    }
 
     fx.ui.modem = NULL;
     nd_modem_close(modem);
@@ -1295,6 +1421,566 @@ static void test_open_message_missing_falls_back_to_inbox(void)
     fx_free(&fx);
 }
 
+/* ================================================================== *
+ * Messages Style, and conversations -- NOT a port
+ * ================================================================== */
+
+static void test_style_parse(void)
+{
+    /* Only "chat" selects CHAT. Everything else -- including nonsense, an
+     * empty setting and a settings.prop written before this existed -- has to
+     * mean CLASSIC, or upgrading a phone redesigns an app on it. */
+    CHECK_INT(g_api.style_parse("CHAT"), ND_MSG_STYLE_CHAT);
+    CHECK_INT(g_api.style_parse("chat"), ND_MSG_STYLE_CHAT);
+    CHECK_INT(g_api.style_parse("Chat"), ND_MSG_STYLE_CHAT);
+    CHECK_INT(g_api.style_parse("  chat  "), ND_MSG_STYLE_CHAT);
+
+    CHECK_INT(g_api.style_parse("CLASSIC"), ND_MSG_STYLE_CLASSIC);
+    CHECK_INT(g_api.style_parse("classic"), ND_MSG_STYLE_CLASSIC);
+    CHECK_INT(g_api.style_parse(""), ND_MSG_STYLE_CLASSIC);
+    CHECK_INT(g_api.style_parse(NULL), ND_MSG_STYLE_CLASSIC);
+    CHECK_INT(g_api.style_parse("bubbles"), ND_MSG_STYLE_CLASSIC);
+    CHECK_INT(g_api.style_parse("chatty"), ND_MSG_STYLE_CLASSIC);
+
+    CHECK_STR(g_api.style_options[0], "Classic");
+    CHECK_STR(g_api.style_options[1], "Chat");
+}
+
+static void test_style_current(void)
+{
+    /* Unset means CLASSIC, which is the whole reason the default is CLASSIC. */
+    (void)nd_settings_set(ND_MSG_STYLE_SETTING, "");
+    CHECK_INT(g_api.style_current(), ND_MSG_STYLE_CLASSIC);
+
+    (void)nd_settings_set(ND_MSG_STYLE_SETTING, "CHAT");
+    CHECK_INT(g_api.style_current(), ND_MSG_STYLE_CHAT);
+
+    (void)nd_settings_set(ND_MSG_STYLE_SETTING, "CLASSIC");
+    CHECK_INT(g_api.style_current(), ND_MSG_STYLE_CLASSIC);
+
+    (void)nd_settings_set(ND_MSG_STYLE_SETTING, "");
+}
+
+static void test_peer_key(void)
+{
+    char k[ND_MSG_SENDER_MAX];
+
+    /* Formatting is not identity. */
+    g_api.peer_key(k, sizeof k, "555-1234");
+    CHECK_STR(k, "5551234");
+    g_api.peer_key(k, sizeof k, "(555) 1234");
+    CHECK_STR(k, "5551234");
+    g_api.peer_key(k, sizeof k, "555 1234");
+    CHECK_STR(k, "5551234");
+
+    /* + is KEPT, which is what stops +353870000001 and 353870000001 being
+     * merged on a guess about a country code nobody told the phone. */
+    g_api.peer_key(k, sizeof k, "+353 87 000 0001");
+    CHECK_STR(k, "+353870000001");
+
+    /* An alphanumeric originating address has no digits at all; it falls back
+     * to the raw text so the thread is still reachable. */
+    g_api.peer_key(k, sizeof k, "Vodafone");
+    CHECK_STR(k, "Vodafone");
+
+    g_api.peer_key(k, sizeof k, "");
+    CHECK_STR(k, "");
+    g_api.peer_key(k, sizeof k, NULL);
+    CHECK_STR(k, "");
+
+    {
+        char tiny[4];
+
+        g_api.peer_key(tiny, sizeof tiny, "5551234");
+        CHECK_INT((int)strlen(tiny), 3);
+        g_api.peer_key(NULL, 0u, "5551234"); /* must not fault */
+        g_checks++;
+    }
+}
+
+/* A sent row with a recipient and a timestamp this test chose --
+ * save_outbox_to() stamps with the clock, and two calls in one tick tie. */
+static void seed_outbox_to(const char *text, const char *to, int64_t ts)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+
+    CHECK_INT(g_api.save_outbox_to(text, to), ND_OK);
+    CHECK_INT(nd_db_open(ND_PATH_DB_SMS_OUTBOX, &db), ND_OK);
+    if (db == NULL)
+        return;
+    /* NOT last_insert_rowid(): that is per CONNECTION, and this is a second
+     * connection opened after save_outbox_to() closed its own -- so it would
+     * be 0 and the UPDATE would match nothing. */
+    if (sqlite3_prepare_v2(db,
+                           "UPDATE outbox SET timestamp = ? "
+                           "WHERE id = (SELECT MAX(id) FROM outbox)",
+                           -1, &st, NULL) == SQLITE_OK) {
+        (void)sqlite3_bind_int64(st, 1, (sqlite3_int64)ts);
+        CHECK_INT(sqlite3_step(st), SQLITE_DONE);
+    } else {
+        CHECK(false);
+    }
+    if (st != NULL)
+        (void)sqlite3_finalize(st);
+    nd_db_close(db);
+}
+
+static void test_outbox_recipient_roundtrip(void)
+{
+    nd_msg_rec rows[8];
+    size_t n;
+
+    db_init();
+    CHECK_INT(g_api.save_outbox_to("with a number", "555-9999"), ND_OK);
+
+    n = g_api.fetch_outbox(rows, 8u);
+    CHECK(n >= 1u);
+    if (n >= 1u) {
+        CHECK_STR(rows[0].message, "with a number");
+        CHECK_STR(rows[0].recipient, "555-9999");
+        /* The ported field stays empty for an outbox row: older tests assert
+         * it, and the chat layer reads `recipient` instead. */
+        CHECK_STR(rows[0].sender, "");
+    }
+
+    /* The ported call still works and still writes no recipient. Found by
+     * MESSAGE, not by position: both rows are written in the same second and
+     * ORDER BY timestamp DESC does not break that tie. */
+    CHECK_INT(g_api.save_outbox("no number"), ND_OK);
+    n = g_api.fetch_outbox(rows, 8u);
+    CHECK(n >= 2u);
+    {
+        size_t i;
+        bool found = false;
+
+        for (i = 0u; i < n; i++) {
+            if (strcmp(rows[i].message, "no number") == 0) {
+                found = true;
+                CHECK_STR(rows[i].recipient, "");
+            }
+        }
+        CHECK(found);
+    }
+
+    /* Running the ALTER a second time must not fail the insert. */
+    CHECK_INT(g_api.save_outbox_to("again", "555-9999"), ND_OK);
+    CHECK_INT(g_api.save_outbox_to("and a NULL", NULL), ND_OK);
+}
+
+static void test_threads_group_and_order(void)
+{
+    nd_msg_thread *th = calloc((size_t)ND_MSG_THREADS_MAX, sizeof *th);
+    size_t n;
+
+    if (th == NULL) {
+        CHECK(false);
+        return;
+    }
+    db_init();
+
+    /* Two correspondents, interleaved in time, one of them reached by two
+     * different spellings of the same number. */
+    (void)seed_inbox("555-1234", "hey", 1000, 1);
+    seed_outbox_to("hello back", "5551234", 1100);
+    (void)seed_inbox("5551234", "how are you", 1200, 0);
+    (void)seed_inbox("+353870000001", "different person", 1300, 0);
+    seed_outbox_to("reply to the other one", "+353870000001", 1400);
+
+    n = g_api.threads(th, (size_t)ND_MSG_THREADS_MAX);
+    CHECK_INT(n, 2);
+    if (n != 2u) {
+        free(th);
+        return;
+    }
+
+    /* MOST RECENT FIRST -- that is what a chat list is. */
+    CHECK_STR(th[0].peer, "+353870000001");
+    CHECK_INT(th[0].last_ts, 1400);
+    CHECK_STR(th[0].preview, "reply to the other one");
+    CHECK(th[0].last_outgoing);
+    CHECK_INT(th[0].n_messages, 2);
+    CHECK_INT(th[0].unread, 1);
+
+    /* "555-1234" and "5551234" are ONE conversation, and its three messages
+     * are counted together. */
+    CHECK_STR(th[1].peer, "5551234");
+    CHECK_INT(th[1].last_ts, 1200);
+    CHECK_STR(th[1].preview, "how are you");
+    CHECK(!th[1].last_outgoing);
+    CHECK_INT(th[1].n_messages, 3);
+    CHECK_INT(th[1].unread, 1);
+
+    free(th);
+}
+
+static void test_threads_display_name(void)
+{
+    nd_msg_thread *th = calloc((size_t)ND_MSG_THREADS_MAX, sizeof *th);
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    size_t n;
+
+    if (th == NULL) {
+        CHECK(false);
+        return;
+    }
+    db_init();
+
+    CHECK_INT(nd_db_open(ND_PATH_DB_PHONEBOOK, &db), ND_OK);
+    if (db != NULL) {
+        if (sqlite3_prepare_v2(db,
+                               "INSERT INTO contacts (name, number, speed_dial) "
+                               "VALUES ('Mum', '555-1234', 0)",
+                               -1, &st, NULL) == SQLITE_OK)
+            CHECK_INT(sqlite3_step(st), SQLITE_DONE);
+        else
+            CHECK(false);
+        if (st != NULL)
+            (void)sqlite3_finalize(st);
+        nd_db_close(db);
+    }
+
+    (void)seed_inbox("555-1234", "from a known number", 2000, 0);
+    (void)seed_inbox("555-7777", "from a stranger", 2100, 0);
+
+    n = g_api.threads(th, (size_t)ND_MSG_THREADS_MAX);
+    CHECK_INT(n, 2);
+    if (n == 2u) {
+        /* A number nobody has saved shows as the number, not as blank. */
+        CHECK_STR(th[0].display, "555-7777");
+        CHECK_STR(th[1].display, "Mum");
+    }
+    free(th);
+}
+
+static void test_thread_messages_order(void)
+{
+    nd_msg_bubble *b = calloc((size_t)ND_MSG_BUBBLES_MAX, sizeof *b);
+    size_t n;
+
+    if (b == NULL) {
+        CHECK(false);
+        return;
+    }
+    db_init();
+
+    (void)seed_inbox("555-1234", "one", 1000, 1);
+    seed_outbox_to("two", "5551234", 2000);
+    (void)seed_inbox("555 1234", "three", 3000, 0);
+    (void)seed_inbox("999-0000", "somebody else entirely", 3500, 0);
+
+    n = g_api.thread_messages("5551234", b, (size_t)ND_MSG_BUBBLES_MAX);
+    CHECK_INT(n, 3);
+    if (n == 3u) {
+        /* OLDEST FIRST -- the opposite of the list, because that is the order
+         * a transcript reads in. */
+        CHECK_STR(b[0].text, "one");
+        CHECK(!b[0].outgoing);
+        CHECK_STR(b[1].text, "two");
+        CHECK(b[1].outgoing);
+        CHECK_STR(b[2].text, "three");
+        CHECK(!b[2].outgoing);
+        CHECK(b[0].timestamp < b[1].timestamp && b[1].timestamp < b[2].timestamp);
+        /* Real rowids, so Delete and Forward have something to act on -- and
+         * an inbox id and an outbox id may collide, which is why `outgoing`
+         * is what decides which table a delete goes to. */
+        CHECK(b[0].id > 0 && b[1].id > 0 && b[2].id > 0);
+    }
+
+    /* A raw, unnormalised number finds the same thread. */
+    CHECK_INT(g_api.thread_messages("(555) 1234", b, (size_t)ND_MSG_BUBBLES_MAX), 3);
+    /* And a peer with nothing in it is empty, not everything. */
+    CHECK_INT(g_api.thread_messages("111-1111", b, (size_t)ND_MSG_BUBBLES_MAX), 0);
+    CHECK_INT(g_api.thread_messages("", b, (size_t)ND_MSG_BUBBLES_MAX), 0);
+    CHECK_INT(g_api.thread_messages(NULL, b, (size_t)ND_MSG_BUBBLES_MAX), 0);
+    CHECK_INT(g_api.thread_messages("5551234", b, 0u), 0);
+
+    free(b);
+}
+
+static void test_thread_mark_read(void)
+{
+    nd_msg_thread *th = calloc((size_t)ND_MSG_THREADS_MAX, sizeof *th);
+    size_t n;
+
+    if (th == NULL) {
+        CHECK(false);
+        return;
+    }
+    db_init();
+
+    (void)seed_inbox("555-1234", "unread one", 1000, 0);
+    (void)seed_inbox("555-1234", "unread two", 1100, 0);
+    (void)seed_inbox("999-0000", "somebody else", 1200, 0);
+
+    n = g_api.threads(th, (size_t)ND_MSG_THREADS_MAX);
+    CHECK_INT(n, 2);
+
+    g_api.thread_mark_read("5551234");
+
+    n = g_api.threads(th, (size_t)ND_MSG_THREADS_MAX);
+    CHECK_INT(n, 2);
+    if (n == 2u) {
+        size_t i;
+
+        for (i = 0u; i < n; i++) {
+            if (strcmp(th[i].peer, "5551234") == 0)
+                CHECK_INT(th[i].unread, 0);
+            else
+                CHECK_INT(th[i].unread, 1); /* the other thread is untouched */
+        }
+    }
+    free(th);
+}
+
+static void test_threads_unknown_recipient(void)
+{
+    nd_msg_thread *th = calloc((size_t)ND_MSG_THREADS_MAX, sizeof *th);
+    size_t n;
+    size_t i;
+    bool saw_unknown = false;
+
+    if (th == NULL) {
+        CHECK(false);
+        return;
+    }
+    db_init();
+
+    /* A row written before the recipient column existed. It must still be
+     * reachable -- a phone that has been sending texts for a year should not
+     * look like it never has. */
+    CHECK_INT(g_api.save_outbox("sent before the column existed"), ND_OK);
+
+    n = g_api.threads(th, (size_t)ND_MSG_THREADS_MAX);
+    CHECK(n >= 1u);
+    for (i = 0u; i < n; i++) {
+        if (strcmp(th[i].peer, ND_MSG_PEER_UNKNOWN) == 0) {
+            saw_unknown = true;
+            CHECK_STR(th[i].preview, "sent before the column existed");
+            CHECK(th[i].last_outgoing);
+        }
+    }
+    CHECK(saw_unknown);
+
+    /* And the row the list shows must be OPENABLE. The list hands
+     * nd_msg_show_thread() the thread's `number`, which for this thread is
+     * the empty string the old schema left behind -- so the lookup has to
+     * make the same (unknown) substitution the grouping made, or the one
+     * conversation an upgraded phone is guaranteed to have is the one
+     * conversation it cannot read. */
+    {
+        nd_msg_bubble *b = calloc((size_t)ND_MSG_BUBBLES_MAX, sizeof *b);
+
+        if (b != NULL) {
+            CHECK_INT((int)g_api.thread_messages("", b, (size_t)ND_MSG_BUBBLES_MAX), 1);
+            CHECK_STR(b[0].text, "sent before the column existed");
+            CHECK(b[0].outgoing);
+
+            /* Spelled either way -- the raw number the list carries, or the
+             * key the grouping produced. */
+            CHECK_INT((int)g_api.thread_messages(ND_MSG_PEER_UNKNOWN, b,
+                                                 (size_t)ND_MSG_BUBBLES_MAX),
+                      1);
+            free(b);
+        }
+    }
+    free(th);
+}
+
+static void test_threads_bounds(void)
+{
+    nd_msg_thread one;
+
+    db_init();
+    (void)seed_inbox("555-0001", "a", 1000, 0);
+    (void)seed_inbox("555-0002", "b", 1100, 0);
+    (void)seed_inbox("555-0003", "c", 1200, 0);
+
+    /* A cap of one gives the MOST RECENT one, not an arbitrary one. */
+    CHECK_INT(g_api.threads(&one, 1u), 1);
+    CHECK_STR(one.peer, "5550003");
+
+    CHECK_INT(g_api.threads(&one, 0u), 0);
+    CHECK_INT(g_api.threads(NULL, 4u), 0);
+}
+
+/* ================================================================== *
+ * The style actually routes
+ * ================================================================== */
+
+/* app_run() opens a different first screen in each style, and the cheap way
+ * to check that is to run each one and see that it drew. That is too weak:
+ * both styles draw.
+ *
+ * So the same key script is run against both, chosen so it means different
+ * things on the two front ends and leaves DIFFERENT STATE IN THE DATABASE:
+ *
+ *   Down, Enter   CLASSIC   root row 1 is "Outbox" -> an empty Outbox
+ *                 CHAT      row 1 is the seeded conversation -> the thread,
+ *                           and OPENING A THREAD MARKS IT READ
+ *
+ * One seeded unread inbox message therefore comes back still unread from
+ * CLASSIC and read from CHAT, through app_run() and nothing else. That is
+ * the routing, observed rather than asserted about. */
+static void run_app_once(int *rc_out, bool *drew_out)
+{
+    fixture fx;
+
+    if (!fx_init(&fx) || !fx_keys(&fx)) {
+        CHECK(false);
+        fx_free(&fx);
+        return;
+    }
+    script_key(&fx, ND_KEY_DOWN);
+    script_key(&fx, ND_KEY_ENTER);
+    hold_key(&fx, ND_KEY_CLEAR);
+    nd_vclock_enable();
+    *rc_out = g_api.run(&fx.ui);
+    *drew_out = canvas_has_ink(fx.canvas);
+    nd_vclock_disable();
+    fx_free(&fx);
+}
+
+static void test_style_routes_app_run(void)
+{
+    int rc = -1;
+    bool drew = false;
+    int64_t id;
+    nd_msg_rec row;
+
+    db_init();
+    id = seed_inbox("555-1234", "hello there", 1000, 0);
+    CHECK(id > 0);
+
+    (void)nd_settings_set(ND_MSG_STYLE_SETTING, "CLASSIC");
+    run_app_once(&rc, &drew);
+    CHECK_INT(rc, 0);
+    CHECK(drew);
+    /* Classic went to the Outbox, so the inbox message was never opened. */
+    CHECK(g_api.fetch_inbox_one(id, &row));
+    CHECK_INT(row.is_read, 0);
+
+    drew = false;
+    (void)nd_settings_set(ND_MSG_STYLE_SETTING, "CHAT");
+    run_app_once(&rc, &drew);
+    CHECK_INT(rc, 0);
+    CHECK(drew);
+    /* Chat went into the conversation, which reads it. */
+    CHECK(g_api.fetch_inbox_one(id, &row));
+    CHECK_INT(row.is_read, 1);
+
+    (void)nd_settings_set(ND_MSG_STYLE_SETTING, "");
+}
+
+/* A fake incoming message, the notification the core would raise for it, and
+ * opening that notification -- which is the path a user actually takes to a
+ * new text. In CHAT it must land on the CONVERSATION, not on the one message,
+ * and it must mark the message read on the way. */
+static void test_incoming_notification_opens_the_thread(void)
+{
+    fixture fx;
+    int64_t id;
+    nd_msg_rec row;
+
+    db_init();
+
+    /* nd_db_store_incoming_sms() is exactly what the core's modem thread
+     * calls when a +CMTI arrives, so this is the real ingest path and not a
+     * hand-written INSERT. */
+    id = nd_db_store_incoming_sms("555-1234", "are you coming tonight?");
+    CHECK(id > 0);
+    CHECK(g_api.fetch_inbox_one(id, &row));
+    CHECK_INT(row.is_read, 0);
+
+    (void)nd_settings_set(ND_MSG_STYLE_SETTING, "CHAT");
+
+    if (!fx_init(&fx) || !fx_keys(&fx)) {
+        CHECK(false);
+        fx_free(&fx);
+        (void)nd_settings_set(ND_MSG_STYLE_SETTING, "");
+        return;
+    }
+    hold_key(&fx, ND_KEY_CLEAR); /* straight back out of the thread */
+    nd_vclock_enable();
+    CHECK_INT(g_api.open_message(&fx.ui, id), 0);
+    CHECK(canvas_has_ink(fx.canvas));
+    CHECK(keys_drained(&fx));
+    nd_vclock_disable();
+    fx_free(&fx);
+
+    /* Opening it read it -- in either style. */
+    CHECK(g_api.fetch_inbox_one(id, &row));
+    CHECK_INT(row.is_read, 1);
+
+    (void)nd_settings_set(ND_MSG_STYLE_SETTING, "");
+}
+
+/* The thread screen itself, driven: Down onto a bubble, Up back to the box,
+ * and out. It must not fault on an empty conversation either. */
+static void test_thread_screen_navigates(void)
+{
+    fixture fx;
+
+    db_init();
+    (void)seed_inbox("555-1234", "first", 1000, 1);
+    seed_outbox_to("second", "5551234", 2000);
+    (void)seed_inbox("555-1234", "third", 3000, 0);
+
+    if (!fx_init(&fx) || !fx_keys(&fx)) {
+        CHECK(false);
+        fx_free(&fx);
+        return;
+    }
+    script_key(&fx, ND_KEY_UP);   /* off the box, onto the last bubble */
+    script_key(&fx, ND_KEY_UP);   /* and up through the transcript     */
+    script_key(&fx, ND_KEY_UP);
+    script_key(&fx, ND_KEY_UP);   /* already at the top; must not wrap */
+    script_key(&fx, ND_KEY_DOWN);
+    hold_key(&fx, ND_KEY_CLEAR);
+
+    nd_vclock_enable();
+    g_api.show_thread(&fx.ui, "5551234", "Mum");
+    CHECK(canvas_has_ink(fx.canvas));
+    /* Every scripted key was consumed by the thread screen's own loop, so
+     * all six -- the four Ups, the Down, and the Back -- reached it. */
+    CHECK(keys_drained(&fx));
+    nd_vclock_disable();
+    fx_free(&fx);
+
+    /* Opening a conversation marks its unread messages read. */
+    {
+        nd_msg_thread *th = calloc((size_t)ND_MSG_THREADS_MAX, sizeof *th);
+        size_t n;
+        size_t i;
+
+        if (th != NULL) {
+            n = g_api.threads(th, (size_t)ND_MSG_THREADS_MAX);
+            for (i = 0u; i < n; i++) {
+                if (strcmp(th[i].peer, "5551234") == 0)
+                    CHECK_INT(th[i].unread, 0);
+            }
+            free(th);
+        }
+    }
+
+    /* An empty conversation draws and leaves rather than faulting. */
+    if (fx_init(&fx) && fx_keys(&fx)) {
+        hold_key(&fx, ND_KEY_CLEAR);
+        nd_vclock_enable();
+        g_api.show_thread(&fx.ui, "000-0000", NULL);
+        CHECK(canvas_has_ink(fx.canvas));
+        nd_vclock_disable();
+    }
+    fx_free(&fx);
+
+    /* NULL-safety, the way every other screen here is checked. */
+    g_api.show_thread(NULL, "5551234", "Mum");
+    g_api.show_thread(&fx.ui, NULL, NULL);
+    g_api.show_threads(NULL);
+    g_checks++;
+}
+
 static void test_shutdown_is_exported(void)
 {
     g_api.shutdown(); /* must not crash, must not draw */
@@ -1340,6 +2026,7 @@ int main(void)
     RUN(test_send_flow_refuses_over_160);
     RUN(test_send_flow_without_a_modem);
     RUN(test_send_flow_reaches_a_modem);
+    RUN(test_send_flow_to_skips_the_number_prompt);
     RUN(test_send_flow_refuses_a_blank_number);
     RUN(test_inbox_marks_read_on_open);
     RUN(test_outbox_empty_state);
@@ -1347,6 +2034,19 @@ int main(void)
     RUN(test_write_exits_on_empty_backspace);
     RUN(test_open_message);
     RUN(test_open_message_missing_falls_back_to_inbox);
+    RUN(test_style_parse);
+    RUN(test_style_current);
+    RUN(test_peer_key);
+    RUN(test_outbox_recipient_roundtrip);
+    RUN(test_threads_group_and_order);
+    RUN(test_threads_display_name);
+    RUN(test_thread_messages_order);
+    RUN(test_thread_mark_read);
+    RUN(test_threads_unknown_recipient);
+    RUN(test_threads_bounds);
+    RUN(test_style_routes_app_run);
+    RUN(test_incoming_notification_opens_the_thread);
+    RUN(test_thread_screen_navigates);
     RUN(test_shutdown_is_exported);
 
     nd_vclock_disable();

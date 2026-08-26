@@ -30,6 +30,52 @@ extern "C" {
 #endif
 
 /* ------------------------------------------------------------------ *
+ * Messages Style -- NOT a port
+ * ------------------------------------------------------------------ *
+ *
+ * The Python has one Messages app: a three-item menu over an Inbox list and
+ * an Outbox list, which is what a 5190 had. That is kept, byte for byte, as
+ * CLASSIC. CHAT is a second front end over the same two tables: one row per
+ * correspondent, and inside it the exchange as bubbles.
+ *
+ * ============ CLASSIC IS THE DEFAULT, AND WHY ============
+ *
+ * Not because it is better -- because it is what is already there. An
+ * unparseable setting, a missing setting and a settings.prop that predates
+ * this all have to mean "behave exactly as before", or upgrading a phone
+ * silently redesigns an app on it. Switching is one row in Settings.
+ *
+ * ============ THREADING NEEDED A COLUMN THAT DID NOT EXIST ============
+ *
+ * The inbox has a `sender`. THE OUTBOX HAS NO RECIPIENT -- the Python's
+ * schema is (id, message, timestamp) and _save_outbox_message() never had a
+ * number to write, because the send flow asks for one and then throws it
+ * away. So a sent message could not be attributed to a conversation at all.
+ *
+ * nd_msg_save_outbox_to() adds one, behind an ALTER TABLE that tolerates
+ * having already run. Rows written before it exists have no recipient and
+ * are gathered under ND_MSG_PEER_UNKNOWN rather than being hidden: a phone
+ * that has been sending texts for a year should not look like it never has.
+ */
+
+/* settings.prop, read through nd_settings like every other app preference. */
+#define ND_MSG_STYLE_SETTING "system.ui.messages_style"
+#define ND_MSG_STYLE_DEFAULT "CLASSIC"
+
+typedef enum { ND_MSG_STYLE_CLASSIC = 0, ND_MSG_STYLE_CHAT } nd_msg_style;
+
+/* Case-insensitive, and tolerant in one direction only: anything that is not
+ * recognisably "CHAT" is CLASSIC. NULL and "" included. */
+nd_msg_style nd_msg_style_parse(const char *raw);
+
+/* The setting, parsed. */
+nd_msg_style nd_msg_style_current(void);
+
+/* The two rows Settings shows, in this order, so index 0 is CLASSIC. */
+#define ND_MSG_STYLE_ITEMS 2
+extern const char *const nd_msg_style_options[ND_MSG_STYLE_ITEMS];
+
+/* ------------------------------------------------------------------ *
  * The module constants, verbatim
  * ------------------------------------------------------------------ */
 
@@ -49,8 +95,11 @@ extern const int32_t nd_msg_arrow_keys[ND_MSG_ARROW_KEYS_N];
 /* The two lists the detail screen's Options branch shows, chosen by comparing
  * the TITLE STRING -- that is how the Python tells an inbox message from an
  * outbox one, and it is reproduced. */
-#define ND_MSG_INBOX_OPTIONS_N  1
-#define ND_MSG_OUTBOX_OPTIONS_N 2
+/* WAS {"Just Erase for now"} and {"Erase", "Send"}. Both now offer Delete
+ * and Forward, in both front ends -- the placeholder wording was the
+ * Python's and it was never a feature. */
+#define ND_MSG_INBOX_OPTIONS_N  2
+#define ND_MSG_OUTBOX_OPTIONS_N 3
 extern const char *const nd_msg_inbox_options[ND_MSG_INBOX_OPTIONS_N];
 extern const char *const nd_msg_outbox_options[ND_MSG_OUTBOX_OPTIONS_N];
 
@@ -94,6 +143,12 @@ typedef struct {
     char sender[ND_MSG_SENDER_MAX]; /* "" for an outbox row */
     int64_t timestamp;
     int32_t is_read; /* 0 for an outbox row */
+
+    /* NOT a port: who a SENT message went to. "" for an inbox row, and also
+     * "" for an outbox row written before the column existed. The inbox's
+     * `sender` is deliberately left empty for outbox rows even now, because
+     * three existing tests assert that it is. */
+    char recipient[ND_MSG_SENDER_MAX];
 } nd_msg_rec;
 
 /* A negative id is C's spelling of Python's `message_id is None`, which the
@@ -142,6 +197,82 @@ void nd_msg_delete_outbox(int64_t id);
  * did not, this app creates a rollback-journal outbox. Reproduced, not
  * fixed; nd_db.h documents the same asymmetry for the call log. */
 nd_err nd_msg_save_outbox(const char *text);
+
+/* The same, with a recipient -- which is what makes a sent message land in a
+ * conversation. `recipient` NULL or "" behaves exactly like the call above.
+ *
+ * The column is added by an ALTER TABLE that is run every time and whose
+ * "duplicate column name" is swallowed. sqlite has no ADD COLUMN IF NOT
+ * EXISTS, and reading back the table's own schema to decide would be more
+ * code doing the same thing. */
+nd_err nd_msg_save_outbox_to(const char *text, const char *recipient);
+
+/* ------------------------------------------------------------------ *
+ * Conversations -- NOT a port
+ * ------------------------------------------------------------------ */
+
+/* A phone can hold more correspondents than a screen can list; both caps are
+ * heap-allocated for the life of one screen. 64 threads is ~16 KB and 128
+ * bubbles is ~136 KB. */
+#define ND_MSG_THREADS_MAX 64
+#define ND_MSG_BUBBLES_MAX 128
+
+/* The preview is one line of a list row, not a message. */
+#define ND_MSG_PREVIEW_MAX 96
+
+/* Where an outbox row with no recipient goes. Shown as a thread rather than
+ * dropped: a phone that has been sending texts since before the column
+ * existed must not look like it never has. */
+#define ND_MSG_PEER_UNKNOWN "(unknown)"
+
+/* The thread key: `number` with everything except 0-9, * # and + removed, so
+ * that "555-1234" and "5551234" are one conversation.
+ *
+ * It does NOT try to reconcile "+15551234" with "5551234". Deciding those are
+ * the same needs a country code the phone has not been told, and guessing
+ * wrong merges two people's conversations -- which is a worse failure than
+ * showing one person twice. */
+void nd_msg_peer_key(char *dst, size_t dst_sz, const char *number);
+
+typedef struct {
+    char peer[ND_MSG_SENDER_MAX];    /* the key, normalised */
+    /* The number AS IT WAS LAST SEEN, punctuation and all. Two things need
+     * it and neither wants the key: a reply is addressed to it, and it is
+     * what a thread with no matching contact is labelled with -- "555-7777"
+     * rather than "5557777", which is the same number spelled the way the
+     * person who sent it spells it. */
+    char number[ND_MSG_SENDER_MAX];
+    char display[ND_MSG_SENDER_MAX]; /* the contact's name, or `number` */
+    char preview[ND_MSG_PREVIEW_MAX];
+    int64_t last_ts;
+    int32_t unread;      /* unread INBOX rows in this thread */
+    int32_t n_messages;  /* in and out together */
+    bool last_outgoing;  /* whose message the preview is */
+} nd_msg_thread;
+
+/* One message in a thread. */
+typedef struct {
+    int64_t id;
+    char text[ND_MSG_TEXT_MAX];
+    int64_t timestamp;
+    bool outgoing;
+} nd_msg_bubble;
+
+/* Every conversation, most recently active FIRST -- which is what a chat list
+ * is. Returns how many rows were written.
+ *
+ * The display name comes from nd_contacts_lookup_name(); a number with no
+ * contact shows as the number. */
+size_t nd_msg_threads(nd_msg_thread *out, size_t max);
+
+/* One conversation, oldest FIRST -- the opposite of the list, because that is
+ * the order a transcript reads in. `peer` is a key from nd_msg_peer_key(), or
+ * a raw number, which is normalised here. */
+size_t nd_msg_thread_messages(const char *peer, nd_msg_bubble *out, size_t max);
+
+/* Marks every unread inbox row in one thread as read. Opening a conversation
+ * is reading it. */
+void nd_msg_thread_mark_read(const char *peer);
 
 /* ------------------------------------------------------------------ *
  * The app's own text wrapper (main.c)
@@ -213,6 +344,24 @@ const char *nd_msg_number_input_show(nd_ui *ui, const char *title, const char *p
  * true only when the network accepted the message. */
 bool nd_msg_send_flow(nd_ui *ui, const char *text, int32_t root_id, int32_t sub_index);
 
+/* The same flow with the recipient already known, which is what a reply from
+ * inside a conversation has. `to` NULL or "" means ask, which is what the
+ * ported call above does.
+ *
+ * ============ IT NOW RECORDS THE SENT MESSAGE ============
+ *
+ * The Python's _send_message_flow() writes NOTHING on success: a sent message
+ * is not saved anywhere unless the user separately chooses Options -> Save,
+ * so the Outbox only ever held drafts. That is a gap rather than a decision --
+ * the screen is called "Outbox" and did not contain what had been sent -- and
+ * a conversation cannot show your own half of it at all.
+ *
+ * So a successful send now writes the message to the outbox with its
+ * recipient. Classic's Outbox gains the sent messages it always implied it
+ * had; Chat gains the right-hand bubbles. Recorded in OPEN-QUESTIONS.md. */
+bool nd_msg_send_flow_to(nd_ui *ui, const char *text, int32_t root_id, int32_t sub_index,
+                         const char *to);
+
 /* _show_message_detail(...)'s return: None, or the string "deleted" that
  * tells _show_inbox / _show_outbox to loop instead of returning. */
 typedef enum { ND_MSG_DETAIL_BACK = 0, ND_MSG_DETAIL_DELETED } nd_msg_detail_result;
@@ -221,12 +370,46 @@ nd_msg_detail_result nd_msg_show_detail(nd_ui *ui, const char *title, const char
                                         int32_t sub_index, const char *message, int64_t message_id,
                                         const char *sender, int64_t timestamp);
 
+/* ------------------------------------------------------------------ *
+ * The chat front end -- NOT a port
+ * ------------------------------------------------------------------ */
+
+/* The conversation list: "New Message" first, then one row per
+ * correspondent, most recent first, each showing the name and a preview of
+ * the last message. Returns when the user backs out. */
+void nd_msg_show_threads(nd_ui *ui);
+
+/* One conversation as bubbles, oldest at the top.
+ *
+ * Up and Down move a selection through the bubbles AND onto the message box
+ * at the bottom, which is the one row that is not a message: choosing it
+ * opens the composer already addressed to this correspondent. Choosing a
+ * bubble offers Delete and Forward.
+ *
+ * `peer` is a key or a raw number; `display` is what the title bar shows and
+ * may be NULL, in which case the number is used. */
+void nd_msg_show_thread(nd_ui *ui, const char *peer, const char *display);
+
 /* _show_inbox(ui, 2, 1) and _show_outbox(ui, 2, 2). */
 void nd_msg_show_inbox(nd_ui *ui, int32_t root_id, int32_t sub_index);
 void nd_msg_show_outbox(nd_ui *ui, int32_t root_id, int32_t sub_index);
 
 /* _show_write_message(ui, 2, 3) -- the composer. */
 void nd_msg_show_write(nd_ui *ui, int32_t root_id, int32_t sub_index);
+
+/* The composer, opened with something already in it. NOT a port.
+ *
+ * `body` prefills the text -- which is what Forward is: the message you chose,
+ * in a new composer, with the cursor after it.
+ *
+ * `to` prefills the RECIPIENT, so a reply from inside a conversation does not
+ * ask for a number you have already named by opening the thread. NULL for
+ * either means "ask", which is what the ported call does for both.
+ *
+ * Returns true when a message was actually sent, so a thread view knows
+ * whether to reload itself. */
+bool nd_msg_show_write_prefill(nd_ui *ui, int32_t root_id, int32_t sub_index, const char *body,
+                               const char *to);
 
 #ifdef __cplusplus
 }
