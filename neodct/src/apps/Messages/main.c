@@ -890,12 +890,24 @@ void nd_msg_show_write(nd_ui *ui, int32_t root_id, int32_t sub_index)
     (void)nd_msg_show_write_prefill(ui, root_id, sub_index, NULL, NULL);
 }
 
+/* nd_textlong borrows its title rather than copying it, so the storage has to
+ * outlive the widget. One composer is open at a time -- it is a modal screen
+ * on a phone with one screen -- so one buffer is enough, and it is also what
+ * nd_msg_composer_title() reads back. */
+static char g_composer_title[ND_MSG_SENDER_MAX];
+
+const char *nd_msg_composer_title(void)
+{
+    return g_composer_title;
+}
+
 bool nd_msg_show_write_prefill(nd_ui *ui, int32_t root_id, int32_t sub_index, const char *body,
                                const char *to)
 {
     char text[ND_TEXTLONG_CAP];
     char options_root[16];
     nd_textlong input_widget;
+    const char *title;
     nd_softkey softkey;
     bool cursor_on = true;
     double last_blink;
@@ -904,10 +916,28 @@ bool nd_msg_show_write_prefill(nd_ui *ui, int32_t root_id, int32_t sub_index, co
         return false;
     if (nd_snprintf(options_root, sizeof options_root, "%d-%d", root_id, sub_index) != ND_OK)
         return false;
+
+    /* The header's top right already carries the T9 mode indicator. When the
+     * composer was reached from inside a conversation the row's LEFT should
+     * say who the message is for -- "Write" does not, and in Chat you got here
+     * by picking a person. Falls back to the number, which still beats
+     * "Write": it is the one fact the screen has about the destination.
+     *
+     * Every Classic caller, and both New Message and Forward, pass no
+     * recipient and keep the ported title untouched. */
+    title = ND_MSG_COMPOSER_TITLE;
+    if (to != NULL && to[0] != '\0') {
+        if (!nd_contacts_lookup_name(to, g_composer_title, sizeof g_composer_title) ||
+            g_composer_title[0] == '\0')
+            (void)nd_strlcpy(g_composer_title, to, sizeof g_composer_title);
+        title = g_composer_title;
+    } else {
+        (void)nd_strlcpy(g_composer_title, ND_MSG_COMPOSER_TITLE, sizeof g_composer_title);
+    }
     /* The prefill goes in as the widget's INITIAL text, so the cursor lands
      * after it and Clear deletes it a character at a time -- a forwarded
      * message is a draft you can edit, not a fixed payload. */
-    if (nd_textlong_init(&input_widget, ui, "Write", text, sizeof text, (body != NULL) ? body : "",
+    if (nd_textlong_init(&input_widget, ui, title, text, sizeof text, (body != NULL) ? body : "",
                          ND_T9_FILTER_ANY) != ND_OK)
         return false;
 

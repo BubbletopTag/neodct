@@ -377,6 +377,14 @@ nd_msg_detail_result nd_msg_show_detail(nd_ui *ui, const char *title, const char
 /* The conversation list: "New Message" first, then one row per
  * correspondent, most recent first, each showing the name and a preview of
  * the last message. Returns when the user backs out. */
+/* The composer's header when it has no recipient to name -- the ported title,
+ * and what every Classic caller still gets. */
+#define ND_MSG_COMPOSER_TITLE "Write"
+
+/* The title the composer last opened with. Exists so a test can read what
+ * nd_msg_show_write_prefill() put in the header without matching pixels. */
+const char *nd_msg_composer_title(void);
+
 void nd_msg_show_threads(nd_ui *ui);
 
 /* One conversation as bubbles, oldest at the top.

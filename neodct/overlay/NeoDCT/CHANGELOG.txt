@@ -29,6 +29,13 @@ Added
   System/engineering/tools/debug_sms_seed_chats.py -- several people,
   both directions, and contacts to go with them.
 
+Changed
+- Writing a reply from inside a conversation now says WHO it is to in
+  the header, instead of just "Write". The input-mode indicator sits at
+  the other end of the same row, so one glance gives you both. Starting
+  a new message or forwarding one still says "Write" -- there is no
+  recipient to name yet.
+
 Fixed
 - Sent messages are now saved. The phone used to hand a text to the
   modem and forget it ever existed, which meant the screen called

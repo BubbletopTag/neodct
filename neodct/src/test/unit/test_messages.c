@@ -227,6 +227,7 @@ typedef struct {
     void (*show_outbox)(nd_ui *, int32_t, int32_t);
     void (*show_write)(nd_ui *, int32_t, int32_t);
     void (*show_threads)(nd_ui *);
+    const char *(*composer_title)(void);
     void (*show_thread)(nd_ui *, const char *, const char *);
 
     const char *const *menu_items;
@@ -298,6 +299,7 @@ static bool api_open(void)
     *(void **)&g_api.show_outbox = sym(h, "nd_msg_show_outbox");
     *(void **)&g_api.show_write = sym(h, "nd_msg_show_write");
     *(void **)&g_api.show_threads = sym(h, "nd_msg_show_threads");
+    *(void **)&g_api.composer_title = sym(h, "nd_msg_composer_title");
     *(void **)&g_api.show_thread = sym(h, "nd_msg_show_thread");
 
     g_api.menu_items = dlsym(h, "nd_msg_menu_items");
@@ -310,6 +312,7 @@ static bool api_open(void)
            g_api.thread_messages != NULL && g_api.thread_mark_read != NULL &&
            g_api.style_options != NULL && g_api.send_flow_to != NULL &&
            g_api.show_write_prefill != NULL && g_api.show_threads != NULL &&
+           g_api.composer_title != NULL &&
            g_api.show_thread != NULL &&
            g_api.run != NULL && g_api.open_message != NULL && g_api.open_inbox != NULL &&
            g_api.shutdown != NULL && g_api.fetch_inbox != NULL && g_api.fetch_outbox != NULL &&
@@ -1981,6 +1984,62 @@ static void test_thread_screen_navigates(void)
     g_checks++;
 }
 
+/* The composer's header carries the T9 mode indicator in its top right, and
+ * in Chat it should say WHO you are writing to on the same row -- you reach it
+ * from inside a conversation, and "Write" does not tell you which one.
+ *
+ * Classic must be unaffected: every one of its callers passes no recipient, so
+ * the title stays "Write" and widget-textinputlong is undisturbed. */
+static void test_composer_titles_itself_with_the_recipient(void)
+{
+    fixture fx;
+
+    db_init(); /* seeds ("NeoDCT Support", "555-1234", 2) */
+
+    /* With a recipient the phone book knows: the contact's name. */
+    if (!fx_init(&fx) || !fx_keys(&fx)) {
+        CHECK(false);
+        fx_free(&fx);
+        return;
+    }
+    hold_key(&fx, ND_KEY_CLEAR);
+    nd_vclock_enable();
+    (void)g_api.show_write_prefill(&fx.ui, 2, 3, "hi", "555-1234");
+    nd_vclock_disable();
+    CHECK_STR(g_api.composer_title(), "NeoDCT Support");
+    fx_free(&fx);
+    pt_new_case();
+
+    /* With a recipient it does not: the number itself, which still beats
+     * "Write" -- it is the one fact the screen has about the destination. */
+    if (!fx_init(&fx) || !fx_keys(&fx)) {
+        CHECK(false);
+        fx_free(&fx);
+        return;
+    }
+    hold_key(&fx, ND_KEY_CLEAR);
+    nd_vclock_enable();
+    (void)g_api.show_write_prefill(&fx.ui, 2, 3, "hi", "555-9999");
+    nd_vclock_disable();
+    CHECK_STR(g_api.composer_title(), "555-9999");
+    fx_free(&fx);
+    pt_new_case();
+
+    /* No recipient -- every Classic caller, plus New Message and Forward --
+     * is unchanged. */
+    if (!fx_init(&fx) || !fx_keys(&fx)) {
+        CHECK(false);
+        fx_free(&fx);
+        return;
+    }
+    hold_key(&fx, ND_KEY_CLEAR);
+    nd_vclock_enable();
+    (void)g_api.show_write_prefill(&fx.ui, 2, 3, "hi", NULL);
+    nd_vclock_disable();
+    CHECK_STR(g_api.composer_title(), "Write");
+    fx_free(&fx);
+}
+
 static void test_shutdown_is_exported(void)
 {
     g_api.shutdown(); /* must not crash, must not draw */
@@ -2047,6 +2106,7 @@ int main(void)
     RUN(test_style_routes_app_run);
     RUN(test_incoming_notification_opens_the_thread);
     RUN(test_thread_screen_navigates);
+    RUN(test_composer_titles_itself_with_the_recipient);
     RUN(test_shutdown_is_exported);
 
     nd_vclock_disable();

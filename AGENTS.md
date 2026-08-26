@@ -68,6 +68,17 @@ are fast enough that there is no excuse not to.
 PIL images instead of writing to the framebuffer. Docs screenshots come from
 `shoot_docs.py` on top of it — genuine output, not mockups.
 
+T9 — multi-tap, predictive, the `#` mode cycle and the mode indicator in the
+composer's top right — runs only on the i2c matrix keypad, because a QWERTY
+dev keyboard takes a different input path and genuinely has no modes. So on
+QEMU none of it is visible by default. `NEODCT_T9=1` overrides that; the boot
+script sources `/NeoDCT/User/env.sh` if it exists, which is the way to set it
+without rebuilding a read-only rootfs:
+
+```sh
+echo 'export NEODCT_T9=1' > /NeoDCT/User/env.sh
+```
+
 The C build has its own suite — `cd neodct/src && make test`, and
 `make ASAN=1 test` before you push anything. It includes the golden frames in
 `neodct/tests/golden/`, captured from the Python build during the port.
