@@ -605,6 +605,67 @@ static void test_newest_version_not_newest_publication(void)
     }
 }
 
+/* The other fixtures are hand-written to exercise a shape. This one is not:
+ * releases-live.json is what api.github.com actually answered for this
+ * repository, captured verbatim -- the real ids, the real digests, the
+ * nested uploader objects, the release notes with their newlines, and the
+ * real asset sizes. It is here because a parser that handles a tidy fixture
+ * and chokes on production bytes is the failure nobody sees until a phone
+ * is in somebody's hand.
+ *
+ * Both platforms, because ONE RELEASE CARRIES BOTH and picking the wrong
+ * asset is a 56 MB mistake. The sizes differ between them (56,436,037 for
+ * the luckfox against 58,828,100 for qemu in 0.3.14a), which is what makes
+ * the assertion worth making: getting the platform wrong would still return
+ * a plausible-looking release. */
+static void test_the_real_listing_parses_for_both_platforms(void)
+{
+    static const struct {
+        const char *platform;
+        const char *asset;
+        int64_t newest_size;
+        int64_t older_size;
+    } CASES[] = {
+        {"luckfox-armv7", "UPDATE-luckfox-armv7.ndsw", 56436037, 56039086},
+        {"qemu-aarch64", "UPDATE-qemu-aarch64.ndsw", 58828100, 64095912},
+    };
+    size_t c;
+
+    for (c = 0u; c < sizeof CASES / sizeof CASES[0]; c++) {
+        nd_release list[8];
+        size_t n = 0u;
+        char why[ND_REMOTE_WHY_MAX];
+
+        scenario_reset();
+        ctl_body("releases-live.json");
+
+        CHECK_INT(nd_remote_all_releases(CASES[c].platform, ND_RELEASES_LIMIT, list, 8u, &n, why,
+                                         sizeof why),
+                  ND_UPD_OK, "the real listing parses");
+        CHECK_INT(n, 2, "both captured releases carry an asset for this platform");
+        if (n != 2u)
+            continue;
+
+        /* Publication order, newest first, as GitHub returned it. */
+        CHECK_STR(list[0].version, "0.3.14a", "0.3.14a is first");
+        CHECK_STR(list[1].version, "0.3.13a", "0.3.13a second");
+
+        /* The tag has no leading 'v' here, so version == tag. */
+        CHECK_STR(list[0].tag, "0.3.14a", "and the tag is the tag");
+
+        CHECK(strstr(list[0].url, CASES[c].asset) != NULL,
+              "the URL is this platform's asset and not the other one");
+        CHECK_INT(list[0].size, CASES[c].newest_size, "and GitHub's size for it");
+        CHECK_INT(list[1].size, CASES[c].older_size, "and for the older one");
+
+        /* Every NeoDCT release is a prerelease -- which is why latest() is
+         * built on this and not on GitHub's /releases/latest, an endpoint
+         * that ignores prereleases and answered 404 for this repository. */
+        CHECK(list[0].prerelease, "the real releases are prereleases");
+        CHECK(list[0].notes[0] != '\0', "and the notes came through");
+    }
+}
+
 static void test_a_release_without_this_platform_is_skipped(void)
 {
     nd_release rel;
@@ -1158,6 +1219,7 @@ int main(void)
     test_latest_picks_this_platform();
     test_the_endpoint_the_phone_asks_for();
     test_newest_version_not_newest_publication();
+    test_the_real_listing_parses_for_both_platforms();
     test_a_release_without_this_platform_is_skipped();
     test_garbage_and_the_wrong_shape();
     test_http_statuses();
