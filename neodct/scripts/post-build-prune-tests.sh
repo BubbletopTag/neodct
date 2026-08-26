@@ -147,30 +147,26 @@ for name in ${NEODCT_EXCLUDE_APPS:-}; do
     done
 done
 
-# Host-built .pyc files are useless on the target (host python != target
-# python) and a read-only rootfs cannot replace them. Drop them; the
-# runtime caches to /NeoDCT/User/.pycache instead (see run_neodct.sh).
 find "$TARGET_DIR/NeoDCT" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
-# Drop the Python from the image.
+# Drop the Python from the image -- A BACKSTOP NOW, NOT THE MAIN EVENT.
 #
-# The overlay still carries the whole Python OS -- 127 files, ~700 KB -- and
-# it is load-bearing IN THE REPOSITORY: it is the reference the C is checked
-# against and the only way to re-cut a golden frame (docs/c-rewrite/BUILDING.md
-# section 4). It is dead weight ON THE TARGET. Nothing on the device invokes
-# it: nd-core is the init process, nd-apprun dlopen()s app.so, and
-# ND_APP_SO_NAME is a compile-time constant -- the "exec": "main.py" line in
-# every manifest.json is never read by the C at all.
+# This used to do real work: the overlay carried the whole Python OS, 127
+# files, and this pass is what kept them off the target. The overlay no
+# longer carries any of it -- it lives in neodct/python-reference/, out of
+# BR2_ROOTFS_OVERLAY entirely -- so on a clean tree the count below is zero.
 #
-# Left in place it is worse than wasted bytes. `ls /NeoDCT/System/core` shows
-# ModemService/ and BatteryService/ full of .py and no sign of the services
-# that are actually running, which is exactly the wrong thing for the next
-# person debugging the phone over serial to find.
+# It stays because the overlay is a directory anybody can drop a file into,
+# and a stray .py under /NeoDCT is not a small mistake: `ls
+# /NeoDCT/System/core` showing ModemService/ full of .py and no sign of the
+# service actually running is exactly the wrong thing for the next person
+# debugging the phone over serial to find. There is also no interpreter on
+# the image any more, so anything this catches could not have run regardless.
 #
 # Scoped to /NeoDCT so it cannot touch anything a package installed, and the
 # now-empty service directories under System/core go with them -- that tree is
-# Python and t9.dict, nothing else, so an empty directory there is a leftover
-# and not something somebody meant.
+# t9.dict and directories, nothing else, so an empty directory there is a
+# leftover and not something somebody meant.
 # The icebox does not ship.
 #
 # /NeoDCT/Development is where work gets parked -- Icebox/MusicPlayer is a

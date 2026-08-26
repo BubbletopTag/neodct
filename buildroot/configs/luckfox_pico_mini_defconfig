@@ -42,13 +42,16 @@ BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="board/qemu/aarch64-virt/linux.config"
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
 BR2_PACKAGE_DEJAVU=y
 BR2_PACKAGE_GPM=y
-BR2_PACKAGE_PYTHON3=y
-BR2_PACKAGE_PYTHON3_SSL=y
-BR2_PACKAGE_PYTHON3_SQLITE=y
-BR2_PACKAGE_PYTHON3_XZ=y
-BR2_PACKAGE_PYTHON_PILLOW=y
-BR2_PACKAGE_PYTHON_MUTAGEN=y
-BR2_PACKAGE_PYTHON_MINIAUDIO=y
+# python3, Pillow, mutagen and miniaudio were here until the last app was
+# ported. Nothing on the phone runs Python any more: /bin/run_neodct.sh
+# execs nd-core, and nd-apprun dlopen()s <app-dir>/app.so. The sources they
+# used to run are kept, out of the overlay, in neodct/python-reference --
+# the port cites them by file and line and they must not ship.
+#
+# sqlite USED TO ARRIVE ONLY THROUGH BR2_PACKAGE_PYTHON3_SQLITE. Dropping
+# python without it builds cleanly and gives a phone with no phonebook, no
+# messages and no call log; BR2_PACKAGE_NEODCT selects it (and freetype,
+# jpeg, libpng, zlib and openssl) in its Config.in for exactly that reason.
 BR2_PACKAGE_JPEG=y
 BR2_PACKAGE_ALSA_UTILS=y
 BR2_PACKAGE_ALSA_UTILS_ALSAMIXER=y
@@ -104,10 +107,9 @@ BR2_PACKAGE_OPENSSH_KEY_UTILS=y
 # --- The C rewrite ---
 # nd-core, nd-apprun, libneodct, the app .so files and the ST7789 panel
 # daemon, built from neodct/src by buildroot/package/neodct. This is what
-# /bin/run_neodct.sh execs; python3 and Pillow stay in the image alongside it
-# until the last app is ported (docs/c-rewrite/SESSION-SCOPE.md).
+# /bin/run_neodct.sh execs, and now the only thing it execs: the last app is
+# ported, so python3 and Pillow have left the image (see above).
 #
-# Selects sqlite explicitly, because today sqlite is only reachable through
-# BR2_PACKAGE_PYTHON3_SQLITE -- dropping python without it would build cleanly
-# and ship a phone with no phonebook.
+# Selects sqlite, freetype, jpeg, libpng, zlib and openssl in its Config.in,
+# so that dropping python takes none of them with it.
 BR2_PACKAGE_NEODCT=y

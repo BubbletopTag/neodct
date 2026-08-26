@@ -275,13 +275,20 @@ The C build is wired in through three things:
 The build uses the `buildroot/` copy. Edit both or the next person builds
 something else. `diff` them before committing.
 
-The package selects `BR2_PACKAGE_SQLITE` explicitly. It is currently reachable
-only through `BR2_PACKAGE_PYTHON3_SQLITE`, so an image that drops Python without
-that line builds cleanly and ships with no phonebook, no messages and no call
-log.
+The package selects `BR2_PACKAGE_SQLITE` explicitly. Until Python left, sqlite
+was reachable *only* through `BR2_PACKAGE_PYTHON3_SQLITE`, so an image that
+dropped Python without that line would have built cleanly and shipped with no
+phonebook, no messages and no call log. It also selects freetype, jpeg, libpng,
+zlib and openssl for the same reason.
 
-Python and Pillow are still in the image. They come out when every app is real,
-not before.
+**Python is out of the image.** Every app is real, so `BR2_PACKAGE_PYTHON3`,
+Pillow, mutagen and miniaudio have left all four NeoDCT defconfigs, and the
+overlay's 1.6 MB of `.py` has moved to `neodct/python-reference/` — it is the
+specification the port cites by file and line, and it must not ship. Removing a
+package from a defconfig is one of the changes buildroot cannot do
+incrementally: `output/target` keeps the files until a clean rebuild, so
+`make neodct_qemu_defconfig && make clean && make` is what actually sheds
+them.
 
 ### musl
 
