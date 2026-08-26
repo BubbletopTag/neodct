@@ -212,13 +212,7 @@ x86-64 Linux, because that is where the golden-frame tests run. So:
 
 ## 7. Testing
 
-Every module gets a unit test that runs on the host. Rendering modules additionally get
-golden-frame tests.
-
-The golden-frame reference is the **Python build's output**, captured before any C is
-written. A C rendering change that alters pixels fails the test. That is the point — it
-is how "one-to-one" becomes something a machine checks instead of something a person
-argues about.
+Every module gets a unit test that runs on the host.
 
 ```
 tests/
@@ -229,6 +223,34 @@ tests/
 
 A test that needs hardware is not a unit test. Put it in `tests/hw/`, and it runs only
 on the device.
+
+### Golden frames are no longer a gate
+
+The golden-frame reference is the **Python build's output**, captured before any C was
+written, and while the port was in progress a C change that altered pixels failed the
+test. That was the right rule then: it is how "one-to-one" became something a machine
+checked instead of something a person argued about.
+
+The port is done, and the owner has since ruled that the frames have served their
+purpose — applications are now being deliberately redesigned to look *different* from
+the Python, and a rule that fails a build for changing pixels is now a rule against
+doing the work. **A golden frame is not a reason to leave a screen the way it is, and
+it is not something to ask permission about before changing a screen.**
+
+What they are still good for, and why they are kept:
+
+- **Regression, not conformance.** When you change screen A, the frames for screens
+  B through Z are a cheap check that you did not disturb them. The Messages Chat style
+  is the worked example: Classic was untouched, so `app-messages` and
+  `app-messages-inbox` still match, and *that* is the useful signal.
+- A frame you deliberately changed gets **re-cut**, not argued with:
+
+      ./build/default/bin/nd-shoot --out /tmp/frames
+      python3 neodct/tools/goldenframe.py --compare neodct/tests/golden /tmp/frames
+
+  then copy the new PNG over the old one and update `manifest.json`. Say so in the
+  commit message. Do not cut a *new* frame for a *new* screen — a redesigned screen's
+  test is its unit test, not a picture of itself that can only ever agree with it.
 
 ---
 

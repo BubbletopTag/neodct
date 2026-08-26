@@ -328,9 +328,16 @@ neodct/tools/          goldenframe.py, fontref.py, logref.py, verify-c-build.sh
 ringtones, icons, `manifest.json` files, `/etc`, the initramfs scripts. Those
 stay directly editable with no rebuild.
 
-**`neodct/overlay/NeoDCT/` is still the Python, and it is load-bearing.** It is
-the reference the C is checked against, and the only way to re-cut a golden
-frame. Do not delete it until the port is finished.
+**`neodct/overlay/NeoDCT/` is still the Python, and it is load-bearing.** It was
+the reference the C was checked against during the port, and `goldenframe.py`
+re-cuts a frame from it.
+
+That is now only true of a screen the C has *not* deliberately changed. A screen
+that has been redesigned in C — the Music library, the Messages Chat style — has
+no Python original to capture, so its frame is re-cut from the C build with
+`nd-shoot --out` instead. See CODING-STANDARDS.md section 7 for when to re-cut
+at all. Do not delete the Python; the fonts, log and widget references still
+come out of it.
 
 It does **not** ship. `post-build-prune-tests.sh` deletes every `.py` from the
 target — 74 files, about 2 MB — because nothing on the device runs them:

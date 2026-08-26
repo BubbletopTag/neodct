@@ -1,10 +1,20 @@
-# Golden frames — the reference the C port is verified against
+# Golden frames — a regression net, no longer a conformance gate
 
 Captured from the **Python build** with `neodct/tools/goldenframe.py`, before any C
-was written. These 49 images are what NeoDCT looks like today, and the C rewrite is
-correct exactly when it reproduces them pixel for pixel.
+was written. While the port was in progress these images were the definition of
+correct: the C build was right exactly when it reproduced them pixel for pixel.
 
-Regenerate (only when the Python UI intentionally changes):
+**That is over.** The port is done and applications are now being deliberately
+redesigned — the Music library, the Messages Chat style — so a frame that no longer
+matches is usually the *point*, not a failure. See CODING-STANDARDS.md section 7.
+
+What they are for now: when you change one screen, these are a cheap check that you
+did not disturb the other forty-seven. A frame you meant to change gets re-cut and
+said so in the commit message. A screen that is genuinely new does **not** get a new
+frame — its test is a unit test, not a picture of itself that can only ever agree
+with it.
+
+Regenerate (only when the UI intentionally changes):
 
     python3 neodct/tools/goldenframe.py --out neodct/tests/golden/
 

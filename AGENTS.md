@@ -68,6 +68,18 @@ are fast enough that there is no excuse not to.
 PIL images instead of writing to the framebuffer. Docs screenshots come from
 `shoot_docs.py` on top of it — genuine output, not mockups.
 
+The C build has its own suite — `cd neodct/src && make test`, and
+`make ASAN=1 test` before you push anything. It includes the golden frames in
+`neodct/tests/golden/`, captured from the Python build during the port.
+
+**Golden frames are a regression net, not a gate.** The port is finished and
+apps are now being deliberately redesigned, so a frame that stops matching
+because you changed that screen on purpose is the point, not a failure — re-cut
+it and say so in the commit. Their value now is telling you that changing screen
+A did not disturb screens B through Z. Do not leave a screen alone because a
+picture of it exists, do not ask permission to change one, and do not cut a new
+frame for a new screen. See CODING-STANDARDS.md section 7.
+
 ## The image design (understand this before touching storage)
 
 At runtime `/` and `/NeoDCT/System` are **read-only squashfs** under dm-verity.
