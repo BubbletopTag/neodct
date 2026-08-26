@@ -44,7 +44,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NEODCT = os.path.dirname(HERE)
-for _p in (HERE, os.path.join(NEODCT, "overlay", "NeoDCT")):
+for _p in (HERE, os.path.join(NEODCT, "python-reference")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 

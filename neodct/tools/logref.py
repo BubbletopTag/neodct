@@ -29,7 +29,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NEODCT = os.path.dirname(HERE)
-sys.path.insert(0, os.path.join(NEODCT, "overlay", "NeoDCT"))
+sys.path.insert(0, os.path.join(NEODCT, "python-reference"))
 
 from System.core import logstyle  # noqa: E402
 

@@ -25,10 +25,20 @@ import tempfile
 
 from PIL import Image
 
-REPO_NEODCT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "overlay", "NeoDCT",
-)
+# TWO TREES, and the split matters.
+#
+# The overlay is what ships: fonts, icons, wallpapers, t9.dict, the
+# manifests. The Python OS is not in it any more -- it is the reference
+# implementation, it must never reach a phone, and it lives in
+# neodct/python-reference (see the README there).
+#
+# A staged phone needs BOTH. The data comes from the overlay because that is
+# what the device has; the System.* modules come from the reference because
+# that is where they are. stage_overlay() lays the second over the first, so
+# the staged root is what /NeoDCT looked like when Python ran it.
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_NEODCT = os.path.join(_REPO, "overlay", "NeoDCT")
+PY_REFERENCE = os.path.join(_REPO, "python-reference")
 
 # Device geometry (see System/core/main.py).
 PANEL_W = 240
@@ -244,15 +254,16 @@ def stage_overlay(dest=None):
     root = os.path.join(str(dest), "NeoDCT")
     if os.path.exists(root):
         shutil.rmtree(root)
-    shutil.copytree(
-        REPO_NEODCT, root,
-        # t9.dict is nearly 3MB of read-only word list. Copying it into
-        # every staged phone put ~3MB per test into /tmp for no benefit --
-        # nothing here types predictively, and t9_dict falls back to no
-        # suggestions when the file is absent, which is exactly the
-        # behaviour a phone without one has.
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "t9.dict"),
-    )
+    ignore = shutil.ignore_patterns("__pycache__", "*.pyc", "t9.dict")
+    # t9.dict is nearly 3MB of read-only word list. Copying it into every
+    # staged phone put ~3MB per test into /tmp for no benefit -- nothing here
+    # types predictively, and t9_dict falls back to no suggestions when the
+    # file is absent, which is exactly the behaviour a phone without one has.
+    shutil.copytree(REPO_NEODCT, root, ignore=ignore)
+    # ...then the Python over the top, into the same tree. dirs_exist_ok is
+    # the whole point: System/apps/Clock/ already exists with its icon and
+    # manifest from the overlay, and this adds the main.py beside them.
+    shutil.copytree(PY_REFERENCE, root, ignore=ignore, dirs_exist_ok=True)
     return root
 
 
@@ -290,8 +301,8 @@ class StubUI:
     # --- lifecycle -------------------------------------------------------
 
     def __enter__(self):
-        if REPO_NEODCT not in sys.path:
-            sys.path.insert(0, REPO_NEODCT)
+        if PY_REFERENCE not in sys.path:
+            sys.path.insert(0, PY_REFERENCE)
 
         # PathRemap only covers /NeoDCT, so anything the runtime reads out
         # of /proc still belongs to the build host. That matters for the
