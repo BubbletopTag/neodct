@@ -1,0 +1,36 @@
+#!/bin/sh
+#
+# S11udevall -- the rest of the udev coldplug.
+#
+# S10udevd triggers and settles the input subsystem only, because that is
+# the one part of it the UI cannot start without (see the long comment
+# there). This is everything else: the subsystem pass and every non-input
+# device in /sys.
+#
+# It is deliberately NOT in rcS's NEODCT_BOOT_CRITICAL list, so it runs in
+# the background while the home screen is already drawing. It is numbered 11
+# so that it is still the FIRST of the background scripts -- eudev renames
+# network interfaces (the qmi_wwan one becomes wwp0s4u3i5 under QEMU, which
+# is why S45modem matches by driver), and S40network, S41ethernet and
+# S45modem all want that settled before they look. Keep it ahead of them.
+#
+SETTLE_TIMEOUT=30
+[ -r /etc/default/udevd ] && . /etc/default/udevd
+
+case "$1" in
+    start)
+        # No message on success: this is the invisible half of a step that
+        # already printed "Starting udevd: OK".
+        udevadm trigger --type=subsystems --action=add
+        udevadm trigger --type=devices --action=add
+        udevadm settle --timeout=$SETTLE_TIMEOUT \
+            || echo "udevadm settle failed (full coldplug)"
+        ;;
+    stop|restart|reload)
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|reload}"
+        exit 1
+        ;;
+esac
+exit 0

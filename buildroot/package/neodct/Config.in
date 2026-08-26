@@ -1,0 +1,25 @@
+config BR2_PACKAGE_NEODCT
+	bool "neodct"
+	depends on BR2_USE_MMU              # fork()/execve() for nd-apprun
+	depends on !BR2_STATIC_LIBS         # dlopen() for app.so
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	select BR2_PACKAGE_FREETYPE
+	select BR2_PACKAGE_JPEG
+	select BR2_PACKAGE_LIBPNG
+	select BR2_PACKAGE_SQLITE
+	select BR2_PACKAGE_ZLIB
+	select BR2_PACKAGE_OPENSSL
+	help
+	  The NeoDCT phone OS: the core process, the UI framework, the
+	  drawing primitives and the shipped apps.
+
+	  Selects sqlite explicitly. It is currently reachable only through
+	  BR2_PACKAGE_PYTHON3_SQLITE, so an image that drops python without
+	  this line builds cleanly and ships with no phonebook, no messages
+	  and no call log.
+
+	  https://github.com/BubbletopTag/neodct
+
+comment "neodct needs a toolchain w/ threads, dynamic library"
+	depends on BR2_USE_MMU
+	depends on !BR2_TOOLCHAIN_HAS_THREADS || BR2_STATIC_LIBS

@@ -1,0 +1,16 @@
+{
+  "epoch": 1704112496.0,
+  "frames": [
+    {
+      "name": "eng-fuelgauge",
+      "sha256": "8110a88e8771fb9c6fd1fa9b7d7dccc3ca3ab9dfa710d4037e4608315154d384",
+      "size": [
+        240,
+        175
+      ]
+    }
+  ],
+  "seed": 20240101,
+  "text_layout": "BASIC",
+  "tick": 0.1
+}

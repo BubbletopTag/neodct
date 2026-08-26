@@ -20,15 +20,19 @@ clear > /dev/tty0
 # /NeoDCT is inside the read-only squashfs, so the crash log goes to the
 # user-data partition.
 #
-# There is deliberately no PYTHONPYCACHEPREFIX here any more. The bytecode
-# is compiled into the image at build time (post-build-prune-tests.sh), and
-# setting a cache prefix would make python look only there and ignore what
-# we shipped -- turning every boot back into a full re-parse of the UI.
+# PYTHONPYCACHEPREFIX used to be exported here, for apps that shelled out
+# to python while the port was in progress. python has left the defconfigs
+# and there is no interpreter on the phone to read it.
 CRASH_LOG=/NeoDCT/User/logs/crash.log
 mkdir -p /NeoDCT/User/logs 2>/dev/null || CRASH_LOG=/tmp/crash.log
 
+# nd-core replaces `python3 /NeoDCT/launcher.py`. It is the same program:
+# nd_main.c is launcher.py's main() followed by System/core/main.py's run().
+# No LD_LIBRARY_PATH is needed -- the binary carries an RPATH of
+# /NeoDCT/System/lib, which is deliberate: the rootfs is a read-only squashfs
+# and ldconfig cannot rebuild its cache at runtime.
 echo "[NeoDCT] Booting..." > /dev/tty0
-python3 /NeoDCT/launcher.py 2> "$CRASH_LOG"
+/NeoDCT/System/bin/nd-core 2> "$CRASH_LOG"
 EXIT_CODE=$?
 
 # ==========================================================

@@ -1,4 +1,7 @@
 BR2_aarch64=y
+# run_qemu.sh emulates -cpu cortex-a53, so tune for it rather than for
+# generic ARMv8. Costs nothing: the image only ever runs under that -cpu.
+BR2_cortex_a53=y
 BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_12=y
 BR2_JLEVEL=8
 BR2_GLOBAL_PATCH_DIR="board/qemu/patches"
@@ -6,6 +9,15 @@ BR2_DOWNLOAD_FORCE_CHECK_HASHES=y
 BR2_TARGET_GENERIC_HOSTNAME="neodct"
 BR2_TARGET_GENERIC_ISSUE="NeoDCT System v0.3.0a"
 BR2_TOOLCHAIN_BUILDROOT_CXX=y
+# musl instead of the buildroot default (glibc). Approved by the project
+# owner for the C rewrite; docs/c-rewrite/MUSL.md has the reasoning and the
+# migration order. It is worth roughly 1-2 MB on a 64 MB device.
+#
+# The one thing that used to block this is gone: NeoDCT/System/hw/neodct_displayd
+# was a committed glibc-linked ARM binary whose interpreter
+# (/lib/ld-linux-armhf.so.3) does not exist under musl, so the kernel could not
+# exec it at all. It is now built from source by the neodct package below.
+BR2_TOOLCHAIN_BUILDROOT_MUSL=y
 BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="board/qemu/busybox.fragment"
 BR2_PACKAGE_MPV=y
 # ffmpeg carries every decoder it has unless told otherwise, which makes
@@ -49,13 +61,16 @@ BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
 BR2_PACKAGE_DEJAVU=y
 BR2_PACKAGE_FREETYPE=y
 BR2_PACKAGE_GPM=y
-BR2_PACKAGE_PYTHON3=y
-BR2_PACKAGE_PYTHON3_SSL=y
-BR2_PACKAGE_PYTHON3_SQLITE=y
-BR2_PACKAGE_PYTHON3_XZ=y
-BR2_PACKAGE_PYTHON_PILLOW=y
-BR2_PACKAGE_PYTHON_MUTAGEN=y
-BR2_PACKAGE_PYTHON_MINIAUDIO=y
+# python3, Pillow, mutagen and miniaudio were here until the last app was
+# ported. Nothing on the phone runs Python any more: /bin/run_neodct.sh
+# execs nd-core, and nd-apprun dlopen()s <app-dir>/app.so. The sources they
+# used to run are kept, out of the overlay, in neodct/python-reference --
+# the port cites them by file and line and they must not ship.
+#
+# sqlite USED TO ARRIVE ONLY THROUGH BR2_PACKAGE_PYTHON3_SQLITE. Dropping
+# python without it builds cleanly and gives a phone with no phonebook, no
+# messages and no call log; BR2_PACKAGE_NEODCT selects it (and freetype,
+# jpeg, libpng, zlib and openssl) in its Config.in for exactly that reason.
 BR2_PACKAGE_JPEG=y
 BR2_PACKAGE_ALSA_UTILS=y
 BR2_PACKAGE_ALSA_UTILS_ALSAMIXER=y
@@ -107,3 +122,13 @@ BR2_PACKAGE_OPENSSH=y
 BR2_PACKAGE_OPENSSH_CLIENT=y
 BR2_PACKAGE_OPENSSH_SERVER=y
 BR2_PACKAGE_OPENSSH_KEY_UTILS=y
+
+# --- The C rewrite ---
+# nd-core, nd-apprun, libneodct, the app .so files and the ST7789 panel
+# daemon, built from neodct/src by buildroot/package/neodct. This is what
+# /bin/run_neodct.sh execs, and now the only thing it execs: the last app is
+# ported, so python3 and Pillow have left the image (see above).
+#
+# Selects sqlite, freetype, jpeg, libpng, zlib and openssl in its Config.in,
+# so that dropping python takes none of them with it.
+BR2_PACKAGE_NEODCT=y

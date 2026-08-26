@@ -2,14 +2,32 @@
 set -eu
 
 TARGET_DIR="${1:-}"
-# Platform id, e.g. luckfox-armv7 / qemu-aarch64. This is the same string
-# that lands in version.prop and in an update's manifest.json, so an image
-# can never be installed on the wrong hardware.
-PLATFORM="${2:-}"
 if [ -z "$TARGET_DIR" ] || [ ! -d "$TARGET_DIR" ]; then
     echo "[post-build] Missing TARGET_DIR" >&2
     exit 1
 fi
+shift
+
+# Platform id, e.g. luckfox-armv7 / qemu-aarch64.
+#
+# Buildroot calls post-build scripts as
+#
+#   script TARGET_DIR $BR2_ROOTFS_POST_SCRIPT_ARGS $BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS
+#
+# and both defconfigs put the defconfig PATH in POST_SCRIPT_ARGS, because the
+# qemu board's post-image script needs it. So $2 is a build-machine path and
+# the platform id is LAST, not second. Reading $2 meant
+# "${PLATFORM%%-*}" = "luckfox" never matched and etc/inittab.luckfox was
+# never installed -- real hardware silently shipped the generic inittab.
+# post-build-system-metadata.sh already takes the last argument; this now
+# agrees with it.
+PLATFORM="unknown"
+for argument in "$@"; do
+    PLATFORM="$argument"
+done
+case "$PLATFORM" in
+    ""|*/*) PLATFORM="unknown" ;;
+esac
 
 rm -rf "$TARGET_DIR/tests"
 
@@ -25,6 +43,13 @@ rm -rf "$TARGET_DIR/tests"
 # Scoped deliberately to the app directories: those are populated purely by
 # the overlay, so "in target but not in the overlay" is unambiguous there.
 # The rest of the tree mixes overlay files with package and generated ones.
+#
+# Since the C rewrite those directories are no longer overlay-only: the neodct
+# package installs app.so into each of them. That does not change the rule --
+# an app dropped from the overlay should lose its app.so too -- but it does
+# mean this loop can delete a freshly built binary, so it prints every removal
+# and the coverage check below says which apps ended up with no app.so at all.
+# Nothing else here touches .so files or /NeoDCT/System/{bin,lib}.
 OVERLAY_ROOT="$(cd "$(dirname "$0")/../overlay" 2>/dev/null && pwd || true)"
 if [ -n "$OVERLAY_ROOT" ]; then
     for apps_rel in NeoDCT/System/apps NeoDCT/System/engineering/apps; do
@@ -35,11 +60,49 @@ if [ -n "$OVERLAY_ROOT" ]; then
             [ -d "$path" ] || continue
             name="$(basename "$path")"
             if [ ! -d "$overlay_apps/$name" ]; then
-                echo "[post-build] dropping stale app: $apps_rel/$name"
+                if [ -f "$path/app.so" ]; then
+                    echo "[post-build] dropping stale app (had a built app.so):" \
+                         "$apps_rel/$name" >&2
+                else
+                    echo "[post-build] dropping stale app: $apps_rel/$name"
+                fi
                 rm -rf "$path"
             fi
         done
     done
+fi
+
+# Which apps got no app.so.
+#
+# The name lists that decide where the stub app.so is installed live in
+# neodct/src/Makefile (STUB_STOCK_APPS / STUB_ENG_APPS) and are maintained by
+# hand, so they can drift from the overlay's directory names. When they do,
+# the app keeps its manifest.json and its icon -- it is still in the grid --
+# and simply fails to start, which is a confusing thing to discover on the
+# phone rather than here.
+#
+# A warning, not an error: during the port a half-populated tree is the normal
+# state, and failing the image build over it would stop work. Set
+# NEODCT_REQUIRE_APP_SO=1 to make it fatal for a release build.
+if [ -n "$OVERLAY_ROOT" ]; then
+    missing=""
+    for apps_rel in NeoDCT/System/apps NeoDCT/System/engineering/apps; do
+        target_apps="$TARGET_DIR/$apps_rel"
+        [ -d "$target_apps" ] || continue
+        for path in "$target_apps"/*; do
+            [ -d "$path" ] || continue
+            [ -f "$path/manifest.json" ] || continue
+            [ -f "$path/app.so" ] && continue
+            missing="$missing $apps_rel/$(basename "$path")"
+        done
+    done
+    if [ -n "$missing" ]; then
+        echo "[post-build] no app.so (app will not launch):$missing" >&2
+        if [ "${NEODCT_REQUIRE_APP_SO:-0}" = "1" ]; then
+            echo "[post-build] NEODCT_REQUIRE_APP_SO=1 -- failing the build" >&2
+            exit 1
+        fi
+    fi
 fi
 
 # openssh's own boot script.
@@ -67,7 +130,7 @@ find "$TARGET_DIR/NeoDCT" \
 
 # Apps the build was told to leave out.
 #
-#     NEODCT_EXCLUDE_APPS="Games Koki" make
+#     NEODCT_EXCLUDE_APPS="Tube Foo" make
 #
 # The overlay is a live working tree and may hold an app somebody is still
 # experimenting with. It has to stay in the tree for them to work on, and
@@ -84,42 +147,119 @@ for name in ${NEODCT_EXCLUDE_APPS:-}; do
     done
 done
 
-# Compile the UI's bytecode into the image.
-#
-# /NeoDCT is read-only squashfs, so python can never write a .pyc beside a
-# .py at runtime, and compiling from source costs memory it does not give
-# back: measured on the device, System.ui.framework is 4.0 MB imported
-# from source and 0.4 MB imported from bytecode.
-#
-# This used to be handled by caching to /NeoDCT/User/.pycache at runtime,
-# on the grounds that host python and target python differ. They do not --
-# buildroot builds both from the same version, and bytecode is
-# version-tagged and architecture independent. Shipping it in the image is
-# better than caching it on the user partition in three ways: it is there
-# on the first boot after an update, which is when the phone is slowest;
-# it survives a user-data reset; and it sits inside the dm-verity tree, so
-# it carries the same signature as the source it came from. Python trusts
-# a .pyc over its .py, so bytecode on a writable partition is bytecode
-# nothing has vouched for.
-#
-# Stale files go first: BR2_ROOTFS_OVERLAY never deletes, so a __pycache__
-# left by an earlier build would otherwise shadow source that has changed.
 find "$TARGET_DIR/NeoDCT" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
-PYC_PYTHON="${HOST_DIR:-}/bin/python3"
-[ -x "$PYC_PYTHON" ] || PYC_PYTHON="$(command -v python3 || true)"
-if [ -n "$PYC_PYTHON" ] && [ -x "$PYC_PYTHON" ]; then
-    # -s/-p rewrite the source path recorded in each .pyc, so a traceback
-    # on the phone names /NeoDCT/... rather than a build directory that
-    # exists on nobody's machine but the builder's.
-    if "$PYC_PYTHON" -m compileall -q -f \
-            -s "$TARGET_DIR" -p / "$TARGET_DIR/NeoDCT" >/dev/null 2>&1; then
-        echo "[post-build] bytecode precompiled into /NeoDCT"
-    else
-        echo "[post-build] bytecode precompile failed; shipping source only"
+# Drop the Python from the image -- A BACKSTOP NOW, NOT THE MAIN EVENT.
+#
+# This used to do real work: the overlay carried the whole Python OS, 127
+# files, and this pass is what kept them off the target. The overlay no
+# longer carries any of it -- it lives in neodct/python-reference/, out of
+# BR2_ROOTFS_OVERLAY entirely -- so on a clean tree the count below is zero.
+#
+# It stays because the overlay is a directory anybody can drop a file into,
+# and a stray .py under /NeoDCT is not a small mistake: `ls
+# /NeoDCT/System/core` showing ModemService/ full of .py and no sign of the
+# service actually running is exactly the wrong thing for the next person
+# debugging the phone over serial to find. There is also no interpreter on
+# the image any more, so anything this catches could not have run regardless.
+#
+# Scoped to /NeoDCT so it cannot touch anything a package installed, and the
+# now-empty service directories under System/core go with them -- that tree is
+# t9.dict and directories, nothing else, so an empty directory there is a
+# leftover and not something somebody meant.
+# The icebox does not ship.
+#
+# /NeoDCT/Development is where work gets parked -- Icebox/MusicPlayer is a
+# whole app with an icon and a manifest_disabled.disabled, sitting there
+# waiting for somebody to come back to it. That is a working-tree thing.
+# Nothing on the phone reads the directory (grep across src, overlay/etc,
+# overlay/bin and scripts finds no reference at all), so shipping it just
+# puts half-finished code on a device where it can only confuse whoever
+# finds it. It stays in the repository, which is the point of an icebox.
+rm -rf "$TARGET_DIR/NeoDCT/Development"
+
+if [ "${NEODCT_KEEP_PYTHON:-0}" != "1" ] && [ -d "$TARGET_DIR/NeoDCT" ]; then
+    py_count=$(find "$TARGET_DIR/NeoDCT" \
+        \( -name '*.py' -o -name '*.pyc' -o -name '*.pyo' -o -name '*.py.old' \) \
+        -type f | wc -l)
+    find "$TARGET_DIR/NeoDCT" \
+        \( -name '*.py' -o -name '*.pyc' -o -name '*.pyo' -o -name '*.py.old' \) \
+        -type f -delete 2>/dev/null || true
+    if [ -d "$TARGET_DIR/NeoDCT/System/core" ]; then
+        find "$TARGET_DIR/NeoDCT/System/core" -mindepth 1 -type d -empty -delete \
+            2>/dev/null || true
     fi
-else
-    echo "[post-build] no host python found; shipping source only"
+    echo "[post-build] dropped $py_count Python files from the image"
+fi
+
+# Strip the ELF files buildroot's own strip pass cannot reach.
+#
+# target-finalize runs its global strip BEFORE it copies BR2_ROOTFS_OVERLAY
+# over the target tree and BEFORE it runs this script (buildroot/Makefile:
+# strip at line 760, overlay at 791, post-build at 802). So anything the
+# neodct package installed is already stripped by the time we get here and
+# this is a no-op on it -- but any ELF file carried in the overlay has never
+# been through strip at all, and never will be. That gap is what this closes.
+# (It used to hold the 24KB neodct_displayd blob; the daemon is built from
+# source now, but the gap is still there for the next one.)
+#
+# Deliberately narrow and deliberately unable to fail the build: scoped to
+# /NeoDCT, skips anything that is not an ELF, and every failure is swallowed.
+# A phone image is not worth losing to a strip that did not like a file.
+if [ "${NEODCT_SKIP_STRIP:-0}" != "1" ] && [ -d "$TARGET_DIR/NeoDCT" ]; then
+    # Honour BR2_STRIP_none: if the user asked for symbols, they get symbols.
+    br_config=""
+    for candidate in "${CONFIG_DIR:-}/.config" "${O:-}/.config"; do
+        [ -f "$candidate" ] && { br_config="$candidate"; break; }
+    done
+    strip_wanted=1
+    if [ -n "$br_config" ] && ! grep -q '^BR2_STRIP_strip=y$' "$br_config"; then
+        strip_wanted=0
+    fi
+
+    # The cross strip, by whatever tuple this toolchain calls itself.
+    #
+    # It must come out of the buildroot host tree. An unset root would make
+    # "$root"/bin/*-strip glob as /bin/*-strip and quietly select the BUILD
+    # MACHINE's strip -- which on this host is llvm-strip, and llvm-strip is
+    # multi-target, so it would cheerfully rewrite ARM binaries and nobody
+    # would ever see it happen. Hence the explicit empty-root skip.
+    #
+    # HOST_DIR is not in buildroot's EXTRA_ENV, so in a real build it is O
+    # that resolves this; HOST_DIR is only the fallback for running this
+    # script by hand.
+    strip_bin=""
+    for root in "${O:-}/host" "${HOST_DIR:-}"; do
+        [ -n "$root" ] && [ "$root" != "/host" ] || continue
+        for candidate in "$root"/bin/*-strip; do
+            [ -x "$candidate" ] || continue
+            strip_bin="$candidate"
+            break
+        done
+        [ -n "$strip_bin" ] && break
+    done
+
+    if [ "$strip_wanted" = "1" ] && [ -n "$strip_bin" ]; then
+        find "$TARGET_DIR/NeoDCT" -type f \
+             \( -perm -u+x -o -name '*.so' -o -name '*.so.*' \) -print \
+        | while IFS= read -r f; do
+            # Four bytes of ELF magic, or leave it alone. Shell scripts and
+            # python live in here too, and `strip` on a text file is a mess.
+            magic=$(dd if="$f" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
+            [ "$magic" = "7f454c46" ] || continue
+            # No chmod: everything here arrives u+w (the overlay rsync uses
+            # --chmod=u=rwX and the package installs 0755), and silently
+            # widening the mode of a file somebody made read-only on purpose
+            # is a worse outcome than leaving its symbols in.
+            [ -w "$f" ] || continue
+            "$strip_bin" --strip-unneeded \
+                --remove-section=.comment --remove-section=.note \
+                "$f" 2>/dev/null || true
+        done
+    elif [ "$strip_wanted" = "1" ]; then
+        echo "[post-build] no cross strip found; overlay binaries keep their" \
+             "debug symbols" >&2
+    fi
 fi
 
 # Luckfox-specific console config: replace generic inittab

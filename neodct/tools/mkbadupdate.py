@@ -26,9 +26,12 @@ import sys
 import tempfile
 import zipfile
 
+# The Python OS is the reference implementation, not something that ships.
+# It lives outside the overlay so BR2_ROOTFS_OVERLAY cannot put it on a
+# phone; see neodct/python-reference/README.md.
 REPO_NEODCT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "overlay", "NeoDCT",
+    "python-reference",
 )
 if REPO_NEODCT not in sys.path:
     sys.path.insert(0, REPO_NEODCT)

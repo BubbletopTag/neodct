@@ -47,7 +47,7 @@ SKEL="$BINARIES_DIR/.userdata-skel"
 rm -rf "$SKEL"
 # These are the directories S00userdata would create on first boot; making
 # them here means a fresh partition is usable even before it runs.
-mkdir -p "$SKEL/db" "$SKEL/logs" "$SKEL/.ndsys" "$SKEL/.pycache" \
+mkdir -p "$SKEL/db" "$SKEL/logs" "$SKEL/.ndsys" \
          "$SKEL/.seedrng" "$SKEL/sdcard" "$SKEL/tones" "$SKEL/wallpapers"
 
 "$NEODCT_DIR/tools/mkupdate.py" \

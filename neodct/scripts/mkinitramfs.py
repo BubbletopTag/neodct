@@ -248,8 +248,12 @@ def resolve_libs(binaries, lib_dirs):
 DMSETUP_CANDIDATES = ("usr/sbin/dmsetup", "sbin/dmsetup",
                       "usr/bin/dmsetup", "bin/dmsetup")
 
-# Prebuilt ST7789 daemon carried in the overlay (not a buildroot package),
-# so its path in the target tree is the overlay's own.
+# The ST7789 panel daemon. Built from source by the neodct buildroot
+# package (neodct/src/displayd/) and installed into the target tree; it
+# used to be a committed binary in the overlay, which could not work once
+# the toolchain moved to musl. The path is unchanged either way, and this
+# reads the built target tree rather than the overlay, so nothing here had
+# to change when it stopped being a blob.
 PANEL_DAEMON = "NeoDCT/System/hw/neodct_displayd"
 
 # The recovery splash. Kept in a subdirectory of the init dir because
@@ -296,9 +300,14 @@ def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None):
         # The SPI panel daemon, so recovery is visible on hardware. The
         # phone's fb0 is vfb: the framebuffer console draws the recovery
         # menu into it, but the pixels only reach the ST7789 if something
-        # mirrors them. Optional -- it is a prebuilt binary carried in the
-        # overlay, so it is present even in target trees of another
-        # architecture, where it must not be shipped.
+        # mirrors them.
+        #
+        # Optional, and the architecture check stays even though the daemon
+        # is built from source now and so cannot be the wrong architecture
+        # any more. It costs one readelf and it is the check that would
+        # catch a stale target/ left over from a build for another board --
+        # shipping a binary the kernel cannot exec is exactly the failure
+        # this whole file has to avoid.
         panel = os.path.join(target_dir, PANEL_DAEMON)
         if os.path.exists(panel):
             try:

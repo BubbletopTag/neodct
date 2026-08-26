@@ -21,13 +21,12 @@ case "$1" in
     # db     sqlite databases (phonebook, sms, call log)
     # logs   crash.log from run_neodct.sh, update.log from the applier
     # .ndsys pending/installed update records shared with the initramfs
-    # .pycache PYTHONPYCACHEPREFIX target, see run_neodct.sh
     # sdcard mountpoint for a removable card (S06sdcard mounts onto it)
     # tones/wallpapers user-added media, alongside the stock ones in System
     # .seedrng is where /var/lib/seedrng points: the image is read-only, and
     # seedrng needs somewhere persistent or entropy is reseeded from nothing
     # on every boot.
-    for dir in db logs .ndsys .pycache .seedrng sdcard tones wallpapers; do
+    for dir in db logs .ndsys .seedrng sdcard tones wallpapers; do
         mkdir -p "$USER_DIR/$dir" 2>/dev/null
     done
     ;;

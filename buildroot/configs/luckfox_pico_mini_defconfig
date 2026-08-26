@@ -1,6 +1,14 @@
 BR2_arm=y
 BR2_cortex_a7=y
-BR2_ARM_FPU_NEON=y
+# The RV1103's Cortex-A7 really does have VFPv4 and NEON with Fused-MAC:
+# the displayd binary that ran on the board reports Tag_FP_arch VFPv4 and
+# Tag_Advanced_SIMD_arch "NEONv1 with Fused-MAC". Plain -mfpu=neon is the
+# VFPv3-era setting and leaves both unused.
+BR2_ARM_FPU_NEON_VFPV4=y
+# Thumb-2 is roughly 30% denser than ARM for the same code. On a part with
+# 32 KB of L1 instruction cache that density buys more than the occasional
+# extra instruction costs.
+BR2_ARM_INSTRUCTIONS_THUMB2=y
 BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_12=y
 BR2_JLEVEL=8
 BR2_GLOBAL_PATCH_DIR="board/qemu/patches"
@@ -11,6 +19,15 @@ BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y
 BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="board/qemu/busybox.fragment"
 BR2_SYSTEM_DHCP=""
 BR2_TOOLCHAIN_BUILDROOT_CXX=y
+# musl instead of the buildroot default (glibc). Approved by the project
+# owner for the C rewrite; docs/c-rewrite/MUSL.md has the reasoning and the
+# migration order. It is worth roughly 1-2 MB on a 64 MB device.
+#
+# The one thing that used to block this is gone: NeoDCT/System/hw/neodct_displayd
+# was a committed glibc-linked ARM binary whose interpreter
+# (/lib/ld-linux-armhf.so.3) does not exist under musl, so the kernel could not
+# exec it at all. It is now built from source by the neodct package below.
+BR2_TOOLCHAIN_BUILDROOT_MUSL=y
 BR2_TARGET_TZ_INFO=y
 BR2_ROOTFS_OVERLAY="../neodct/overlay"
 BR2_ROOTFS_POST_BUILD_SCRIPT="../neodct/scripts/post-build-prune-tests.sh ../neodct/scripts/post-build-system-metadata.sh"
@@ -25,13 +42,16 @@ BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="board/qemu/aarch64-virt/linux.config"
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
 BR2_PACKAGE_DEJAVU=y
 BR2_PACKAGE_GPM=y
-BR2_PACKAGE_PYTHON3=y
-BR2_PACKAGE_PYTHON3_SSL=y
-BR2_PACKAGE_PYTHON3_SQLITE=y
-BR2_PACKAGE_PYTHON3_XZ=y
-BR2_PACKAGE_PYTHON_PILLOW=y
-BR2_PACKAGE_PYTHON_MUTAGEN=y
-BR2_PACKAGE_PYTHON_MINIAUDIO=y
+# python3, Pillow, mutagen and miniaudio were here until the last app was
+# ported. Nothing on the phone runs Python any more: /bin/run_neodct.sh
+# execs nd-core, and nd-apprun dlopen()s <app-dir>/app.so. The sources they
+# used to run are kept, out of the overlay, in neodct/python-reference --
+# the port cites them by file and line and they must not ship.
+#
+# sqlite USED TO ARRIVE ONLY THROUGH BR2_PACKAGE_PYTHON3_SQLITE. Dropping
+# python without it builds cleanly and gives a phone with no phonebook, no
+# messages and no call log; BR2_PACKAGE_NEODCT selects it (and freetype,
+# jpeg, libpng, zlib and openssl) in its Config.in for exactly that reason.
 BR2_PACKAGE_JPEG=y
 BR2_PACKAGE_ALSA_UTILS=y
 BR2_PACKAGE_ALSA_UTILS_ALSAMIXER=y
@@ -107,3 +127,13 @@ BR2_PACKAGE_OPENSSH=y
 BR2_PACKAGE_OPENSSH_CLIENT=y
 BR2_PACKAGE_OPENSSH_SERVER=y
 BR2_PACKAGE_OPENSSH_KEY_UTILS=y
+
+# --- The C rewrite ---
+# nd-core, nd-apprun, libneodct, the app .so files and the ST7789 panel
+# daemon, built from neodct/src by buildroot/package/neodct. This is what
+# /bin/run_neodct.sh execs, and now the only thing it execs: the last app is
+# ported, so python3 and Pillow have left the image (see above).
+#
+# Selects sqlite, freetype, jpeg, libpng, zlib and openssl in its Config.in,
+# so that dropping python takes none of them with it.
+BR2_PACKAGE_NEODCT=y
