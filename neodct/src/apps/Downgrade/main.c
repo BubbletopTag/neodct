@@ -29,42 +29,78 @@
  *     signature check, the same staging, the same applier. Nothing here
  *     installs anything itself.
  *
- * ============ THIS PORT IS INCOMPLETE, ON PURPOSE ============
+ * ============ WHERE THE FOUR UpdateService CALLS GO ============
  *
- * "Everything past 'pick one' is the ordinary update path" -- and that path
- * has no C implementation. Neither does the release list that "pick one"
- * picks from. downgrade.h says exactly what is missing, why it is not
- * reimplemented here, and what wiring it up will look like; READ THAT BEFORE
- * CHANGING THIS FILE. In short: there is no libndupdate, no nd_remote, no
- * HTTP client and no TLS anywhere in neodct/src, and SESSION-SCOPE.md puts
- * the update system and its crypto out of scope for this pass deliberately.
+ * The app's eleven steps call into UpdateService four times, and all four
+ * now have somewhere to land:
  *
- * So app_run() below is steps 1 and 2 of eleven, and then an honest stop.
- * Everything the app itself defines -- every string, every label, every
- * confirmation, every refusal, all three screen shapes -- is ported and
- * exported, and test/unit/test_downgrade.c pins it against the Python.
+ *     step 3   remote.all_releases(platform)   nd_remote_all_releases()
+ *     step 9   remote.asset_name(platform)     nd_remote_asset_name()
+ *     step 10  remote.download(url, dest, ...) nd_remote_download()
+ *     step 11  Update/main.py's _install()     nd_update_install(), reached
+ *                                              by dlopen()ing the Update
+ *                                              app -- see below
  *
- * ============ TWO THINGS IN THE PYTHON WORTH KNOWING ============
+ * The first three are in libneodct, which every app.so links, so they are
+ * ordinary calls. The fourth is not: nd_update_install() lives in the Update
+ * app's OWN app.so, and this is a different app.so in a different process.
  *
- * 1. THE RUNNING VERSION IS MARKED, NOT HIDDEN. "Seeing where you are in the
- *    list is most of the point of the list." Picking it is then refused by a
- *    page of its own rather than by leaving it out.
+ * ============ WHY THE INSTALLER IS dlopen()ED AND NOT LINKED ============
  *
- * 2. THE LAST try/except IS WIDER THAN IT LOOKS. It wraps both the importlib
- *    dance that loads the Update app AND the _install() call inside it, so a
- *    failure DURING the install -- a bad signature, no room to stage --
- *    reports "Downloaded, but could not start the installer." The installer
- *    started fine; it refused. That is the Python's and it is reproduced as
- *    the message for both cases when this is wired up.
+ * Because the Python does the same thing for the same reason, and the reason
+ * is in its docstring: "One signature check, one staging path, one applier --
+ * a second copy of that logic is the last thing this phone needs." The Python
+ * reaches for importlib and loads /NeoDCT/System/apps/Update/main.py at the
+ * moment it needs it; the C reaches for dlopen() and loads
+ * /NeoDCT/System/apps/Update/app.so. Compiling the Update app's sources
+ * into this app.so as well would put two copies of the signature verifier, the zip
+ * reader and the stager in the image, which is exactly what that sentence
+ * forbids.
+ *
+ * RTLD_LOCAL matters: both app.so files export app_run and app_shutdown, and
+ * loading the Update app globally would leave two definitions of each in one
+ * process. Nothing here calls the Update app's app_run(), only _install().
+ *
+ * The handle is deliberately NOT dlclose()d. nd_update_install() can end in
+ * nd_update_reboot(), and unloading the library that the return address
+ * points into is a segfault with a confusing backtrace. An app process is
+ * torn down after run() returns anyway, so the leak lasts microseconds.
+ *
+ * ============ ONE THING IN THE PYTHON WORTH KNOWING ============
+ *
+ * THE RUNNING VERSION IS MARKED, NOT HIDDEN. "Seeing where you are in the
+ * list is most of the point of the list." Picking it is then refused by a
+ * page of its own rather than by leaving it out.
+ *
+ * ============ THE LAST try/except IS WIDER THAN IT LOOKS ============
+ *
+ * It wraps both the importlib dance that loads the Update app AND the
+ * _install() call inside it, so a failure DURING the install -- a bad
+ * signature, no room to stage -- also reports "Downloaded, but could not
+ * start the installer." The installer started fine; it refused.
+ *
+ * The C cannot reproduce that half. nd_update_install() draws its own
+ * screens and returns void: a bad signature is a page the owner already saw,
+ * not a value this app can see. So the C's message covers only the half it
+ * can observe -- dlopen() or dlsym() failing -- and once _install() is
+ * entered, whatever it says is the last word. That is a NARROWER message
+ * than the Python's, not a wider one, and it is narrower in the honest
+ * direction: this app never claims an install failed when it has no way of
+ * knowing.
  */
 
+#include <dlfcn.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "nd_app.h"
 #include "nd_keycodes.h"
 #include "nd_log.h"
+#include "nd_paths.h"
+#include "nd_remote.h"
 #include "nd_settings.h"
+#include "nd_storage.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_widgets.h"
@@ -86,17 +122,11 @@ const char *const nd_downgrade_noconn_subtitle = "Could not reach GitHub";
 const char *const nd_downgrade_running_title = "Already running";
 const char *const nd_downgrade_running_body = "That is the version this phone is running.";
 
-/* Not the Python's. See downgrade.h: the phone is in neither of the two
- * states the Python has a page for, and borrowing one of them would be the
- * app claiming to know something it does not. */
-const char *const nd_downgrade_nosvc_title = "No release list";
-const char *const nd_downgrade_nosvc_why = "this build has no release reader";
-const char *const nd_downgrade_nosvc_body =
-    "Downgrade reads the list of published releases through the update "
-    "service, and this build does not have one.\n\n"
-    "Nothing was changed.";
-
 const char *const nd_downgrade_no_folder = "The card has no update folder.";
+
+/* VerticalList(ui, "Releases", ...) -- NOT the "Downgrade" header, which is
+ * what the DetailPages and the ProgressScreens carry. */
+const char *const nd_downgrade_list_title = "Releases";
 
 const char *const nd_downgrade_button_downgrade = "Downgrade";
 const char *const nd_downgrade_button_install = "Install";
@@ -106,6 +136,30 @@ const char *const nd_downgrade_button_install = "Install";
 
 /* ProgressScreen(ui, "Reading releases", header=HEADER).draw(0, 1) */
 #define DOWNGRADE_READING_STEP "Reading releases"
+
+void nd_downgrade_downloading_step(char *out, size_t out_sz, const char *version)
+{
+    if (out == NULL || out_sz == 0u)
+        return;
+    (void)snprintf(out, out_sz, "Downloading %s", (version != NULL) ? version : "");
+}
+
+/* The denominator the Python's progress lambda passes to draw():
+ *
+ *     lambda done, total: progress.draw(done, total or picked["size"] or 1)
+ *
+ * `or` on an int is falsy at zero, so this is "total, else the size the
+ * release listing gave, else 1". The 1 is not decoration -- draw() divides
+ * by it, and a server that sends no Content-Length for a release whose size
+ * GitHub also reported as 0 would otherwise divide by zero. */
+int64_t nd_downgrade_progress_total(int64_t total, int64_t size)
+{
+    if (total != 0)
+        return total;
+    if (size != 0)
+        return size;
+    return 1;
+}
 
 /* ------------------------------------------------------------------ *
  * The builders
@@ -249,12 +303,89 @@ void nd_downgrade_refuse(nd_ui *ui, const char *message)
  * run()
  * ------------------------------------------------------------------ */
 
+/* What the download progress callback needs. `size` is the release listing's
+ * figure, used when the server sends no length of its own. */
+typedef struct {
+    nd_progress *progress;
+    int64_t size;
+} downgrade_progress_ctx;
+
+static void downgrade_on_progress(void *ctx, int64_t done, int64_t total)
+{
+    downgrade_progress_ctx *c = (downgrade_progress_ctx *)ctx;
+
+    if (c == NULL || c->progress == NULL)
+        return;
+    (void)nd_progress_draw(c->progress, done, nd_downgrade_progress_total(total, c->size));
+}
+
+/* Step 11. The Python's importlib dance, as dlopen()/dlsym(). `why` receives
+ * the reason on failure, in the position str(exc) occupies in the Python.
+ *
+ * Nothing is dlclose()d: _install() can end in a reboot, and unloading the
+ * library the return address points into is a segfault. See the file header. */
+static bool downgrade_hand_to_installer(nd_ui *ui, const char *package, char *why, size_t why_sz)
+{
+    char resolved[ND_PATH_MAX];
+    void (*install)(nd_ui *, const char *);
+    void *handle;
+    void *symbol;
+
+    if (nd_path_resolve(resolved, sizeof resolved, ND_DOWNGRADE_UPDATE_APP_SO) != ND_OK) {
+        (void)snprintf(why, why_sz, "%s: path too long", ND_DOWNGRADE_UPDATE_APP_SO);
+        return false;
+    }
+
+    handle = dlopen(resolved, RTLD_NOW | RTLD_LOCAL);
+    if (handle == NULL) {
+        const char *err = dlerror();
+        (void)snprintf(why, why_sz, "%s", (err != NULL) ? err : "dlopen failed");
+        return false;
+    }
+
+    /* POSIX says a function pointer cannot portably be assigned from the
+     * void * dlsym returns; the memcpy is the standard way round it and is
+     * what -Wpedantic wants to see. dlerror() is cleared first because a
+     * symbol legitimately resolving to NULL is indistinguishable from
+     * failure any other way -- this one cannot, but the idiom is the idiom. */
+    (void)dlerror();
+    symbol = dlsym(handle, ND_DOWNGRADE_INSTALL_SYMBOL);
+    if (symbol == NULL) {
+        const char *err = dlerror();
+        (void)snprintf(why, why_sz, "%s: %s", ND_DOWNGRADE_INSTALL_SYMBOL,
+                       (err != NULL) ? err : "not found");
+        return false;
+    }
+    memcpy(&install, &symbol, sizeof install);
+
+    install(ui, package);
+    return true;
+}
+
 int app_run(nd_ui *ui)
 {
     char platform[64];
     char installed[64];
     char subtitle[96];
+    char why[ND_REMOTE_WHY_MAX];
+    char message[ND_DOWNGRADE_MSG_MAX];
+    char folder[ND_PATH_MAX];
+    char asset[ND_REMOTE_ASSET_MAX];
+    char destination[ND_PATH_MAX];
+    char step[ND_DOWNGRADE_LABEL_MAX + 16];
+    char labels[ND_RELEASES_LIMIT][ND_DOWNGRADE_LABEL_MAX];
+    const char *items[ND_RELEASES_LIMIT];
+    nd_release *releases;
+    size_t n_releases = 0u;
+    size_t i;
+    const nd_release *picked;
     nd_progress progress;
+    nd_vlist menu;
+    nd_softkey bar;
+    nd_update_err rc;
+    int32_t choice;
+    bool going_back;
+    downgrade_progress_ctx ctx;
 
     if (ui == NULL)
         return 1;
@@ -272,15 +403,123 @@ int app_run(nd_ui *ui)
     nd_progress_init(&progress, ui, DOWNGRADE_READING_STEP, nd_downgrade_header, NULL, NULL, NULL);
     (void)nd_progress_draw(&progress, 0, 1);
 
-    /* Step 3 is remote.all_releases(platform), and there is nothing in this
-     * build to call. See downgrade.h. The log line follows the form
-     * nd_main.c uses for a subsystem that is not linked, so that grepping the
-     * serial console for one of them finds all of them. */
-    nd_log_err(ND_LOG_UPDATE, "release list unavailable: %s (platform %s, running %s)",
-               nd_downgrade_nosvc_why, platform, (installed[0] != '\0') ? installed : "unknown");
+    /* Step 3. remote.all_releases(platform).
+     *
+     * ~1.7 kB per entry and thirty of them is 51 kB, which is more than an
+     * app thread's stack should be asked to carry (nd_remote.h says so at
+     * the struct). The labels beside it are 64 bytes each and stay here. */
+    releases = (nd_release *)calloc(ND_RELEASES_LIMIT, sizeof *releases);
+    if (releases == NULL) {
+        nd_log_err(ND_LOG_UPDATE, "downgrade: no memory for the release list");
+        nd_downgrade_noconn_body(message, sizeof message, "out of memory");
+        nd_downgrade_page(ui, nd_downgrade_noconn_title, nd_downgrade_noconn_subtitle, message);
+        return 0;
+    }
 
-    nd_downgrade_for_platform(subtitle, sizeof subtitle, platform);
-    nd_downgrade_page(ui, nd_downgrade_nosvc_title, subtitle, nd_downgrade_nosvc_body);
+    why[0] = '\0';
+    rc = nd_remote_all_releases(platform, ND_RELEASES_LIMIT, releases, ND_RELEASES_LIMIT,
+                                &n_releases, why, sizeof why);
+
+    /* remote.NoRelease: GitHub answered, and nothing it published carries an
+     * asset for this platform. A reachable-but-empty list is the same thing
+     * and takes the same page -- the Python raises NoRelease for both. */
+    if (rc == ND_UPD_ERR_NO_PACKAGE || (rc == ND_UPD_OK && n_releases == 0u)) {
+        free(releases);
+        nd_downgrade_for_platform(subtitle, sizeof subtitle, platform);
+        nd_downgrade_page(ui, nd_downgrade_nothing_title, subtitle, nd_downgrade_nothing_body);
+        return 0;
+    }
+    /* remote.NetworkError, in all its forms. `why` is str(exc). */
+    if (rc != ND_UPD_OK) {
+        free(releases);
+        nd_downgrade_noconn_body(message, sizeof message, why);
+        nd_downgrade_page(ui, nd_downgrade_noconn_title, nd_downgrade_noconn_subtitle, message);
+        return 0;
+    }
+
+    /* Step 4. The running version is MARKED, not hidden. Seeing where you are
+     * in the list is most of the point of the list. */
+    for (i = 0u; i < n_releases; i++) {
+        nd_downgrade_label(labels[i], sizeof labels[i], releases[i].version, installed,
+                           !nd_remote_is_newer(releases[i].version, installed));
+        items[i] = labels[i];
+    }
+
+    /* Step 5. VerticalList + SoftKeyBar("Select", present=False). */
+    nd_vlist_init(&menu, ui, nd_downgrade_list_title, items, n_releases, ND_DOWNGRADE_APP_ID);
+    nd_softkey_init(&bar, ui, false);
+    nd_softkey_update(&bar, "Select", false);
+
+    choice = nd_vlist_show(&menu);
+    if (choice < 0 || (size_t)choice >= n_releases) {
+        free(releases);
+        return 0;
+    }
+    picked = &releases[choice];
+
+    /* Step 6. Picking the running version is refused by a page of its own. */
+    if (strcmp(picked->version, installed) == 0) {
+        nd_downgrade_neodct_version(subtitle, sizeof subtitle, installed);
+        free(releases);
+        nd_downgrade_page(ui, nd_downgrade_running_title, subtitle, nd_downgrade_running_body);
+        return 0;
+    }
+
+    /* Steps 7 and 8. Going back is spelled out rather than asked as a bare
+     * "are you sure": the consequence is not obvious, and this tool exists to
+     * be used deliberately. */
+    going_back = installed[0] != '\0' && !nd_remote_is_newer(picked->version, installed);
+    if (going_back)
+        nd_downgrade_ask_downgrade(message, sizeof message, picked->version, installed);
+    else
+        nd_downgrade_ask_install(message, sizeof message, picked->version, picked->size);
+    if (!nd_downgrade_confirm(ui, message,
+                              going_back ? nd_downgrade_button_downgrade
+                                         : nd_downgrade_button_install)) {
+        free(releases);
+        return 0;
+    }
+
+    /* Step 9. The card, and the one name a package for this platform has. */
+    if (!nd_storage_folder("update", folder, sizeof folder)) {
+        free(releases);
+        nd_downgrade_refuse(ui, nd_downgrade_no_folder);
+        return 0;
+    }
+    if (nd_remote_asset_name(platform, asset, sizeof asset) != ND_OK ||
+        nd_snprintf(destination, sizeof destination, "%s/%s", folder, asset) != ND_OK) {
+        free(releases);
+        nd_downgrade_refuse(ui, nd_downgrade_no_folder);
+        return 0;
+    }
+
+    /* Step 10. It resumes across dropped connections; see nd_remote.h. */
+    nd_downgrade_downloading_step(step, sizeof step, picked->version);
+    nd_progress_init(&progress, ui, step, nd_downgrade_header, NULL, NULL, NULL);
+    ctx.progress = &progress;
+    ctx.size = picked->size;
+    why[0] = '\0';
+    if (nd_remote_download(picked->url, destination, picked->size, downgrade_on_progress, &ctx,
+                           ND_REMOTE_DOWNLOAD_ATTEMPTS, NULL, why, sizeof why) != ND_UPD_OK) {
+        free(releases);
+        nd_downgrade_download_failed(message, sizeof message, why);
+        nd_downgrade_refuse(ui, message);
+        return 0;
+    }
+
+    /* Step 11. Hand off to the Update app's installer rather than
+     * reimplementing it. `releases` dies here: nothing past this point reads
+     * it, and _install() may not return at all. */
+    free(releases);
+    releases = NULL;
+    picked = NULL;
+
+    why[0] = '\0';
+    if (!downgrade_hand_to_installer(ui, destination, why, sizeof why)) {
+        nd_log_err(ND_LOG_UPDATE, "downgrade: installer unreachable: %s", why);
+        nd_downgrade_installer_failed(message, sizeof message, why);
+        nd_downgrade_refuse(ui, message);
+    }
     return 0;
 }
 

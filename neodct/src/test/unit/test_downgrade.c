@@ -1,16 +1,29 @@
 /* test_downgrade.c -- the Downgrade app, app id 9006.
  *
- * ============ WHAT THIS TEST CANNOT CHECK, AND WHY ============
+ * ============ HOW THE NETWORK HALF IS DRIVEN ============
  *
- * Eight of the app's eleven steps need System/core/UpdateService, which has no
- * C implementation: no nd_remote, no libndupdate, no HTTP client, no TLS. So
- * there is no release list to pick from, nothing to download and nothing to
- * install, and no test here can pretend otherwise. apps/Downgrade/downgrade.h
- * says what is missing in full.
+ * It is not stubbed. The transport under nd_remote_all_releases() is a
+ * SPAWNED curl, so this test does what test_remote.c does: it puts the
+ * committed stand-in (neodct/tests/remote/fake-curl) first on PATH and lets
+ * the app find it with the library's own PATH walk. The app runs its real
+ * code -- the real argv, the real pipes, the real JSON parse -- against
+ * neodct/tests/remote/releases.json, which is a GitHub /releases listing in
+ * GitHub's own shape, carrying UPDATE-luckfox-armv7.ndsw and
+ * UPDATE-qemu-aarch64.ndsw exactly as a published release does.
  *
- * What IS checked is everything the Python app defines itself, asserted
- * against the strings the Python actually produces -- computed by running the
- * expressions out of engineering/apps/Downgrade/main.py, not guessed:
+ * NO TEST HERE MAKES A NETWORK REQUEST.
+ *
+ * What is NOT driven is the far end of the app: the confirmation, the
+ * download and the handoff to the Update app's installer. Those need a card,
+ * 60 MB of package and a second app.so to dlopen; nd_remote's own download
+ * path is pinned by test_remote.c and the installer by test_update_app.c,
+ * and a third copy of either here would test the fixture rather than the
+ * app. What this test pins is the part that is this app's: which page each
+ * outcome of the scan draws, and what the release list says.
+ *
+ * What IS checked, asserted against the strings the Python actually produces
+ * -- computed by running the expressions out of
+ * engineering/apps/Downgrade/main.py, not guessed:
  *
  *   1. The verbatim strings: NO_NETWORK, the three page titles and bodies,
  *      "The card has no update folder.", both button labels, APP_ID and the
@@ -28,9 +41,10 @@
  *
  *   5. _confirm() is Yes only on ENTER, and _page() and _refuse() return.
  *
- *   6. app_run() draws the two frames it can honestly draw -- the "Reading
- *      releases" progress screen and the page that says the release list is
- *      not available in this build -- and returns 0.
+ *   6. app_run()'s three scan outcomes: a listing with nothing for this
+ *      platform draws "Nothing published", a curl that cannot connect draws
+ *      "No connection", and a listing that does carry this platform's asset
+ *      draws the release list with its "(running)" and "(older)" marks.
  *
  * _refuse()'s other half, that Clear does NOT dismiss it, is deliberately not
  * driven: the dialog has no cancel keys, so a test that pressed Clear at it
@@ -41,10 +55,16 @@
  * font); the scratch root is the Makefile's.
  */
 
+#include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "smallapp_test.h"
+#include "nd_paths.h"
+#include "nd_settings.h"
+#include "nd_remote.h"
 
 #include "../../apps/Downgrade/downgrade.h"
 
@@ -60,6 +80,8 @@ static struct {
     void (*ask_install)(char *, size_t, const char *, int64_t);
     void (*download_failed)(char *, size_t, const char *);
     void (*installer_failed)(char *, size_t, const char *);
+    void (*downloading_step)(char *, size_t, const char *);
+    int64_t (*progress_total)(int64_t, int64_t);
     void (*page)(nd_ui *, const char *, const char *, const char *);
     bool (*confirm)(nd_ui *, const char *, const char *);
     void (*refuse)(nd_ui *, const char *);
@@ -71,8 +93,7 @@ static struct {
     const char *const *noconn_subtitle;
     const char *const *running_title;
     const char *const *running_body;
-    const char *const *nosvc_title;
-    const char *const *nosvc_body;
+    const char *const *list_title;
     const char *const *no_folder;
     const char *const *button_downgrade;
     const char *const *button_install;
@@ -91,6 +112,8 @@ static bool api_open(void *h)
     *(void **)&api.ask_install = sa_sym(h, "nd_downgrade_ask_install");
     *(void **)&api.download_failed = sa_sym(h, "nd_downgrade_download_failed");
     *(void **)&api.installer_failed = sa_sym(h, "nd_downgrade_installer_failed");
+    *(void **)&api.downloading_step = sa_sym(h, "nd_downgrade_downloading_step");
+    *(void **)&api.progress_total = sa_sym(h, "nd_downgrade_progress_total");
     *(void **)&api.page = sa_sym(h, "nd_downgrade_page");
     *(void **)&api.confirm = sa_sym(h, "nd_downgrade_confirm");
     *(void **)&api.refuse = sa_sym(h, "nd_downgrade_refuse");
@@ -103,8 +126,7 @@ static bool api_open(void *h)
     api.noconn_subtitle = dlsym(h, "nd_downgrade_noconn_subtitle");
     api.running_title = dlsym(h, "nd_downgrade_running_title");
     api.running_body = dlsym(h, "nd_downgrade_running_body");
-    api.nosvc_title = dlsym(h, "nd_downgrade_nosvc_title");
-    api.nosvc_body = dlsym(h, "nd_downgrade_nosvc_body");
+    api.list_title = dlsym(h, "nd_downgrade_list_title");
     api.no_folder = dlsym(h, "nd_downgrade_no_folder");
     api.button_downgrade = dlsym(h, "nd_downgrade_button_downgrade");
     api.button_install = dlsym(h, "nd_downgrade_button_install");
@@ -116,8 +138,9 @@ static bool api_open(void *h)
            api.confirm != NULL && api.refuse != NULL && api.header != NULL &&
            api.no_network != NULL && api.nothing_title != NULL && api.nothing_body != NULL &&
            api.noconn_title != NULL && api.noconn_subtitle != NULL && api.running_title != NULL &&
-           api.running_body != NULL && api.nosvc_title != NULL && api.nosvc_body != NULL &&
-           api.no_folder != NULL && api.button_downgrade != NULL && api.button_install != NULL;
+           api.running_body != NULL && api.list_title != NULL && api.no_folder != NULL &&
+           api.button_downgrade != NULL && api.button_install != NULL &&
+           api.downloading_step != NULL && api.progress_total != NULL;
 }
 
 /* ------------------------------------------------------------------ *
@@ -152,15 +175,10 @@ static void test_strings(void)
     CHECK_STR(*api.button_downgrade, "Downgrade", "going-back button");
     CHECK_STR(*api.button_install, "Install", "going-forward button");
 
-    /* The one page that is not the Python's. Its wording is this port's, so
-     * the test pins it as this port's rather than as the Python's -- what
-     * matters is that it does not claim to be either of the two conditions
-     * the Python has a page for. */
-    CHECK_STR(*api.nosvc_title, "No release list", "the not-linked page title");
-    CHECK(strstr(*api.nosvc_body, "update service") != NULL,
-          "the not-linked page says which subsystem is missing");
-    CHECK(strcmp(*api.nosvc_title, *api.noconn_title) != 0,
-          "and is not the Python's 'No connection' page");
+    /* VerticalList(ui, "Releases", ...) -- the list's title, which is NOT
+     * the "Downgrade" header every page and progress screen carries. */
+    CHECK_STR(*api.list_title, "Releases", "the release list's title");
+    CHECK(strcmp(*api.list_title, *api.header) != 0, "and it is not the header");
 }
 
 /* ------------------------------------------------------------------ *
@@ -329,29 +347,378 @@ static void test_refuse_and_page(void)
     sa_fx_free(&fx);
 }
 
-static void test_run(void)
+static void test_progress(void)
+{
+    char out[64];
+
+    api.downloading_step(out, sizeof out, "0.3.11a");
+    CHECK_STR(out, "Downloading 0.3.11a", "the ProgressScreen step for the download");
+    api.downloading_step(out, sizeof out, NULL);
+    CHECK_STR(out, "Downloading ", "a NULL version is the empty one");
+    api.downloading_step(NULL, 0u, "x");
+
+    /* `total or picked["size"] or 1`, and `or` on an int is falsy at zero. */
+    CHECK_INT(api.progress_total(4096, 999), 4096, "a length from the server wins");
+    CHECK_INT(api.progress_total(0, 999), 999, "no length falls back to the listing's size");
+    CHECK_INT(api.progress_total(0, 0), 1, "neither is 1, because draw() divides by it");
+}
+
+/* ------------------------------------------------------------------ *
+ * 7. app_run(): the three ways the scan can end
+ * ------------------------------------------------------------------ *
+ *
+ * The stand-in curl, exactly as test_remote.c installs it. See this file's
+ * header: nothing here reaches the network, and nothing in the library is
+ * stubbed -- the executable is replaced, not the code.
+ */
+
+static char g_ctl[ND_PATH_MAX];      /* the stand-in's control files */
+static char g_fixtures[ND_PATH_MAX]; /* neodct/tests/remote          */
+static bool g_curl_ready;
+
+static bool shell(const char *fmt, ...) ND_PRINTF(1, 2);
+
+static bool shell(const char *fmt, ...)
+{
+    char cmd[ND_PATH_MAX * 3];
+    va_list ap;
+    int n;
+
+    va_start(ap, fmt);
+    n = vsnprintf(cmd, sizeof cmd, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= sizeof cmd)
+        return false;
+    return system(cmd) == 0;
+}
+
+/* The fixtures sit beside the source tree and not under a phone root, so
+ * this walks up from the test binary the way test_remote.c does. */
+static bool fake_curl_install(void)
+{
+    char self[ND_PATH_MAX];
+    char bindir[ND_PATH_MAX];
+    char sandbox[ND_PATH_MAX];
+    char path[ND_PATH_MAX * 2];
+    const char *old_path = getenv("PATH");
+    ssize_t n;
+    char *slash;
+
+    n = readlink("/proc/self/exe", self, sizeof self - 1u);
+    if (n <= 0)
+        return false;
+    self[n] = '\0';
+    slash = strrchr(self, '/');
+    if (slash == NULL)
+        return false;
+    *slash = '\0';
+    /* build/<variant>/test -> ../../../../tests/remote */
+    if (nd_snprintf(g_fixtures, sizeof g_fixtures, "%s/../../../../tests/remote", self) != ND_OK)
+        return false;
+
+    if (!sa_tmpdir("nddgcurl", sandbox, sizeof sandbox))
+        return false;
+    if (nd_snprintf(bindir, sizeof bindir, "%s/bin", sandbox) != ND_OK ||
+        nd_snprintf(g_ctl, sizeof g_ctl, "%s/ctl", sandbox) != ND_OK)
+        return false;
+    if (!shell("mkdir -p '%s' '%s'", bindir, g_ctl))
+        return false;
+    if (!shell("cp '%s/fake-curl' '%s/curl' && chmod 0755 '%s/curl'", g_fixtures, bindir, bindir))
+        return false;
+    if (nd_snprintf(path, sizeof path, "%s:%s", bindir,
+                    (old_path != NULL) ? old_path : "/usr/bin:/bin") != ND_OK)
+        return false;
+    return setenv("PATH", path, 1) == 0 && setenv("NDCURL_DIR", g_ctl, 1) == 0;
+}
+
+static void ctl_set(const char *name, const char *value)
+{
+    char p[ND_PATH_MAX];
+    FILE *f;
+
+    if (nd_snprintf(p, sizeof p, "%s/%s", g_ctl, name) != ND_OK)
+        return;
+    f = fopen(p, "w");
+    if (f == NULL)
+        return;
+    if (value != NULL)
+        (void)fputs(value, f);
+    (void)fclose(f);
+}
+
+/* Wipe the scenario. Every case starts clean. */
+static void scenario_reset(void)
+{
+    (void)shell("rm -f '%s'/*", g_ctl);
+}
+
+static void ctl_body(const char *fixture_name)
+{
+    char p[ND_PATH_MAX];
+
+    if (nd_snprintf(p, sizeof p, "%s/%s", g_fixtures, fixture_name) != ND_OK)
+        return;
+    ctl_set("body", p);
+}
+
+/* version.prop describes the IMAGE, and both settings the app reads are
+ * "system.os.*" keys, so this is where they come from. Writing it under the
+ * scratch root is how a test picks the platform the scan asks for. */
+static void write_version_prop(const char *platform, const char *version)
+{
+    const char *virt = ND_PATH_VERSION_PROP;
+    char resolved[ND_PATH_MAX];
+    char dir[ND_PATH_MAX];
+    const char *slash = strrchr(virt, '/');
+    FILE *f;
+
+    if (slash != NULL && slash != virt) {
+        (void)nd_strlcpy(dir, virt, (size_t)(slash - virt) + 1u);
+        if (nd_mkdir_p(dir, 0755u) != ND_OK) {
+            CHECK(false, "mkdir -p for version.prop");
+            return;
+        }
+    }
+    if (nd_path_resolve(resolved, sizeof resolved, virt) != ND_OK) {
+        CHECK(false, "resolve version.prop");
+        return;
+    }
+    f = fopen(resolved, "wb");
+    if (f == NULL) {
+        CHECK(false, "open version.prop");
+        return;
+    }
+    (void)fprintf(f, "system.os.platform=%s\nsystem.os.versionnumber=%s\n", platform, version);
+    (void)fclose(f);
+    (void)nd_settings_init();
+}
+
+/* One scan, with `keys` pressed at whatever it draws. Returns the frame
+ * count; *rc_out receives app_run's return and *digest_out, when it is not
+ * NULL, receives a hash of the LAST frame drawn.
+ *
+ * The digest is what makes these tests mean anything. A frame COUNT does not
+ * discriminate: pressing three keys at a DetailPage that failed to load a
+ * release list draws about as many frames as pressing three keys at a list
+ * that loaded, so an assertion on the count passes just as happily when the
+ * scan never happened -- which is exactly what a mutation that stubbed
+ * nd_remote_all_releases() out proved. The hash of the final screen does
+ * discriminate, because the "No connection" page and a list of releases do
+ * not look alike. */
+#define DG_DIGEST_MAX 96
+
+static uint64_t run_scan(const int32_t *keys, size_t n_keys, int *rc_out, char *digest_out,
+                         size_t digest_sz, char *after_scan_out, size_t after_scan_sz)
 {
     sa_fixture fx;
-    int rc;
+    const nd_image *last;
+    uint64_t frames;
+    size_t i;
 
+    if (digest_out != NULL && digest_sz > 0u)
+        digest_out[0] = '\0';
+    if (after_scan_out != NULL && after_scan_sz > 0u)
+        after_scan_out[0] = '\0';
     if (!sa_fx_init(&fx)) {
         CHECK(false, "fixture");
         sa_fx_free(&fx);
-        return;
+        *rc_out = -1;
+        return 0u;
     }
-    /* One press dismisses the only page the app can reach. */
-    CHECK(sa_send(&fx, ND_KEY_CLEAR), "queued Back");
+    for (i = 0u; i < n_keys; i++)
+        CHECK(sa_send(&fx, keys[i]), "queued a key");
 
+    *rc_out = api.run(&fx.ui);
+
+    frames = nd_capture_frames_drawn(fx.cap);
+    if (digest_out != NULL && digest_sz > 0u) {
+        last = nd_capture_recent(fx.cap, 0u);
+        if (last == NULL || nd_capture_digest(last, digest_out, digest_sz) != ND_OK)
+            digest_out[0] = '\0';
+    }
+    /* Frame 1 (0-based) -- whatever replaced "Reading releases" the instant
+     * the scan came back, before any key moved anything. That frame is a
+     * failure PAGE or it is the release LIST, and nothing else, which is
+     * what makes it the assertion worth writing. */
+    if (after_scan_out != NULL && after_scan_sz > 0u && frames >= 2u) {
+        last = nd_capture_recent(fx.cap, (size_t)(frames - 2u));
+        if (last == NULL || nd_capture_digest(last, after_scan_out, after_scan_sz) != ND_OK)
+            after_scan_out[0] = '\0';
+    }
+    sa_fx_free(&fx);
+    return frames;
+}
+
+/* The digest of a page drawn straight from the app's own _page(), with no
+ * scan involved -- the oracle a scan outcome is compared against. */
+static bool page_digest(char *out, size_t out_sz, const char *title, const char *subtitle,
+                        const char *body)
+{
+    sa_fixture fx;
+    const nd_image *last;
+    bool ok;
+
+    out[0] = '\0';
+    if (!sa_fx_init(&fx)) {
+        CHECK(false, "fixture");
+        sa_fx_free(&fx);
+        return false;
+    }
+    CHECK(sa_send(&fx, ND_KEY_CLEAR), "queued Back");
     nd_vclock_enable();
-    rc = api.run(&fx.ui);
+    api.page(&fx.ui, title, subtitle, body);
     nd_vclock_disable();
 
-    CHECK_INT(rc, 0, "app_run returns 0");
-    /* Two frames: "Reading releases" at 0%, then the page. Anything more
-     * would mean the app had found a release list to show, which it cannot
-     * have. */
-    CHECK_INT(nd_capture_frames_drawn(fx.cap), 2, "the progress screen, then one page");
+    last = nd_capture_recent(fx.cap, 0u);
+    ok = last != NULL && nd_capture_digest(last, out, out_sz) == ND_OK;
     sa_fx_free(&fx);
+    return ok;
+}
+
+/* Ask nd_remote the same question the app just asked, under the scenario
+ * that is already armed, and keep the reason it gives. Used to build the
+ * expected page without copying another module's wording into this file. */
+static bool scan_reason(char *out, size_t out_sz)
+{
+    char platform[64];
+    nd_release *list;
+    size_t n = 0u;
+    bool got;
+
+    out[0] = '\0';
+    (void)nd_settings_get_copy(ND_SET_OS_PLATFORM, "unknown", platform, sizeof platform);
+    list = (nd_release *)calloc(4u, sizeof *list);
+    if (list == NULL) {
+        CHECK(false, "calloc");
+        return false;
+    }
+    got = nd_remote_all_releases(platform, ND_RELEASES_LIMIT, list, 4u, &n, out, out_sz) ==
+          ND_UPD_ERR_NETWORK;
+    free(list);
+    CHECK(got, "the armed scenario is a network failure");
+    return got && out[0] != '\0';
+}
+
+/* GitHub answered, and nothing it published carries an asset for THIS
+ * phone: remote.NoRelease, which is the "Nothing published" page. The
+ * platform is left at SettingsStorage's "unknown", so the asset the scan
+ * looks for is UPDATE-unknown.ndsw and releases.json has no such thing --
+ * which is the real condition, reached the real way. */
+static void test_run_nothing_published(void)
+{
+    const int32_t keys[] = {ND_KEY_CLEAR};
+    char got[DG_DIGEST_MAX];
+    char want[DG_DIGEST_MAX];
+    int rc = -1;
+    uint64_t frames;
+
+    scenario_reset();
+    ctl_body("releases.json");
+    frames = run_scan(keys, 1u, &rc, got, sizeof got, NULL, 0u);
+
+    CHECK_INT(rc, 0, "app_run returns 0");
+    CHECK_INT((int64_t)frames, 2, "the progress screen, then one page");
+    if (page_digest(want, sizeof want, *api.nothing_title, "for unknown", *api.nothing_body))
+        CHECK_STR(got, want, "and the page is 'Nothing published' for this platform");
+}
+
+/* remote.NetworkError: curl's exit 6, "Could not resolve host". */
+static void test_run_no_connection(void)
+{
+    const int32_t keys[] = {ND_KEY_CLEAR};
+    char got[DG_DIGEST_MAX];
+    char want[DG_DIGEST_MAX];
+    char body[ND_DOWNGRADE_MSG_MAX];
+    char reason[ND_REMOTE_WHY_MAX];
+    int rc = -1;
+    uint64_t frames;
+
+    scenario_reset();
+    ctl_set("exit", "6");
+    ctl_set("stderr", "curl: (6) Could not resolve host: api.github.com\n");
+    frames = run_scan(keys, 1u, &rc, got, sizeof got, NULL, 0u);
+
+    CHECK_INT(rc, 0, "app_run returns 0");
+    CHECK_INT((int64_t)frames, 2, "the progress screen, then one page");
+
+    /* str(exc) reaches the page. The reason's WORDING is nd_remote's and is
+     * pinned by test_remote.c, so this asks the same library the same
+     * question and expects the app to have put that answer on the screen --
+     * rather than restating another module's string here, where it would go
+     * stale silently. */
+    if (scan_reason(reason, sizeof reason)) {
+        api.noconn_body(body, sizeof body, reason);
+        if (page_digest(want, sizeof want, *api.noconn_title, *api.noconn_subtitle, body))
+            CHECK_STR(got, want, "and the page is 'No connection', carrying curl's reason");
+    }
+}
+
+/* The whole point of the app: a listing that DOES carry this platform's
+ * asset becomes a list to pick from. releases.json holds four releases and
+ * three of them carry UPDATE-luckfox-armv7.ndsw, so there is a list to walk.
+ *
+ * The assertion is that the last frame is NOT either failure page. That is
+ * the discriminator a frame count is not -- three keys pressed at a
+ * DetailPage draw about as many frames as three keys pressed at a list. */
+static void test_run_lists_releases(void)
+{
+    const int32_t keys[] = {ND_KEY_DOWN, ND_KEY_DOWN, ND_KEY_CLEAR};
+    char got[DG_DIGEST_MAX];
+    char after[DG_DIGEST_MAX];
+    char nothing[DG_DIGEST_MAX];
+    char noconn[DG_DIGEST_MAX];
+    char body[ND_DOWNGRADE_MSG_MAX];
+    int rc = -1;
+
+    scenario_reset();
+    ctl_body("releases.json");
+    write_version_prop("luckfox-armv7", "0.3.11a");
+    (void)run_scan(keys, 3u, &rc, got, sizeof got, after, sizeof after);
+
+    CHECK_INT(rc, 0, "app_run returns 0 when the list is backed out of");
+    CHECK(after[0] != '\0', "a frame was drawn after the scan");
+
+    /* The frame the scan produced is neither failure page, so it is the
+     * list. Asserted on THAT frame and not on the last one: three keys
+     * pressed at a scrollable DetailPage move it, so the last frame differs
+     * from both pages even when the scan failed -- which a mutation that
+     * stubbed the scanner out proved by surviving the weaker check. */
+    api.noconn_body(body, sizeof body, "");
+    if (page_digest(nothing, sizeof nothing, *api.nothing_title, "for luckfox-armv7",
+                    *api.nothing_body))
+        CHECK(strcmp(after, nothing) != 0, "the scan did not draw 'Nothing published'");
+    if (page_digest(noconn, sizeof noconn, *api.noconn_title, *api.noconn_subtitle, body))
+        CHECK(strcmp(after, noconn) != 0, "nor 'No connection'");
+}
+
+/* Picking the version the phone is already running is refused by a page of
+ * its own rather than by leaving it out of the list -- "seeing where you are
+ * in the list is most of the point of the list".
+ *
+ * releases.json is deliberately NOT in version order and all_releases()
+ * keeps GitHub's order, so the three luckfox releases arrive as 0.3.2a,
+ * 0.3.11a, 0.3.10a. One Down reaches 0.3.11a, which is what version.prop
+ * says is running; Enter on it is the refusal. Asserting the digest of that
+ * page is what proves the scan really returned 0.3.11a in that position --
+ * this is the one test here that pins the list's CONTENTS and not just its
+ * existence. */
+static void test_run_already_running(void)
+{
+    const int32_t keys[] = {ND_KEY_DOWN, ND_KEY_ENTER, ND_KEY_CLEAR};
+    char got[DG_DIGEST_MAX];
+    char want[DG_DIGEST_MAX];
+    char subtitle[96];
+    int rc = -1;
+
+    scenario_reset();
+    ctl_body("releases.json");
+    write_version_prop("luckfox-armv7", "0.3.11a");
+    (void)run_scan(keys, 3u, &rc, got, sizeof got, NULL, 0u);
+
+    CHECK_INT(rc, 0, "app_run returns 0");
+    api.neodct_version(subtitle, sizeof subtitle, "0.3.11a");
+    if (page_digest(want, sizeof want, *api.running_title, subtitle, *api.running_body))
+        CHECK_STR(got, want, "row 1 is 0.3.11a, and picking it is refused as 'Already running'");
 }
 
 static void test_null_safety(void)
@@ -385,6 +752,7 @@ int main(void)
         (void)dlclose(h);
         return 1;
     }
+    g_curl_ready = fake_curl_install();
 
     RUN(test_strings);
     RUN(test_format_size);
@@ -392,7 +760,17 @@ int main(void)
     RUN(test_messages);
     RUN(test_confirm);
     RUN(test_refuse_and_page);
-    RUN(test_run);
+    RUN(test_progress);
+    if (g_curl_ready) {
+        RUN(test_run_nothing_published);
+        RUN(test_run_no_connection);
+        RUN(test_run_lists_releases);
+        RUN(test_run_already_running);
+    } else {
+        /* Loud rather than silent. A missing stand-in means the scan half of
+         * this test did not run, and a green result would be a lie. */
+        CHECK(false, "the stand-in curl could not be installed; the scan is untested");
+    }
     RUN(test_null_safety);
 
     return sa_end(h, "test_downgrade");

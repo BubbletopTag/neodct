@@ -20,14 +20,9 @@ clear > /dev/tty0
 # /NeoDCT is inside the read-only squashfs, so the crash log goes to the
 # user-data partition.
 #
-# PYTHONPYCACHEPREFIX is dead weight now that the UI is nd-core and not
-# python, and it is left here on purpose. The image still carries python3
-# and Pillow (SESSION-SCOPE.md: both ship until the last app is real), so an
-# app that shells out to python during the transition still needs a writable
-# cache prefix -- with a read-only rootfs python cannot drop .pyc files next
-# to the .py files, and without this it re-parses everything on every run.
-# Delete it when python leaves the defconfigs, not before.
-export PYTHONPYCACHEPREFIX=/NeoDCT/User/.pycache
+# PYTHONPYCACHEPREFIX used to be exported here, for apps that shelled out
+# to python while the port was in progress. python has left the defconfigs
+# and there is no interpreter on the phone to read it.
 CRASH_LOG=/NeoDCT/User/logs/crash.log
 mkdir -p /NeoDCT/User/logs 2>/dev/null || CRASH_LOG=/tmp/crash.log
 

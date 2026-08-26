@@ -31,7 +31,7 @@ answers were recorded:
 
 ```python
 import io, os, sys
-sys.path.insert(0, "neodct/overlay/NeoDCT")
+sys.path.insert(0, "neodct/python-reference")
 from System.core.UpdateService import remote
 
 class R(io.BytesIO):

@@ -1,5 +1,5 @@
 /* downgrade.h -- the parts of the Downgrade app a unit test can reach, and
- * the boundary with the half of the update system that is NOT in C yet.
+ * the boundary with the update system.
  *
  * System/engineering/apps/Downgrade/main.py is 160 lines. Everything it does
  * ITSELF -- the two settings it reads, the two failure pages, the release
@@ -7,69 +7,24 @@
  * the megabyte formatting, the three refusals -- is ported in full below and
  * is exercised by test/unit/test_downgrade.c.
  *
- * Everything it does through System/core/UpdateService is not, because that
- * package has no C implementation.
+ * Everything it does through System/core/UpdateService is done through
+ * nd_remote (in libneodct, which every app.so links) and, for the install
+ * itself, through the Update app's own app.so, dlopen()ed at the moment it
+ * is needed exactly as the Python reaches for importlib. main.c's header
+ * explains why the installer is loaded rather than linked; the short version
+ * is the Python's own: "One signature check, one staging path, one applier
+ * -- a second copy of that logic is the last thing this phone needs."
  *
- * ============ WHAT IS MISSING, AND WHY IT IS NOT INVENTED HERE ============
+ * ============ THE VERSION COMPARISON IS NOT DUPLICATED EITHER ============
  *
- * The app's eleven steps call into UpdateService four times:
+ * nd_downgrade_label() takes `older` as an ARGUMENT rather than working it
+ * out. remote.version_key/is_newer is subtle -- piecewise numeric comparison,
+ * so that 0.3.10a sorts above 0.3.9a and not below it -- and the Update app
+ * needs the same answer. It lives once, in nd_remote_is_newer(); this app
+ * calls it and passes the result in. That also keeps every builder here
+ * pure, which is what lets test/unit/test_downgrade.c pin them against the
+ * Python without a network.
  *
- *     step 3   remote.all_releases(platform)   the GitHub release list
- *     step 9   remote.asset_name(platform)     "UPDATE-<platform>.ndsw"
- *     step 10  remote.download(url, dest, ...) a resumable HTTPS download
- *     step 11  Update/main.py's _install(ui, destination)
- *
- * spec-update-system.md puts the first three in `nd_remote.c` and the fourth
- * in `nd_update_install()`, both inside a shared library called
- * libndupdate.so. Grepping include/ and lib/ finds none of it: no nd_remote,
- * no nd_package, no nd_zip, no nd_manifest, no nd_rsa, no nd_staging. The
- * whole of the C update system today is include/nd_update.h -- an enum, some
- * string constants, and one function (nd_update_message()) that lib/ never
- * defines, so calling even that would leave app.so with an unresolved symbol
- * and dlopen() would refuse to load the app.
- *
- * There is also no HTTP client anywhere in the tree and no TLS: the Makefile's
- * PKG_DEPS are freetype2, libpng, libjpeg and sqlite3. spec-update-system.md
- * line 1861 wants a libcurl backend behind a transport vtable. Nothing to
- * call, and nothing to build it out of.
- *
- * NONE OF IT IS REIMPLEMENTED IN THIS APP, for the reason the app's own
- * docstring gives about the step it refuses to duplicate: "One signature
- * check, one staging path, one applier -- a second copy of that logic is the
- * last thing this phone needs." That applies to the release list and the
- * download too. It applies twice over to the version comparison behind the
- * "(older)" mark, which is `remote.version_key`/`remote.is_newer` and which
- * the Update app needs as well: this app takes the answer as an argument
- * (see nd_downgrade_label) rather than growing a second copy of it.
- *
- * SESSION-SCOPE.md is explicit that this is deliberate, not an oversight:
- * "The update system and its crypto. Security-critical; it gets its own pass
- * with the RSA verifier reviewed properly, not rushed alongside everything
- * else."
- *
- * ============ SO WHAT DOES THE APP DO TODAY ============
- *
- * Steps 1 and 2, and then it stops. It reads the platform and the running
- * version, draws the Python's "Reading releases" progress screen at 0%, and
- * then -- with nothing to ask for the list -- logs
- *
- *     [UPDATE] release list unavailable: this build has no release reader
- *
- * and shows one DetailPage in the same shape as the Python's two failure
- * pages. That page is NOT one of the Python's: the Python has a page for
- * "GitHub says there is nothing for this phone" and a page for "the phone
- * could not reach GitHub", and this is neither of those conditions. Putting
- * either of the Python's screens up would be the app telling the owner
- * something it does not know. spec-core-loop.md line 183 and OPEN-QUESTIONS
- * X-20 set the precedent for the wording: a subsystem that is not linked says
- * so, in those words, rather than borrowing a message meant for something
- * else.
- *
- * When libndupdate lands, app_run() grows steps 3-11 around the helpers below
- * and nothing else in this directory changes. The call shapes are already
- * written down twice: spec-update-system.md's nd_remote.h block (line 1633),
- * and apps/Update/update_app.h, where the same boundary is drawn for the
- * Update app.
  */
 
 #ifndef ND_DOWNGRADE_H_INCLUDED
@@ -102,6 +57,15 @@ extern const char *const nd_downgrade_header;
 /* A release label is a version plus at most "  (running)". */
 #define ND_DOWNGRADE_LABEL_MAX 64
 
+/* Step 11's importlib dance, as a path and a symbol. The Python loads
+ * /NeoDCT/System/apps/Update/main.py; the C loads the app.so the C build
+ * installs beside that app's manifest.json, and resolves the one function
+ * that is _install()'s port. Both are ABSOLUTE and load-bearing
+ * (CODING-STANDARDS.md 9.5): the path goes through nd_path_resolve(), so a
+ * test root redirects it and the phone does not. */
+#define ND_DOWNGRADE_UPDATE_APP_SO   "/NeoDCT/System/apps/Update/app.so"
+#define ND_DOWNGRADE_INSTALL_SYMBOL  "nd_update_install"
+
 /* ------------------------------------------------------------------ *
  * The verbatim strings
  * ------------------------------------------------------------------ */
@@ -118,11 +82,9 @@ extern const char *const nd_downgrade_noconn_subtitle; /* "Could not reach..." *
 extern const char *const nd_downgrade_running_title;   /* "Already running"    */
 extern const char *const nd_downgrade_running_body;
 
-/* The one page that is NOT the Python's, for the condition the Python cannot
- * be in. See the header comment. */
-extern const char *const nd_downgrade_nosvc_title;
-extern const char *const nd_downgrade_nosvc_body;
-extern const char *const nd_downgrade_nosvc_why;
+/* VerticalList(ui, "Releases", ...): the list's own title, which is NOT the
+ * "Downgrade" header the pages and progress screens carry. */
+extern const char *const nd_downgrade_list_title;
 
 /* _refuse(ui, "The card has no update folder.") */
 extern const char *const nd_downgrade_no_folder;
@@ -146,11 +108,24 @@ void nd_downgrade_format_size(char *out, size_t out_sz, int64_t count);
  *            ""            otherwise
  *
  * TWO LEADING SPACES inside both marks. `older` is `not remote.is_newer(
- * version, installed)` and is the CALLER's to supply: version comparison
- * lives in nd_remote, which does not exist in this build, and this app must
- * not grow a second copy of it. See the header comment. */
+ * version, installed)` and is the CALLER's to supply: the comparison lives
+ * once, in nd_remote_is_newer(), and this app must not grow a second copy of
+ * it. Keeping it out also keeps this builder pure, which is what lets the
+ * unit test pin it without a network. See the header comment. */
 void nd_downgrade_label(char *out, size_t out_sz, const char *version, const char *installed,
                         bool older);
+
+/* "Downloading %s" % version -- the ProgressScreen step for step 10. */
+void nd_downgrade_downloading_step(char *out, size_t out_sz, const char *version);
+
+/* The denominator of the Python's progress lambda:
+ *
+ *     lambda done, total: progress.draw(done, total or picked["size"] or 1)
+ *
+ * `or` on an int is falsy at zero, so: total, else the size from the release
+ * listing, else 1. The 1 stops a division by zero when a server sends no
+ * length for a release GitHub also reported as zero bytes. */
+int64_t nd_downgrade_progress_total(int64_t total, int64_t size);
 
 /* "for %s" % platform, and "NeoDCT %s" % installed. */
 void nd_downgrade_for_platform(char *out, size_t out_sz, const char *platform);
