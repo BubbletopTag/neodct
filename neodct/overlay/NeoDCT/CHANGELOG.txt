@@ -1,5 +1,52 @@
 # NeoDCT OS Changelog
 
+0.4.1a
+The Music app grew a library.
+
+It used to list the raw filenames it found on the card, in the order the
+directory walk happened to produce them, and there was no way to change
+the volume at all. Now it opens on a menu: Artists, Albums, Songs,
+Folders, Volume.
+
+Added
+- Browse by artist, album or song. The app reads the ID3 tags off every
+  track on the card and groups them properly: artists in alphabetical
+  order, an artist's albums oldest first, and an album's tracks in
+  TRACK NUMBER order rather than filename order -- so a record whose
+  files are called 01.mp3, 02.mp3 and a-side.mp3 finally plays in the
+  order it was recorded in.
+- Compilations stay in one piece. A track's album artist, where it has
+  one, decides which artist it belongs to, so a "Various Artists" record
+  is one entry with one album under it instead of forty artists with one
+  track each.
+- Volume, on a ten-step scale that is even in loudness rather than in
+  amplitude. Up and Down while a track is playing open a full-screen
+  scale, and the level is remembered between sessions. It is applied to
+  the audio itself, which means turning the music down does NOT turn the
+  ringtone down -- a phone that stops ringing because you were listening
+  quietly is a phone that loses you a call.
+- Picking a track now plays the list it came from, and moves on to the
+  next track when one ends, instead of dropping back to the menu every
+  three minutes. Left and Right skip.
+
+Changed
+- The tag reader learned four more frames -- album artist, track number,
+  disc number and the recording year -- which is what the grouping and
+  the ordering are built out of.
+- Reading the tags off a full card takes a moment, so it happens the
+  first time you choose Artists, Albums or Songs, behind a progress bar
+  that Clear cancels. Folders is still instant and still shows exactly
+  what it always showed: the filenames, in the old order. Nothing that
+  worked before was taken away.
+
+Fixed
+- A file with no tags, or one that has gone missing since the card was
+  scanned, no longer stops the scan. It is listed under Unknown Artist
+  with its filename as the title.
+- The unit tests build again on a toolchain that pairs a recent glibc
+  with -O2, where a cast to void is not enough to ignore write()'s
+  result.
+
 0.4.0
 The whole operating system has been rewritten in C.
 
