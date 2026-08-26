@@ -78,6 +78,7 @@ static struct {
     nd_err (*fingerprint)(char *, size_t);
     nd_err (*write_sshd_config)(void);
     nd_err (*write_tunnel_script)(const char *, const char *, const char *);
+    nd_err (*write_sshd_script)(void);
     nd_err (*quote)(char *, size_t, const char *);
     nd_err (*tunnel_line)(char *, size_t, const char *, const char *, const char *);
     nd_err (*check_ready)(nd_rs_settings *, char *, size_t);
@@ -109,6 +110,7 @@ static bool api_open(void *h)
     *(void **)&api.fingerprint = sa_sym(h, "nd_rs_host_fingerprint");
     *(void **)&api.write_sshd_config = sa_sym(h, "nd_rs_write_sshd_config");
     *(void **)&api.write_tunnel_script = sa_sym(h, "nd_rs_write_tunnel_script");
+    *(void **)&api.write_sshd_script = dlsym(h, "nd_rs_write_sshd_script");
     *(void **)&api.quote = sa_sym(h, "nd_rs_quote");
     *(void **)&api.tunnel_line = sa_sym(h, "nd_rs_tunnel_command_line");
     *(void **)&api.check_ready = sa_sym(h, "nd_rs_check_ready");
@@ -473,6 +475,49 @@ static void test_tunnel_script(void)
     CHECK(strstr(text, "'-R' '2022:127.0.0.1:22'") != NULL, "the command is the quoted one");
 }
 
+/* sshd gets the same retry loop the tunnel has, and for the same reason.
+ *
+ * The launcher starts Remote Shell at boot, before the network scripts have
+ * finished -- deliberately, because the tunnel is a retry loop and mobile data
+ * can take a minute to attach. But sshd was started ONCE, and at that point
+ * loopback may not be configured yet:
+ *
+ *     Bind to port 22 on 127.0.0.1 failed: Address not available.
+ *     Cannot bind any address.
+ *
+ * sshd then exits and nothing ever starts it again. The tunnel, meanwhile,
+ * comes up perfectly and holds -- so the phone looks reachable from the relay,
+ * every hop works, and the connection arrives at a port with nothing behind
+ * it. From the other end that is indistinguishable from a rejected key, which
+ * is what made this so hard to see. Whether it happens at all depends on
+ * whether lo won the race that boot, which is why it worked sometimes.
+ *
+ * Seen on a fresh boot in QEMU with a real relay: tunnel up, sshd dead, and
+ * the phone's own log naming the bind failure in its first two lines. */
+static void test_sshd_script(void)
+{
+    char text[4096];
+
+    wipe_state();
+    CHECK(api.write_sshd_script != NULL, "the module can write an sshd runner");
+    if (api.write_sshd_script == NULL)
+        return;
+
+    CHECK_INT(api.write_sshd_script(), ND_OK, "wrote sshd.sh");
+    CHECK(read_whole(ND_RS_SSHD_SCRIPT, text, sizeof text), "and it is on disk");
+    CHECK_INT((int)mode_of(ND_RS_SSHD_SCRIPT), 0700, "executable, by us alone");
+
+    CHECK(strncmp(text, "#!/bin/sh\n", 10) == 0, "a shell script");
+    CHECK(strstr(text, "while :; do\n") != NULL, "loops forever, as tunnel.sh does");
+    CHECK(strstr(text, "'" ND_RS_SSHD "'") != NULL, "runs sshd");
+    CHECK(strstr(text, "'-D'") != NULL, "in the foreground, so the loop can wait on it");
+    CHECK(strstr(text, "/.remote/sshd_config'") != NULL, "with the generated config");
+    CHECK(strstr(text, "    echo \"[RSHELL] sshd ended ($?); retrying in 15\"\n") != NULL,
+          "says why it is going round again, with the tag the log colours");
+    CHECK(strstr(text, "    sleep 15\n") != NULL, "RETRY_SECONDS, the same as the tunnel");
+    CHECK(strstr(text, "\ndone\n") != NULL, "and the loop is closed");
+}
+
 /* ------------------------------------------------------------------ *
  * 3. install_keys_from_card()
  * ------------------------------------------------------------------ */
@@ -628,8 +673,14 @@ static void test_pid_and_ownership(void)
 
     /* stop() is safe when it is already down, and forgets the stale file
      * either way -- Python unlinks it whether or not it signalled. */
+    /* sshd runs under a loop now, and the loop has its own pid file. Off has
+     * to mean off: a loop left behind would start sshd again fifteen seconds
+     * after the phone was told to stop. */
+    CHECK(write_whole(ND_RS_SSHD_LOOP_PID, "not a number\n"), "wrote a stale loop pid file");
+
     CHECK_INT(api.stop(&state, true), ND_OK, "stop on an already-stopped phone");
     CHECK(!nd_path_exists(ND_RS_SSHD_PID), "the stale pid file is gone");
+    CHECK(!nd_path_exists(ND_RS_SSHD_LOOP_PID), "and so is the loop's");
     CHECK(!state.sshd && !state.tunnel, "and it is still down");
 }
 
@@ -668,6 +719,71 @@ static void test_host_key(void)
     CHECK_INT(api.fingerprint(fingerprint, sizeof fingerprint), ND_OK, "fingerprint answers");
     CHECK(strstr(fingerprint, "SHA256:") != NULL, "and now names a SHA256 fingerprint");
     CHECK(strchr(fingerprint, '\n') == NULL, "stripped, so it fits one dialog line");
+}
+
+/* An empty host key file is not a host key, and treating it as one leaves the
+ * phone unreachable for good.
+ *
+ * ssh-keygen creates the file before it has any key material to put in it, so
+ * an interrupted run leaves nothing behind but a zero-byte file -- and on a
+ * first boot it can sit there a long while, because generating a key wants
+ * entropy the kernel has not gathered yet. ensure_host_key() asked only
+ * whether the file EXISTED, so every start after that skipped regeneration,
+ * sshd exited with "no hostkeys available", and the tunnel came up to a phone
+ * with nothing listening at the other end of it. Silently: the only thing the
+ * person trying to log in sees is a refused connection.
+ *
+ * Found on a real boot, not by reading this code -- the phone's own remote.log
+ * named it in one line while the file listing showed a 0-byte key. */
+static void test_empty_host_key_is_replaced(void)
+{
+    char why[ND_RS_ERRMSG_MAX];
+    char body[512];
+    struct stat st;
+
+    if (stat(ND_RS_KEYGEN, &st) != 0 || !S_ISREG(st.st_mode)) {
+        printf("  (no %s on this host: host key regeneration is unreachable)\n", ND_RS_KEYGEN);
+        return;
+    }
+
+    wipe_state();
+    /* save_settings() is what makes the directory; nothing else here does. */
+    CHECK_INT(api.settings_save("relay.example.net", NULL, NULL, NULL), ND_OK,
+              "a .remote directory to write into");
+    CHECK(write_whole(ND_RS_HOST_KEY, ""), "an empty key, as an interrupted keygen leaves it");
+
+    CHECK_INT(api.ensure_host_key(why, sizeof why), ND_OK, "ensure_host_key answers");
+    CHECK(read_whole(ND_RS_HOST_KEY, body, sizeof body) && body[0] != '\0',
+          "the empty key is replaced, not kept");
+    CHECK_INT((int)mode_of(ND_RS_HOST_KEY), 0600, "and what replaces it is 0600");
+}
+
+/* Neither is a half-written one. A phone loses power, and ssh-keygen is not
+ * atomic: what is left is a file with bytes in it that no longer parses.
+ * sshd says "error in libcrypto" and exits exactly as it does for an empty
+ * one, so a size check alone still leaves the phone wedged for good -- the
+ * key has to be one openssh can actually load. */
+static void test_corrupt_host_key_is_replaced(void)
+{
+    char why[ND_RS_ERRMSG_MAX];
+    char body[512];
+    struct stat st;
+    const char *rubbish = "-----BEGIN OPENSSH PRIVATE KEY-----\ntruncated here\n";
+
+    if (stat(ND_RS_KEYGEN, &st) != 0 || !S_ISREG(st.st_mode)) {
+        printf("  (no %s on this host: host key validation is unreachable)\n", ND_RS_KEYGEN);
+        return;
+    }
+
+    wipe_state();
+    CHECK_INT(api.settings_save("relay.example.net", NULL, NULL, NULL), ND_OK,
+              "a .remote directory to write into");
+    CHECK(write_whole(ND_RS_HOST_KEY, rubbish), "a key that stops halfway");
+
+    CHECK_INT(api.ensure_host_key(why, sizeof why), ND_OK, "ensure_host_key answers");
+    CHECK(read_whole(ND_RS_HOST_KEY, body, sizeof body) && strcmp(body, rubbish) != 0,
+          "the unloadable key is replaced, not kept");
+    CHECK_INT((int)mode_of(ND_RS_HOST_KEY), 0600, "and what replaces it is 0600");
 }
 
 /* ------------------------------------------------------------------ *
@@ -739,10 +855,13 @@ int main(void)
     RUN(test_tunnel_command);
     RUN(test_sshd_config);
     RUN(test_tunnel_script);
+    RUN(test_sshd_script);
     RUN(test_install_keys);
     RUN(test_check_ready_order);
     RUN(test_pid_and_ownership);
     RUN(test_host_key);
+    RUN(test_empty_host_key_is_replaced);
+    RUN(test_corrupt_host_key_is_replaced);
     RUN(test_back_leaves);
     RUN(test_null_safety);
 

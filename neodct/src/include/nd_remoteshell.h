@@ -81,9 +81,14 @@ extern "C" {
 #define ND_RS_RELAY_KEY       "/NeoDCT/User/.remote/relay_id_ed25519"
 #define ND_RS_KNOWN_HOSTS     "/NeoDCT/User/.remote/known_hosts"
 #define ND_RS_TUNNEL_SCRIPT   "/NeoDCT/User/.remote/tunnel.sh"
-#define ND_RS_TUNNEL_PID      "/NeoDCT/User/.remote/tunnel.pid"
-#define ND_RS_SSHD_PID        "/NeoDCT/User/.remote/sshd.pid"
-#define ND_RS_LOG_FILE        "/NeoDCT/User/.remote/remote.log"
+/* sshd runs under a retry loop of its own, for the reason tunnel.sh has one:
+ * it is started at boot, before the network scripts have finished, and a bind
+ * to 127.0.0.1 fails outright when loopback is not up yet. */
+#define ND_RS_SSHD_SCRIPT   "/NeoDCT/User/.remote/sshd.sh"
+#define ND_RS_SSHD_LOOP_PID "/NeoDCT/User/.remote/sshd_loop.pid"
+#define ND_RS_TUNNEL_PID    "/NeoDCT/User/.remote/tunnel.pid"
+#define ND_RS_SSHD_PID      "/NeoDCT/User/.remote/sshd.pid"
+#define ND_RS_LOG_FILE      "/NeoDCT/User/.remote/remote.log"
 
 /* Where the operator drops the three files, on the card, from a PC. */
 #define ND_RS_CARD_DIR  "remote"
@@ -206,6 +211,12 @@ nd_err nd_rs_write_sshd_config(void);
 
 /* write_tunnel_script(host, user, port): the reconnect loop. */
 nd_err nd_rs_write_tunnel_script(const char *host, const char *user, const char *port);
+
+/* write_sshd_script(): the same retry loop, around sshd. It is started at boot
+ * before the network scripts have finished, and a bind to 127.0.0.1 fails
+ * outright when loopback is not up yet -- once, silently, leaving a phone that
+ * the tunnel reaches and nothing answers on. */
+nd_err nd_rs_write_sshd_script(void);
 
 /* _quote(word): "'" + word.replace("'", "'\\''") + "'". Exported because the
  * Python's test suite has a real-`sh` shell-injection case over it. */

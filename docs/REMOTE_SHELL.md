@@ -261,14 +261,64 @@ only want a shell into your own QEMU instance, you do not need Remote Shell
 at all: run the emulator with a port forward and reach `sshd` directly.
 Remote Shell exists for the hardware problem.
 
-## 8. Known limits
+## 8. How it keeps itself up
+
+Two processes, each under its own retry loop, both regenerated from source
+every start:
+
+| process | script | what it does |
+|---|---|---|
+| `sshd` | `.remote/sshd.sh` | listens on `127.0.0.1:22`, and nowhere else |
+| the tunnel | `.remote/tunnel.sh` | dials the relay and asks for the reverse forward |
+
+The tunnel has always retried, because mobile data drops and that is not an
+error. **sshd needs the same loop for a duller reason:** Remote Shell starts
+at boot, deliberately early — the tunnel can afford to wait for a route, so
+it does not hold the launcher up — and at that point loopback may not be
+configured yet:
+
+```
+Bind to port 22 on 127.0.0.1 failed: Address not available.
+Cannot bind any address.
+```
+
+Started once, sshd exits there and nothing brings it back. The tunnel
+meanwhile connects perfectly and holds, so every hop works and the
+connection arrives at a port with nothing behind it — which from the far
+end is indistinguishable from a rejected key. Whether it happened at all
+depended on whether `lo` won that boot's race, which is why it worked
+sometimes.
+
+Both loops retry every 15 seconds, so a phone is reachable within about
+that long of the network coming up, and "Off" kills the loops before the
+processes they supervise — otherwise stopping sshd just starts another one.
+
+## 9. Testing it without a VPS
+
+`neodct/tools/test_relay.sh` runs an unprivileged sshd on `127.0.0.1:2022`
+and stands in for the relay; QEMU's `guestfwd` points the guest's
+`10.0.2.100:22` at it, so the phone dials "port 22" and lands there.
+Everything else is real — real sshd on the phone, real `ssh` dialling out,
+real reverse forward, real login.
+
+```sh
+neodct/tools/test_remoteshell_e2e.sh          # one full run, fresh userdata
+NEODCT_E2E_RUNS=5 neodct/tools/test_remoteshell_e2e.sh
+```
+
+That boots the phone, waits for it to dial out, and then logs in *through
+the tunnel the phone opened*, which is the only thing that proves the
+feature works. On failure it prints the phone's own `remote.log`, which
+names the reason far more often than the client's "Permission denied" does.
+
+## 10. Known limits
 
 - **The relay's own ssh port is assumed to be 22.** The Port setting in the
   app is the port the *relay listens on for you*, not the port the phone
   dials. If you move sshd on the relay off 22, the phone cannot reach it
   and there is no setting for that yet.
 
-## 9. What this does not protect against
+## 11. What this does not protect against
 
 Worth being plain about, because "it uses ssh" invites more confidence than
 is earned:
@@ -285,14 +335,16 @@ is earned:
 - **This is alpha software with a root shell on the far end.** It is a
   development tool. Turn it off when you are not using it.
 
-## 10. Where the code is
+## 12. Where the code is
 
 | what | where |
 |---|---|
-| the decisions — config, keys, processes | `System/core/RemoteShell/__init__.py` |
-| the switch on the phone | `System/engineering/apps/RemoteShell/main.py` |
-| starting it at boot when it was left on | `launcher.py` |
-| tests, mostly about who can get in | `neodct/tests/test_remoteshell.py` |
+| the decisions — config, keys, processes | `neodct/src/lib/nd_remoteshell.c` |
+| the switch on the phone | `neodct/src/apps/RemoteShell/main.c` |
+| starting it at boot when it was left on | `neodct/src/core/nd_main.c` |
+| tests, mostly about who can get in | `neodct/src/test/unit/test_remoteshell.c` |
+| a relay to test against | `neodct/tools/test_relay.sh` |
+| the whole thing, end to end | `neodct/tools/test_remoteshell_e2e.sh` |
 
 The sshd config is generated from `write_sshd_config()` every single time
 it starts, and is not read back. If you edit it on the phone to get past
