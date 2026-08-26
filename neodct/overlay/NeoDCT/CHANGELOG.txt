@@ -18,6 +18,9 @@ Added
   yours. Newest conversation first.
 - New Message sits at the top of that list and opens the same composer
   Classic uses.
+- The conversation list gives each row two clear lines, so a contact
+  whose name has a descender -- a p, a g, a y -- no longer has the
+  message preview drawn through the tails of it.
 - Opening a conversation shows it as bubbles -- yours filled and on the
   right, theirs outlined and on the left. Up and Down walk from the
   message box at the bottom back through the transcript.

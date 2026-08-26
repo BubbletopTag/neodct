@@ -45,32 +45,43 @@
 
 /* ============ THE VERTICAL BUDGET, WHICH IS EXACT ============
  *
- * 145 px of content, and this screen wants a header, a "New Message" action
- * and three two-line conversation rows in it. The numbers come from where the
- * fonts actually put INK, measured rather than assumed -- an em size is not a
- * glyph height, and using the em size is what makes a rule saw through the
- * descenders of the line above it. Relative to a text origin `o`:
+ * 145 px of content, and the numbers come from where the fonts actually put
+ * INK, measured rather than assumed -- an em size is not a glyph height, and
+ * using the em size is what makes one line of text sit in the descenders of
+ * the line above it. Relative to a text origin `o`:
  *
- *     font_s  (14 px)   ink o+1 .. o+15
- *     font_md (18 px)   ink o+3 .. o+19
- *     font_n  (20 px)   ink o+2 .. o+22
+ *     font_s  (14 px)   ink o+1 .. o+15   (15 rows)
+ *     font_md (18 px)   ink o+3 .. o+19   (17 rows)
+ *     font_n  (20 px)   ink o+2 .. o+22   (21 rows)
  *
- * which lays out as:
+ * ============ WHY ONLY TWO CONVERSATIONS ARE VISIBLE ============
  *
- *   24  header: font_n at o=1, so ink runs 3..23 and the rule at 24 clears it
+ * This showed three, and the third was bought by letting the preview overlap
+ * the name: a contact whose name has descenders -- "NeoDCT Support" -- had
+ * the grey preview drawn straight through the tails of its p's.
+ *
+ * The arithmetic says that is not fixable at three. A row needs 17 rows of
+ * name plus 15 of preview plus the gaps that make them read as two lines,
+ * which is a pitch of about 40. Three of those is 120, and the header and
+ * the New Message row have already spent 49 of the 145. Three rows fit only
+ * by removing the gaps, which is the bug.
+ *
+ * So the row got the space instead of the count:
+ *
+ *   24  header: font_n at o=1, ink 3..23, rule at 24 clears it
  *    3  air
  *   22  New Message: font_md at o=y-2, ink y+1..y+17, rule at y+20
- *   96  three rows of 32
+ *   96  two rows of 48
  *   ---
  *  145  = content_bottom. Exactly.
  *
- * A conversation row puts font_md at o=y-2 (ink y+1..y+17) over font_s at
- * o=y+13 (ink y+14..y+28), with the row rule at y+30. Change any constant
- * here alone and the third row stops fitting -- threads_draw() breaks out
- * rather than drawing a row that would overrun, so the symptom is a
- * conversation that silently vanishes, not a corrupted frame. */
-#define ROW_H       32
-#define ROW_VISIBLE 3
+ * A row is font_md at o=y+1 (ink y+4..y+20) over font_s at o=y+24 (ink
+ * y+25..y+39), rule at y+46. Four clear pixels between the two lines, six
+ * under the preview. Change any constant here alone and a row stops fitting
+ * -- threads_draw() breaks out rather than drawing one that would overrun,
+ * so the symptom is a conversation that silently vanishes. */
+#define ROW_H       48
+#define ROW_VISIBLE 2
 #define NEW_ROW_H   22
 
 /* Bubbles. The 0.72 is the fraction of the screen one may occupy before its
@@ -191,7 +202,7 @@ static void threads_draw(nd_ui *ui, thread_list *tl, nd_softkey *bar)
             break;
 
         if (selected) {
-            (void)nd_draw_rect_fill(d, ND_RECT(2, y - 2, w - 8, y + ROW_H - 3), ND_WHITE);
+            (void)nd_draw_rect_fill(d, ND_RECT(2, y + 1, w - 8, y + ROW_H - 4), ND_WHITE);
             name_c = ND_BLACK;
             prev_c = ND_BLACK;
         } else {
@@ -212,7 +223,7 @@ static void threads_draw(nd_ui *ui, thread_list *tl, nd_softkey *bar)
             char fitted[64];
 
             (void)nd_text_ellipsize(fitted, sizeof fitted, name, ui->font_md, w - 22);
-            (void)nd_draw_text(d, CHAT_MARGIN + 4, y - 2, fitted, ui->font_md, name_c);
+            (void)nd_draw_text(d, CHAT_MARGIN + 4, y + 1, fitted, ui->font_md, name_c);
         }
         {
             char fitted[96];
@@ -224,7 +235,7 @@ static void threads_draw(nd_ui *ui, thread_list *tl, nd_softkey *bar)
             else
                 (void)nd_strlcpy(preview, t->preview, sizeof preview);
             (void)nd_text_ellipsize(fitted, sizeof fitted, preview, ui->font_s, w - 22);
-            (void)nd_draw_text(d, CHAT_MARGIN + 4, y + 13, fitted, ui->font_s, prev_c);
+            (void)nd_draw_text(d, CHAT_MARGIN + 4, y + 24, fitted, ui->font_s, prev_c);
         }
 
         y += ROW_H;

@@ -3364,6 +3364,16 @@ actually put **ink**, measured, not from their em sizes; the constants and the
 arithmetic are in the comment at the top of `chat.c`. Using the em size is what
 makes a row rule saw through the descenders of the line above it.
 
+The conversation list shows **two** conversations, not three. Three was the
+first attempt and it was bought by letting the preview overlap the name --
+invisible for "Dave" and "Aoife", obvious the moment a contact called "NeoDCT
+Support" appeared and the grey preview ran through the tails of its p's. The
+arithmetic does not allow three: a row needs 17 rows of `font_md` name plus 15
+of `font_s` preview plus the gaps that make them read as two lines, and the
+header and the New Message row have already spent 49 of the 145. Three fit only
+with the gaps removed, which is the bug. The row got the space instead of the
+count -- 48 px, four clear pixels between the lines and six under the preview.
+
 **Answer:** _(no owner decision needed)_
 
 ---
