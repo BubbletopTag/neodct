@@ -167,6 +167,16 @@ size_t nd_modemapp_radio_rows(const nd_modem_status *st, int32_t bars, nd_modema
         if (nd_modemapp_ttyusb_list(ttys, sizeof ttys) == 0u)
             (void)nd_strlcpy(ttys, "no ttyUSB nodes!", sizeof ttys);
         row_set(&out[n++], "PORTS", ttys);
+        if (n >= max)
+            return n;
+
+        /* WHY, not just what. The nodes existing and the modem answering are
+         * different questions, and this app exists to be read on a phone that
+         * has no serial console attached -- so the probe's own reason comes
+         * across the wire and is drawn here rather than only being printed
+         * where nobody can see it. */
+        if (st->probe_why[0] != '\0')
+            row_set(&out[n++], "WHY", st->probe_why);
     }
     return n;
 }
@@ -215,9 +225,9 @@ size_t nd_modemapp_data_rows(nd_modemapp_row *out, size_t max)
         return n;
 
     row_set(&out[n++], "IPV6",
-            have_ipv6 ? nd_modemapp_shorten(ipv6, ND_MODEMAPP_SHORTEN_LIMIT, shortened,
-                                            sizeof shortened)
-                      : "--");
+            have_ipv6
+                ? nd_modemapp_shorten(ipv6, ND_MODEMAPP_SHORTEN_LIMIT, shortened, sizeof shortened)
+                : "--");
     if (n >= max)
         return n;
 
@@ -374,7 +384,7 @@ int32_t nd_modemapp_line_h(int32_t bottom, int32_t y, size_t n_rows)
     return h < 15 ? 15 : h;
 }
 
-void nd_modemapp_draw_page(nd_ui *ui, const nd_modem_status *st, int32_t page,
+void nd_modemapp_draw_page(nd_ui *ui, const nd_modem_status *st, bool linked, int32_t page,
                            const nd_modemapp_row *rows, size_t n_rows)
 {
     int32_t screen_w;
@@ -409,8 +419,15 @@ void nd_modemapp_draw_page(nd_ui *ui, const nd_modem_status *st, int32_t page,
         y += line_h;
     }
 
+    /* Three states, not two. "SIMULATION" is a claim about the phone; making
+     * it when the core never answered says the modem is missing on a phone
+     * whose modem is fine, which is exactly the bug this app was reported
+     * for. */
     (void)nd_draw_text(ui->draw, 8, bottom - 14,
-                       st->hardware ? st->port : ND_MODEMAPP_SIMULATION, ui->font_s, ND_GRAY);
+                       !linked        ? ND_MODEMAPP_NO_LINK
+                       : st->hardware ? st->port
+                                      : ND_MODEMAPP_SIMULATION,
+                       ui->font_s, ND_GRAY);
     (void)nd_snprintf(pos, sizeof pos, "%d/%d", page + 1, ND_MODEMAPP_N_PAGES);
     nd_ui_text_size(ui, pos, ui->font_s, &tw, &th);
     (void)nd_draw_text(ui->draw, screen_w - 5 - tw, bottom - 14, pos, ui->font_s, ND_GRAY);
@@ -455,8 +472,12 @@ int app_run(nd_ui *ui)
         if (now - last_draw >= ND_MODEMAPP_REFRESH_S) {
             nd_modem_status st;
             size_t n_rows;
+            bool linked;
 
-            (void)nd_svc_modem_status(ui, &st);
+            /* The return value used to be thrown away. It is the difference
+             * between "the core says there is no modem" and "the core did not
+             * answer", and the second was being drawn as the first. */
+            linked = nd_svc_modem_status(ui, &st);
             if (page == ND_MODEMAPP_PAGE_RADIO) {
                 /* BARS is the PATCHED signal_level(); see the header. */
                 n_rows = nd_modemapp_radio_rows(&st, nd_ui_status_signal_level(ui), rows,
@@ -477,11 +498,10 @@ int app_run(nd_ui *ui)
                      * status snapshot beside them. Every one of those strings
                      * already existed for a modem that would not answer, and
                      * that is what has happened: it was not asked. */
-                    n_sim_cache = st.hardware
-                                      ? sim_rows_present(ui->modem, &st, sim_cache,
-                                                         ND_ARRAY_LEN(sim_cache))
-                                      : nd_modemapp_sim_rows_absent(sim_cache,
-                                                                    ND_ARRAY_LEN(sim_cache));
+                    n_sim_cache =
+                        st.hardware
+                            ? sim_rows_present(ui->modem, &st, sim_cache, ND_ARRAY_LEN(sim_cache))
+                            : nd_modemapp_sim_rows_absent(sim_cache, ND_ARRAY_LEN(sim_cache));
                     have_sim_cache = true;
                 }
                 memcpy(rows, sim_cache, sizeof rows);
@@ -490,7 +510,7 @@ int app_run(nd_ui *ui)
                 n_rows = nd_modemapp_data_rows(rows, ND_ARRAY_LEN(rows));
             }
 
-            nd_modemapp_draw_page(ui, &st, page, rows, n_rows);
+            nd_modemapp_draw_page(ui, &st, linked, page, rows, n_rows);
             nd_softkey_update(&softkey, page < ND_MODEMAPP_N_PAGES - 1 ? "Next" : "Exit", false);
             if (nd_ui_present(ui) != ND_OK)
                 return 0;

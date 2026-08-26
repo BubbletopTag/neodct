@@ -312,8 +312,10 @@ int nd_modem__open_port(const char *dev)
     struct termios t;
     int fd;
 
-    if (nd_path_resolve(resolved, sizeof resolved, dev) != ND_OK)
+    if (nd_path_resolve(resolved, sizeof resolved, dev) != ND_OK) {
+        errno = ENAMETOOLONG;
         return -1;
+    }
 
     /* O_CLOEXEC because Python 3 sets it on every os.open() (PEP 446) and the
      * modem must not leak the port into aplay. */
@@ -321,8 +323,13 @@ int nd_modem__open_port(const char *dev)
     if (fd < 0)
         return -1;
 
+    /* close() may set errno of its own, and the caller prints ours to say why
+     * a port was rejected -- so save it across the teardown on both paths. */
     if (tcgetattr(fd, &t) != 0) {
+        int saved = errno;
+
         (void)close(fd);
+        errno = saved;
         return -1;
     }
     t.c_iflag = 0;
@@ -334,7 +341,10 @@ int nd_modem__open_port(const char *dev)
     t.c_cc[VMIN] = 0;
     t.c_cc[VTIME] = 0;
     if (tcsetattr(fd, TCSANOW, &t) != 0) {
+        int saved = errno;
+
         (void)close(fd);
+        errno = saved;
         return -1;
     }
     return fd;

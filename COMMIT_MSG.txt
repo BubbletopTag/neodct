@@ -1234,3 +1234,220 @@ of the image, and still says something when there is no version.prop.
 output/images/system.img and userdata.ext4 are the rebuilt **0.3.0a** pair, so
 the phone boots the old version and the card has the new one on it. The
 pristine base is kept in output/images-0.3.0a/ to run the install again.
+
+---
+
+# tools: point mkupdate at the python reference where it now lives
+
+Moving the Python out of the overlay took the update builder's imports with
+it. mkupdate.py put `neodct/overlay/NeoDCT` on sys.path and imported
+UpdateService's package and verity from there; those files are now in
+neodct/python-reference, and the import died with
+
+    ImportError: cannot import name 'package' from 'System.core.UpdateService'
+
+That is the code which pads the squashfs, appends the dm-verity hash tree and
+writes installed.prop, so nothing downstream of it could run: no system.img,
+so no system.ubi from mknand.sh, so no flashable image and no .ndsw. On the
+qemu defconfig it is worse than a manual step, because post-image-neodct.sh
+calls mkupdate during `make` itself.
+
+One path, and a comment saying why the reference sits outside the overlay: it
+builds the image, it does not ship in it.
+
+The same stale path is still in conftest.py (30 test modules fail to collect),
+uistub.py, goldenframe.py, logref.py, shoot_docs.py and mkbadupdate.py. Only
+the one the image build needs is touched here.
+
+---
+
+# t9: the keypad never told the apps it was a keypad
+
+Everything T9 was already built. The engine, the on-disk dictionary, the
+predictive widget, the mode indicator and both uinput bridges were finished and
+green -- test_t9_engine 108 checks, test_t9_dict 587, test_widgets_text 2163 --
+and none of it did anything on the phone. Pressing 2 in Phonebook typed "2".
+
+Every one of those tests sets `ui.has_matrix_keypad` by hand, and that was the
+whole bug: nothing ever set it for real inside an app.
+
+## What was actually wrong
+
+`nd_ui_init_app()` derived the flag the only way it could:
+
+    ui->has_matrix_keypad = nd_input_has_matrix(ui->input);
+
+An app's `ui->input` is the pipe the core hands it. A pipe has no matrix, by
+construction, on every device -- so the flag was false in every app process
+that has ever run, and nd_textinput.c:223, nd_textlong.c:526 and nd_t9ind.c:50
+all hang off it. Every text field on the phone fell through to the QWERTY dev
+path, and `nd_key_dev_char()` ends in a fall-through to `nd_key_digit_char()`,
+so a keypad press typed its own digit and stopped there. No letters, no
+multi-tap, no predictive, no # mode switching, and no mode indicator drawn.
+
+It was written down. OPEN-QUESTIONS.md BR-3 found it while porting the browser
+launcher and left it, because lib/nd_ui.c was not that work package's file:
+
+  > That also means the T9 mode indicator is never drawn inside an app, which
+  > is a separate bug in lib/nd_ui.c / lib/nd_input.c [...] Not fixed.
+
+LinuxShell and the Browser had each grown the same workaround -- re-read
+/NeoDCT/User/keymap.json and infer the hardware from it -- so the two uinput
+bridges worked while the fourteen widgets did not.
+
+## The fix
+
+The core knows the answer, because it opened the backend. So it says so.
+`nd_proc_launch_app()` sets NEODCT_KEYPAD_MATRIX=1 when its own keypad is the
+matrix, and `nd_ui_init_app()` reads that instead of interrogating the pipe.
+Not a descriptor, so it is documented in nd_app.h beside the four that are.
+
+Both bridge gates lost their keymap.json half and ask `nd_app_keypad_is_matrix()`
+instead. That is not just tidier: a keymap on disk is a *claim* about the
+hardware, while the environment carries the backend the core actually opened.
+If the matrix failed to open and the core fell back to evdev, the old code
+would have bridged a uinput keyboard on top of a real one and doubled every
+press. test_browser.c now pins that -- a keymap.json alone must NOT bridge.
+
+Two things worth knowing about the shape of it:
+
+**NEODCT_T9 is a second, separate switch.** Unset in production and in every
+golden capture; "0" forces T9 off, anything else forces it on. It is the only
+way to exercise multi-tap over a QWERTY keyboard, and it is deliberately not
+folded into what the bridges ask, because the two are different questions:
+`ui->has_matrix_keypad` is "should keys mean T9?", `nd_app_keypad_is_matrix()`
+is "is the console's keyboard missing?". Forcing T9 on at a desk must not
+bridge a second keyboard into netsurf.
+
+**build_envp() had to start allocating.** It filled a `const char *[64]` and
+silently stopped copying when it ran out. The phone's environment is small so
+nobody had ever seen it, but an ordinary desktop shell exports ~66 entries and
+the copy then lost whatever sat at the *end* of environ -- which is exactly
+where setenv() puts a variable set just before a launch. NEODCT_T9 was the
+first thing to notice, by not arriving. Sized from the real environment now, so
+there is no cliff to fall off, and $HOME cannot go missing because it sorted
+late.
+
+## How it is proved
+
+test/apps/T9App plus test/unit/test_t9_app.c, in the shape test_svc.c
+established: a real app.so, dlopen()ed by the real nd-apprun, in a real child
+forked by the real nd_proc_launch_app(), driving a real nd_textinput over real
+keypad codes and reporting the string that came out. Four launches -- no
+matrix, matrix, override on, override off.
+
+It refuses to set the flag by hand, because that is what let this survive.
+
+    no matrix    2,2,2,3 -> "2223"     the old behaviour, pinned so it
+                                       cannot come back by accident
+    matrix       2,2,2,3 -> "cd"       multi-tap
+                 #,2,2,2 -> "C" ABC    mode switching, from inside the app
+                 #,#,2,3 -> "23" 123
+                 #,#,#,4,6,6,3 -> "home"
+
+The last one opens the shipped /NeoDCT/System/core/t9.dict from inside the app
+process, so it also proves the dictionary is reachable across the boundary.
+"home" and not "good": t9.dict is ordered by digit key then by frequency.
+
+45 checks. Everything else still passes, ASan included, and all 48 golden
+frames are still byte-exact -- NEODCT_T9 is unset in uistub, nd-shoot and CI,
+so T-5 holds and no reference capture moves.
+
+musl-gcc is not installed on this host, so verify-c-build.sh check 3 skipped as
+it always does here; check 3b (32-bit, unsigned char, -Wconversion) passes.
+
+---
+
+# modem: the info app could not tell "no modem" from "could not ask"
+
+Reported as "it says simulation mode even on real hardware", then narrowed by
+the owner to "modem works completely, just the info app doesn't".
+
+## What is proven
+
+The core-to-app path is correct, and that is now a test rather than an
+opinion. test_svc.c grew a modem that ANSWERS -- a pty that replies OK, which
+is all _probe_ports() and the init sequence need -- so nd_modem_has_hardware()
+can be TRUE on a build host for the first time. Against it:
+
+  * the loopback case asks twice over a live server and gets hardware=1 and
+    the real port back both times;
+  * SvcApp, a real app.so in a real child forked by the real
+    nd_proc_launch_app(), reports status_hardware=1 and status_port over
+    NEODCT_SERVICE_FD.
+
+Every existing case ran against a modem in Simulation Mode, so
+`CHECK_INT(st.hardware, direct.hardware)` was comparing false against false
+and would have passed just as happily if the wire zeroed the field. It does
+not zero it. 114 checks now, up from 95.
+
+## What was actually wrong
+
+**The app rendered a failed service call as "SIMULATION".** It threw away
+nd_svc_modem_status()'s return value, and that return value is the difference
+between "the core says there is no modem" and "the question never reached the
+core". On failure the client hands back the documented "nothing is known"
+snapshot -- hardware=0 -- so an unanswered call drew the phone's modem as
+missing. Three states now, not two: the port, SIMULATION, or NO LINK TO CORE.
+
+**And the probe never said why.** "HARDWARE NOT FOUND: Running in Simulation
+Mode." was the whole output, on a phone with a modem visibly plugged into it.
+probe_ports() dropped every errno and every refusal on the floor -- including
+the one failure that is completely silent, nd_modem__acquire() losing the AT
+port flock to S45modem's background redial. It now names the cause:
+
+    No AT port: no candidate AT ports (no ttyUSB* in /sys/class/tty)
+    No AT port: /dev/ttyUSB2: Permission denied
+    No AT port: /dev/ttyUSB2: AT -> no reply
+    No AT port: the AT port lock is held (S45modem or atcmd is mid-session)
+
+Printed on CHANGE, not every time: the probe retries every 10 s forever while
+there is no modem, and an unconditional print would put the same line on the
+serial console six times a minute for the life of the phone.
+
+nd_modem__open_port() now preserves errno across its own teardown, because
+close() may set one of its own and the caller prints ours.
+
+## And it says it on the phone
+
+The reason rides the service wire (nd_modem_status.probe_why, appended, so no
+existing field moves -- M-17) and the engineering Modem app draws it as a WHY
+row beside PORTS. This app exists to be read on a device with no serial
+console attached; the Python could print to a terminal the developer was
+already watching, and this cannot.
+
+455 checks in test_modem (up from 433), covering all four reasons and the
+print-on-change rule -- a diagnostic nobody checked is a diagnostic that rots.
+
+No golden frame moves: probe_why is empty in nd-shoot, so the WHY row does not
+appear and all 48 stay byte-exact. That is a consequence, not a constraint --
+per the owner, the OS is function-matched and the frames are not a spec.
+
+## The reported symptom did not reproduce
+
+Recorded plainly, because it changes what this commit is. The owner reopened
+the app on an UNCHANGED system -- none of the above was flashed -- and found it
+working: "it actually is working, and may have worked the whole time." So none
+of this fixed what was reported, and nothing here should be read as having
+done so.
+
+The most likely explanation, and the reason the WHY row earns its place
+anyway: the core re-probes every PROBE_RETRY_S while it has no modem
+(nd_modem.c, the !m->hardware branch of poll()). Open the app inside that
+window -- ttyUSB nodes not enumerated yet, or S45modem mid-dial holding the
+flock -- and it says SIMULATION; open it later and it does not. An
+intermittent readout with no stated cause is exactly the thing the probe used
+to be silent about.
+
+What is defended on its own merits, independent of the report:
+
+  * open_port() discarded errno and probe_ports() dropped every rejection,
+    including a lock loss that returned false in total silence;
+  * the app drew a failed service call as a fact about the phone;
+  * NO TEST IN THE TREE HAD EVER RUN WITH hardware == true, so the assertion
+    that was supposed to cover this compared false against false.
+
+Note for whoever reads a bug report about this next: the home screen cannot
+rule Simulation Mode in or out. nd_layout.c:404 draws the element's sim_val
+when signal_level() is -1, so a phone with no modem shows CONSTANT FAKE BARS.
+Bars that move or vanish are the real ones.

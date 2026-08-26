@@ -76,6 +76,9 @@
 /* Candidate AT ports considered in one probe. A SIM7600 enumerates five. */
 #define ND_MODEM_CAND_MAX 32
 
+/* ND_MODEM_PROBE_WHY_MAX is public now -- the reason crosses the service wire
+ * so the engineering Modem app can draw it. It arrives with nd_modem.h. */
+
 #define ND_MODEM_PORT_MAX 96
 #define ND_MODEM_WHY_MAX  128
 
@@ -215,6 +218,10 @@ struct nd_modem {
     double next_net;
     double next_cops;
     double next_probe;
+    /* The last reason the probe gave, so a failure that repeats every
+     * PROBE_RETRY_S is printed ONCE and not forever. Cleared on success, so a
+     * modem that is lost and fails again says so again. */
+    char last_probe_why[ND_MODEM_PROBE_WHY_MAX];
     double next_clcc;
     double next_audio_restart;
 

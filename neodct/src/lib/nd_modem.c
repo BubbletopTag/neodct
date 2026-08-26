@@ -892,21 +892,59 @@ void nd_modem__init_modem(nd_modem *m)
  * _probe_ports / _probe_hardware, lines 199 and 209
  * ------------------------------------------------------------------ */
 
-static bool probe_ports(nd_modem *m)
+/* Append "sep<text>" to a bounded buffer, doing nothing once it is full. The
+ * reason line is a diagnostic; losing the tail of a very long candidate list
+ * is better than any of the alternatives. */
+static void why_add(char *why, size_t why_sz, const char *sep, const char *text)
+{
+    size_t len;
+
+    if (why == NULL || why_sz == 0u)
+        return;
+    len = strlen(why);
+    if (len + 1u >= why_sz)
+        return;
+    (void)nd_strlcpy(why + len, (len > 0u) ? sep : "", why_sz - len);
+    len = strlen(why);
+    if (len + 1u < why_sz)
+        (void)nd_strlcpy(why + len, text, why_sz - len);
+}
+
+static bool probe_ports(nd_modem *m, char *why, size_t why_sz)
 {
     char ports[ND_MODEM_CAND_MAX][ND_MODEM_PORT_MAX];
     size_t n = nd_modem__candidate_ports(m, ports, ND_ARRAY_LEN(ports));
     size_t i;
 
+    if (n == 0u) {
+        /* Nothing even enumerated. On the phone that is a USB, kernel or
+         * power question, not a modem question -- and it is the single most
+         * useful thing this function can say. */
+        (void)nd_strlcpy(why, "no candidate AT ports (no ttyUSB* in /sys/class/tty)", why_sz);
+        return false;
+    }
+
     for (i = 0u; i < n; i++) {
+        char note[ND_MODEM_PORT_MAX + 64];
         char final[64];
         int fd;
 
-        if (!nd_path_exists(ports[i]))
+        if (!nd_path_exists(ports[i])) {
+            /* Enumerated in sysfs but no device node: mdev/udev has not
+             * caught up, or /dev is not the one being listed. */
+            (void)nd_snprintf(note, sizeof note, "%s: no device node", ports[i]);
+            why_add(why, why_sz, "; ", note);
             continue;
+        }
         fd = nd_modem__open_port(ports[i]);
-        if (fd < 0)
+        if (fd < 0) {
+            /* Almost always EACCES (permissions) or EBUSY/ENODEV (something
+             * else holds it, or the modem re-enumerated mid-probe). The errno
+             * is the whole diagnosis and it used to be thrown away here. */
+            (void)nd_snprintf(note, sizeof note, "%s: %s", ports[i], strerror(errno));
+            why_add(why, why_sz, "; ", note);
             continue;
+        }
         /* The Python assigns self.fd/self.port BEFORE testing, so the
          * transaction and any teardown inside it see a real port. */
         nd_modem__adopt(m, fd, ports[i]);
@@ -915,6 +953,11 @@ static bool probe_ports(nd_modem *m)
             nd_modem__init_modem(m);
             return true;
         }
+        /* Opened, but did not answer "OK" in a second. A DIAG port, a port
+         * another process is mid-transaction on, or a modem still booting. */
+        (void)nd_snprintf(note, sizeof note, "%s: AT -> %s", ports[i],
+                          (final[0] != '\0') ? final : "no reply");
+        why_add(why, why_sz, "; ", note);
         /* The Python closes the local `fd` here even when _drop_hardware has
          * already closed it -- a double close it gets away with because the
          * exception is swallowed. In C the number may have been recycled by
@@ -934,17 +977,52 @@ static bool probe_ports(nd_modem *m)
     return false;
 }
 
+/* Print `why`, but only when it is not what was printed last time.
+ *
+ * The probe runs every PROBE_RETRY_S forever while there is no modem, so an
+ * unconditional print would put the same line on the serial console six times
+ * a minute for the life of the phone. Printing on CHANGE gives the one line
+ * that matters at boot, and a new line the moment the situation changes --
+ * ports appearing, permissions changing, S45modem letting go. */
+static void probe_note(nd_modem *m, const char *why)
+{
+    if (why == NULL || why[0] == '\0')
+        return;
+    if (strcmp(m->last_probe_why, why) == 0)
+        return;
+    /* Read by the UI thread through nd_modem_status_snapshot(), so it is
+     * st_mu state like every other field the snapshot copies. */
+    lock_state(m);
+    (void)nd_strlcpy(m->last_probe_why, why, sizeof m->last_probe_why);
+    unlock_state(m);
+    nd_log(ND_LOG_MODEM, "No AT port: %s", why);
+}
+
 bool nd_modem__probe_hardware(nd_modem *m)
 {
+    char why[ND_MODEM_PROBE_WHY_MAX];
     bool ok;
 
     /* Armed BEFORE the attempt, so a port held by S45modem still costs a full
      * PROBE_RETRY_S before the next try. */
     m->next_probe = nd_modem__now() + ND_PROBE_RETRY_S;
-    if (!nd_modem__acquire(m))
+    if (!nd_modem__acquire(m)) {
+        /* Silent until now, and it is a real cause on a phone that has one:
+         * S45modem's background redial takes the lock per transaction, and a
+         * probe that lands inside one looks exactly like having no modem. */
+        probe_note(m, "the AT port lock is held (S45modem or atcmd is mid-session)");
         return false;
-    ok = probe_ports(m);
+    }
+    why[0] = '\0';
+    ok = probe_ports(m, why, sizeof why);
     nd_modem__release(m);
+    if (ok) {
+        lock_state(m);
+        m->last_probe_why[0] = '\0'; /* so losing it later says why again */
+        unlock_state(m);
+    } else {
+        probe_note(m, why);
+    }
     return ok;
 }
 
@@ -2150,6 +2228,7 @@ void nd_modem_status_snapshot(nd_modem *m, nd_modem_status *out)
     out->csq_rssi = m->csq;
     out->reg_stat = m->reg_stat;
     out->state = m->state;
+    (void)nd_strlcpy(out->probe_why, m->last_probe_why, sizeof out->probe_why);
     (void)nd_strlcpy(out->caller_id, m->caller_id_known ? m->caller_id : "", sizeof out->caller_id);
     unlock_state(m);
 

@@ -41,6 +41,9 @@ extern "C" {
 #define ND_MODEM_LOCK_FILE    "/tmp/neodct-modem.lock"
 #define ND_MODEM_DEFAULT_PORT "AUTO" /* probes ttyUSB2 then ttyUSB3 */
 
+/* One line of "why is there no modem": a candidate list with a reason each. */
+#define ND_MODEM_PROBE_WHY_MAX 200
+
 /* Timings, all load-bearing for a 1:1 port of the poll cadence. */
 #define ND_POLL_URC_S              0.5
 #define ND_SMS_PROMPT_TIMEOUT_S    5.0
@@ -118,6 +121,16 @@ typedef struct {
      * ROAMING, nor either of them from "nothing has answered yet". Appended,
      * so no existing field moves. */
     int32_t reg_stat;
+
+    /* ---- APPENDED, see OPEN-QUESTIONS.md M-17 ----
+     *
+     * Why the last probe found no AT port, "" when there is a modem. The
+     * Python had nothing like it and did not need one: it printed to a
+     * console the developer was already watching. A phone in a pocket has no
+     * console, and "SIMULATION" on a device with a modem visibly plugged into
+     * it is not a diagnosis -- so the reason rides along and the engineering
+     * Modem app draws it. Appended, so no existing field moves. */
+    char probe_why[ND_MODEM_PROBE_WHY_MAX];
 } nd_modem_status;
 
 typedef struct nd_modem nd_modem;

@@ -1607,6 +1607,131 @@ static void test_sim_send_sms_pretends(void)
     nd_modem__destroy(m);
 }
 
+/* ------------------------------------------------------------------ *
+ * 10b. The probe says WHY there is no modem
+ * ------------------------------------------------------------------ *
+ *
+ * "HARDWARE NOT FOUND: Running in Simulation Mode." on a phone that visibly
+ * HAS a modem plugged into it is the least useful sentence this service can
+ * print, and until now it was the only one -- probe_ports() dropped every
+ * errno and every refusal on the floor. These pin the three answers it can
+ * give, because a diagnostic nobody checked is a diagnostic that rots.
+ */
+
+static void test_probe_reports_no_candidates(void)
+{
+    nd_modem *m;
+
+    use_scratch_settings("");
+    /* An empty /sys/class/tty: nothing enumerated at all. */
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK(strstr(m->last_probe_why, "no candidate AT ports") != NULL);
+    nd_modem__destroy(m);
+}
+
+static void test_probe_reports_a_missing_device_node(void)
+{
+    nd_modem *m;
+
+    /* Configured to a path that is not there: sysfs is bypassed entirely, so
+     * this is the "the node the setting names does not exist" answer. */
+    use_scratch_settings("system.hw.modem_at_port=/dev/nope-not-here\n");
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK(strstr(m->last_probe_why, "/dev/nope-not-here") != NULL);
+    CHECK(strstr(m->last_probe_why, "no device node") != NULL);
+    nd_modem__destroy(m);
+}
+
+static void test_probe_reports_the_errno_when_the_port_will_not_open(void)
+{
+    nd_modem *m;
+    char resolved[ND_PATH_MAX];
+
+    /* A directory exists at the port's path. open(O_RDWR) on a directory is
+     * EISDIR, which is a real errno reaching a real strerror() -- the point
+     * being that the REASON travels, not that this particular one does. */
+    use_scratch_settings("system.hw.modem_at_port=/notaport\n");
+    CHECK_INT(nd_mkdir_p("/notaport", 0755u), ND_OK);
+    CHECK_INT(nd_path_resolve(resolved, sizeof resolved, "/notaport"), ND_OK);
+
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK(strstr(m->last_probe_why, "/notaport") != NULL);
+    CHECK(strstr(m->last_probe_why, strerror(EISDIR)) != NULL);
+    nd_modem__destroy(m);
+}
+
+/* The lock is the cause with no symptom: S45modem's background redial takes
+ * it per transaction, and a probe landing inside one is indistinguishable
+ * from having no modem at all -- it used to `return false` in silence. */
+static void test_probe_reports_the_held_lock(void)
+{
+    nd_modem *m;
+    nd_modem *other;
+
+    use_scratch_settings("");
+    m = make_modem();
+    other = make_modem();
+    CHECK(m != NULL && other != NULL);
+    if (m == NULL || other == NULL) {
+        nd_modem__destroy(m);
+        nd_modem__destroy(other);
+        return;
+    }
+    if (m->lock_fd < 0 || other->lock_fd < 0) {
+        /* No lock file on this host: the probe serialises with nobody and
+         * this case cannot arise. */
+        nd_modem__destroy(m);
+        nd_modem__destroy(other);
+        return;
+    }
+
+    /* `other` stands in for S45modem holding the AT port. */
+    CHECK(nd_modem__acquire(other));
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK(strstr(m->last_probe_why, "lock is held") != NULL);
+    nd_modem__release(other);
+
+    nd_modem__destroy(other);
+    nd_modem__destroy(m);
+}
+
+/* Printed once, not six times a minute for the life of the phone. */
+static void test_the_same_reason_is_not_reprinted(void)
+{
+    nd_modem *m;
+    char first[ND_MODEM_PROBE_WHY_MAX];
+
+    use_scratch_settings("");
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+
+    CHECK(!nd_modem__probe_hardware(m));
+    (void)nd_strlcpy(first, m->last_probe_why, sizeof first);
+    CHECK(first[0] != '\0');
+
+    /* Same failure again: last_probe_why is unchanged, which is exactly what
+     * probe_note() compares against before printing. */
+    m->next_probe = 0.0;
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK_STR(m->last_probe_why, first);
+
+    nd_modem__destroy(m);
+}
+
 static void test_sim_reprobe_finds_a_modem_plugged_in_later(void)
 {
     fake_modem fm;
@@ -1886,6 +2011,11 @@ int main(void)
     RUN(test_sim_sms_hook_delivers_and_consumes);
     RUN(test_sim_dial_pretends_after_two_seconds);
     RUN(test_sim_send_sms_pretends);
+    RUN(test_probe_reports_no_candidates);
+    RUN(test_probe_reports_a_missing_device_node);
+    RUN(test_probe_reports_the_errno_when_the_port_will_not_open);
+    RUN(test_probe_reports_the_held_lock);
+    RUN(test_the_same_reason_is_not_reprinted);
     RUN(test_sim_reprobe_finds_a_modem_plugged_in_later);
 
     RUN(test_allow_calls_off_simulates_on_real_hardware);

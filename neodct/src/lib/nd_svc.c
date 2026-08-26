@@ -824,6 +824,7 @@ static svc_status svc_call(uint32_t op, const char *number, const char *text, sv
     out->modem.imei[sizeof out->modem.imei - 1u] = '\0';
     out->modem.operator_name[sizeof out->modem.operator_name - 1u] = '\0';
     out->modem.caller_id[sizeof out->modem.caller_id - 1u] = '\0';
+    out->modem.probe_why[sizeof out->modem.probe_why - 1u] = '\0';
     return (svc_status)out->status;
 }
 

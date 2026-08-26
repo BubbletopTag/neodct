@@ -36,6 +36,7 @@
 #include <fcntl.h>
 #include <ftw.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -650,6 +651,272 @@ static void test_garbage_does_not_take_the_core_down(core_fixture *fx)
 }
 
 /* ------------------------------------------------------------------ *
+ * A modem that answers, so `hardware` can be TRUE on this host
+ * ------------------------------------------------------------------ *
+ *
+ * Every other case in this file runs against a modem in Simulation Mode,
+ * where nd_modem_has_hardware() is false -- so `CHECK_INT(st.hardware,
+ * direct.hardware)` in the loopback case was comparing false against false
+ * and would have passed just as happily if the wire forced the field to zero.
+ * The engineering Modem app draws SIMULATION off exactly that field, and it
+ * was reported saying SIMULATION on a phone whose modem worked. So the wire
+ * has to be tested with the field TRUE, and that needs a port that answers.
+ *
+ * Not a SIM7600 emulator -- test_modem.c has one of those and it belongs
+ * there. This answers OK to everything, which is all _probe_ports() and the
+ * init sequence require, and it is deliberately the smallest thing that makes
+ * nd_modem_has_hardware() true.
+ */
+
+#define MODEM_LINK "/dev/modem"
+
+/* Point ModemService at the pty, or clear the setting again. The staged root
+ * makes "/dev/modem" a path inside the scratch tree, so nothing here can
+ * reach a real device node. */
+static void use_modem_port(const char *dev)
+{
+    char body[128];
+
+    if (dev == NULL) {
+        pt_write_text(ND_PATH_SETTINGS_PROP, "");
+        return;
+    }
+    (void)nd_snprintf(body, sizeof body, "system.hw.modem_at_port=%s\n", dev);
+    pt_write_text(ND_PATH_SETTINGS_PROP, body);
+}
+
+typedef struct {
+    int master;
+    int keepalive;
+    pthread_t th;
+    bool running;
+    bool awaiting_body;
+    volatile bool stop;
+} okmodem;
+
+static void *okmodem_loop(void *arg)
+{
+    okmodem *k = arg;
+    char line[256];
+    size_t len = 0u;
+
+    while (!k->stop) {
+        struct pollfd pfd;
+        char c;
+        ssize_t n;
+
+        pfd.fd = k->master;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        if (poll(&pfd, 1, 50) <= 0)
+            continue;
+        n = read(k->master, &c, 1u);
+        if (n <= 0)
+            continue;
+        if (c == '\x1a') { /* Ctrl-Z ends an SMS body */
+            line[len] = '\0';
+            len = 0u;
+            if (k->awaiting_body) {
+                static const char SENT[] = "\r\n+CMGS: 42\r\n\r\nOK\r\n";
+
+                k->awaiting_body = false;
+                (void)write(k->master, SENT, strlen(SENT));
+            }
+            continue;
+        }
+        if (c == '\r' || c == '\n') {
+            if (len == 0u)
+                continue;
+            line[len] = '\0';
+            len = 0u;
+            {
+                static const char IMEI[] = "\r\n866758041234567\r\n\r\nOK\r\n";
+                static const char PROMPT[] = "\r\n> ";
+                static const char SENT[] = "\r\n+CMGS: 42\r\n\r\nOK\r\n";
+                static const char OK[] = "\r\nOK\r\n";
+                const char *reply;
+
+                /* The body arrives as its own "line" after the prompt, and it
+                 * is answered with the send receipt rather than a bare OK --
+                 * without this, send_sms() waits out its whole timeout and
+                 * the test takes 45 seconds to say nothing useful. */
+                if (k->awaiting_body) {
+                    k->awaiting_body = false;
+                    reply = SENT;
+                } else if (strncmp(line, "AT+CMGS=", 8u) == 0) {
+                    k->awaiting_body = true;
+                    reply = PROMPT;
+                } else if (strcmp(line, "AT+CGSN") == 0) {
+                    reply = IMEI;
+                } else {
+                    reply = OK;
+                }
+                (void)write(k->master, reply, strlen(reply));
+            }
+            continue;
+        }
+        if (len + 1u < sizeof line)
+            line[len++] = c;
+    }
+    return NULL;
+}
+
+static bool okmodem_start(okmodem *k, const char *link_at)
+{
+    char link[ND_PATH_MAX];
+    const char *slave;
+
+    memset(k, 0, sizeof *k);
+    k->master = -1;
+    k->keepalive = -1;
+
+    k->master = posix_openpt(O_RDWR | O_NOCTTY);
+    if (k->master < 0 || grantpt(k->master) != 0 || unlockpt(k->master) != 0)
+        return false;
+    slave = ptsname(k->master);
+    if (slave == NULL)
+        return false;
+
+    /* Held open for the life of the fake so the master never sees a hangup
+     * between the probe closing one candidate and opening the next. */
+    k->keepalive = open(slave, O_RDWR | O_NOCTTY);
+    if (k->keepalive < 0)
+        return false;
+
+    pt_mkdir("/dev");
+    if (nd_path_resolve(link, sizeof link, link_at) != ND_OK)
+        return false;
+    (void)unlink(link);
+    if (symlink(slave, link) != 0)
+        return false;
+
+    if (pthread_create(&k->th, NULL, okmodem_loop, k) != 0)
+        return false;
+    k->running = true;
+    return true;
+}
+
+static void okmodem_stop(okmodem *k)
+{
+    k->stop = true;
+    if (k->running)
+        (void)pthread_join(k->th, NULL);
+    if (k->keepalive >= 0)
+        (void)close(k->keepalive);
+    if (k->master >= 0)
+        (void)close(k->master);
+    memset(k, 0, sizeof *k);
+}
+
+/* ------------------------------------------------------------------ *
+ * 4b. The wire with a modem that ANSWERS
+ * ------------------------------------------------------------------ *
+ *
+ * The reported bug: "modem works completely, just the info app doesn't." The
+ * app draws SIMULATION off st.hardware and gets st.hardware from here.
+ */
+
+/* Defined with the other launch helpers in section 5, below. */
+static void app_entry_for(nd_app_entry *e, const char *dir, const char *name);
+
+static void test_hardware_true_survives_the_wire(void)
+{
+    okmodem fake;
+    core_fixture hw;
+    nd_svc_server *s = NULL;
+    nd_ui app; /* an APP's context: the handles are NULL, as nd_app.h says */
+    nd_modem_status st;
+    nd_modem_status direct;
+    int child_fd;
+
+    use_modem_port(MODEM_LINK);
+    if (!okmodem_start(&fake, MODEM_LINK)) {
+        fprintf(stderr, "test_svc: no pty on this host; skipping the hardware case\n");
+        okmodem_stop(&fake);
+        return;
+    }
+    if (!core_init(&hw)) {
+        fprintf(stderr, "test_svc: cannot build a core fixture; skipping\n");
+        core_free(&hw);
+        okmodem_stop(&fake);
+        return;
+    }
+
+    /* The precondition. Without it this case proves nothing, so it is checked
+     * rather than assumed: if the fake did not get adopted, say so loudly. */
+    nd_modem_status_snapshot(hw.ui.modem, &direct);
+    CHECK(direct.hardware);
+    if (!direct.hardware) {
+        fprintf(stderr, "test_svc: the fake modem was not adopted (%s)\n", direct.probe_why);
+        core_free(&hw);
+        okmodem_stop(&fake);
+        return;
+    }
+
+    memset(&app, 0, sizeof app);
+    CHECK_INT(nd_svc_server_open(&s), ND_OK);
+    if (s == NULL) {
+        core_free(&hw);
+        okmodem_stop(&fake);
+        return;
+    }
+    child_fd = dup(nd_svc_server_child_fd(s));
+    CHECK(child_fd >= 0);
+    CHECK(client_from_fd(child_fd));
+    CHECK_INT(nd_svc_server_start(s, &hw.ui), ND_OK);
+
+    /* Asked twice, because the app asks once per second forever and the
+     * failure being chased looks like "the first answer is fine and every
+     * one after it is not". */
+    memset(&st, 0, sizeof st);
+    CHECK(nd_svc_modem_present(&app));
+    CHECK(nd_svc_modem_status(&app, &st));
+    CHECK(st.hardware); /* <-- the app's SIMULATION line, over the wire */
+    CHECK_STR(st.port, MODEM_LINK);
+
+    memset(&st, 0, sizeof st);
+    CHECK(nd_svc_modem_status(&app, &st));
+    CHECK(st.hardware);
+    CHECK_STR(st.port, MODEM_LINK);
+
+    nd_svc_client_close();
+    nd_svc_server_stop(s);
+
+    /* ...and the same question from a REAL forked child, which is the shape
+     * the phone actually runs: nd_proc_launch_app() forks nd-apprun, the
+     * child adopts NEODCT_SERVICE_FD and asks across it. The loopback above
+     * shares this process; this does not. */
+    {
+        nd_app_entry entry;
+        nd_crash_info crash;
+        char report[REPORT_BYTES];
+        char resolved[ND_PATH_MAX];
+
+        if (nd_path_resolve(resolved, sizeof resolved, SVC_REPORT) == ND_OK)
+            (void)unlink(resolved);
+
+        app_entry_for(&entry, SVC_APP_DIR, "SvcApp");
+        memset(&crash, 0, sizeof crash);
+        CHECK_INT(nd_proc_launch_app(&hw.ui, &entry, NULL, NULL, &crash), ND_OK);
+        CHECK(!crash.from_signal);
+        if (pt_read_text(SVC_REPORT, report, sizeof report) != (size_t)-1) {
+            check_kv(report, "done", "1");
+            check_kv(report, "modem_handle", "0"); /* still an app, still NULL */
+            check_kv(report, "status_ok", "1");
+            check_kv(report, "status_hardware", "1"); /* the reported bug */
+            check_kv(report, "status_port", MODEM_LINK);
+        } else {
+            CHECK(false);
+            fprintf(stderr, "test_svc: the hardware-case child wrote no report\n");
+        }
+    }
+
+    core_free(&hw);
+    okmodem_stop(&fake);
+    use_modem_port(NULL);
+}
+
+/* ------------------------------------------------------------------ *
  * 5. A real child process, launched by the real launcher
  * ------------------------------------------------------------------ */
 
@@ -783,6 +1050,7 @@ int main(void)
     test_a_direct_handle_wins(&fx);
     test_loopback_over_a_live_server(&fx);
     test_garbage_does_not_take_the_core_down(&fx);
+    test_hardware_true_survives_the_wire();
     test_a_real_child_reaches_the_core(&fx);
     test_two_launches_in_a_row(&fx);
 

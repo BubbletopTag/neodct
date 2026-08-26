@@ -1730,6 +1730,34 @@ Python would have said `"Send failed: timeout waiting for network"` thirty
 seconds later. The C wording matches the two other drop paths in the same
 function, and is what actually happened.
 
+### M-17. `nd_modem_status` carries WHY there is no modem, which the Python never did
+
+Appended field, so nothing existing moves: `char probe_why[ND_MODEM_PROBE_WHY_MAX]`,
+empty whenever there is a modem.
+
+`ModemService.__init__` prints `HARDWARE NOT FOUND: Running in Simulation Mode.` and
+that is the entire diagnosis. `_probe_ports()` drops every reason on the floor — the
+`except Exception: continue` around `_open_port`, the port that opened but never
+answered `OK`, and `_acquire()` losing the flock to S45modem, which returns `False`
+in complete silence. The C had ported all three faithfully.
+
+That is survivable in Python, where the developer is watching a console. It is not
+survivable on the phone: the engineering Modem app exists precisely to be read on a
+device with no serial cable attached, and "SIMULATION" on hardware that visibly has a
+modem in it is not something a user can act on. So the reason travels with the status
+and the app draws it as a WHY row beside PORTS.
+
+**Deliberate deviation, and the only one in this direction.** Everywhere else the port
+reproduces the Python's silence; here it does not, because the silence was the defect.
+The console line is printed on CHANGE rather than on every probe — the retry runs every
+`PROBE_RETRY_S` forever while there is no modem, and printing unconditionally would put
+the same sentence on the serial console six times a minute for the life of the phone.
+
+While here: `nd_modem__open_port()` preserves `errno` across its own `close()` on the
+two `tcgetattr`/`tcsetattr` failure paths, because the caller now prints it.
+
+---
+
 ## nd-core, nd-apprun, the launcher and the stub app (WP core-loop)
 
 Recorded while porting `launcher.py:main()`, `main.py:run()` and `launch_app()`, and

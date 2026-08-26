@@ -70,11 +70,21 @@ int32_t nd_modemapp_line_h(int32_t bottom, int32_t y, size_t n_rows);
  * otherwise. */
 #define ND_MODEMAPP_SIMULATION "SIMULATION"
 
+/* The core did not answer. NOT the same thing as "there is no modem", and
+ * drawing SIMULATION for it -- which is what this app used to do, because it
+ * threw away nd_svc_modem_status()'s return value -- reports a working modem
+ * as a missing one. See nd_modemapp_draw_page(). */
+#define ND_MODEMAPP_NO_LINK "NO LINK TO CORE"
+
 /* The dialog shown when the core has no ModemService at all. */
 extern const char *const nd_modemapp_no_service_msg;
 
-/* Draw one page. Exported so the test can render without the key loop. */
-void nd_modemapp_draw_page(nd_ui *ui, const nd_modem_status *st, int32_t page,
+/* Draw one page. Exported so the test can render without the key loop.
+ *
+ * `linked` is nd_svc_modem_status()'s return value: false means the question
+ * never reached the core, so `st` is the "nothing is known" snapshot and NOT
+ * evidence about the modem. */
+void nd_modemapp_draw_page(nd_ui *ui, const nd_modem_status *st, bool linked, int32_t page,
                            const nd_modemapp_row *rows, size_t n_rows);
 
 #ifdef __cplusplus
