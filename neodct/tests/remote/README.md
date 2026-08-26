@@ -17,6 +17,7 @@ library is stubbed, compiled differently, or given a test-only branch.
 | `fake-curl` | The stand-in. Reads a scenario out of `$NDCURL_DIR`, writes headers to its `-D` target, the body to stdout, and curl's own complaints to stderr, exiting with curl's own codes (0, 6, 18). Its header comment lists every control file. |
 | `releases.json` | A GitHub `/releases` listing, four releases, both platforms, deliberately **not** in version order. |
 | `releases-qemu-only.json` | A release carrying only the other platform's asset — an upload still in progress. |
+| `releases-live.json` | **Not hand-written.** What `api.github.com` actually answered for this repository — 0.3.14a and 0.3.13a, verbatim: real ids, real digests, nested uploader objects, real release notes, real asset sizes. A parser that handles a tidy fixture and chokes on production bytes fails where nobody sees it. |
 | `releases-insecure-url.json` | A newest release whose asset URL is `http://`. |
 | `one-object.json` | What `/releases/latest` returns: an object, not a list. |
 | `not-json.html` | What a captive portal sends instead. |

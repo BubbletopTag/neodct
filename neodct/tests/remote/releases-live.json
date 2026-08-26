@@ -1,0 +1,126 @@
+[
+ {
+  "url": "https://api.github.com/repos/BubbletopTag/neodct/releases/375347011",
+  "id": 375347011,
+  "node_id": "RE_kwDOQw5ZDs4WX1dD",
+  "tag_name": "0.3.14a",
+  "target_commitish": "main",
+  "name": "NeoDCT OS 0.3.14a",
+  "draft": false,
+  "prerelease": true,
+  "created_at": "2026-08-23T22:46:48Z",
+  "published_at": "2026-08-23T22:47:01Z",
+  "html_url": "https://github.com/BubbletopTag/neodct/releases/tag/0.3.14a",
+  "body": "Fixed\n- Sound comes out of the USB sound card instead of the socket on the board\n  that nothing is plugged into. The phone was playing everything into a\n  speaker that does not exist.\n- The two programs a phone call needs to carry sound were missing from the\n  phone altogether. They were built but never installed, so a call could\n  never have had audio in either direction.\n",
+  "assets": [
+   {
+    "id": 526728754,
+    "url": "https://api.github.com/repos/BubbletopTag/neodct/releases/assets/526728754",
+    "name": "UPDATE-luckfox-armv7.ndsw",
+    "label": "",
+    "state": "uploaded",
+    "content_type": "application/octet-stream",
+    "size": 56436037,
+    "download_count": 0,
+    "created_at": "2026-08-23T22:47:06Z",
+    "updated_at": "2026-08-23T22:47:29Z",
+    "browser_download_url": "https://github.com/BubbletopTag/neodct/releases/download/0.3.14a/UPDATE-luckfox-armv7.ndsw",
+    "uploader": {
+     "login": "BubbletopTag",
+     "id": 56369099,
+     "user_view_type": "public",
+     "node_id": "MDQ6VXNlcjU2MzY5MDk5",
+     "type": "User",
+     "site_admin": false,
+     "html_url": "https://github.com/BubbletopTag"
+    },
+    "digest": "sha256:f06d32fe275faf1c58cc82f2ae94fd1ac516b399f8e6b57e9108d7c1290eb9cc"
+   },
+   {
+    "id": 526728756,
+    "url": "https://api.github.com/repos/BubbletopTag/neodct/releases/assets/526728756",
+    "name": "UPDATE-qemu-aarch64.ndsw",
+    "label": "",
+    "state": "uploaded",
+    "content_type": "application/octet-stream",
+    "size": 58828100,
+    "download_count": 0,
+    "created_at": "2026-08-23T22:47:06Z",
+    "updated_at": "2026-08-23T22:47:32Z",
+    "browser_download_url": "https://github.com/BubbletopTag/neodct/releases/download/0.3.14a/UPDATE-qemu-aarch64.ndsw",
+    "uploader": {
+     "login": "BubbletopTag",
+     "id": 56369099,
+     "user_view_type": "public",
+     "node_id": "MDQ6VXNlcjU2MzY5MDk5",
+     "type": "User",
+     "site_admin": false,
+     "html_url": "https://github.com/BubbletopTag"
+    },
+    "digest": "sha256:86bc7ccc490936bba5a088e732b4437bd062533427d08fba2e408d9c04d664e1"
+   }
+  ]
+ },
+ {
+  "url": "https://api.github.com/repos/BubbletopTag/neodct/releases/375057968",
+  "id": 375057968,
+  "node_id": "RE_kwDOQw5ZDs4WWu4w",
+  "tag_name": "0.3.13a",
+  "target_commitish": "main",
+  "name": "NeoDCT OS 0.3.13a",
+  "draft": false,
+  "prerelease": true,
+  "created_at": "2026-08-22T22:41:06Z",
+  "published_at": "2026-08-22T22:41:17Z",
+  "html_url": "https://github.com/BubbletopTag/neodct/releases/tag/0.3.13a",
+  "body": "Fixed\n- Downloading an update over mobile data now carries on where it stopped.\n  The phone used to throw away everything it had downloaded whenever the\n  connection dropped, so on a slow signal the download could never finish\n  however many times you tried. It now keeps what it has and asks only\n  for the rest.\n",
+  "assets": [
+   {
+    "id": 525527830,
+    "url": "https://api.github.com/repos/BubbletopTag/neodct/releases/assets/525527830",
+    "name": "UPDATE-luckfox-armv7.ndsw",
+    "label": "",
+    "state": "uploaded",
+    "content_type": "application/octet-stream",
+    "size": 56039086,
+    "download_count": 0,
+    "created_at": "2026-08-22T22:41:22Z",
+    "updated_at": "2026-08-22T22:41:47Z",
+    "browser_download_url": "https://github.com/BubbletopTag/neodct/releases/download/0.3.13a/UPDATE-luckfox-armv7.ndsw",
+    "uploader": {
+     "login": "BubbletopTag",
+     "id": 56369099,
+     "user_view_type": "public",
+     "node_id": "MDQ6VXNlcjU2MzY5MDk5",
+     "type": "User",
+     "site_admin": false,
+     "html_url": "https://github.com/BubbletopTag"
+    },
+    "digest": "sha256:57ffa7adae2cade81851bca2ae6af0db4261f0637b51054e94e1fd8da8c302da"
+   },
+   {
+    "id": 525527826,
+    "url": "https://api.github.com/repos/BubbletopTag/neodct/releases/assets/525527826",
+    "name": "UPDATE-qemu-aarch64.ndsw",
+    "label": "",
+    "state": "uploaded",
+    "content_type": "application/octet-stream",
+    "size": 64095912,
+    "download_count": 0,
+    "created_at": "2026-08-22T22:41:22Z",
+    "updated_at": "2026-08-22T22:41:48Z",
+    "browser_download_url": "https://github.com/BubbletopTag/neodct/releases/download/0.3.13a/UPDATE-qemu-aarch64.ndsw",
+    "uploader": {
+     "login": "BubbletopTag",
+     "id": 56369099,
+     "user_view_type": "public",
+     "node_id": "MDQ6VXNlcjU2MzY5MDk5",
+     "type": "User",
+     "site_admin": false,
+     "html_url": "https://github.com/BubbletopTag"
+    },
+    "digest": "sha256:c547cbfb6c5671eb11f4da4ed95c25eb905e0d791ae94d101e6ffb4f2d1d177c"
+   }
+  ]
+ }
+]
