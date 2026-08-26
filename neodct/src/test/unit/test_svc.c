@@ -694,6 +694,33 @@ typedef struct {
     volatile bool stop;
 } okmodem;
 
+/* `(void)write(...)` is not enough to silence -Wunused-result: glibc marks
+ * write() warn_unused_result under _FORTIFY_SOURCE, which -O2 turns on, and
+ * a cast to void does not count as using the value. The tree builds with
+ * -Werror, so on a toolchain that pairs a recent glibc with -O2 this file
+ * would not compile at all.
+ *
+ * Looping is also the right thing on a pty: a short write is legal and the
+ * modem stub's replies are parsed by the code under test, so half of one is
+ * a mysterious failure somewhere else. */
+static void write_all(int fd, const char *buf, size_t len)
+{
+    size_t off = 0u;
+
+    while (off < len) {
+        ssize_t n = write(fd, buf + off, len - off);
+
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return;
+        }
+        if (n == 0)
+            return;
+        off += (size_t)n;
+    }
+}
+
 static void *okmodem_loop(void *arg)
 {
     okmodem *k = arg;
@@ -720,7 +747,7 @@ static void *okmodem_loop(void *arg)
                 static const char SENT[] = "\r\n+CMGS: 42\r\n\r\nOK\r\n";
 
                 k->awaiting_body = false;
-                (void)write(k->master, SENT, strlen(SENT));
+                write_all(k->master, SENT, strlen(SENT));
             }
             continue;
         }
@@ -751,7 +778,7 @@ static void *okmodem_loop(void *arg)
                 } else {
                     reply = OK;
                 }
-                (void)write(k->master, reply, strlen(reply));
+                write_all(k->master, reply, strlen(reply));
             }
             continue;
         }
