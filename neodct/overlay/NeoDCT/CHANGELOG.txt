@@ -1,16 +1,34 @@
 # NeoDCT OS Changelog
 
 0.4.0
+The whole operating system has been rewritten in C.
+
+Every line of it -- the main loop, the framebuffer, all fourteen widgets,
+the modem, the phone book, the dialler, the games, the browser launcher,
+the update system -- was rewritten from the Python original in four days,
+by a fleet of Claude agents working in parallel on separate branches. Ten
+of them were writing into the same source tree at once; the build's
+source lists are wildcards rather than hand-written for exactly that
+reason. 109 commits, about 141,000 lines of C and headers.
+
+And you cannot tell. That was the point. 48 screens rendered by the new C
+build are compared against captures from the Python one and every single
+one matches BYTE FOR BYTE -- not "looks the same", the same pixels. The
+menus, the fonts, the spacing, the blinking cursor, even a couple of
+bugs that were faithfully carried across because changing them would
+have changed the picture.
+
 Changed
 - The whole operating system is now written in C. Everything you see on
   screen -- the menus, the phone book, the dialler, the text boxes -- is
   drawn by new code that produces the same picture, pixel for pixel, as
-  the version before it. 27 screens are checked against the old ones
+  the version before it. 48 screens are checked against the old ones
   automatically, and every one of them matches exactly.
 - The phone uses about a third of the memory it used to. Sitting on the
-  home screen it was using around 20 MB and now uses under 6 MB, which
+  home screen it was using around 20 MB and now uses under 8 MB, which
   is most of the reason for doing this at all: there is finally room to
   add things.
+- Every app is now real C. Nothing is left running the old Python.
 - Apps now run as separate programs instead of inside the system itself.
   If an app goes wrong it can no longer take the phone down with it --
   you get a crash screen and you are back at the menu, and the modem,
