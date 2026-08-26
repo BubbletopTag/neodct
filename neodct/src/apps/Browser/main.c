@@ -930,18 +930,24 @@ void nd_browser_dump_dmesg_tail(int lines)
 
 bool nd_browser_needs_key_bridge(const nd_ui *ui)
 {
-    nd_keymap km;
+    ND_UNUSED(ui);
 
-    /* Whenever the framework can answer, believe it. */
-    if (ui != NULL && ui->has_matrix_keypad)
-        return true;
-
-    /* It cannot yet inside an app process: nd_ui_init_app() derives
-     * has_matrix_keypad from the inherited PIPE, which has no matrix by
-     * construction. So ask the same file the core asks -- keymap.json exists
-     * and names a driver that is present exactly on the keypad-only hardware
-     * where netsurf can see no keyboard at all. BR-3. */
-    return nd_keymap_load(ND_PATH_KEYMAP, &km) == ND_OK;
+    /* The core hands the fact down in NEODCT_KEYPAD_MATRIX (nd_app.h). This
+     * used to re-read keymap.json instead, because ui->has_matrix_keypad was
+     * false in every app process on every device -- BR-3, now closed.
+     *
+     * Asking the core is not merely tidier, it is more correct: a keymap.json
+     * on disk is a CLAIM about the hardware, while this is the backend the
+     * core actually opened. If the matrix failed and the core fell back to
+     * evdev, the old code would have started a bridge against a keyboard that
+     * is already reaching netsurf, and doubled every press.
+     *
+     * nd_app_keypad_is_matrix() and NOT ui->has_matrix_keypad, even though
+     * the second is derived from the first: only the second has the NEODCT_T9
+     * override folded into it, and this question is about the hardware. A
+     * developer forcing T9 on over a real keyboard must not thereby get a
+     * second keyboard bridged on top of it. */
+    return nd_app_keypad_is_matrix();
 }
 
 /* ------------------------------------------------------------------ *

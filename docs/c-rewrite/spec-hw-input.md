@@ -1556,6 +1556,14 @@ otherwise (dev QWERTY keyboard):   DEV_KEYMAP lookup + char_allowed()
 multi-tap runs **only** on the real i²c keypad; a QEMU keyboard uses the QWERTY
 `DEV_KEYMAP` path and shows no mode indicator at all.
 
+> **In C this cannot be asked the Python's way from inside an app.** An app's
+> `ui->input` is the pipe the core hands it, which has no matrix by construction, so
+> `nd_input_has_matrix()` is the wrong source for `ui->has_matrix_keypad` there — it
+> answers `false` on the phone and takes all of T9 down with it. The core sets
+> **`NEODCT_KEYPAD_MATRIX=1`** (`nd_app.h`) and `nd_ui_init_app()` reads that.
+> `NEODCT_T9` overrides the result in either direction, which is the only way to
+> exercise T9 over a QWERTY keyboard. See OPEN-QUESTIONS.md BR-3.
+
 **Koki** (`System/apps/Koki/engine.py:39`) has its own keycode map and needs *held*
 state, which `read_key()` cannot give it:
 

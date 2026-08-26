@@ -47,8 +47,8 @@
 #include <time.h>
 
 #include "nd_app.h"
-#include "nd_bench.h"
 #include "nd_battery.h"
+#include "nd_bench.h"
 #include "nd_crash.h"
 #include "nd_db.h"
 #include "nd_draw.h"
@@ -624,7 +624,8 @@ static void rescan_apps(nd_ui *ui)
     n = nd_ui_scan_apps(ND_PATH_APPS_DIR, ui->home_.apps, ND_APP_MAX);
     ui->home_.n_apps = n;
     if (nd_ui_engineering_mode(ui) && ui->home_.n_apps < ND_APP_MAX) {
-        n = nd_ui_scan_apps(ND_PATH_ENG_APPS_DIR, &ui->home_.apps[ui->home_.n_apps], ND_APP_MAX - ui->home_.n_apps);
+        n = nd_ui_scan_apps(ND_PATH_ENG_APPS_DIR, &ui->home_.apps[ui->home_.n_apps],
+                            ND_APP_MAX - ui->home_.n_apps);
         ui->home_.n_apps += n;
     }
     sort_apps_by_id(ui->home_.apps, ui->home_.n_apps);
@@ -831,6 +832,39 @@ static void ui_load_fonts(nd_ui *ui)
 
 /* Steps 5, 9, 10, 11, 12, 14, 15, 16, 17, 18 -- everything both the core and
  * an app process need. */
+/* ------------------------------------------------------------------ *
+ * has_matrix_keypad, in one place for both init paths
+ * ------------------------------------------------------------------ */
+
+/* framework._t9_active(). T9 -- multi-tap, predictive, the # mode cycle and
+ * the mode indicator -- runs on the i2c keypad only, because a QWERTY dev
+ * keyboard has real letters and takes the DEV_KEYMAP path instead.
+ *
+ * `detected` is what the process can see for itself: the real backend in the
+ * core, the core's word for it in an app (nd_app.h). NEODCT_T9 overrides
+ * both, and is the only way to exercise T9 on a keyboard. Unset in every
+ * golden capture, so the reference frames are unchanged -- OPEN-QUESTIONS.md
+ * T-5 still holds. */
+static bool t9_active(bool detected)
+{
+    const char *env = getenv(ND_ENV_T9);
+
+    if (env == NULL || env[0] == '\0')
+        return detected;
+    /* Exactly "0" is off; anything else non-empty is on. A developer who
+     * exports NEODCT_T9=0 to turn it off must not get it turned on. */
+    return !(env[0] == '0' && env[1] == '\0');
+}
+
+/* The core's own answer, handed to an app in NEODCT_KEYPAD_MATRIX because the
+ * app's input is a pipe and cannot be asked. */
+static bool matrix_from_env(void)
+{
+    const char *env = getenv(ND_ENV_KEYPAD_MATRIX);
+
+    return env != NULL && env[0] == '1' && env[1] == '\0';
+}
+
 static nd_err ui_common_init(nd_ui *ui, nd_fb *fb)
 {
     nd_err rc;
@@ -921,11 +955,11 @@ nd_err nd_ui_init(nd_ui *ui, nd_fb *fb)
      * to flush pending keys before their first draw. --- */
     if (nd_input_open(&ui->input) == ND_OK && ui->input != NULL) {
         ui->keypad_fd = nd_input_fd(ui->input);
-        ui->has_matrix_keypad = nd_input_has_matrix(ui->input);
+        ui->has_matrix_keypad = t9_active(nd_input_has_matrix(ui->input));
     } else {
         ui->input = NULL;
         ui->keypad_fd = -1;
-        ui->has_matrix_keypad = false;
+        ui->has_matrix_keypad = t9_active(false);
     }
 
     rc = ui_common_init(ui, fb);
@@ -968,12 +1002,15 @@ nd_err nd_ui_init_app(nd_ui *ui, nd_fb *fb, int keypad_fd)
      * "not present", which is the sentence Messages and the Modem app already
      * draw. OPEN-QUESTIONS.md MSG-1. */
     nd_svc_client_open_from_env();
-    if (keypad_fd >= 0 && nd_input_open_pipe(&ui->input, keypad_fd) == ND_OK) {
-        ui->has_matrix_keypad = nd_input_has_matrix(ui->input);
-    } else {
+    if (keypad_fd >= 0 && nd_input_open_pipe(&ui->input, keypad_fd) != ND_OK)
         ui->input = NULL;
-        ui->has_matrix_keypad = false;
-    }
+
+    /* NOT nd_input_has_matrix(ui->input): ui->input is the inherited PIPE and
+     * has no matrix by construction, which is why this flag used to be false
+     * in every app on every device and took multi-tap, predictive, the # mode
+     * cycle and the mode indicator down with it. The core knows, and says so.
+     * nd_app.h, and OPEN-QUESTIONS.md BR-3. */
+    ui->has_matrix_keypad = t9_active(matrix_from_env());
 
     nd_bench_mark("ui_init_app: input");
 

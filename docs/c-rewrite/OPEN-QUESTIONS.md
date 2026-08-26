@@ -1174,6 +1174,12 @@ the constant — do not pass a bigger `cap`.
 
 ### T-5. The mode indicator is invisible in every golden frame, and that is correct
 
+> **Still true after BR-3 was closed.** `NEODCT_T9` is unset in `uistub.py`, in
+> `nd-shoot` and in CI, and the core it renders through has no matrix — so
+> `t9_active(false)` is `false` and all 48 frames stay byte-exact. Verified: the
+> acceptance gate's check 6 passes unchanged.
+
+
 `framework._t9_active(ui)` is `getattr(ui, "matrix_input", None) is not None`: T9
 multi-tap runs on the real i2c keypad only, because a development QEMU keyboard has a
 full QWERTY and takes the DEV_KEYMAP path. `uistub.py` boots with a dead input path,
@@ -1723,8 +1729,6 @@ disappears mid-CMGS gives Messages `"Send failed: modem lost"` where the
 Python would have said `"Send failed: timeout waiting for network"` thirty
 seconds later. The C wording matches the two other drop paths in the same
 function, and is what actually happened.
-
----
 
 ## nd-core, nd-apprun, the launcher and the stub app (WP core-loop)
 
@@ -2353,7 +2357,11 @@ unchanged.
 someone owns it, is a two-line alias — `nd_t9_bridge_new_manual()` /
 `nd_t9_bridge_free_manual()` — with the existing spellings kept for the tests.
 
-### BR-3. `ui->has_matrix_keypad` is always false inside an app, so the bridge gate moved
+### BR-3. `ui->has_matrix_keypad` is always false inside an app — **CLOSED**
+
+> **RESOLVED — the core now propagates the fact, and T9 works in apps for the first
+> time.** What follows is the original entry, kept because it names the bug exactly;
+> the resolution is at the end.
 
 `_start_key_bridge` returns `None` when `ui.matrix_input is None`, i.e. on QEMU and dev
 boards where a real keyboard already reaches netsurf. Bridging one there would double
@@ -2368,9 +2376,44 @@ this is where it was found. Not fixed: those are not this work package's files.)
 
 `nd_browser_needs_key_bridge()` therefore trusts `ui->has_matrix_keypad` when it is true
 and otherwise asks the same file the core asks: `nd_keymap_load(ND_PATH_KEYMAP, ...)`
-succeeding means keypad-only hardware. That is the same evidence, read from the same
-place, one process further out. It is correct today and it becomes redundant the moment
-the core propagates the flag — at which point the second half can be deleted.
+succeeding means keypad-only hardware.
+
+**How it was closed.** The parenthesis above was the bigger half and it was worse than it
+sounded. Everything T9 is gated on that flag — `nd_textinput.c:223`, `nd_textlong.c:526`
+and `nd_t9ind.c:50` — so with the flag false in every app, **every text field on the
+phone fell through to the QWERTY dev path**. `nd_key_dev_char()` ends in a fall-through to
+`nd_key_digit_char()`, so a keypad press typed its own digit and nothing else: no letters,
+no multi-tap, no predictive, no `#` mode switching, no mode indicator. The engine, the
+dictionary and the widgets were all finished and green the whole time — 108, 587 and 2163
+checks — because every one of those tests sets the flag by hand.
+
+The core knows the answer, so it says so. `nd_proc_launch_app()` sets
+**`NEODCT_KEYPAD_MATRIX=1`** (`nd_app.h`) when its own keypad is the matrix, and
+`nd_ui_init_app()` reads that instead of interrogating the pipe. Both bridge gates lost
+their `keymap_load` half: a keymap on disk is a *claim* about the hardware, while the
+environment carries *the backend the core actually opened* — if the matrix failed and the
+core fell back to evdev, the old code would have bridged a second keyboard on top of a
+real one.
+
+Two things worth knowing about the shape of the fix:
+
+* **`ND_ENV_T9` is a separate question from `ND_ENV_KEYPAD_MATRIX`.** `nd_app.h` spells
+  out why. `ui->has_matrix_keypad` answers *"should keys mean T9?"* and carries the
+  `NEODCT_T9` developer override; `nd_app_keypad_is_matrix()` answers *"is the console's
+  keyboard missing?"* and does not. The bridges ask the second one, so forcing T9 on over
+  a QWERTY keyboard cannot also bridge a uinput keyboard on top of it.
+* **`build_envp()` had to start allocating.** It filled a `const char *[64]` and silently
+  stopped copying when it ran out. The phone's environment is small so nobody had seen it,
+  but an ordinary desktop shell exports ~66 entries and the copy then lost whatever sat at
+  the *end* of `environ` — which is exactly where `setenv()` puts a variable set just
+  before a launch. `NEODCT_T9` was the first thing to notice. It is now sized from the
+  real environment, so there is no cliff.
+
+The evidence is `test/apps/T9App` + `test/unit/test_t9_app.c`: a real `app.so` in a real
+child forked by the real `nd_proc_launch_app()`, driving a real `nd_textinput` over real
+keypad codes and reporting the string that came out. It asserts `"2223"` with the flag off
+and `"cd"`, `"C"`, `"23"` and `"home"` with it on — the last from the shipped `t9.dict`,
+which also proves the dictionary is reachable from inside an app process.
 
 ### BR-4. The pipe is now drained even when `/dev/console` will not open
 

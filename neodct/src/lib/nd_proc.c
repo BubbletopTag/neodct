@@ -388,7 +388,8 @@ static const char *apprun_path(char *buf, size_t buf_sz)
  * /NeoDCT/System/apps/<Name> and resolves it the same way we would. */
 static nd_err app_env(char *keypad, size_t keypad_sz, char *crash, size_t crash_sz, char *fbv,
                       size_t fb_sz, char *rootv, size_t root_sz, char *svcv, size_t svc_sz,
-                      int keypad_fd, int crash_fd, int fb_fd, int svc_fd)
+                      char *matrixv, size_t matrix_sz, int keypad_fd, int crash_fd, int fb_fd,
+                      int svc_fd, bool has_matrix)
 {
     const char *root = nd_path_root();
 
@@ -423,22 +424,61 @@ static nd_err app_env(char *keypad, size_t keypad_sz, char *crash, size_t crash_
     } else {
         svcv[0] = '\0';
     }
+    /* Set only when true, so "absent" and "no matrix" are the same thing to
+     * the child and there is one less state to get wrong. Without this the
+     * app has no way to know: its own input is a pipe. nd_app.h, BR-3. */
+    if (has_matrix) {
+        if (nd_snprintf(matrixv, matrix_sz, "%s=1", ND_ENV_KEYPAD_MATRIX) != ND_OK)
+            return ND_ERR_TOOLONG;
+    } else {
+        matrixv[0] = '\0';
+    }
     return ND_OK;
 }
 
-#define APP_ENVP_MAX 64
+/* How many of our own entries build_envp() may append, plus the NULL. */
+#define APP_ENVP_OURS 7
 
-/* environ plus our four, with any inherited copy of ours removed so the child
- * cannot pick up a stale descriptor number from a previous launch. */
-static size_t build_envp(const char **envp, size_t max, const char *keypad, const char *crash,
-                         const char *fbv, const char *rootv, const char *svcv)
+/* environ plus ours, with any inherited copy of ours removed so the child
+ * cannot pick up a stale descriptor number -- or a stale keypad claim -- from
+ * a previous launch. NEODCT_T9 is deliberately NOT in OURS: it is the
+ * developer's own override and it is meant to reach the child untouched.
+ *
+ * ============ WHY THIS ALLOCATES ============
+ *
+ * It used to fill a fixed const char *[64] on the stack and STOP COPYING when
+ * it ran out, silently. The phone's environment is small, so nobody saw it;
+ * an ordinary desktop shell exports around 66 entries, and the copy then lost
+ * whatever sat at the end of environ -- which is exactly where setenv() puts
+ * a variable set just before the launch. The first thing that noticed was
+ * NEODCT_T9, whose whole job is to be set by hand and reach the child.
+ *
+ * Dropping part of a caller's environment because it did not fit is the kind
+ * of failure that shows up later as an app that cannot find $HOME. The array
+ * is a handful of pointers per launch and an app launch already forks; size
+ * it to the real environment and there is no cliff to fall off.
+ *
+ * owned by the caller; free with free(). The STRINGS are environ's own and
+ * the caller's stack buffers -- neither is ours to release. */
+static const char **build_envp(const char *keypad, const char *crash, const char *fbv,
+                               const char *rootv, const char *svcv, const char *matrixv)
 {
-    static const char *const OURS[] = {ND_ENV_KEYPAD_FD "=", ND_ENV_CRASH_FD "=", ND_ENV_FB_FD "=",
-                                       ND_ENV_ROOT "=", ND_ENV_SERVICE_FD "="};
+    static const char *const OURS[] = {ND_ENV_KEYPAD_FD "=",  ND_ENV_CRASH_FD "=",
+                                       ND_ENV_FB_FD "=",      ND_ENV_ROOT "=",
+                                       ND_ENV_SERVICE_FD "=", ND_ENV_KEYPAD_MATRIX "="};
+    const char **envp;
+    size_t have = 0u;
     size_t n = 0u;
     size_t i;
 
-    for (i = 0u; environ[i] != NULL && n + 6u < max; i++) {
+    while (environ[have] != NULL)
+        have++;
+
+    envp = calloc(have + APP_ENVP_OURS, sizeof *envp);
+    if (envp == NULL)
+        return NULL;
+
+    for (i = 0u; i < have; i++) {
         size_t k;
         bool ours = false;
 
@@ -457,8 +497,10 @@ static size_t build_envp(const char **envp, size_t max, const char *keypad, cons
         envp[n++] = rootv;
     if (svcv[0] != '\0')
         envp[n++] = svcv;
+    if (matrixv[0] != '\0')
+        envp[n++] = matrixv;
     envp[n] = NULL;
-    return n;
+    return envp;
 }
 
 /* Forward the core's key stream to the child while it runs.
@@ -488,11 +530,12 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
     char runner[ND_PATH_MAX];
     const char *path;
     const char *argv[5];
-    const char *envp[APP_ENVP_MAX];
+    const char **envp = NULL;
     char keypad_env[64];
     char crash_env[64];
     char fb_env[64];
     char svc_env[64];
+    char matrix_env[64];
     char root_env[ND_PATH_MAX + 32];
     nd_input_channel ch = {-1, -1};
     int crash_pipe[2] = {-1, -1};
@@ -547,13 +590,20 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
     argv[3] = arg; /* NULL when there is none, which also terminates argv */
     argv[4] = NULL;
 
+    /* ui->has_matrix_keypad and not nd_input_has_matrix(ui->input) directly:
+     * the core's flag already has the NEODCT_T9 override folded into it, so a
+     * developer who forces T9 on in the core gets it in the app too. */
     if (app_env(keypad_env, sizeof keypad_env, crash_env, sizeof crash_env, fb_env, sizeof fb_env,
-                root_env, sizeof root_env, svc_env, sizeof svc_env, ch.read_fd, crash_pipe[1],
-                fb_fd, svc_fd) != ND_OK) {
+                root_env, sizeof root_env, svc_env, sizeof svc_env, matrix_env, sizeof matrix_env,
+                ch.read_fd, crash_pipe[1], fb_fd, svc_fd, ui->has_matrix_keypad) != ND_OK) {
         rc = ND_ERR_TOOLONG;
         goto done;
     }
-    (void)build_envp(envp, ND_ARRAY_LEN(envp), keypad_env, crash_env, fb_env, root_env, svc_env);
+    envp = build_envp(keypad_env, crash_env, fb_env, root_env, svc_env, matrix_env);
+    if (envp == NULL) {
+        rc = ND_ERR_NOMEM;
+        goto done;
+    }
 
     memset(&spec, 0, sizeof spec);
     spec.argv = argv;
@@ -672,6 +722,7 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
         *crash_out = info;
 
 done:
+    free((void *)envp);
     if (svc != NULL)
         nd_svc_server_free(svc); /* only reached when the launch never happened */
     if (crash_pipe[0] >= 0)

@@ -107,6 +107,17 @@ nd_err nd_app_asset_path(char *out, size_t out_sz, const char *name)
 }
 
 /* ------------------------------------------------------------------ *
+ * The keypad fact the core hands down
+ * ------------------------------------------------------------------ */
+
+bool nd_app_keypad_is_matrix(void)
+{
+    const char *env = getenv(ND_ENV_KEYPAD_MATRIX);
+
+    return env != NULL && env[0] == '1' && env[1] == '\0';
+}
+
+/* ------------------------------------------------------------------ *
  * The inherited framebuffer
  * ------------------------------------------------------------------ */
 

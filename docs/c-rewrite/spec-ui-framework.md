@@ -123,7 +123,7 @@ subsystem reads off it:
 | `ui.wait_for_key()` | blocks forever until a key code arrives | every `show()` | `nd_ui_wait_key()` |
 | `ui.read_keypress(timeout)` | polls; returns code or `None` | Dialer screens | `nd_ui_read_key()` |
 | `ui.keypad_fd` | evdev fd or `None` | input-flush in AppSelector / PagedList / MessageDialog | `int keypad_fd` |
-| `ui.matrix_input` | i2c keypad object or `None` | `_t9_active()` — decides T9 vs QWERTY | `bool has_matrix_keypad` |
+| `ui.matrix_input` | i2c keypad object or `None` | `_t9_active()` — decides T9 vs QWERTY | `bool has_matrix_keypad` (in an app: from `NEODCT_KEYPAD_MATRIX`, not from `ui->input` — BR-3) |
 | `ui.wallpaper` | dimmed 240×175 RGB `Image` or `None` | SoftKeyBar transparent mode | `nd_image *wallpaper` |
 | `ui.softkey` | the core's own `SoftKeyBar` | **its mere existence** decides softkey transparency | see §SoftKeyBar |
 | `ui.modem` | ModemService | Dialer screens | `nd_modem *modem` |

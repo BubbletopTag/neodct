@@ -76,6 +76,22 @@
  *
  * Everything else is closed on exec.
  *
+ * ============ AND ONE FACT THAT IS NOT A DESCRIPTOR ============
+ *
+ *     NEODCT_KEYPAD_MATRIX  "1" when the core's keypad is the i2c matrix
+ *
+ * An app CANNOT WORK THIS OUT FOR ITSELF. nd_ui_init_app() derives
+ * ui->has_matrix_keypad from ui->input, and an app's input is the pipe above
+ * -- which has no matrix by construction, on every device. So the flag read
+ * that way is false everywhere, and everything gated on it (multi-tap,
+ * predictive, the # mode cycle, the T9 mode indicator) is dead in every app
+ * on the phone it was written for. That was BR-3 in OPEN-QUESTIONS.md.
+ *
+ * The core knows the answer -- it opened the backend -- so it simply says so.
+ * Anything that wants the fact reads the flag; nothing re-derives it by
+ * reading keymap.json a second time, because a keymap on disk is not the
+ * same claim as a matrix the core actually opened.
+ *
  * ============ WHAT AN APP MAY CALL ============
  *
  * All of libneodct: the widgets, the rasterizer, settings, storage, the
@@ -115,6 +131,18 @@ extern "C" {
 #define ND_ENV_FB_FD      "NEODCT_FB_FD"
 #define ND_ENV_SERVICE_FD "NEODCT_SERVICE_FD"
 
+/* "1" when the core's keypad is the i2c matrix, absent otherwise. NOT a
+ * descriptor -- it is the one FACT about the keypad an app cannot work out
+ * for itself, because its own input is a pipe. See the block above. */
+#define ND_ENV_KEYPAD_MATRIX "NEODCT_KEYPAD_MATRIX"
+
+/* Developer override for the same flag, honoured in the core AND in every
+ * app: "0" forces T9 off, any other non-empty value forces it on. Unset in
+ * production and in every golden frame, so the reference captures are
+ * unaffected. This is how T9 is exercised on a QEMU keyboard, where there is
+ * no i2c matrix to detect. */
+#define ND_ENV_T9 "NEODCT_T9"
+
 /* The file an app's compiled code lives in, beside its manifest.json. */
 #define ND_APP_SO_NAME "app.so"
 
@@ -133,6 +161,23 @@ int app_open_inbox(nd_ui *ui);
 /* ------------------------------------------------------------------ *
  * What an app CALLS, from libneodct
  * ------------------------------------------------------------------ */
+
+/* True when the core's keypad is the i2c matrix: the HARDWARE fact, straight
+ * from NEODCT_KEYPAD_MATRIX, WITHOUT the NEODCT_T9 policy override folded in.
+ *
+ * ui->has_matrix_keypad is the other question and they are not the same one:
+ *
+ *   ui->has_matrix_keypad  "should keys mean T9?"  -- multi-tap, predictive,
+ *                          the # cycle, the mode indicator. A developer may
+ *                          turn this on over a QWERTY keyboard to exercise it.
+ *   this function          "is the console's keyboard missing?" -- which is
+ *                          what LinuxShell and the Browser ask before they
+ *                          start a uinput bridge.
+ *
+ * Folding the override into the second one would make NEODCT_T9=1 on a dev
+ * box start a bridge alongside a real keyboard, and netsurf would then see
+ * every press twice. */
+bool nd_app_keypad_is_matrix(void);
 
 /* True once SIGTERM has arrived. Poll it in any loop that runs longer than a
  * frame; return from app_run() promptly when it goes true. Reading it is a

@@ -54,6 +54,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "nd_app.h"
 #include "nd_input.h"
 #include "nd_keycodes.h"
 #include "nd_keypad.h"
@@ -828,12 +829,25 @@ static void t_needs_key_bridge(void)
     CHECK(!g_api.needs_key_bridge(ui));
     CHECK(!g_api.needs_key_bridge(NULL));
 
-    /* Whenever the framework can answer, it wins. */
-    ui->has_matrix_keypad = true;
+    /* NEODCT_KEYPAD_MATRIX is the only answer now: the core sets it from the
+     * backend it actually opened, and nd_app_keypad_is_matrix() reads it. */
+    (void)setenv(ND_ENV_KEYPAD_MATRIX, "1", 1);
     CHECK(g_api.needs_key_bridge(ui));
+    (void)unsetenv(ND_ENV_KEYPAD_MATRIX);
+    CHECK(!g_api.needs_key_bridge(ui));
+
+    /* ui->has_matrix_keypad is deliberately NOT consulted: it carries the
+     * NEODCT_T9 override, and forcing T9 on over a real keyboard must not
+     * bridge a second one on top of it. */
+    ui->has_matrix_keypad = true;
+    CHECK(!g_api.needs_key_bridge(ui));
     ui->has_matrix_keypad = false;
 
-    /* Keypad-only hardware, recognised the same way the core recognises it. */
+    /* A keymap.json on disk is NOT enough on its own, and that is the point
+     * of the change: it is a claim about the hardware, not evidence that the
+     * core opened the matrix. If the matrix failed and the core fell back to
+     * evdev, netsurf already has a real keyboard and a bridge here would
+     * double every press. BR-3. */
     pt_write_text(ND_PATH_KEYMAP, "{\n"
                                   "  \"format\": \"neodct.keymap.v3.matrix.i2c\",\n"
                                   "  \"driver\": \"pcf8575-i2c\",\n"
@@ -846,7 +860,7 @@ static void t_needs_key_bridge(void)
                                   "    \"num_2\": {\"row\": 0, \"col\": 1}\n"
                                   "  }\n"
                                   "}\n");
-    CHECK(g_api.needs_key_bridge(ui));
+    CHECK(!g_api.needs_key_bridge(ui));
 }
 
 /* ------------------------------------------------------------------ *

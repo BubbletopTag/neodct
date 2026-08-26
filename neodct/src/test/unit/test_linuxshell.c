@@ -41,6 +41,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "nd_app.h"
+
 #include "smallapp_test.h"
 
 #include "../../apps/LinuxShell/linuxshell.h"
@@ -504,12 +506,19 @@ static void test_needs_key_bridge(void)
         CHECK(!fx.ui.has_matrix_keypad, "the fixture has no matrix, like an app process");
         CHECK(!api.needs_bridge(&fx.ui), "a ui without a matrix -> no bridge");
 
-        /* The one arm the framework can answer for itself. The other -- a
-         * keymap.json naming a driver that is present -- needs an i2c
-         * expander on the bus and is not reachable on the host; BR-3 is where
-         * the substitution is recorded. */
+        /* The core's word for it, which is the only evidence there is inside
+         * an app process. BR-3: this used to re-read keymap.json, because
+         * ui->has_matrix_keypad was false in every app on every device. */
+        (void)setenv(ND_ENV_KEYPAD_MATRIX, "1", 1);
+        CHECK(api.needs_bridge(&fx.ui), "the core says there is a matrix -> bridge");
+        (void)unsetenv(ND_ENV_KEYPAD_MATRIX);
+        CHECK(!api.needs_bridge(&fx.ui), "and without it, no bridge");
+
+        /* NOT ui->has_matrix_keypad: that one carries the NEODCT_T9 override,
+         * and a developer forcing T9 on over a real keyboard must not get a
+         * uinput keyboard bridged on top of it and every press doubled. */
         fx.ui.has_matrix_keypad = true;
-        CHECK(api.needs_bridge(&fx.ui), "ui.matrix_input is not None -> bridge");
+        CHECK(!api.needs_bridge(&fx.ui), "the T9 override alone does not bridge");
     } else {
         CHECK(false, "fixture");
     }
