@@ -311,6 +311,27 @@ the tunnel the phone opened*, which is the only thing that proves the
 feature works. On failure it prints the phone's own `remote.log`, which
 names the reason far more often than the client's "Permission denied" does.
 
+It seeds `.remote` directly, though, which skips the way a person actually
+sets this up. `test_card_flow.sh` does that half:
+
+```sh
+neodct/tools/test_card_flow.sh
+```
+
+It puts a card in the phone with **nothing** seeded, then walks the real
+menus with QEMU's `sendkey` -- Menu, down to Remote Shell, Copy keys from
+card, Turn on -- and logs in. The keys the phone ends up using can only have
+come off the card, and `state.prop` can only have come from `relay.conf`.
+
+Two things about driving the UI that are worth knowing before you extend
+it. The QEMU monitor must be **one connection held open**: a connection per
+key loses most of them, because the command races the close. And only the
+*first* keypress can be confirmed -- `nd_main.c` logs `Code: N` from the
+core's main loop, so once a widget with its own read loop is on screen
+(AppSelector, VerticalList, a dialog) nothing is logged. The first key is
+therefore also the readiness probe, offered until the phone takes it; the
+rest are paced, and the *outcome* is what gets checked.
+
 ## 10. Known limits
 
 - **The relay's own ssh port is assumed to be 22.** The Port setting in the
@@ -345,6 +366,7 @@ is earned:
 | tests, mostly about who can get in | `neodct/src/test/unit/test_remoteshell.c` |
 | a relay to test against | `neodct/tools/test_relay.sh` |
 | the whole thing, end to end | `neodct/tools/test_remoteshell_e2e.sh` |
+| the card flow, through the real UI | `neodct/tools/test_card_flow.sh` |
 
 The sshd config is generated from `write_sshd_config()` every single time
 it starts, and is not read back. If you edit it on the phone to get past
