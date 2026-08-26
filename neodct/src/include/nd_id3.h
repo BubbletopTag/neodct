@@ -1,12 +1,31 @@
-/* nd_id3.h -- the four ID3v2 frames the Music app puts on screen, read out of
- * a file that a user may have put on the SD card themselves.
+/* nd_id3.h -- the ID3v2 frames the Music app puts on screen, read out of a
+ * file that a user may have put on the SD card themselves.
  *
  * The Python calls mutagen: `MP3(path, ID3=ID3)`, then `TIT2`, `TPE1`, `TALB`
  * and the first `APIC` frame. mutagen is 14,000 lines and is not in the
- * image, so this is a deliberately small reader for exactly those four
- * frames and nothing else. It does not write tags, it does not read ID3v1,
- * it does not read Vorbis comments, and it reports no error a caller could
- * act on beyond "there was nothing to read".
+ * image, so this is a deliberately small reader for a handful of frames and
+ * nothing else. It does not write tags, it does not read ID3v1, it does not
+ * read Vorbis comments, and it reports no error a caller could act on beyond
+ * "there was nothing to read".
+ *
+ * ============ THE FOUR THE PYTHON READ, AND THE FOUR ADDED SINCE ==========
+ *
+ * TIT2, TPE1, TALB and APIC are the Python's and are what the Now Playing
+ * screen draws. TPE2, TRCK, TPOS and the year were added for the library
+ * browser, which cannot do its job without them:
+ *
+ *   TPE2  album artist. Without it every guest vocalist on a compilation
+ *         becomes an artist with one track, and "Various Artists" albums
+ *         shatter into forty one-track artists. This is THE field that makes
+ *         an album view usable.
+ *   TRCK  track number. Without it an album's tracks sort by filename, which
+ *         is the complaint the browser exists to answer.
+ *   TPOS  disc number, so a two-disc set does not interleave.
+ *   year  TDRC (2.4), TYER (2.3) or TYE (2.2), so albums sort chronologically
+ *         rather than alphabetically.
+ *
+ * All four are cheap: they are short text frames sitting in a tag that is
+ * already being read and walked in full.
  *
  * ============ THIS PARSES ATTACKER-INFLUENCED BYTES ============
  *
@@ -70,9 +89,40 @@ typedef struct {
     bool has_artist;
     bool has_album;
 
+    /* TPE2 / TP2 -- the ALBUM artist, which is a different thing from the
+     * track artist and is why a compilation has one entry and not forty. */
+    char albumartist[ND_ID3_TEXT_MAX];
+    bool has_albumartist;
+
+    /* TRCK / TRK and TPOS / TPA. Both are TEXT frames spelled "5" or "5/12",
+     * so only the part before the slash is kept, as a number. 0 means the
+     * frame was absent, was not a number, or said zero -- the browser treats
+     * all three the same way, which is to fall back to sorting by title.
+     * A number that does not fit is clamped rather than wrapped; see
+     * ND_ID3_NUM_MAX. */
+    uint16_t track;
+    uint16_t disc;
+
+    /* The recording year, from whichever of the three spellings the tag
+     * uses: TDRC (2.4, an ISO timestamp whose first four digits are the
+     * year), TYER (2.3) or TYE (2.2). 0 when absent or not a plausible year.
+     * Bounded by ND_ID3_YEAR_MIN/MAX so that a corrupt tag cannot put an
+     * album in the year 43,000 at the top of a sorted list. */
+    uint16_t year;
+
     /* Version reached, for the log and the test: 2, 3 or 4. 0 when no tag. */
     uint8_t version;
 } nd_id3;
+
+/* A track or disc number this large is a corrupt tag, not a boxed set. The
+ * value is clamped here rather than rejected, because a track that sorts
+ * last is a better answer than a track that vanishes. */
+#define ND_ID3_NUM_MAX 9999u
+
+/* Outside this range the value is not a year and is dropped. The lower bound
+ * is before recorded music; the upper is generous. */
+#define ND_ID3_YEAR_MIN 1000u
+#define ND_ID3_YEAR_MAX 2999u
 
 /* Called once per embedded picture, in FILE ORDER, until it returns true.
  *

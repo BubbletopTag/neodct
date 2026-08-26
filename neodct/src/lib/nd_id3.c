@@ -255,6 +255,85 @@ static void take_text(char *dst, size_t dst_sz, bool *flag, const uint8_t *body,
     *flag = true;
 }
 
+
+/* ------------------------------------------------------------------ *
+ * The two numeric text frames
+ * ------------------------------------------------------------------ *
+ *
+ * TRCK, TPOS and the year frames are all TEXT frames -- there is no binary
+ * integer anywhere in ID3 -- so each is decoded through the same UTF-16-aware
+ * path as a title and then read as digits. That is why a UTF-16BE TRCK
+ * (which real taggers do write) yields a number rather than nothing.
+ *
+ * Both parsers are deliberately forgiving in one direction and strict in the
+ * other: leading spaces and trailing junk are tolerated, because "5/12" and
+ * " 9" are what tags actually contain; a value that is not a number at all
+ * leaves the field at zero, because a browser sorting on a wrong number is
+ * worse than one falling back to the title.
+ */
+
+/* "5", "5/12", " 9", "5A" -> 5. "A5", "/12", "-3", "" -> 0.
+ *
+ * Clamped at ND_ID3_NUM_MAX rather than allowed to overflow: a tag can say
+ * 4294967296, and a uint16 that wrapped would land somewhere plausible in
+ * the middle of an album instead of at the end. */
+static void take_num(uint16_t *dst, const uint8_t *body, size_t blen)
+{
+    char text[40];
+    const char *p = text;
+    unsigned long v = 0ul;
+    bool any = false;
+
+    if (blen == 0u)
+        return;
+    text[0] = '\0';
+    (void)nd_id3_text_utf8(text, sizeof text, body[0], body + 1, blen - 1u);
+
+    while (*p == ' ' || *p == '\t')
+        p++;
+    while (*p >= '0' && *p <= '9') {
+        any = true;
+        /* Accumulate, then clamp, then keep consuming digits. Stopping at
+         * the first digit past the cap would read "10000" as 1000. */
+        v = (v * 10ul) + (unsigned long)(*p - '0');
+        if (v > (unsigned long)ND_ID3_NUM_MAX)
+            v = (unsigned long)ND_ID3_NUM_MAX;
+        p++;
+    }
+    if (!any)
+        return; /* leaves the caller's zero standing */
+    *dst = (uint16_t)v;
+}
+
+/* The first FOUR digits, which is what turns v2.4's "2013-05-13T09:00:00"
+ * into 2013 without a date parser. Out of range leaves zero -- a corrupt
+ * year is dropped rather than clamped, because clamping 43000 to 2999 would
+ * put the album at the end of a chronological list as though somebody meant
+ * it. */
+static void take_year(uint16_t *dst, const uint8_t *body, size_t blen)
+{
+    char text[40];
+    const char *p = text;
+    unsigned v = 0u;
+    unsigned digits = 0u;
+
+    if (blen == 0u)
+        return;
+    text[0] = '\0';
+    (void)nd_id3_text_utf8(text, sizeof text, body[0], body + 1, blen - 1u);
+
+    while (*p == ' ' || *p == '\t')
+        p++;
+    while (digits < 4u && *p >= '0' && *p <= '9') {
+        v = (v * 10u) + (unsigned)(*p - '0');
+        digits++;
+        p++;
+    }
+    if (digits == 0u || v < ND_ID3_YEAR_MIN || v > ND_ID3_YEAR_MAX)
+        return;
+    *dst = (uint16_t)v;
+}
+
 /* APIC (2.3/2.4) and PIC (2.2) differ only in what sits between the encoding
  * byte and the description: a NUL-terminated MIME string, or three fixed
  * bytes of image format. `fixed_fmt` picks which.
@@ -343,6 +422,19 @@ static void walk_v22(uint8_t *p, size_t len, nd_id3 *out, nd_id3_pic_fn on_pic, 
             take_text(out->artist, sizeof out->artist, &out->has_artist, body, blen);
         else if (memcmp(id, "TAL", 3) == 0)
             take_text(out->album, sizeof out->album, &out->has_album, body, blen);
+        else if (memcmp(id, "TP2", 3) == 0)
+            take_text(out->albumartist, sizeof out->albumartist, &out->has_albumartist, body,
+                      blen);
+        else if (memcmp(id, "TRK", 3) == 0)
+            take_num(&out->track, body, blen);
+        else if (memcmp(id, "TPA", 3) == 0)
+            take_num(&out->disc, body, blen);
+        /* The FIRST valid year frame wins. A tag carrying both TYE and a
+         * v2.4-style TDRC is a re-tagged file whose two answers usually
+         * agree; picking one deterministically beats letting frame order
+         * decide. */
+        else if (memcmp(id, "TYE", 3) == 0 && out->year == 0u)
+            take_year(&out->year, body, blen);
         else if (on_pic != NULL && memcmp(id, "PIC", 3) == 0) {
             const uint8_t *data;
             size_t data_len;
@@ -428,6 +520,18 @@ static void walk_v23_v24(uint8_t *p, size_t len, uint8_t ver, bool tag_unsync, n
             take_text(out->artist, sizeof out->artist, &out->has_artist, body, blen);
         else if (memcmp(id, "TALB", 4) == 0)
             take_text(out->album, sizeof out->album, &out->has_album, body, blen);
+        else if (memcmp(id, "TPE2", 4) == 0)
+            take_text(out->albumartist, sizeof out->albumartist, &out->has_albumartist, body,
+                      blen);
+        else if (memcmp(id, "TRCK", 4) == 0)
+            take_num(&out->track, body, blen);
+        else if (memcmp(id, "TPOS", 4) == 0)
+            take_num(&out->disc, body, blen);
+        /* TDRC is v2.4's spelling and TYER is v2.3's; both are accepted at
+         * either version, because a re-muxed file routinely carries the
+         * other one. First valid frame wins -- see the v2.2 branch. */
+        else if ((memcmp(id, "TDRC", 4) == 0 || memcmp(id, "TYER", 4) == 0) && out->year == 0u)
+            take_year(&out->year, body, blen);
         else if (on_pic != NULL && memcmp(id, "APIC", 4) == 0) {
             const uint8_t *data;
             size_t data_len;

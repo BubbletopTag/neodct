@@ -4266,6 +4266,98 @@ scroller's page is refused by `nd_capture` with `ND_ERR_BUSY` — the same
 mechanism as `CALC_FRAMES`. `test_musicplayer.c` takes the frame the same way,
 so both sides agree on the arithmetic.
 
+### MU-13. The limitation in MU-11 is now layered over, not removed
+
+MU-11 stands exactly as written: `nd_music_scan()` still walks `os.walk` order
+with each directory sorted by byte value and no global sort, and `test_scan`
+still pins it with `0-first.mp3`. Nothing about the port changed.
+
+What was added is a layer above it. `apps/MusicPlayer/library.c` reads an ID3
+tag from every scanned track and groups them into artists and albums, sorted by
+name, year, disc and track number; `main.c` opens on a menu whose **Folders**
+row is the old list, unchanged, and whose **Artists / Albums / Songs** rows are
+the new one. So the ported behaviour is still reachable and still tested, and
+the limitation README.md called out is answered without rewriting the walk.
+
+Three consequences worth knowing:
+
+* **The scan is not free and is not done at start-up.** Reading a tag from 256
+  tracks is roughly 15 MB off the card, because the tag body is read in full
+  even when the embedded cover art in it is never decoded. The library is built
+  the first time a browse row is chosen, once per app session, behind a
+  progress bar that Clear cancels. Folders stays instant.
+* **`nd_music_get_metadata()` is deliberately NOT used for it.** It also
+  computes the duration -- which walks the whole MP3 when there is no Xing
+  header -- and decodes cover art at full resolution. Measured across a
+  256-track card that is up to 1.3 GB of reads and minutes of wall clock,
+  against ~15 MB and ~1 ms for the tags alone. Now Playing still calls it, for
+  one track at a time, which is what it is for.
+* **`nd_id3` grew four frames** to make the grouping possible: TPE2 (album
+  artist, which is what stops a compilation becoming forty one-track artists),
+  TRCK, TPOS, and the year from TDRC/TYER/TYE. See MU-14.
+
+### MU-14. `nd_id3` reads eight frames now, not four
+
+The Python read `TIT2`, `TPE1`, `TALB` and `APIC` because that is what the Now
+Playing screen draws. The library browser cannot group without more, so the
+reader also takes `TPE2`, `TRCK`, `TPOS` and the recording year, in each of the
+three v2.x spellings. All are short text frames inside a tag that was already
+being read and walked in full, so the added cost is a `memcmp` per frame.
+
+Two decisions inside them:
+
+* `TRCK` and `TPOS` are text -- there is no binary integer anywhere in ID3 --
+  so `"5/12"` yields 5 and `"A5"` yields nothing. Values are **clamped** at
+  `ND_ID3_NUM_MAX`, not allowed to wrap: a tag really can say `4294967296`, and
+  a `uint16` that wrapped would land somewhere plausible in the middle of an
+  album rather than at the end.
+* A year outside `ND_ID3_YEAR_MIN..MAX` is **dropped rather than clamped**,
+  because clamping 43000 to 2999 would put the album at the end of a
+  chronological list as though somebody meant it. The first valid year frame
+  wins, so a re-tagged file carrying both `TYER` and `TDRC` is deterministic.
+
+`nd_id3` still does not read ID3v1, and still does not read Vorbis comments --
+so `.flac`, `.ogg` and `.wav` tracks have no tags at all and land under Unknown
+Artist. That is unchanged and is not new.
+
+### MU-15. Volume is a multiply, not `amixer`
+
+Both defconfigs build `alsa-utils` with `amixer` and `alsamixer` in it, so
+shelling out was available and was not used. In order of weight:
+
+1. **It would be the phone's volume, not the music's.** The ringtone goes
+   through the same card (`lib/nd_notify.c`). A phone that stops ringing
+   because you were listening to something quietly is broken in a way that
+   costs you a call.
+2. **The control name is not knowable here.** `Master` exists on QEMU's AC97;
+   the RV1103's codec exposes its own set, and a wrong name fails silently.
+3. **A multiply is testable.** `nd_music_gain_q15()` is a pure function and
+   `test_musicplayer.c` recomputes the whole ladder in `double` rather than
+   copying it, so a drifted table is a failure rather than a quietly wrong
+   curve. An `amixer` call can only be tested by watching for a subprocess.
+
+The ladder is 3 dB a step over ten steps -- 30 dB -- because ten equal steps of
+*amplitude* would put nine of them in the top half of what you can hear. Level
+10 is unity and skips the multiply entirely. The scaling happens in the feeder
+thread, once per decoded chunk, reading one `volatile sig_atomic_t` so that a
+level change lands on a chunk boundary rather than partway through a waveform.
+
+**The known cost:** gain is applied where the audio is *decoded*, so a change is
+heard only after the socket buffer (~208 kB, about 1.2 s) and `aplay`'s own
+`--buffer-time` (500 ms by default) have drained -- roughly 1.7 s.
+`NEODCT_MUSIC_ABUF_MS` shrinks both the chunk and `aplay`'s buffer together and
+is the knob for it. Neither buffer is resized in code: halving the lag would
+also halve the slack the feeder has before an underrun, and a stutter on
+hardware this port cannot be tested against from here is a worse trade than a
+volume key that takes a moment. The on-screen scale moves immediately, so the
+phone never looks like it ignored the key.
+
+The mpv fallback gets `--volume=` on its argv instead, because its samples
+never come past us. That means an mpv track -- a `.flac`, `.ogg` or `.aac` --
+is told its level once, when it starts, and a change while one is playing takes
+effect on the next track. Everything that goes through the in-process path,
+which is every MP3 and WAV, changes within a chunk.
+
 ### KS-1. The first-boot wizard's payload drops two fields nothing reads
 
 `nd_keymap_save()` writes the keymap, and an `nd_keymap` has nowhere to put

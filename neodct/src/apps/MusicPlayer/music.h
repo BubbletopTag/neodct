@@ -119,6 +119,101 @@ void nd_music_player_init(nd_music_backend backend);
 bool nd_music_is_supported(const char *filename, nd_music_backend backend);
 
 /* ------------------------------------------------------------------ *
+ * Volume
+ * ------------------------------------------------------------------ *
+ *
+ * NOT A PORT. The Python has no volume control at all -- neither backend is
+ * given one and nothing on the phone sets a mixer. This is new, and the two
+ * decisions behind it are worth stating because neither is obvious.
+ *
+ * ============ WHY SOFTWARE GAIN AND NOT amixer ============
+ *
+ * Both defconfigs build alsa-utils with amixer in it, so `amixer set Master
+ * 60%` was available and was not used. Three reasons, in order of weight:
+ *
+ *   1. IT WOULD BE THE PHONE'S VOLUME, NOT THE MUSIC'S. The ringtone goes
+ *      through the same card (lib/nd_notify.c). Turning a track down must not
+ *      turn the ring down -- a phone that stops ringing because you were
+ *      listening to something quietly is broken in a way that costs you a
+ *      call.
+ *   2. THE CONTROL NAME IS NOT KNOWABLE HERE. "Master" exists on QEMU's
+ *      AC97; the RV1103's codec exposes its own set, and a wrong name fails
+ *      silently. Guessing across a list of names at runtime is a lot of
+ *      machinery to end up less predictable than a multiply.
+ *   3. A MULTIPLY IS TESTABLE. nd_music_gain_q15() is a pure function and
+ *      test_musicplayer.c checks the whole ladder against its own arithmetic.
+ *      An amixer call can only be tested by watching whether a subprocess
+ *      was spawned.
+ *
+ * ============ THE ONE COST: THE CHANGE IS HEARD LATE ============
+ *
+ * Gain is applied where the audio is DECODED, so a new level reaches the
+ * speaker only once everything already buffered ahead of it has drained.
+ * Two buffers sit in the way, and both are the existing design:
+ *
+ *   the socketpair   whatever SO_SNDBUF defaults to, typically 208 kB on
+ *                    Linux, which is about 1.2 s of 44.1 kHz stereo
+ *   aplay's own      --buffer-time, which audio.c already sets from
+ *                    NEODCT_MUSIC_ABUF_MS -- 500 ms by default
+ *
+ * so roughly 1.7 s at the shipped settings. NEODCT_MUSIC_ABUF_MS is the
+ * knob: it shrinks aplay's buffer AND the decode chunk together, so
+ * lowering it lowers the lag.
+ *
+ * Neither buffer is resized here, deliberately. Shrinking the socket buffer
+ * would cut the lag roughly in half and would also cut the slack the feeder
+ * thread has before aplay underruns -- and an underrun is a stutter on a
+ * device this port cannot be tested on from here, which is a much worse
+ * trade than a volume key that takes a moment. What the key DOES do
+ * immediately is move the bar in the header, so the phone never looks like
+ * it ignored you.
+ *
+ * ============ THE LADDER IS IN dB, NOT IN AMPLITUDE ============
+ *
+ * Loudness is roughly logarithmic, so ten equal steps of AMPLITUDE would put
+ * nine of them in the top half of what you can hear and make the bottom of
+ * the range useless. The table is 3 dB a step -- each step is half the power
+ * of the one above -- which spreads 0..10 over 30 dB. Level 10 is unity: the
+ * samples are passed through untouched and the multiply is skipped entirely.
+ */
+
+#define ND_MUSIC_VOLUME_MAX 10
+#define ND_MUSIC_VOLUME_DEFAULT 7
+
+/* settings.prop, written through nd_settings_set() like every other app
+ * preference (Tones writes the ringtone the same way). */
+#define ND_MUSIC_VOLUME_SETTING "music.volume"
+
+/* The current level, 0..ND_MUSIC_VOLUME_MAX. */
+int32_t nd_music_volume(void);
+
+/* Clamps to 0..ND_MUSIC_VOLUME_MAX, applies to whatever is playing NOW, and
+ * persists. Safe to call from the UI thread while the feeder is running. */
+void nd_music_set_volume(int32_t level);
+
+/* Reads ND_MUSIC_VOLUME_SETTING and applies it. Called once at start-up; a
+ * missing or unparseable value gives ND_MUSIC_VOLUME_DEFAULT.
+ *
+ * IT DOES NOT WRITE. Opening the app must not rewrite settings.prop -- that
+ * is a whole-file temp-fsync-rename on the phone's only writable flash, for a
+ * value nobody changed. Only nd_music_set_volume() persists. */
+void nd_music_volume_load(void);
+
+/* The Q15 multiplier for a level: 32768 is unity, 0 is silence. Out-of-range
+ * levels clamp. Exposed because the ladder is the part worth pinning. */
+int32_t nd_music_gain_q15(int32_t level);
+
+/* One sample through one level. Saturating, though at a gain of at most
+ * unity it cannot actually clip -- the saturation is there so that raising
+ * the ceiling later cannot silently wrap a sample from +32767 to -32768. */
+int16_t nd_music_apply_gain(int16_t sample, int32_t level);
+
+/* Scales `n_samples` interleaved samples in place. This is what the feeder
+ * calls; a level of ND_MUSIC_VOLUME_MAX returns without touching the buffer,
+ * which is the fast path the common case takes. */
+void nd_music_gain_buffer(int16_t *samples, size_t n_samples, int32_t level);
+
+/* ------------------------------------------------------------------ *
  * The playlist
  * ------------------------------------------------------------------ */
 
@@ -136,6 +231,156 @@ bool nd_music_dir(char *out, size_t out_sz);
  * already calls the sorting limited; it is ported, not improved. Returns how
  * many rows were written. */
 size_t nd_music_scan(nd_music_track *out, size_t max, nd_music_backend backend);
+
+
+/* ------------------------------------------------------------------ *
+ * The library -- artists, albums, and a sort that is actually a sort
+ * ------------------------------------------------------------------ *
+ *
+ * NOT A PORT. OPEN-QUESTIONS.md MU-11 records that the Python sorts each
+ * directory's files by byte value and does NOT sort globally, so a track two
+ * directories down lands after every track beside its parent whatever it is
+ * called; README.md calls the sorting and metadata support limited. That
+ * limitation was ported faithfully and test_scan still pins it. THIS IS THE
+ * LAYER ON TOP, and nd_music_scan() is untouched underneath it -- the Folders
+ * view is still the walk, byte for byte.
+ *
+ * ============ WHAT IT COSTS, AND WHY IT IS BUILT ON DEMAND ============
+ *
+ * Grouping by artist means reading a tag from every file, and the ONLY
+ * affordable way to do that was measured before it was written:
+ *
+ *   nd_id3_read(path, &tag, NULL, NULL)   the tag body only. A 60 kB
+ *                                         embedded cover is still read off
+ *                                         the card but never decoded.
+ *                                         ~15 MB and ~1 ms of CPU for a full
+ *                                         256-track card.
+ *
+ *   nd_music_get_metadata()               ALSO walks the whole MP3 to count
+ *                                         frames when there is no Xing
+ *                                         header, and ALSO decodes cover art
+ *                                         at full resolution. For 256 tracks
+ *                                         that is up to 1.3 GB off the card
+ *                                         and minutes of wall clock.
+ *
+ * So the library reads tags and NOTHING else -- no duration, no artwork.
+ * Both belong to the Now Playing screen, which needs them for one track at a
+ * time and already fetches them there.
+ *
+ * Even the cheap scan is seconds on a full card, so it is NOT done at
+ * start-up. The app opens on a menu; Folders is the old instant walk, and
+ * Artists / Albums / Songs build the index once per session, behind a
+ * progress bar that Clear can cancel.
+ *
+ * ============ THE CAPS ARE DERIVED, NOT INVENTED ============
+ *
+ * A track has one artist and one album, so ND_MUSIC_MAX tracks cannot
+ * produce more than ND_MUSIC_MAX of either. Sizing both tables at
+ * ND_MUSIC_MAX means the overflow case does not exist -- there is no "too
+ * many artists" branch to get wrong, and no bucket for the ones that did not
+ * fit. It costs 256 * 200 bytes of artist table on a device that has already
+ * spent 64 kB on the paths.
+ *
+ * One library is about 220 kB of heap, held only while the browser is open.
+ */
+
+/* Songs, artists and albums are each capped by the track count for the
+ * reason above. */
+#define ND_MUSIC_ARTISTS_MAX ND_MUSIC_MAX
+#define ND_MUSIC_ALBUMS_MAX  ND_MUSIC_MAX
+
+/* Shown for a track whose tag names no album. The artist equivalent is
+ * nd_music_unknown_artist, which is the Python's own string. */
+extern const char *const nd_music_unknown_album;
+
+/* One track, with its tag read and its groups resolved. `artist` and `album`
+ * are indices into the library's own tables, not pointers, so the whole
+ * structure is one contiguous block that can be freed in one call. */
+typedef struct {
+    char path[ND_MUSIC_PATH_MAX];
+    char title[ND_MUSIC_TEXT_MAX];
+    uint16_t artist;
+    uint16_t album;
+    uint16_t track; /* TRCK, 0 when the tag did not say */
+    uint16_t disc;  /* TPOS, 0 when the tag did not say */
+} nd_music_song;
+
+/* Albums are a contiguous run, so an artist is a pair of integers. */
+typedef struct {
+    char name[ND_MUSIC_TEXT_MAX];
+    uint16_t first_album;
+    uint16_t n_albums;
+    uint16_t n_songs;
+} nd_music_artist;
+
+/* And songs are a contiguous run within an album. */
+typedef struct {
+    char name[ND_MUSIC_TEXT_MAX];
+    uint16_t artist;
+    uint16_t year; /* 0 when no track in it carried one */
+    uint16_t first_song;
+    uint16_t n_songs;
+} nd_music_album;
+
+typedef struct nd_music_library nd_music_library;
+
+/* Called every few tracks while the index builds. Return FALSE to cancel,
+ * which makes nd_music_library_build() return ND_ERR_BUSY and free
+ * everything. `done` counts tracks whose tag has been read. */
+typedef bool (*nd_music_progress_fn)(void *ctx, size_t done, size_t total);
+
+/* Reads a tag from each of `n` tracks and groups them.
+ *
+ * cb may be NULL. On success *out owns everything and is released with
+ * nd_music_library_free(); on any failure *out is NULL and nothing leaks.
+ *
+ *   ND_OK          built, possibly with zero songs
+ *   ND_ERR_BUSY    the callback asked to stop
+ *   ND_ERR_NOMEM   the tables would not fit
+ *   ND_ERR_INVAL   out was NULL, or tracks was NULL with n > 0 */
+nd_err nd_music_library_build(nd_music_library **out, const nd_music_track *tracks, size_t n,
+                              nd_music_progress_fn cb, void *ctx);
+void nd_music_library_free(nd_music_library *lib);
+
+size_t nd_music_library_n_songs(const nd_music_library *lib);
+size_t nd_music_library_n_artists(const nd_music_library *lib);
+size_t nd_music_library_n_albums(const nd_music_library *lib);
+
+/* NULL past the end rather than a dummy row: every caller here is a loop
+ * bounded by the counts above, and a silent empty row would hide an
+ * off-by-one instead of crashing on it. */
+const nd_music_song *nd_music_library_song(const nd_music_library *lib, size_t i);
+
+/* The same songs in TITLE order, for the flat "Songs" list -- the view that
+ * answers "I know what it is called and not who made it".
+ *
+ * A second index rather than a second copy: 2 bytes a track against 456, and
+ * the album runs the browser navigates by have to stay contiguous in the
+ * primary order. Ties break on artist and then path, so the order is total
+ * and two tracks called "Intro" do not swap between visits. */
+const nd_music_song *nd_music_library_song_by_title(const nd_music_library *lib, size_t i);
+const nd_music_artist *nd_music_library_artist(const nd_music_library *lib, size_t i);
+const nd_music_album *nd_music_library_album(const nd_music_library *lib, size_t i);
+
+/* ------------------------------------------------------------------ *
+ * The sort keys, exposed because they ARE the feature
+ * ------------------------------------------------------------------ */
+
+/* Case-insensitive ASCII compare, with one rule on top: the two "Unknown"
+ * placeholders sort after everything else regardless of spelling, so an
+ * untagged file does not land between Tycho and U2. Returns <0, 0 or >0. */
+int32_t nd_music_name_cmp(const char *a, const char *b);
+
+/* Album order within an artist: by YEAR first, oldest to newest, with an
+ * unknown year last; then by name. A discography reads chronologically,
+ * which is what a browser is for. */
+int32_t nd_music_album_cmp(const nd_music_album *a, const nd_music_album *b);
+
+/* Track order within an album: disc, then track number, then title, then
+ * path. Every fallback matters -- a rip with no TRCK still has to be
+ * deterministic, and two tracks with the same title still have to have an
+ * order. */
+int32_t nd_music_song_cmp(const nd_music_song *a, const nd_music_song *b);
 
 /* ------------------------------------------------------------------ *
  * Metadata

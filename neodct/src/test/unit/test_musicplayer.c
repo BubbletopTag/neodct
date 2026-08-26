@@ -69,7 +69,11 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <math.h>
+#include <time.h>
+
 #include "nd_id3.h"
+#include "nd_settings.h"
 #include "nd_storage.h"
 
 #include "smallapp_test.h"
@@ -98,6 +102,28 @@ static struct {
     bool (*play)(const char *);
     void (*stop)(void);
     void (*toggle_pause)(void);
+
+    /* ---- the library: new in this revision, not a port ---- */
+    nd_err (*lib_build)(nd_music_library **, const nd_music_track *, size_t,
+                        nd_music_progress_fn, void *);
+    void (*lib_free)(nd_music_library *);
+    size_t (*lib_n_songs)(const nd_music_library *);
+    size_t (*lib_n_artists)(const nd_music_library *);
+    size_t (*lib_n_albums)(const nd_music_library *);
+    const nd_music_song *(*lib_song)(const nd_music_library *, size_t);
+    const nd_music_song *(*lib_song_by_title)(const nd_music_library *, size_t);
+    const nd_music_artist *(*lib_artist)(const nd_music_library *, size_t);
+    const nd_music_album *(*lib_album)(const nd_music_library *, size_t);
+    int32_t (*name_cmp)(const char *, const char *);
+    const char *const *unknown_album;
+
+    /* ---- volume: new in this revision, not a port ---- */
+    int32_t (*volume)(void);
+    void (*set_volume)(int32_t);
+    void (*volume_load)(void);
+    int32_t (*gain_q15)(int32_t);
+    int16_t (*apply_gain)(int16_t, int32_t);
+    void (*gain_buffer)(int16_t *, size_t, int32_t);
     bool (*is_paused)(void);
     bool (*is_finished)(void);
     bool (*position)(double *);
@@ -136,7 +162,33 @@ static bool api_open(void *h)
     api.unknown_artist = dlsym(h, "nd_music_unknown_artist");
     api.mpv_cmd = dlsym(h, "nd_music_mpv_cmd");
 
-    return api.run != NULL && api.shutdown != NULL && api.pick_player != NULL &&
+    *(void **)&api.lib_build = sa_sym(h, "nd_music_library_build");
+    *(void **)&api.lib_free = sa_sym(h, "nd_music_library_free");
+    *(void **)&api.lib_n_songs = sa_sym(h, "nd_music_library_n_songs");
+    *(void **)&api.lib_n_artists = sa_sym(h, "nd_music_library_n_artists");
+    *(void **)&api.lib_n_albums = sa_sym(h, "nd_music_library_n_albums");
+    *(void **)&api.lib_song = sa_sym(h, "nd_music_library_song");
+    *(void **)&api.lib_song_by_title = sa_sym(h, "nd_music_library_song_by_title");
+    *(void **)&api.lib_artist = sa_sym(h, "nd_music_library_artist");
+    *(void **)&api.lib_album = sa_sym(h, "nd_music_library_album");
+    *(void **)&api.name_cmp = sa_sym(h, "nd_music_name_cmp");
+    api.unknown_album = dlsym(h, "nd_music_unknown_album");
+
+    *(void **)&api.volume = sa_sym(h, "nd_music_volume");
+    *(void **)&api.set_volume = sa_sym(h, "nd_music_set_volume");
+    *(void **)&api.volume_load = sa_sym(h, "nd_music_volume_load");
+    *(void **)&api.gain_q15 = sa_sym(h, "nd_music_gain_q15");
+    *(void **)&api.apply_gain = sa_sym(h, "nd_music_apply_gain");
+    *(void **)&api.gain_buffer = sa_sym(h, "nd_music_gain_buffer");
+
+    return api.lib_build != NULL && api.lib_free != NULL && api.lib_n_songs != NULL &&
+           api.lib_n_artists != NULL && api.lib_n_albums != NULL && api.lib_song != NULL &&
+           api.lib_artist != NULL && api.lib_album != NULL && api.name_cmp != NULL &&
+           api.lib_song_by_title != NULL &&
+           api.unknown_album != NULL &&
+           api.volume != NULL && api.set_volume != NULL && api.volume_load != NULL &&
+           api.gain_q15 != NULL && api.apply_gain != NULL && api.gain_buffer != NULL &&
+           api.run != NULL && api.shutdown != NULL && api.pick_player != NULL &&
            api.backend_now != NULL && api.player_init != NULL && api.is_supported != NULL &&
            api.dir != NULL && api.scan != NULL && api.get_metadata != NULL &&
            api.meta_free != NULL && api.find_folder_art != NULL && api.duration != NULL &&
@@ -686,6 +738,145 @@ static void test_id3_frames(void)
 /* THE HOSTILE CASES. Every length in an ID3 tag comes out of the file, the
  * file comes off a FAT32 card, and the card comes from whoever handed it to
  * the user. */
+/* ------------------------------------------------------------------ *
+ * 6b. The four frames the library browser needs
+ * ------------------------------------------------------------------ */
+
+/* TPE2, TRCK, TPOS and the year. None of these reach the Now Playing screen;
+ * every one of them decides where a track lands in the browser, which is why
+ * they are read at all. See the nd_id3.h header comment. */
+static void test_id3_library_frames(void)
+{
+    uint8_t tag[512];
+    uint8_t body[128];
+    nd_id3 out;
+    size_t n;
+    size_t b;
+
+    /* ---- v2.3: the spelling nearly every ripper writes ---- */
+    n = ND_ID3_HEADER_LEN;
+    b = text_body(body, "Talking Heads");
+    n += id3_frame_v23(tag + n, "TPE2", body, b);
+    b = text_body(body, "7/11");
+    n += id3_frame_v23(tag + n, "TRCK", body, b);
+    b = text_body(body, "2/2");
+    n += id3_frame_v23(tag + n, "TPOS", body, b);
+    b = text_body(body, "1980");
+    n += id3_frame_v23(tag + n, "TYER", body, b);
+    (void)id3_header(tag, 3u, 0u, n - ND_ID3_HEADER_LEN);
+
+    CHECK_INT(nd_id3_parse(tag, n, &out, NULL, NULL), ND_OK, "a v2.3 library tag parses");
+    CHECK_STR(out.albumartist, "Talking Heads", "TPE2 is the album artist");
+    CHECK(out.has_albumartist, "and it is marked present");
+    CHECK_INT(out.track, 7, "TRCK \"7/11\" is track 7, not 711");
+    CHECK_INT(out.disc, 2, "TPOS \"2/2\" is disc 2");
+    CHECK_INT(out.year, 1980, "TYER is the year");
+
+    /* ---- v2.4 spells the year TDRC, and it is a whole ISO timestamp ---- */
+    n = ND_ID3_HEADER_LEN;
+    b = text_body(body, "2013-05-13T09:00:00");
+    n += id3_frame_v24(tag + n, "TDRC", body, b);
+    b = text_body(body, "3");
+    n += id3_frame_v24(tag + n, "TRCK", body, b);
+    (void)id3_header(tag, 4u, 0u, n - ND_ID3_HEADER_LEN);
+
+    CHECK_INT(nd_id3_parse(tag, n, &out, NULL, NULL), ND_OK, "a v2.4 library tag parses");
+    CHECK_INT(out.year, 2013, "TDRC yields the year out of an ISO timestamp");
+    CHECK_INT(out.track, 3, "a bare TRCK with no slash");
+    CHECK_INT(out.disc, 0, "an absent TPOS is zero, not one");
+
+    /* ---- v2.2's three-letter spellings ---- */
+    n = ND_ID3_HEADER_LEN;
+    b = text_body(body, "Various Artists");
+    n += id3_frame_v22(tag + n, "TP2", body, b);
+    b = text_body(body, "12");
+    n += id3_frame_v22(tag + n, "TRK", body, b);
+    b = text_body(body, "1994");
+    n += id3_frame_v22(tag + n, "TYE", body, b);
+    (void)id3_header(tag, 2u, 0u, n - ND_ID3_HEADER_LEN);
+
+    CHECK_INT(nd_id3_parse(tag, n, &out, NULL, NULL), ND_OK, "a v2.2 library tag parses");
+    CHECK_STR(out.albumartist, "Various Artists", "TP2");
+    CHECK_INT(out.track, 12, "TRK");
+    CHECK_INT(out.year, 1994, "TYE");
+
+    /* ---- what a corrupt or eccentric tag does ---- *
+     *
+     * Every one of these came off somebody's card. None may put a track in
+     * the wrong place or, worse, wrap a uint16 into a plausible-looking one. */
+    {
+        static const struct {
+            const char *raw;
+            unsigned expect;
+            const char *what;
+        } TRACKS[] = {
+            {"0", 0u, "track 0 is treated as absent"},
+            {"", 0u, "an empty TRCK is absent"},
+            {"/12", 0u, "a leading slash with no number is absent"},
+            {"A5", 0u, "a track number that is not a number is absent"},
+            {"5A", 5u, "a number with trailing junk still yields the number"},
+            {"  9", 9u, "leading spaces are skipped"},
+            {"9999", 9999u, "the largest allowed track"},
+            {"10000", ND_ID3_NUM_MAX, "one past it clamps rather than wrapping"},
+            {"65536", ND_ID3_NUM_MAX, "and a value that would wrap a uint16 clamps"},
+            {"4294967296", ND_ID3_NUM_MAX, "so does one that would wrap a uint32"},
+            {"-3", 0u, "a negative track number is absent, not 65533"},
+        };
+        size_t i;
+
+        for (i = 0u; i < ND_ARRAY_LEN(TRACKS); i++) {
+            n = ND_ID3_HEADER_LEN;
+            b = text_body(body, TRACKS[i].raw);
+            n += id3_frame_v23(tag + n, "TRCK", body, b);
+            (void)id3_header(tag, 3u, 0u, n - ND_ID3_HEADER_LEN);
+            (void)nd_id3_parse(tag, n, &out, NULL, NULL);
+            CHECK_INT(out.track, TRACKS[i].expect, TRACKS[i].what);
+        }
+    }
+
+    {
+        static const struct {
+            const char *raw;
+            unsigned expect;
+            const char *what;
+        } YEARS[] = {
+            {"1980", 1980u, "a plain year"},
+            {"0", 0u, "year 0 is not a year"},
+            {"999", 0u, "below the floor is dropped"},
+            {"1000", 1000u, "the floor itself is kept"},
+            {"2999", 2999u, "and the ceiling"},
+            {"3000", 0u, "above the ceiling is dropped, not clamped"},
+            {"43000", 0u, "a corrupt year cannot sort to the top"},
+            {"nineteen eighty", 0u, "words are not a year"},
+            {"", 0u, "an empty year frame is absent"},
+        };
+        size_t i;
+
+        for (i = 0u; i < ND_ARRAY_LEN(YEARS); i++) {
+            n = ND_ID3_HEADER_LEN;
+            b = text_body(body, YEARS[i].raw);
+            n += id3_frame_v23(tag + n, "TYER", body, b);
+            (void)id3_header(tag, 3u, 0u, n - ND_ID3_HEADER_LEN);
+            (void)nd_id3_parse(tag, n, &out, NULL, NULL);
+            CHECK_INT(out.year, YEARS[i].expect, YEARS[i].what);
+        }
+    }
+
+    /* A tag carrying only the Python's three frames must leave every new
+     * field at zero -- that is what makes the browser's fallbacks fire
+     * instead of it sorting on uninitialised memory. */
+    n = ND_ID3_HEADER_LEN;
+    b = text_body(body, "Just A Title");
+    n += id3_frame_v23(tag + n, "TIT2", body, b);
+    (void)id3_header(tag, 3u, 0u, n - ND_ID3_HEADER_LEN);
+    (void)nd_id3_parse(tag, n, &out, NULL, NULL);
+    CHECK_INT(out.track, 0, "no TRCK");
+    CHECK_INT(out.disc, 0, "no TPOS");
+    CHECK_INT(out.year, 0, "no year");
+    CHECK(!out.has_albumartist, "no TPE2");
+    CHECK_STR(out.albumartist, "", "and the field is empty, not garbage");
+}
+
 static void test_id3_hostile(void)
 {
     uint8_t tag[256];
@@ -1248,6 +1439,67 @@ static void test_duration(void)
  * `aplay` is what the in-process path feeds; `nice` is MPV_CMD's argv[0] and
  * therefore the only program the mpv path has to find. Both block, so a
  * started child stays started until it is stopped. */
+/* A stub that RECORDS its argv before sleeping, so a test can assert on what
+ * was actually passed to the player. Written with printf rather than "$@" so
+ * that one argument per line survives arguments containing spaces. */
+static bool make_recording_stub(const char *name, const char *logfile)
+{
+    char path[ND_PATH_MAX];
+    FILE *f;
+
+    if (nd_snprintf(path, sizeof path, "%s/%s", g_bindir, name) != ND_OK)
+        return false;
+    f = fopen(path, "w");
+    if (f == NULL)
+        return false;
+    (void)fprintf(f, "#!/bin/sh\nfor a in \"$@\"; do printf '%%s\\n' \"$a\"; done > '%s'\n"
+                     "exec sleep 30\n",
+                  logfile);
+    (void)fclose(f);
+    return chmod(path, 0755) == 0;
+}
+
+/* `nice -n -10 mpv ...` means the process that is actually exec'd is NICE,
+ * and the plain sleeping stub above never reaches mpv at all. This one does
+ * what nice does: drop its own two arguments and exec the rest. */
+static bool make_passthrough_stub(const char *name)
+{
+    char path[ND_PATH_MAX];
+    FILE *f;
+
+    if (nd_snprintf(path, sizeof path, "%s/%s", g_bindir, name) != ND_OK)
+        return false;
+    f = fopen(path, "w");
+    if (f == NULL)
+        return false;
+    (void)fputs("#!/bin/sh\nshift 2\nexec \"$@\"\n", f);
+    (void)fclose(f);
+    return chmod(path, 0755) == 0;
+}
+
+/* True when `needle` is one of the recorded argv entries, exactly. */
+static bool stub_argv_has(const char *logfile, const char *needle)
+{
+    char line[512];
+    FILE *f = fopen(logfile, "r");
+    bool found = false;
+
+    if (f == NULL)
+        return false;
+    while (fgets(line, sizeof line, f) != NULL) {
+        size_t n = strlen(line);
+
+        while (n > 0u && (line[n - 1u] == '\n' || line[n - 1u] == '\r'))
+            line[--n] = '\0';
+        if (strcmp(line, needle) == 0) {
+            found = true;
+            break;
+        }
+    }
+    (void)fclose(f);
+    return found;
+}
+
 static bool make_stub(const char *name)
 {
     char path[ND_PATH_MAX];
@@ -1293,6 +1545,11 @@ static void test_playback(void)
     first = api.child_pid();
     CHECK(first > 0, "a player process was started");
     CHECK(!api.is_paused(), "and it is not paused");
+    /* The Now Playing screen tests this before its first draw, and the queue
+     * added in this revision treats it as "go to the next track" -- so an
+     * is_finished() that is true the instant a track starts would skip the
+     * whole album without drawing a frame. */
+    CHECK(!api.is_finished(), "and it is NOT finished the instant it starts");
     CHECK_INT(api.backend_now(), ND_MUSIC_BACKEND_STREAM, "still in-process");
 
     /* _MiniaudioPlayer.position() is a real decoded-frame position, so the
@@ -1360,6 +1617,874 @@ static void test_playback(void)
     (void)setenv("PATH", keep, 1);
 }
 
+/* ------------------------------------------------------------------ *
+ * 12. Volume -- NOT a port; see the music.h header comment
+ * ------------------------------------------------------------------ */
+
+/* The ladder, computed here rather than copied from the implementation.
+ * 3 dB a step means each level is 10^(-3/20) of the one above it, and the
+ * expectation is that arithmetic done in double and rounded -- so a table
+ * that drifted, or a curve that quietly became linear, fails here. */
+static int32_t expected_gain_q15(int32_t level)
+{
+    double db;
+
+    if (level <= 0)
+        return 0;
+    if (level >= ND_MUSIC_VOLUME_MAX)
+        return 32768;
+    db = -3.0 * (double)(ND_MUSIC_VOLUME_MAX - level);
+    return (int32_t)(32768.0 * pow(10.0, db / 20.0) + 0.5);
+}
+
+static void test_gain_ladder(void)
+{
+    int32_t level;
+
+    CHECK_INT(api.gain_q15(ND_MUSIC_VOLUME_MAX), 32768, "level 10 is unity");
+    CHECK_INT(api.gain_q15(0), 0, "level 0 is silence");
+
+    for (level = 0; level <= ND_MUSIC_VOLUME_MAX; level++) {
+        char what[64];
+
+        (void)nd_snprintf(what, sizeof what, "level %d is 3 dB below level %d", level, level + 1);
+        CHECK_INT(api.gain_q15(level), expected_gain_q15(level), what);
+    }
+
+    /* Monotonic, which a table typo would break without changing either end. */
+    for (level = 1; level <= ND_MUSIC_VOLUME_MAX; level++)
+        CHECK(api.gain_q15(level) > api.gain_q15(level - 1), "the ladder rises at every step");
+
+    /* Out of range clamps rather than indexing off the table. */
+    CHECK_INT(api.gain_q15(-1), 0, "below zero is silence");
+    CHECK_INT(api.gain_q15(-1000), 0, "far below zero is still silence");
+    CHECK_INT(api.gain_q15(ND_MUSIC_VOLUME_MAX + 1), 32768, "above the top is unity");
+    CHECK_INT(api.gain_q15(1000000), 32768, "far above the top is still unity");
+}
+
+static void test_apply_gain(void)
+{
+    CHECK_INT(api.apply_gain(1000, ND_MUSIC_VOLUME_MAX), 1000, "unity passes a sample through");
+    CHECK_INT(api.apply_gain(-1000, ND_MUSIC_VOLUME_MAX), -1000, "including a negative one");
+    CHECK_INT(api.apply_gain(1000, 0), 0, "silence is silence");
+    CHECK_INT(api.apply_gain(-1000, 0), 0, "for a negative sample too");
+
+    /* The extremes of the sample range, at unity: the whole point of the
+     * saturating cast is that neither wraps. */
+    CHECK_INT(api.apply_gain(32767, ND_MUSIC_VOLUME_MAX), 32767, "the largest sample survives");
+    CHECK_INT(api.apply_gain(-32768, ND_MUSIC_VOLUME_MAX), -32768, "and the smallest");
+
+    /* Halfway down the ladder the sample is scaled by the table, and the
+     * arithmetic is (sample * gain) >> 15 with the sign kept. */
+    {
+        int32_t g = api.gain_q15(5);
+
+        CHECK_INT(api.apply_gain(20000, 5), (int16_t)((20000 * g) / 32768),
+                  "a positive sample is scaled by the table");
+        CHECK_INT(api.apply_gain(-20000, 5), (int16_t)((-20000 * g) / 32768),
+                  "and a negative sample scales symmetrically");
+    }
+
+    /* A gain of at most unity cannot amplify, so nothing can ever clip. */
+    {
+        int32_t level;
+
+        for (level = 0; level <= ND_MUSIC_VOLUME_MAX; level++) {
+            CHECK(api.apply_gain(32767, level) <= 32767, "no positive overflow at any level");
+            CHECK(api.apply_gain(-32768, level) >= -32768, "no negative overflow at any level");
+        }
+    }
+}
+
+static void test_gain_buffer(void)
+{
+    int16_t buf[8];
+    int16_t original[8];
+    size_t i;
+    static const int16_t SEED[8] = {0, 1, -1, 100, -100, 32767, -32768, 12345};
+
+    memcpy(original, SEED, sizeof SEED);
+
+    /* Unity is a no-op, and it is a no-op WITHOUT touching the buffer -- that
+     * is the fast path the common case takes. */
+    memcpy(buf, SEED, sizeof SEED);
+    api.gain_buffer(buf, 8u, ND_MUSIC_VOLUME_MAX);
+    CHECK_INT(memcmp(buf, original, sizeof buf), 0, "unity leaves the buffer alone");
+
+    /* Zero silences every sample. */
+    memcpy(buf, SEED, sizeof SEED);
+    api.gain_buffer(buf, 8u, 0);
+    for (i = 0u; i < 8u; i++)
+        CHECK_INT(buf[i], 0, "level 0 silences every sample");
+
+    /* An intermediate level agrees with apply_gain(), sample for sample --
+     * which is what stops the buffer path and the single-sample path from
+     * drifting apart. */
+    memcpy(buf, SEED, sizeof SEED);
+    api.gain_buffer(buf, 8u, 4);
+    for (i = 0u; i < 8u; i++)
+        CHECK_INT(buf[i], api.apply_gain(SEED[i], 4), "the buffer path matches apply_gain");
+
+    /* Bounds: n_samples of 0, and a NULL buffer, must both be safe. */
+    memcpy(buf, SEED, sizeof SEED);
+    api.gain_buffer(buf, 0u, 0);
+    CHECK_INT(memcmp(buf, original, sizeof buf), 0, "zero samples touches nothing");
+    api.gain_buffer(NULL, 8u, 4);
+    sa_checks++; /* reaching here without faulting is the claim */
+
+    /* It must scale only the range it was given. */
+    memcpy(buf, SEED, sizeof SEED);
+    api.gain_buffer(buf, 4u, 0);
+    for (i = 0u; i < 4u; i++)
+        CHECK_INT(buf[i], 0, "the first four are silenced");
+    for (i = 4u; i < 8u; i++)
+        CHECK_INT(buf[i], SEED[i], "and the rest are untouched");
+}
+
+static void test_volume_state(void)
+{
+    char saved[32];
+
+    (void)nd_strlcpy(saved, "", sizeof saved);
+
+    api.set_volume(5);
+    CHECK_INT(api.volume(), 5, "set_volume takes");
+
+    api.set_volume(0);
+    CHECK_INT(api.volume(), 0, "zero is a legal level");
+    api.set_volume(ND_MUSIC_VOLUME_MAX);
+    CHECK_INT(api.volume(), ND_MUSIC_VOLUME_MAX, "so is the top");
+
+    /* Clamped, not wrapped and not rejected: the UI steps this with a key
+     * and holding the key at either end must simply stop. */
+    api.set_volume(-1);
+    CHECK_INT(api.volume(), 0, "below zero clamps to zero");
+    api.set_volume(ND_MUSIC_VOLUME_MAX + 5);
+    CHECK_INT(api.volume(), ND_MUSIC_VOLUME_MAX, "above the top clamps to the top");
+
+    /* It survives a reload, because it is written to settings.prop. */
+    api.set_volume(3);
+    api.volume_load();
+    CHECK_INT(api.volume(), 3, "the level persists across a reload");
+
+    /* An absent setting gives the default rather than silence -- a phone
+     * whose first launch plays nothing looks broken. */
+    (void)nd_settings_set(ND_MUSIC_VOLUME_SETTING, "");
+    api.volume_load();
+    CHECK_INT(api.volume(), ND_MUSIC_VOLUME_DEFAULT, "an empty setting gives the default");
+
+    /* AND LOADING DOES NOT WRITE IT BACK.
+     *
+     * app_run() loads the level before it knows whether there is a card, so a
+     * load that persisted would rewrite the whole of settings.prop -- temp
+     * file, fsync, rename, on the phone's only writable flash -- every time
+     * the app was opened, and would leave a trace in it merely for having
+     * been opened. It also, concretely, wrote into the repo's own
+     * overlay/NeoDCT/User/settings.prop when test_golden_frame pointed the
+     * path root at the real overlay to find the warning icon. */
+    CHECK_STR(nd_settings_get(ND_MUSIC_VOLUME_SETTING, "ABSENT"), "",
+              "loading the default leaves the stored value alone");
+
+    (void)nd_settings_set(ND_MUSIC_VOLUME_SETTING, "not-a-number");
+    api.volume_load();
+    CHECK_INT(api.volume(), ND_MUSIC_VOLUME_DEFAULT, "so does a value that is not a number");
+
+    (void)nd_settings_set(ND_MUSIC_VOLUME_SETTING, "99");
+    api.volume_load();
+    CHECK_INT(api.volume(), ND_MUSIC_VOLUME_MAX, "an out-of-range setting clamps");
+
+    api.set_volume(ND_MUSIC_VOLUME_DEFAULT);
+}
+
+/* ------------------------------------------------------------------ *
+ * 13. The level reaches the player
+ * ------------------------------------------------------------------ */
+
+/* The in-process path scales samples itself and is covered by the three
+ * tests above. mpv decodes in another process, so the ONLY way the level can
+ * reach it is its argv -- and that is what this checks, against a stub that
+ * records what it was given.
+ *
+ * The asymmetry is real and is documented in music.h: an mpv track is told
+ * its level once, when it starts. */
+static void test_mpv_gets_the_volume(void)
+{
+    char keep[ND_PATH_MAX];
+    char logfile[ND_PATH_MAX];
+    const char *saved = getenv("PATH");
+
+    (void)nd_strlcpy(keep, (saved != NULL) ? saved : "", sizeof keep);
+    if (nd_snprintf(logfile, sizeof logfile, "%s/mpv-argv.txt", g_bindir) != ND_OK) {
+        CHECK(false, "log path");
+        return;
+    }
+    if (!make_recording_stub("mpv", logfile) || !make_passthrough_stub("nice")) {
+        CHECK(false, "recording stub");
+        return;
+    }
+    (void)setenv("PATH", g_bindir, 1);
+
+    api.player_init(ND_MUSIC_BACKEND_MPV);
+
+    api.set_volume(4);
+    CHECK(api.play(MUSIC "/tone.wav"), "mpv plays a track");
+    /* The stub writes the file before exec'ing sleep, and play() has already
+     * waited for the spawn, but the write is in the CHILD -- give it a
+     * moment rather than racing it. */
+    {
+        int tries = 0;
+
+        while (tries < 200 && !stub_argv_has(logfile, "--volume=40")) {
+            struct timespec ts = {0, 10 * 1000 * 1000};
+
+            (void)nanosleep(&ts, NULL);
+            tries++;
+        }
+    }
+    CHECK(stub_argv_has(logfile, "--volume=40"), "level 4 reaches mpv as --volume=40");
+    CHECK(stub_argv_has(logfile, "--no-video"), "and the Python's own arguments survive");
+    api.stop();
+
+    /* Level 10 is 100, not 130: mpv's --volume is a percentage of unity and
+     * this player never amplifies. */
+    api.set_volume(ND_MUSIC_VOLUME_MAX);
+    CHECK(api.play(MUSIC "/tone.wav"), "mpv plays again");
+    {
+        int tries = 0;
+
+        while (tries < 200 && !stub_argv_has(logfile, "--volume=100")) {
+            struct timespec ts = {0, 10 * 1000 * 1000};
+
+            (void)nanosleep(&ts, NULL);
+            tries++;
+        }
+    }
+    CHECK(stub_argv_has(logfile, "--volume=100"), "the top of the ladder is --volume=100");
+    api.stop();
+
+    api.set_volume(0);
+    CHECK(api.play(MUSIC "/tone.wav"), "and at zero");
+    {
+        int tries = 0;
+
+        while (tries < 200 && !stub_argv_has(logfile, "--volume=0")) {
+            struct timespec ts = {0, 10 * 1000 * 1000};
+
+            (void)nanosleep(&ts, NULL);
+            tries++;
+        }
+    }
+    CHECK(stub_argv_has(logfile, "--volume=0"), "silence is --volume=0");
+    api.stop();
+
+    api.set_volume(ND_MUSIC_VOLUME_DEFAULT);
+    api.player_init(ND_MUSIC_BACKEND_NONE);
+    (void)setenv("PATH", keep, 1);
+}
+
+
+/* ------------------------------------------------------------------ *
+ * 14. The library -- NOT a port; see the music.h header comment
+ * ------------------------------------------------------------------ */
+
+/* Writes a real MP3-ish file: an ID3v2.3 tag followed by enough bytes that
+ * the scan sees a file. The library reads ONLY the tag, so the audio after
+ * it is never touched -- which is the point being relied on, and is why
+ * these fixtures can be four bytes of nothing. */
+static bool write_tagged(const char *logical, const char *title, const char *artist,
+                         const char *albumartist, const char *album, const char *trck,
+                         const char *year)
+{
+    uint8_t tag[1024];
+    uint8_t body[256];
+    char real[ND_PATH_MAX];
+    size_t n = ND_ID3_HEADER_LEN;
+    size_t b;
+    FILE *f;
+
+    if (title != NULL) {
+        b = text_body(body, title);
+        n += id3_frame_v23(tag + n, "TIT2", body, b);
+    }
+    if (artist != NULL) {
+        b = text_body(body, artist);
+        n += id3_frame_v23(tag + n, "TPE1", body, b);
+    }
+    if (albumartist != NULL) {
+        b = text_body(body, albumartist);
+        n += id3_frame_v23(tag + n, "TPE2", body, b);
+    }
+    if (album != NULL) {
+        b = text_body(body, album);
+        n += id3_frame_v23(tag + n, "TALB", body, b);
+    }
+    if (trck != NULL) {
+        b = text_body(body, trck);
+        n += id3_frame_v23(tag + n, "TRCK", body, b);
+    }
+    if (year != NULL) {
+        b = text_body(body, year);
+        n += id3_frame_v23(tag + n, "TYER", body, b);
+    }
+    (void)id3_header(tag, 3u, 0u, n - ND_ID3_HEADER_LEN);
+
+    if (nd_path_resolve(real, sizeof real, logical) != ND_OK)
+        return false;
+    f = fopen(real, "wb");
+    if (f == NULL)
+        return false;
+    (void)fwrite(tag, 1u, n, f);
+    (void)fputs("audio-goes-here", f);
+    (void)fclose(f);
+    return true;
+}
+
+#define LIBDIR MUSIC "/lib"
+
+/* A deliberately awkward card:
+ *
+ *   - two albums by one artist, out of chronological order on disk
+ *   - track numbers that disagree with filenames, which is the whole
+ *     complaint the browser answers
+ *   - a compilation whose four tracks have four different TPE1s and one
+ *     shared TPE2, which must collapse to ONE artist
+ *   - two different artists with an album of the SAME NAME
+ *   - a file with no tag at all
+ *   - a two-disc set
+ */
+static void build_library_card(void)
+{
+    CHECK_INT(nd_mkdir_p(LIBDIR, 0755u), ND_OK, "the library fixture directory");
+
+    /* Portishead, two albums, filenames in the wrong order on purpose. */
+    CHECK(write_tagged(LIBDIR "/zzz.mp3", "Mysterons", "Portishead", NULL, "Dummy", "1", "1994"),
+          "Dummy 1");
+    CHECK(write_tagged(LIBDIR "/aaa.mp3", "Sour Times", "Portishead", NULL, "Dummy", "2", "1994"),
+          "Dummy 2");
+    CHECK(write_tagged(LIBDIR "/mmm.mp3", "Cowboys", "Portishead", NULL, "Portishead", "1",
+                       "1997"),
+          "Portishead 1");
+
+    /* A compilation: four different TPE1s, one TPE2. */
+    CHECK(write_tagged(LIBDIR "/c1.mp3", "Track One", "Alice", "Various Artists", "Now 42", "1",
+                       "2001"),
+          "compilation 1");
+    CHECK(write_tagged(LIBDIR "/c2.mp3", "Track Two", "Bob", "Various Artists", "Now 42", "2",
+                       "2001"),
+          "compilation 2");
+    CHECK(write_tagged(LIBDIR "/c3.mp3", "Track Three", "Carol", "Various Artists", "Now 42", "3",
+                       "2001"),
+          "compilation 3");
+
+    /* Two artists, one album title. These must not merge. */
+    CHECK(write_tagged(LIBDIR "/g1.mp3", "Hit A", "Queen", NULL, "Greatest Hits", "1", "1981"),
+          "Queen greatest hits");
+    CHECK(write_tagged(LIBDIR "/g2.mp3", "Hit B", "Abba", NULL, "Greatest Hits", "1", "1975"),
+          "Abba greatest hits");
+
+    /* A two-disc set whose disc 2 track 1 must not jump ahead of disc 1. */
+    CHECK(write_tagged(LIBDIR "/d2t1.mp3", "Disc Two Opener", "Sufjan", NULL, "Illinois", "1",
+                       "2005"),
+          "disc 2 track 1");
+    CHECK(write_tagged(LIBDIR "/d1t9.mp3", "Disc One Closer", "Sufjan", NULL, "Illinois", "9",
+                       "2005"),
+          "disc 1 track 9");
+
+    /* No tag at all: the browser has to invent both names. */
+    CHECK(write_text(LIBDIR "/untagged.mp3", "no tag here"), "an untagged file");
+}
+
+/* Finds an artist by name, or (size_t)-1. */
+static size_t find_artist(const nd_music_library *lib, const char *name)
+{
+    size_t i;
+
+    for (i = 0u; i < api.lib_n_artists(lib); i++) {
+        if (strcmp(api.lib_artist(lib, i)->name, name) == 0)
+            return i;
+    }
+    return (size_t)-1;
+}
+
+static void test_name_cmp(void)
+{
+    CHECK(api.name_cmp("abba", "Beatles") < 0, "case-insensitive: a before B");
+    CHECK(api.name_cmp("ABBA", "abba") == 0, "the same name in any case is the same name");
+    CHECK(api.name_cmp("Zappa", "abba") > 0, "and Z after a");
+    CHECK(api.name_cmp("", "") == 0, "two empties");
+
+    /* The placeholders sort LAST whatever letter they start with, so an
+     * untagged file does not land between Tycho and U2. */
+    CHECK(api.name_cmp(*api.unknown_artist, "Zappa") > 0, "Unknown Artist sorts after Z");
+    CHECK(api.name_cmp("Abba", *api.unknown_artist) < 0, "and after A");
+    CHECK(api.name_cmp(*api.unknown_album, "Zeppelin") > 0, "Unknown Album too");
+    CHECK(api.name_cmp(*api.unknown_artist, *api.unknown_artist) == 0,
+          "and a placeholder equals itself");
+
+    CHECK(api.name_cmp(NULL, "a") != 0, "NULL is ordered, not a crash");
+    CHECK(api.name_cmp("a", NULL) != 0, "either way round");
+    CHECK(api.name_cmp(NULL, NULL) == 0, "and two NULLs are equal");
+}
+
+static void test_library_groups(void)
+{
+    nd_music_track *tracks = calloc((size_t)ND_MUSIC_MAX, sizeof *tracks);
+    nd_music_library *lib = NULL;
+    size_t n;
+    size_t idx;
+
+    if (tracks == NULL) {
+        CHECK(false, "allocation");
+        return;
+    }
+    n = api.scan(tracks, (size_t)ND_MUSIC_MAX, ND_MUSIC_BACKEND_STREAM);
+    CHECK(n > 0u, "the card scanned");
+
+    CHECK_INT(api.lib_build(&lib, tracks, n, NULL, NULL), ND_OK, "the library builds");
+    if (lib == NULL) {
+        free(tracks);
+        CHECK(false, "no library");
+        return;
+    }
+
+    CHECK_INT(api.lib_n_songs(lib), n, "every scanned track is in the library");
+
+    /* ---- the compilation collapses to ONE artist ---- */
+    idx = find_artist(lib, "Various Artists");
+    CHECK(idx != (size_t)-1, "TPE2 gives the compilation a single artist");
+    if (idx != (size_t)-1) {
+        CHECK_INT(api.lib_artist(lib, idx)->n_albums, 1, "with one album");
+        CHECK_INT(api.lib_artist(lib, idx)->n_songs, 3, "and three songs");
+    }
+    CHECK_INT(find_artist(lib, "Alice"), (size_t)-1,
+              "and the per-track TPE1s do NOT become artists of their own");
+    CHECK_INT(find_artist(lib, "Bob"), (size_t)-1, "none of them");
+
+    /* ---- an untagged file gets both placeholders ---- */
+    idx = find_artist(lib, *api.unknown_artist);
+    CHECK(idx != (size_t)-1, "an untagged track lands under Unknown Artist");
+    if (idx != (size_t)-1) {
+        const nd_music_artist *a = api.lib_artist(lib, idx);
+        const nd_music_album *alb = api.lib_album(lib, a->first_album);
+        size_t j;
+        bool found = false;
+
+        /* build_card() already left several untagged files on the card, so
+         * they ALL land here -- which is the claim: one Unknown Artist with
+         * one Unknown Album, not one row per untagged file. */
+        CHECK_INT(a->n_albums, 1, "all untagged tracks share one album");
+        CHECK_STR(alb->name, *api.unknown_album, "which is Unknown Album");
+        CHECK_INT(alb->year, 0, "with no year");
+
+        /* With no TIT2 the title falls back to the filename, which is what
+         * the Now Playing screen already does with the same file. */
+        for (j = 0u; j < alb->n_songs; j++) {
+            const nd_music_song *sg = api.lib_song(lib, alb->first_song + j);
+
+            if (strcmp(sg->title, "untagged.mp3") == 0) {
+                found = true;
+                CHECK(strstr(sg->path, "/lib/untagged.mp3") != NULL,
+                      "and it is the file we wrote");
+                CHECK_INT(sg->track, 0, "with no track number");
+            }
+        }
+        CHECK(found, "an untagged track is titled after its filename");
+    }
+
+    /* ---- two artists with the same album title stay two albums ---- */
+    {
+        size_t queen = find_artist(lib, "Queen");
+        size_t abba = find_artist(lib, "Abba");
+
+        CHECK(queen != (size_t)-1 && abba != (size_t)-1, "both artists exist");
+        if (queen != (size_t)-1 && abba != (size_t)-1) {
+            const nd_music_album *qa = api.lib_album(lib, api.lib_artist(lib, queen)->first_album);
+            const nd_music_album *aa = api.lib_album(lib, api.lib_artist(lib, abba)->first_album);
+
+            CHECK_STR(qa->name, "Greatest Hits", "Queen's");
+            CHECK_STR(aa->name, "Greatest Hits", "Abba's");
+            CHECK(qa != aa, "two albums, not one merged by title");
+            CHECK_INT(qa->n_songs, 1, "one song each");
+            CHECK_INT(aa->n_songs, 1, "each");
+        }
+    }
+
+    api.lib_free(lib);
+    free(tracks);
+}
+
+static void test_library_order(void)
+{
+    nd_music_track *tracks = calloc((size_t)ND_MUSIC_MAX, sizeof *tracks);
+    nd_music_library *lib = NULL;
+    size_t n;
+    size_t i;
+    size_t idx;
+
+    if (tracks == NULL) {
+        CHECK(false, "allocation");
+        return;
+    }
+    n = api.scan(tracks, (size_t)ND_MUSIC_MAX, ND_MUSIC_BACKEND_STREAM);
+    CHECK_INT(api.lib_build(&lib, tracks, n, NULL, NULL), ND_OK, "the library builds");
+    if (lib == NULL) {
+        free(tracks);
+        return;
+    }
+
+    /* ---- artists are sorted, and the placeholder is last ---- */
+    for (i = 1u; i < api.lib_n_artists(lib); i++) {
+        CHECK(api.name_cmp(api.lib_artist(lib, i - 1u)->name, api.lib_artist(lib, i)->name) < 0,
+              "artists are in ascending order with no duplicates");
+    }
+    if (api.lib_n_artists(lib) > 0u) {
+        CHECK_STR(api.lib_artist(lib, api.lib_n_artists(lib) - 1u)->name, *api.unknown_artist,
+                  "Unknown Artist is last");
+    }
+
+    /* ---- an artist's albums are CHRONOLOGICAL, not alphabetical ---- *
+     *
+     * Portishead's two albums are "Dummy" (1994) and "Portishead" (1997),
+     * which happen to be in the same order either way -- so the claim is
+     * checked on the years, which is what actually decides it. */
+    idx = find_artist(lib, "Portishead");
+    CHECK(idx != (size_t)-1, "Portishead is in the library");
+    if (idx != (size_t)-1) {
+        const nd_music_artist *a = api.lib_artist(lib, idx);
+
+        CHECK_INT(a->n_albums, 2, "two albums");
+        if (a->n_albums == 2u) {
+            const nd_music_album *first = api.lib_album(lib, a->first_album);
+            const nd_music_album *second = api.lib_album(lib, a->first_album + 1u);
+
+            CHECK_INT(first->year, 1994, "the 1994 album is first");
+            CHECK_INT(second->year, 1997, "and the 1997 album second");
+            CHECK_STR(first->name, "Dummy", "Dummy");
+            CHECK_STR(second->name, "Portishead", "then Portishead");
+        }
+
+        /* ---- and the tracks are in TRACK NUMBER order, not filename order.
+         *
+         * THIS IS THE WHOLE POINT. On disk "Dummy"'s two tracks are aaa.mp3
+         * (track 2) and zzz.mp3 (track 1); the old list showed them a, z. */
+        if (a->n_albums >= 1u) {
+            const nd_music_album *dummy = api.lib_album(lib, a->first_album);
+
+            CHECK_INT(dummy->n_songs, 2, "Dummy has two songs");
+            if (dummy->n_songs == 2u) {
+                const nd_music_song *s1 = api.lib_song(lib, dummy->first_song);
+                const nd_music_song *s2 = api.lib_song(lib, dummy->first_song + 1u);
+
+                CHECK_STR(s1->title, "Mysterons", "track 1 comes first");
+                CHECK_STR(s2->title, "Sour Times", "track 2 second");
+                CHECK(strstr(s1->path, "zzz.mp3") != NULL,
+                      "even though its filename sorts LAST");
+                CHECK(strstr(s2->path, "aaa.mp3") != NULL, "and the other sorts first");
+            }
+        }
+    }
+
+    /* ---- a compilation keeps its running order ---- */
+    idx = find_artist(lib, "Various Artists");
+    if (idx != (size_t)-1) {
+        const nd_music_album *alb = api.lib_album(lib, api.lib_artist(lib, idx)->first_album);
+
+        if (alb->n_songs == 3u) {
+            CHECK_STR(api.lib_song(lib, alb->first_song)->title, "Track One", "1");
+            CHECK_STR(api.lib_song(lib, alb->first_song + 1u)->title, "Track Two", "2");
+            CHECK_STR(api.lib_song(lib, alb->first_song + 2u)->title, "Track Three", "3");
+        } else {
+            CHECK(false, "the compilation has three songs");
+        }
+    }
+
+    /* ---- every album's song run is inside the song array and contiguous, and
+     * every artist's album run likewise. A browser indexes straight into
+     * these, so a bad range is an out-of-bounds read on a real phone. ---- */
+    {
+        size_t songs_seen = 0u;
+        size_t albums_seen = 0u;
+
+        for (i = 0u; i < api.lib_n_artists(lib); i++) {
+            const nd_music_artist *a = api.lib_artist(lib, i);
+            size_t j;
+            size_t counted = 0u;
+
+            CHECK_INT(a->first_album, albums_seen, "an artist's albums start where the last ended");
+            CHECK(a->n_albums > 0u, "an artist with no albums cannot exist");
+            for (j = 0u; j < a->n_albums; j++) {
+                const nd_music_album *alb = api.lib_album(lib, a->first_album + j);
+
+                CHECK_INT(alb->artist, i, "an album points back at its artist");
+                CHECK_INT(alb->first_song, songs_seen, "songs are contiguous across the library");
+                CHECK(alb->n_songs > 0u, "an album with no songs cannot exist");
+                songs_seen += alb->n_songs;
+                counted += alb->n_songs;
+            }
+            albums_seen += a->n_albums;
+            CHECK_INT(a->n_songs, counted, "an artist's song count is its albums'");
+        }
+        CHECK_INT(albums_seen, api.lib_n_albums(lib), "every album belongs to an artist");
+        CHECK_INT(songs_seen, api.lib_n_songs(lib), "and every song to an album");
+    }
+
+    api.lib_free(lib);
+    free(tracks);
+}
+
+/* The flat "Songs" view: every song exactly once, in title order. */
+static void test_library_by_title(void)
+{
+    nd_music_track *tracks = calloc((size_t)ND_MUSIC_MAX, sizeof *tracks);
+    nd_music_library *lib = NULL;
+    size_t n;
+    size_t i;
+    size_t seen = 0u;
+
+    if (tracks == NULL) {
+        CHECK(false, "allocation");
+        return;
+    }
+    n = api.scan(tracks, (size_t)ND_MUSIC_MAX, ND_MUSIC_BACKEND_STREAM);
+    CHECK_INT(api.lib_build(&lib, tracks, n, NULL, NULL), ND_OK, "the library builds");
+    if (lib == NULL) {
+        free(tracks);
+        return;
+    }
+
+    /* Ascending by title, with ties allowed -- two tracks really can share a
+     * name, and the tie-break is checked below rather than here. */
+    for (i = 1u; i < api.lib_n_songs(lib); i++) {
+        const nd_music_song *prev = api.lib_song_by_title(lib, i - 1u);
+        const nd_music_song *cur = api.lib_song_by_title(lib, i);
+
+        CHECK(api.name_cmp(prev->title, cur->title) <= 0, "titles ascend");
+    }
+
+    /* It is a PERMUTATION: every song appears exactly once. A sort that
+     * dropped or duplicated a row would still pass the ordering check above,
+     * which is why this one exists. */
+    for (i = 0u; i < api.lib_n_songs(lib); i++) {
+        const nd_music_song *target = api.lib_song(lib, i);
+        size_t j;
+        size_t hits = 0u;
+
+        for (j = 0u; j < api.lib_n_songs(lib); j++) {
+            if (api.lib_song_by_title(lib, j) == target)
+                hits++;
+        }
+        if (hits != 1u) {
+            CHECK_INT(hits, 1, "every song appears exactly once in title order");
+            break;
+        }
+        seen++;
+    }
+    CHECK_INT(seen, api.lib_n_songs(lib), "and all of them appear");
+
+    /* The index is stable across two builds of the same card: a browser that
+     * reordered itself between visits would be worse than one that did not
+     * sort at all. */
+    {
+        nd_music_library *again = NULL;
+
+        if (api.lib_build(&again, tracks, n, NULL, NULL) == ND_OK && again != NULL) {
+            bool same = true;
+
+            for (i = 0u; i < api.lib_n_songs(lib); i++) {
+                if (strcmp(api.lib_song_by_title(lib, i)->path,
+                           api.lib_song_by_title(again, i)->path) != 0) {
+                    same = false;
+                    break;
+                }
+            }
+            CHECK(same, "two builds of one card give the same title order");
+            api.lib_free(again);
+        }
+    }
+
+    CHECK(api.lib_song_by_title(lib, api.lib_n_songs(lib)) == NULL, "past the end is NULL");
+    CHECK(api.lib_song_by_title(NULL, 0u) == NULL, "and a NULL library is NULL");
+
+    api.lib_free(lib);
+    free(tracks);
+}
+
+static void test_library_discs(void)
+{
+    nd_music_track one[2];
+    nd_music_library *lib = NULL;
+
+    /* Two tracks of one album: disc 1 track 9, and disc 2 track 1. Sorted by
+     * track number alone the disc-2 opener would jump ahead of the disc-1
+     * closer, which is the bug this pins. The fixture writes TPOS through a
+     * second tag write, so build them here rather than in build_library_card. */
+    CHECK_INT(nd_mkdir_p(MUSIC "/discs", 0755u), ND_OK, "a directory for the two-disc set");
+    {
+        uint8_t tag[512];
+        uint8_t body[128];
+        char real[ND_PATH_MAX];
+        static const struct {
+            const char *file;
+            const char *title;
+            const char *trck;
+            const char *tpos;
+        } SET[2] = {
+            {MUSIC "/discs/b.mp3", "Disc Two Opener", "1", "2"},
+            {MUSIC "/discs/a.mp3", "Disc One Closer", "9", "1"},
+        };
+        size_t k;
+
+        for (k = 0u; k < 2u; k++) {
+            size_t n = ND_ID3_HEADER_LEN;
+            size_t b;
+            FILE *f;
+
+            b = text_body(body, SET[k].title);
+            n += id3_frame_v23(tag + n, "TIT2", body, b);
+            b = text_body(body, "Sufjan");
+            n += id3_frame_v23(tag + n, "TPE1", body, b);
+            b = text_body(body, "Illinois");
+            n += id3_frame_v23(tag + n, "TALB", body, b);
+            b = text_body(body, SET[k].trck);
+            n += id3_frame_v23(tag + n, "TRCK", body, b);
+            b = text_body(body, SET[k].tpos);
+            n += id3_frame_v23(tag + n, "TPOS", body, b);
+            (void)id3_header(tag, 3u, 0u, n - ND_ID3_HEADER_LEN);
+
+            CHECK_INT(nd_path_resolve(real, sizeof real, SET[k].file), ND_OK, "path");
+            f = fopen(real, "wb");
+            if (f == NULL) {
+                CHECK(false, "write the disc fixture");
+                return;
+            }
+            (void)fwrite(tag, 1u, n, f);
+            (void)fclose(f);
+            (void)nd_strlcpy(one[k].path, SET[k].file, sizeof one[k].path);
+        }
+    }
+
+    CHECK_INT(api.lib_build(&lib, one, 2u, NULL, NULL), ND_OK, "the two-disc library builds");
+    if (lib == NULL)
+        return;
+    CHECK_INT(api.lib_n_albums(lib), 1, "one album");
+    if (api.lib_n_albums(lib) == 1u) {
+        const nd_music_album *alb = api.lib_album(lib, 0u);
+
+        CHECK_INT(alb->n_songs, 2, "with both songs");
+        CHECK_STR(api.lib_song(lib, alb->first_song)->title, "Disc One Closer",
+                  "disc 1 track 9 comes before disc 2 track 1");
+        CHECK_STR(api.lib_song(lib, alb->first_song + 1u)->title, "Disc Two Opener",
+                  "and the disc 2 opener is second");
+    }
+    api.lib_free(lib);
+}
+
+/* The progress callback, and cancelling. */
+static size_t g_progress_calls;
+static size_t g_progress_last_done;
+static size_t g_progress_total;
+static size_t g_progress_stop_after;
+
+static bool progress_cb(void *ctx, size_t done, size_t total)
+{
+    CHECK(ctx == (void *)&g_progress_calls, "the context is handed back");
+    g_progress_calls++;
+    g_progress_last_done = done;
+    g_progress_total = total;
+    if (g_progress_stop_after != 0u && g_progress_calls >= g_progress_stop_after)
+        return false;
+    return true;
+}
+
+static void test_library_progress(void)
+{
+    nd_music_track *tracks = calloc((size_t)ND_MUSIC_MAX, sizeof *tracks);
+    nd_music_library *lib = NULL;
+    size_t n;
+
+    if (tracks == NULL) {
+        CHECK(false, "allocation");
+        return;
+    }
+    n = api.scan(tracks, (size_t)ND_MUSIC_MAX, ND_MUSIC_BACKEND_STREAM);
+
+    g_progress_calls = 0u;
+    g_progress_last_done = 0u;
+    g_progress_total = 0u;
+    g_progress_stop_after = 0u;
+    CHECK_INT(api.lib_build(&lib, tracks, n, progress_cb, &g_progress_calls), ND_OK,
+              "a build with a callback succeeds");
+    CHECK(g_progress_calls > 0u, "the callback was called");
+    CHECK_INT(g_progress_total, n, "and told the real total");
+    CHECK_INT(g_progress_last_done, n, "and reached it");
+    api.lib_free(lib);
+    lib = NULL;
+
+    /* Cancelling frees everything and reports it, rather than returning a
+     * half-built library the browser would then draw. */
+    g_progress_calls = 0u;
+    g_progress_stop_after = 1u;
+    CHECK_INT(api.lib_build(&lib, tracks, n, progress_cb, &g_progress_calls), ND_ERR_BUSY,
+              "a cancelled build says so");
+    CHECK(lib == NULL, "and hands back nothing to free");
+
+    g_progress_stop_after = 0u;
+    free(tracks);
+}
+
+static void test_library_edges(void)
+{
+    nd_music_library *lib = NULL;
+    nd_music_track one;
+
+    /* Zero tracks is a library, not an error: the browser draws "no music"
+     * rather than an error screen. */
+    CHECK_INT(api.lib_build(&lib, NULL, 0u, NULL, NULL), ND_OK, "an empty library builds");
+    if (lib != NULL) {
+        CHECK_INT(api.lib_n_songs(lib), 0, "no songs");
+        CHECK_INT(api.lib_n_artists(lib), 0, "no artists");
+        CHECK_INT(api.lib_n_albums(lib), 0, "no albums");
+        CHECK(api.lib_song(lib, 0u) == NULL, "and indexing it gives NULL, not a dummy row");
+        CHECK(api.lib_artist(lib, 0u) == NULL, "for artists");
+        CHECK(api.lib_album(lib, 0u) == NULL, "and albums");
+        api.lib_free(lib);
+        lib = NULL;
+    } else {
+        CHECK(false, "an empty library is still a library");
+    }
+
+    /* A track that has since vanished must not take the build down with it;
+     * it gets the placeholders like any other untagged file. */
+    (void)nd_strlcpy(one.path, MUSIC "/does-not-exist.mp3", sizeof one.path);
+    CHECK_INT(api.lib_build(&lib, &one, 1u, NULL, NULL), ND_OK, "a missing file still builds");
+    if (lib != NULL) {
+        CHECK_INT(api.lib_n_songs(lib), 1, "and is listed");
+        CHECK_STR(api.lib_artist(lib, 0u)->name, *api.unknown_artist, "under Unknown Artist");
+        api.lib_free(lib);
+        lib = NULL;
+    }
+
+    CHECK_INT(api.lib_build(NULL, NULL, 0u, NULL, NULL), ND_ERR_INVAL, "a NULL out is refused");
+    CHECK_INT(api.lib_build(&lib, NULL, 5u, NULL, NULL), ND_ERR_INVAL,
+              "so are tracks that are NULL with a non-zero count");
+    api.lib_free(NULL); /* must be safe */
+    sa_checks++;
+
+    /* Past the end is NULL on a non-empty library too. */
+    {
+        nd_music_track t;
+
+        (void)nd_strlcpy(t.path, MUSIC "/does-not-exist.mp3", sizeof t.path);
+        if (api.lib_build(&lib, &t, 1u, NULL, NULL) == ND_OK && lib != NULL) {
+            CHECK(api.lib_song(lib, 1u) == NULL, "one past the last song");
+            CHECK(api.lib_artist(lib, 1u) == NULL, "one past the last artist");
+            CHECK(api.lib_album(lib, 1u) == NULL, "one past the last album");
+            CHECK(api.lib_song(lib, (size_t)-1) == NULL, "and a wrapped index");
+            api.lib_free(lib);
+        }
+    }
+}
+
 static void test_null_safety(void)
 {
     CHECK_INT(api.run(NULL), 1, "app_run(NULL) refuses rather than faults");
@@ -1400,6 +2525,7 @@ int main(void)
     RUN(test_truncate);
     RUN(test_id3_text);
     RUN(test_id3_frames);
+    RUN(test_id3_library_frames);
     RUN(test_id3_hostile);
 
     /* The no-card screens FIRST: they are the only ones the golden frame
@@ -1414,6 +2540,19 @@ int main(void)
     RUN(test_metadata);
     RUN(test_duration);
     RUN(test_playback);
+    RUN(test_gain_ladder);
+    RUN(test_apply_gain);
+    RUN(test_gain_buffer);
+    RUN(test_volume_state);
+    RUN(test_mpv_gets_the_volume);
+    RUN(build_library_card);
+    RUN(test_name_cmp);
+    RUN(test_library_groups);
+    RUN(test_library_order);
+    RUN(test_library_by_title);
+    RUN(test_library_discs);
+    RUN(test_library_progress);
+    RUN(test_library_edges);
     RUN(test_null_safety);
 
     nd_storage_set_paths(NULL, NULL);
