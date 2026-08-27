@@ -1,7 +1,7 @@
 # NeoDCT OS Changelog
 
-Unreleased
-Messages can look like a chat app now.
+0.4.2a
+Messages can look like a chat app now, and Remote Shell finally lets you in.
 
 Settings has a new entry, Messages Style, with two choices. Classic is
 the inbox-and-outbox the phone has always had, and it is still what you
@@ -44,6 +44,25 @@ Fixed
   modem and forget it ever existed, which meant the screen called
   "Outbox" never contained anything you had actually sent. It does now,
   in Classic as well as in Chat.
+- Remote Shell lets you in. It has never worked reliably, for two
+  reasons that both look identical from a laptop -- a refused
+  connection, or a rejected key -- and neither of which was your
+  setup.
+- The phone starts its ssh server at boot, before the network scripts
+  have finished, and binding to itself fails outright when loopback is
+  not up yet. It gave up there and nothing ever started it again, while
+  the tunnel out to the relay retried its way to a working connection
+  and held it. So the relay showed a phone dialled in, every hop
+  worked, and the connection arrived at a port with nothing behind it.
+  Whether it happened at all came down to which won the race that boot,
+  which is why it worked sometimes. The ssh server now retries the same
+  way the tunnel always has.
+- A half-made host key is no longer kept forever. Generating one wants
+  randomness the phone has not gathered yet on a first boot, and an
+  interrupted attempt leaves an empty file behind; the phone took that
+  file as proof it had a key, and from then on the ssh server refused
+  to start on every boot, for good. It now checks that the key is one
+  it can actually load, and makes a new one when it is not.
 
 0.4.1a
 The Music app grew a library.
