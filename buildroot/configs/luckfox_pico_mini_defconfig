@@ -30,7 +30,7 @@ BR2_TOOLCHAIN_BUILDROOT_CXX=y
 BR2_TOOLCHAIN_BUILDROOT_MUSL=y
 BR2_TARGET_TZ_INFO=y
 BR2_ROOTFS_OVERLAY="../neodct/overlay"
-BR2_ROOTFS_POST_BUILD_SCRIPT="../neodct/scripts/post-build-prune-tests.sh ../neodct/scripts/post-build-system-metadata.sh ../neodct/scripts/post-build-nonfree-firmware.sh"
+BR2_ROOTFS_POST_BUILD_SCRIPT="../neodct/scripts/post-build-prune-tests.sh ../neodct/scripts/post-build-system-metadata.sh ../neodct/scripts/post-build-nonfree-firmware.sh ../neodct/scripts/post-build-bt-on-demand.sh"
 BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS="luckfox-armv7"
 BR2_ROOTFS_POST_IMAGE_SCRIPT="board/qemu/post-image.sh"
 BR2_ROOTFS_POST_SCRIPT_ARGS="$(BR2_DEFCONFIG)"
@@ -141,20 +141,37 @@ BR2_PACKAGE_NEODCT=y
 # --- Bluetooth (engineering) ---
 # Nothing is added here on purpose, and that is the decision worth recording.
 #
-# A TP-Link UB500 (2357:0604, an RTL8761BU) is driven entirely by the kernel:
-# CONFIG_BT + CONFIG_BT_HCIBTUSB + CONFIG_BT_HCIBTUSB_RTL in the linux.config,
-# plus two firmware files that ship in the overlay at
-# overlay/lib/firmware/rtl_bt/. Userspace is neodct/src/lib/nd_bt.c, ~400
-# lines of ioctl on an AF_BLUETOOTH socket, inside libneodct.
+# A TP-Link UB500 (2357:0604, an RTL8761BU) is driven by the kernel:
+# CONFIG_BT + CONFIG_BT_HCIBTUSB + CONFIG_BT_HCIBTUSB_RTL in the SDK's
+# luckfox_rv1106_linux_defconfig, plus two firmware files installed by
+# neodct/scripts/post-build-nonfree-firmware.sh out of neodct/nonfree/rtl_bt/.
 #
-# BR2_PACKAGE_BLUEZ5_UTILS is deliberately NOT set. It selects dbus and
-# libglib2 and brings a resident daemon, which is a message bus and ~1.5 MB
-# of object library on a 64 MB device, for a feature that is engineering-only
-# and needs none of it. That argument stops holding the day pairing, A2DP or
-# RFCOMM is wanted -- all three need the event-driven HCI session bluetoothd
-# exists to run. docs/BLUETOOTH.md has the whole reasoning.
+# BlueZ was deliberately absent here for as long as Bluetooth meant the
+# engineering app, which is ~400 lines of ioctl on an AF_BLUETOOTH socket in
+# neodct/src/lib/nd_bt.c and needs no daemon. The note that stood here said
+# the argument would stop holding "the day pairing, A2DP or RFCOMM is wanted".
+# A2DP is wanted: Settings can connect earbuds and route ALSA to them, and
+# every part of that -- Secure Simple Pairing, the link key, AVDTP signalling
+# -- is an event-driven HCI session, which is the thing bluetoothd exists to
+# run. So it is set now, matching the QEMU config it was proven on.
 #
-# The firmware is in the overlay rather than from BR2_PACKAGE_LINUX_FIRMWARE
+# Measured on QEMU before this was accepted: 2.8 MiB of flash, ~6 MB PSS with
+# all three daemons up (dbus 519 KB, bluetoothd 2.1 MB, bluealsa 3.5 MB). This
+# board has the same 64 MB, so the same rule applies and is enforced the same
+# way -- NOTHING here starts at boot. post-build-bt-on-demand.sh removes
+# buildroot's S30dbus and S40bluetoothd; the daemons come up when Settings
+# enables Bluetooth, and bluealsa only lives while a device is connected.
+# Idle cost is zero. docs/BLUETOOTH.md has the whole reasoning.
+#
+# Only the audio plugins are built. midi, hcitop and rfcomm are not.
+BR2_PACKAGE_BLUEZ5_UTILS=y
+BR2_PACKAGE_BLUEZ5_UTILS_PLUGINS_AUDIO=y
+# bluetoothctl, driven as a subprocess -- the same shape this OS already uses
+# for ssh, sshd, arecord and aplay. It costs readline.
+BR2_PACKAGE_BLUEZ5_UTILS_CLIENT=y
+BR2_PACKAGE_BLUEZ_ALSA=y
+#
+# The firmware is in neodct/nonfree/ rather than from BR2_PACKAGE_LINUX_FIRMWARE
 # (+ _RTL_87XX_BT) because that tarball is 583 MB compressed and buildroot
 # extracts the whole tree into EACH output directory -- there are two here --
 # and it would put 338 KB of firmware for seven other Realtek parts onto a

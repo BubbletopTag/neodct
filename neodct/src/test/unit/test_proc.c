@@ -567,6 +567,91 @@ static void test_spawn_same_session(void)
     CHECK(child_sid == our_sid);
 }
 
+/* A daemon must not carry the core's descriptors past execve.
+ *
+ * bluetoothd and bluealsa are spawned by the Settings app and deliberately
+ * outlive it. spawn_quiet() points their stdout and stderr at /dev/null, which
+ * looks like enough and is not: execve keeps every OTHER inherited descriptor,
+ * and among them is the pipe the CORE reads the app's output from. The app
+ * exits, its own copy goes, and the pipe still does not reach EOF -- because
+ * two daemons on the far side of the phone are still holding the write end.
+ * nd-core sits in pipe_read forever and the whole UI freezes, but only after
+ * Bluetooth has been used, which is what made it look like an audio bug:
+ *
+ *   nd-core    fd 9  -> pipe:[277]   (read end, blocked here)
+ *   bluealsa   fd 10 -> pipe:[277]   (write end)
+ *   bluetoothd fd 10 -> pipe:[277]   (write end)
+ *
+ * The pipe here stands in for that one. Non-blocking, so the two outcomes are
+ * distinguishable without hanging: EAGAIN means somebody still holds the write
+ * end, 0 means nobody does. Blocking would reproduce the freeze faithfully and
+ * tell us nothing. */
+static void test_spawn_can_close_inherited_fds(void)
+{
+    static const char *const SH_ARGV[] = {"/bin/sh", "-c", "exec sleep 5", NULL};
+    nd_proc_spec spec;
+    pid_t pid = -1;
+    int leak[2];
+    int devnull;
+    int flags;
+    int tries;
+    ssize_t got = -1;
+    char c;
+
+    if (pipe(leak) != 0) {
+        CHECK(leak[0] >= 0);
+        return;
+    }
+    devnull = open("/dev/null", O_RDWR);
+    if (devnull < 0) {
+        CHECK(devnull >= 0);
+        (void)close(leak[0]);
+        (void)close(leak[1]);
+        return;
+    }
+
+    flags = fcntl(leak[0], F_GETFL, 0);
+    (void)fcntl(leak[0], F_SETFL, flags | O_NONBLOCK);
+
+    memset(&spec, 0, sizeof spec);
+    spec.argv = SH_ARGV;
+    spec.owner = ND_OWNER_SYSTEM;
+    spec.new_session = true;
+    spec.close_others = true;
+    spec.fds[0].child_fd = 1;
+    spec.fds[0].our_fd = devnull;
+    spec.fds[1].child_fd = 2;
+    spec.fds[1].our_fd = devnull;
+    spec.n_fds = 2u;
+
+    CHECK_INT(nd_proc_spawn("/bin/sh", &spec, &pid), ND_OK);
+    /* Our own copy of the write end goes now; the child's copy is the question
+     * this test exists to ask. */
+    (void)close(leak[1]);
+    (void)close(devnull);
+
+    /* The closing happens between fork and execve, so give the child room to
+     * get there rather than racing it. */
+    for (tries = 0; tries < 200; tries++) {
+        struct timespec ts;
+
+        got = read(leak[0], &c, 1u);
+        if (got == 0)
+            break;
+        ts.tv_sec = 0;
+        ts.tv_nsec = 10000000L;
+        (void)nanosleep(&ts, NULL);
+    }
+    CHECK_INT((int)got, 0);
+
+    if (pid > 0) {
+        nd_proc_status st;
+
+        (void)nd_proc_terminate(pid, 1.0, &st);
+    }
+    (void)close(leak[0]);
+}
+
 static void test_spawn_and_wait(void)
 {
     static const char *const TRUE_ARGV[] = {"/bin/true", NULL};
@@ -915,6 +1000,7 @@ int main(void)
 
     test_spawn_new_session();
     test_spawn_same_session();
+    test_spawn_can_close_inherited_fds();
     test_spawn_and_wait();
     test_reaper_keeps_the_status();
     test_summary_is_capped_at_ninety();

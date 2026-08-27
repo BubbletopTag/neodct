@@ -1,5 +1,40 @@
 # NeoDCT OS Changelog
 
+0.4.4a
+Bluetooth earbuds. Pair them in Settings and the phone plays through them.
+
+Settings has a new entry, BT Audio. Turn Bluetooth on, scan, pick your
+earbuds, and pair. Once they are connected everything the phone plays goes
+to them -- the music player, and calls -- and when they disconnect the sound
+comes back to the speaker on its own. You connect from Settings and nowhere
+else, on purpose; disconnecting can happen anywhere, including by putting
+the earbuds back in their case.
+
+Nothing about this runs until you ask for it. The Bluetooth daemons start
+when you enable Bluetooth and stop when you disable it, so a phone that
+never uses earbuds pays nothing for the feature -- which matters on a device
+with 64 MB of memory.
+
+Added
+- BT Audio, in Settings. Enable, Scan, Pair, Disconnect, Disable.
+- Devices are listed by their real names -- "Smokin' Buds", not an address.
+- Earbuds are remembered. Pairing is stored on the user partition, so it
+  survives a reboot and a power cycle.
+- Bluetooth support in the Luckfox kernel, so this works on the real phone
+  and not only in the emulator.
+
+Fixed
+- Pairing now completes. The phone used to say "Pairing..." and then
+  "Could not connect", and the earbuds would announce they were ready to
+  pair a second time -- because nothing on the phone was answering the
+  pairing request. It answers now.
+- Sound actually reaches the earbuds. The phone was offering itself as a
+  speaker rather than as a source of music, so there was no way for the two
+  to agree on what to do and every connection was refused.
+- Leaving Settings after using Bluetooth no longer freezes the phone. The
+  Bluetooth daemons were holding on to something belonging to the program
+  that started them, which kept the rest of the system waiting forever.
+
 0.4.3a
 Two engineering apps for hardware you can plug in.
 

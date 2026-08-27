@@ -284,6 +284,8 @@ nd_err nd_proc_spawn(const char *path, const nd_proc_spec *spec, pid_t *pid_out)
     size_t n_fds;
     char *const *argv;
     char *const *envp;
+    bool close_others;
+    int fd_limit;
 
     if (path == NULL || spec == NULL || spec->argv == NULL || pid_out == NULL)
         return ND_ERR_INVAL;
@@ -291,6 +293,12 @@ nd_err nd_proc_spawn(const char *path, const nd_proc_spec *spec, pid_t *pid_out)
         return ND_ERR_INVAL;
 
     n_fds = spec->n_fds;
+    close_others = spec->close_others;
+    /* sysconf() BEFORE the fork: it is not on the async-signal-safe list, and
+     * the child between fork and execve may call nothing that is not. */
+    fd_limit = close_others ? (int)sysconf(_SC_OPEN_MAX) : 0;
+    if (fd_limit < 3 || fd_limit > 4096)
+        fd_limit = 4096;
     for (i = 0u; i < n_fds; i++) {
         child_fd[i] = spec->fds[i].child_fd;
         our_fd[i] = spec->fds[i].our_fd;
@@ -333,6 +341,34 @@ nd_err nd_proc_spawn(const char *path, const nd_proc_spec *spec, pid_t *pid_out)
                     _exit(126);
             }
         }
+        /* Everything above stderr that was not asked for, AFTER the dup2s so
+         * the descriptors just installed are never among the casualties.
+         * close() is async-signal-safe and closing a descriptor that was never
+         * open is a harmless EBADF, so no enumeration of what is open is
+         * needed -- which is just as well, since reading /proc/self/fd here
+         * would not be safe either.
+         *
+         * fds 0-2 are left alone deliberately: closing stdin outright would
+         * leave the number free for the next open() in the child to claim, and
+         * a daemon that writes to what it thinks is a file and is actually
+         * descriptor 0 is a worse bug than the one being fixed. */
+        if (close_others) {
+            int fd;
+
+            for (fd = 3; fd < fd_limit; fd++) {
+                bool keep = false;
+
+                for (i = 0u; i < n_fds; i++) {
+                    if (child_fd[i] == fd) {
+                        keep = true;
+                        break;
+                    }
+                }
+                if (!keep)
+                    (void)close(fd);
+            }
+        }
+
         (void)execve(path, argv, envp);
         _exit(127); /* only reached if execve failed */
     }

@@ -1631,3 +1631,177 @@ CHANGELOG.txt and VERSION_ID are untouched: 0.4.2a is already tagged, and
 opening the next version is a release decision, not this commit's.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+================================================================================
+
+bt: pairing needs an agent, and there never was one
+
+Pairing earbuds has never once produced a bond. It looked like it had --
+the phone said "Connected", BlueZ stored a device record, and audio routing
+switched over -- but the record it wrote tells the real story:
+
+    [General]
+    Name=Smokin' Buds
+    Class=0x240404
+    Trusted=true
+    Services=...0000110b... (A2DP browsed fine)
+
+Name, class, and a full service list, so a connection plainly happened. No
+[LinkKey] section, so it was never authenticated. `bluetoothctl info` agrees:
+Paired: no, Bonded: no. There was nothing to reconnect to, which is why the
+next attempt failed in under a second instead of timing out.
+
+BlueZ will not complete Secure Simple Pairing unless some agent is registered
+to answer for the local side; with none it cancels the exchange outright. A
+one-shot `bluetoothctl pair XX` registers no agent unless asked, and we never
+asked. The peer sees the attempt abandoned and goes back to advertising --
+heard from the earbuds as "ready to pair" a second time.
+
+That second announcement was blamed on --timeout in an earlier commit here,
+on the theory that bluetoothctl was exiting before the handshake finished.
+Removing it did change the outcome, so it looked confirmed, and it was the
+wrong cause: what actually got through was an UNAUTHENTICATED connect while
+the earbuds happened to be sitting in open pairing mode. The bond was missing
+the whole time. --timeout stays off pair and connect regardless; that part of
+the reasoning still holds for its own reasons.
+
+cmd_build now passes --agent NoInputNoOutput for pair and connect. That is
+the honest capability for a phone with no keypad to type a passkey on and no
+display to show one, and it is also the useful one: it selects the "Just
+Works" association model, which BlueZ auto-confirms for a pairing we
+initiated. The agent has to exist. It never has to be asked anything.
+
+Query verbs do not get one. An agent registration is a D-Bus round trip and
+a default-agent claim, and taking it out on every `devices` poll would be
+noise -- claiming the default agent while a pairing is in flight is worse
+than noise.
+
+Four tests in test_btaudio.c: pair and connect carry the agent, the query
+verbs stay clean, and everything at once still fits argv with room for the
+NULL (worst case is exactly eight slots, which is what ND_BTAUDIO_ARGV_MAX
+allows). 75 checks in that file, suite green.
+
+Not yet done: nothing watches for the earbuds disconnecting on their own.
+Powering them off leaves ALSA pointed at a bluealsa PCM that no longer has a
+transport. Settings' Disconnect row reverts the route correctly; a core
+service that notices it happening anywhere else is still owed.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+================================================================================
+
+bt: audio goes the other way, and daemons kept the core's pipe
+
+Two bugs, one symptom each, found by finally getting a real error message out
+of the phone instead of reasoning about the code.
+
+## a2dp-source, not a2dp-sink
+
+bluealsa's -p names the profile THIS device implements, not the peer's.
+Earbuds are an A2DP Sink; for the phone to send them music it must register
+as an A2DP Source. It registered a2dp-sink, offering the phone as a speaker,
+so a connection to earbuds found no complementary profile at either end:
+
+    Failed to connect: org.bluez.Error.Failed br-connection-profile-unavailable
+
+That error names no profile, and it arrives at exactly the moment pairing
+would, so it reads as a pairing failure. It is not one. The comment that was
+there had the physics right -- "this phone is the SOURCE of the music and the
+earbuds are the sink" -- and then passed the flag for the opposite.
+
+With this the Skullcandy buds connect, announce it themselves, and play an
+mp3 off the SD card.
+
+## daemons must not inherit the core's descriptors
+
+Leaving Settings froze the whole UI, but only after Bluetooth had been used.
+From the running phone:
+
+    nd-core    fd 9  -> pipe:[277]   (read end, blocked in pipe_read)
+    bluealsa   fd 10 -> pipe:[277]   (write end)
+    bluetoothd fd 10 -> pipe:[277]   (write end)
+
+spawn_quiet() points the daemons' stdout and stderr at /dev/null, which looks
+sufficient. execve keeps every OTHER inherited descriptor, and the app had
+inherited the pipe nd-core reads it through. Settings exits, its own copy
+goes, and the pipe still does not reach EOF, because two daemons that are
+SUPPOSED to outlive it are holding the write end. The core waits forever.
+
+nd_proc_spec gains close_others: close everything above stderr in the child,
+after the fds[] mappings are installed and before the execve. Off by default,
+because an app is meant to inherit what the core hands it -- the crash pipe
+and the service socket are passed exactly that way. bluetoothd, bluealsa and
+dbus-daemon opt in.
+
+sysconf() is called before the fork, not in the child: it is not on the
+async-signal-safe list. fds 0-2 are left alone, because closing stdin frees
+the number for the next open() in the child to claim, and a daemon writing
+into what it believes is a file and is actually descriptor 0 is a worse bug
+than this one.
+
+test_proc.c reproduces the symptom rather than the mechanism: spawn a
+long-lived child, close our own write end, read non-blocking. EAGAIN means
+something still holds it, 0 means nothing does. Blocking would reproduce the
+freeze faithfully and prove nothing. RED was "got -1 want 0".
+
+## Corrections to the two commits above this one
+
+The earlier claim that --timeout was cutting pairing short was wrong. It was
+never the cause; what got through once was an UNAUTHENTICATED connect while
+the earbuds sat in open pairing mode, and the device record BlueZ wrote had
+no [LinkKey] section to show for it. The missing agent (previous commit) was
+real but not sufficient, and the profile being backwards is what actually
+blocked every connection.
+
+Still owed: nothing watches for the earbuds disconnecting on their own, so
+powering them off leaves ALSA pointed at a bluealsa PCM with no transport
+behind it. Settings' Disconnect row reverts the route correctly; a core
+service that notices it happening anywhere else is not written yet.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+================================================================================
+
+0.4.4a: Bluetooth earbuds, and the kernel to run them on real hardware
+
+BT Audio in Settings, working end to end on QEMU with a TP-Link UB500 and a
+pair of Skullcandy earbuds: enable, scan, pair, connect, ALSA routed to the
+buds, disconnect, routed back. Confirmed by ear, not by log line -- an mp3
+off the SD card played through the earbuds, which is the only test of this
+that means anything.
+
+## Luckfox
+
+The SDK kernel had no Bluetooth at all: zero CONFIG_BT lines in
+luckfox_rv1106_linux_defconfig. Added the set proven on the QEMU kernel minus
+BT_HCIVHCI, which exists there only because USB passthrough into QEMU needs
+privileges the dev machine may not have; this board has the real dongle on a
+real port. Verified in the BUILT .config, per the rule in the SDK notes that
+a defconfig edit is not evidence:
+
+    CONFIG_BT=y  CONFIG_BT_BREDR=y  CONFIG_BT_HCIBTUSB=y
+    CONFIG_BT_HCIBTUSB_RTL=y  CONFIG_BT_RTL=y  CONFIG_FW_LOADER=y
+    # CONFIG_BT_HCIBTUSB_BCM is not set
+
+and by the objects themselves -- btusb.o and btrtl.o are 515 KB and 312 KB of
+compiled driver, not config lines. BT_INTEL came in unconditionally, exactly
+as the comment in the QEMU config says it would.
+
+The rootfs defconfig deliberately had no BlueZ, and the note explaining why
+ended: "That argument stops holding the day pairing, A2DP or RFCOMM is
+wanted." That day is this commit, so BLUEZ5_UTILS + audio plugins + CLIENT +
+BLUEZ_ALSA are set, and the note now says what changed rather than standing
+there contradicting the config below it. The 64 MB argument still holds and
+is still enforced: post-build-bt-on-demand.sh was already in the Luckfox
+post-build list, so nothing starts at boot. Both defconfig copies synced.
+
+## Untested
+
+Nothing here has run on the board. The kernel builds, the rootfs builds, the
+firmware is installed by a post-build step that was already wired up -- but
+a dongle has never enumerated on real RV1103 hardware. S16btusb's boot-time
+re-probe may prove unnecessary there: it exists because btusb probes during
+initramfs before /lib/firmware is mounted, and whether that race exists on
+this board is not known yet. It costs one directory read if it does not.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>

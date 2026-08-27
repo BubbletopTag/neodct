@@ -82,6 +82,14 @@ typedef struct {
      * that outlives its session leader is exactly the orphan the crash
      * screen exists to catch. */
     bool new_session;
+
+    /* Close every descriptor above stderr in the child, after the fds[] above
+     * are in place and before the execve. Off by default because an app is
+     * MEANT to inherit what the core hands it -- the crash pipe and the
+     * service socket are passed exactly that way. Turn it on for anything
+     * long-lived that the core does not own, or it will hold the core's pipes
+     * open for as long as it runs. */
+    bool close_others;
 } nd_proc_spec;
 
 /* fork + execve, in that order and nothing in between. *pid_out receives the

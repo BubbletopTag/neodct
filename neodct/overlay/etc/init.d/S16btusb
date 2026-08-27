@@ -1,0 +1,85 @@
+#!/bin/sh
+# Re-probe Bluetooth USB adapters once the real rootfs is mounted.
+#
+# btusb is built into the kernel, so it probes a dongle the instant USB
+# enumerates -- which happens while the initramfs is still the root filesystem
+# and /lib/firmware does not exist yet. An RTL8761BU carries no firmware of its
+# own, so the load fails:
+#
+#   bluetooth hci0: Direct firmware load for rtl_bt/rtl8761bu_fw.bin failed
+#                   with error -2
+#   Bluetooth: hci0: RTL: firmware file rtl_bt/rtl8761bu_fw not found
+#
+# and the controller never finishes setup. What makes that hard to diagnose is
+# what it looks like afterwards: /sys/class/bluetooth/hci0 exists, the
+# engineering app lists an adapter, and every scan fails. bluetoothd is worse
+# still -- it reports "Number of controllers: 0" and says "No default
+# controller available", because the kernel keeps a half-set-up controller out
+# of the management index list entirely.
+#
+# Unbinding and rebinding asks the driver to probe again, and by now the
+# firmware is where it was always going to be. The dongle is not disturbed in
+# any way that matters: nothing can be connected this early in boot.
+#
+# A dongle plugged in AFTER boot never hits this -- the rootfs is up by then
+# and the first probe finds the firmware -- so this is a boot-time fix only.
+#
+# Doing nothing when there is no adapter is the common case and costs one
+# directory read.
+
+BTUSB=/sys/bus/usb/drivers/btusb
+
+case "$1" in
+    start)
+        # BlueZ keeps link keys under /var/lib/bluetooth and bluealsa its
+        # per-device volume under /var/lib/bluealsa. Both are symlinks onto the
+        # user partition, because the rootfs is read-only squashfs and stays
+        # that way. Creating the targets here, at boot, rather than in whatever
+        # code happens to start a daemon: a pairing that cannot be written is
+        # reported as "Pairing successful" and then forgotten, and the phone
+        # says "could not connect" about earbuds it just paired with.
+        mkdir -p /NeoDCT/User/.bluetooth /NeoDCT/User/.bluealsa 2>/dev/null
+
+        [ -d "$BTUSB" ] || exit 0
+
+        found=
+        for dev in "$BTUSB"/*:*; do
+            [ -e "$dev" ] || continue
+            name=$(basename "$dev")
+            # INTERFACE 0 ONLY. A dongle presents two -- ":1.0" carries HCI and
+            # ":1.1" the isochronous audio -- and btusb binds both. Re-probing
+            # the second one interrupts the firmware download the first one
+            # just started, which fails as a vendor-command timeout and looks
+            # nothing like the cause:
+            #
+            #   Bluetooth: hci0: command 0xfc20 tx timeout
+            #   Bluetooth: hci0: RTL: download fw command failed (-110)
+            #
+            # Re-probing ":1.0" re-runs the whole setup, audio interface and
+            # all, so nothing is lost by leaving the other alone.
+            case "$name" in
+                *:1.0) ;;
+                *) continue ;;
+            esac
+            found=1
+            printf '%s' "$name" > "$BTUSB/unbind" 2>/dev/null
+            printf '%s' "$name" > "$BTUSB/bind" 2>/dev/null
+            # The download is ~30 KB over a full-speed link and the driver does
+            # it synchronously in probe, but the write above returns as soon as
+            # the bind is queued. Give it room before boot carries on and
+            # something else grabs the bus.
+            sleep 3
+            echo "[BT] re-probed $name so its firmware loads from the rootfs"
+        done
+        [ -n "$found" ] || exit 0
+        ;;
+    stop)
+        ;;
+    restart|reload)
+        "$0" start
+        ;;
+    *)
+        echo "usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac

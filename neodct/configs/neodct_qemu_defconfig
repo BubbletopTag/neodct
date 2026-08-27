@@ -49,7 +49,7 @@ BR2_SYSTEM_DHCP=""
 BR2_TARGET_TZ_INFO=y
 BR2_ROOTFS_OVERLAY="../neodct/overlay"
 BR2_ROOTFS_POST_IMAGE_SCRIPT="board/qemu/post-image.sh ../neodct/scripts/post-image-neodct.sh"
-BR2_ROOTFS_POST_BUILD_SCRIPT="../neodct/scripts/post-build-prune-tests.sh ../neodct/scripts/post-build-system-metadata.sh ../neodct/scripts/post-build-nonfree-firmware.sh"
+BR2_ROOTFS_POST_BUILD_SCRIPT="../neodct/scripts/post-build-prune-tests.sh ../neodct/scripts/post-build-system-metadata.sh ../neodct/scripts/post-build-nonfree-firmware.sh ../neodct/scripts/post-build-bt-on-demand.sh"
 BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS="qemu-aarch64"
 BR2_ROOTFS_POST_SCRIPT_ARGS="$(BR2_DEFCONFIG)"
 BR2_LINUX_KERNEL=y
@@ -155,3 +155,22 @@ BR2_PACKAGE_NEODCT=y
 # and it would put 338 KB of firmware for seven other Realtek parts onto a
 # 128 MB NAND. Two files and their licence is 44 KB.
 
+# --- Bluetooth audio ---
+# bluez-alsa cannot stand alone: it selects bluez5_utils, which selects dbus
+# and libglib2. Measured on a booted phone before this was accepted -- 2.8 MiB
+# of flash, and about 6 MB PSS with all three daemons up (dbus 519 KB,
+# bluetoothd 2.1 MB, bluealsa 3.5 MB). That is ~11% of the 54 MB this phone
+# actually has, which is why NOTHING here starts at boot: the daemons are
+# brought up when Settings enables Bluetooth and bluealsa only lives while a
+# device is connected. Idle cost is zero.
+#
+# Only the audio plugins are built. midi, hcitop and rfcomm are not.
+BR2_PACKAGE_BLUEZ5_UTILS=y
+BR2_PACKAGE_BLUEZ5_UTILS_PLUGINS_AUDIO=y
+# bluetoothctl. Pairing is Secure Simple Pairing plus a link key to store, and
+# an A2DP connection is AVDTP signalling on top of that -- none of which is a
+# kernel ioctl. Driving the CLI is the same shape this OS already uses for
+# ssh, sshd, arecord and aplay: spawn the tool, read its output, keep the
+# protocol knowledge out of our process. It costs readline.
+BR2_PACKAGE_BLUEZ5_UTILS_CLIENT=y
+BR2_PACKAGE_BLUEZ_ALSA=y

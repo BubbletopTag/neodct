@@ -74,6 +74,10 @@
 
 #include "settings_app.h"
 
+#include "nd_bt.h"
+#include "nd_btaudio.h"
+#include "nd_mic.h"
+
 /* ------------------------------------------------------------------ *
  * The strings
  * ------------------------------------------------------------------ */
@@ -113,8 +117,259 @@ const char *const nd_setapp_sdcard_help =
     "You can make one on a computer, or let the phone do it. Setting up only "
     "adds the folders. Formatting erases everything on the card.";
 
+size_t nd_setapp_bt_lines(char lines[][ND_SETAPP_BT_LINE_MAX], size_t max, bool enabled,
+                          bool connected)
+{
+    size_t n = 0u;
+
+    if (lines == NULL || max == 0u)
+        return 0u;
+
+    if (!enabled) {
+        (void)nd_strlcpy(lines[n++], "Enable", ND_SETAPP_BT_LINE_MAX);
+        return n;
+    }
+    (void)nd_strlcpy(lines[n++], "Disable", ND_SETAPP_BT_LINE_MAX);
+    if (n < max)
+        (void)nd_strlcpy(lines[n++], "Scan", ND_SETAPP_BT_LINE_MAX);
+    if (connected && n < max)
+        (void)nd_strlcpy(lines[n++], "Disconnect", ND_SETAPP_BT_LINE_MAX);
+    return n;
+}
+
+/* The USB sound card, found the way S17audio finds it, so that turning
+ * Bluetooth off lands on the card this phone actually plays through. Only used
+ * as a fallback -- route_to() prefers the saved bytes. */
+static int bt_speaker_card(void)
+{
+    nd_mic_device found[8];
+    size_t n = nd_mic_scan(ND_MIC_ASOUND_DIR, found, ND_ARRAY_LEN(found));
+    size_t i;
+
+    /* A capture device implies a real card; the playback side is the same
+     * card on a headset. Better than guessing 0, which on this phone is the
+     * onboard codec that is wired to nothing. */
+    for (i = 0u; i < n; i++) {
+        int card = 0;
+
+        if (sscanf(found[i].device, "plughw:%d,", &card) == 1)
+            return card;
+    }
+    return 1;
+}
+
+/* "Scanning..." while a scan runs. nd_infoscreen_show() blocks for a key,
+ * which is right for a message and wrong for a progress state, so this draws
+ * the same centred look and returns immediately. */
+static void bt_say_working(nd_ui *ui, const char *what)
+{
+    nd_softkey bar;
+    int32_t w = 0;
+    int32_t h = 0;
+
+    (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, nd_ui_width(ui), nd_ui_content_bottom(ui)),
+                            ND_BLACK);
+    nd_text_size(ui->font_n, what, &w, &h);
+    (void)nd_draw_text(ui->draw, (nd_ui_width(ui) - w) / 2, (nd_ui_content_bottom(ui) - h) / 2,
+                       what, ui->font_n, ND_WHITE);
+    nd_softkey_init(&bar, ui, false);
+    nd_softkey_update(&bar, "", true);
+}
+
+/* The address of whatever is connected, or "" -- asked of bluetoothctl rather
+ * than remembered, because earbuds go away without telling the phone and a
+ * remembered answer would keep saying "connected" into an empty room. */
+static void bt_connected_addr(char *out, size_t n)
+{
+    nd_btaudio_cmd cmd;
+    char text[4096];
+    nd_btaudio_device devices[8];
+    size_t count;
+    size_t i;
+
+    out[0] = '\0';
+    /* Plain "devices", not "devices Connected". The filtered form returns
+     * nothing at all on the BlueZ in this image, so the loop below had no
+     * candidates to confirm and this always answered "nothing is connected"
+     * -- which the Pair screen reported as "Could not connect" about earbuds
+     * that had in fact just connected. Each candidate is confirmed with info
+     * below regardless, so the filter bought nothing even when it worked. */
+    if (nd_btaudio_cmd_build(&cmd, "devices", NULL, 0) != ND_OK)
+        return;
+    if (nd_btaudio_run(&cmd, text, sizeof text) != 0)
+        return;
+
+    count = nd_btaudio_parse_devices(text, devices, ND_ARRAY_LEN(devices));
+    for (i = 0u; i < count; i++) {
+        /* "devices Connected" is a newer bluetoothctl; on an older one it
+         * lists everything, so each candidate is confirmed individually. */
+        nd_btaudio_cmd info;
+        char detail[2048];
+
+        if (nd_btaudio_cmd_build(&info, "info", devices[i].addr, 0) != ND_OK)
+            continue;
+        if (nd_btaudio_run(&info, detail, sizeof detail) != 0)
+            continue;
+        if (nd_btaudio_parse_connected(detail)) {
+            (void)nd_strlcpy(out, devices[i].addr, n);
+            return;
+        }
+    }
+}
+
+/* Scan, list what was found, pair and connect the one chosen. */
+static void bt_scan_and_pair(nd_ui *ui)
+{
+    nd_btaudio_cmd cmd;
+    char text[4096];
+    nd_btaudio_device devices[8];
+    char lines[8][ND_BTAUDIO_NAME_MAX + ND_BTAUDIO_ADDR_MAX + 4];
+    const char *items[8];
+    size_t count;
+    size_t i;
+    nd_vlist list;
+    nd_softkey bar;
+    int32_t choice;
+
+    bt_say_working(ui, "Scanning...");
+    if (nd_ui_present(ui) != ND_OK)
+        return;
+
+    /* The timeout IS the scan length: "scan on" runs until stopped. */
+    if (nd_btaudio_cmd_build(&cmd, "scan", "on", 8) == ND_OK)
+        (void)nd_btaudio_run(&cmd, NULL, 0u);
+
+    if (nd_btaudio_cmd_build(&cmd, "devices", NULL, 0) != ND_OK)
+        return;
+    (void)nd_btaudio_run(&cmd, text, sizeof text);
+    count = nd_btaudio_parse_devices(text, devices, ND_ARRAY_LEN(devices));
+
+    if (count == 0u) {
+        (void)nd_infoscreen_show(ui, "Nothing found", NULL, "Back");
+        return;
+    }
+
+    for (i = 0u; i < count; i++) {
+        (void)nd_strlcpy(lines[i], devices[i].name, sizeof lines[i]);
+        items[i] = lines[i];
+    }
+
+    nd_vlist_init(&list, ui, "Devices", items, count, ND_SETAPP_ROOT_ID);
+    nd_softkey_init(&bar, ui, false);
+    nd_softkey_update(&bar, "Pair", false);
+    choice = nd_vlist_show(&list);
+    if (choice < 0 || (size_t)choice >= count)
+        return;
+
+    bt_say_working(ui, "Pairing...");
+    if (nd_ui_present(ui) != ND_OK)
+        return;
+
+    /* pair, then trust, then connect. Trust is what lets the earbuds come back
+     * on their own after they have been in their case; without it every
+     * reconnection is a fresh pairing. */
+    /* NO --timeout on pair or connect. bluetoothctl exits when the timeout
+     * expires whether or not the exchange finished, and Secure Simple Pairing
+     * with earbuds takes longer than it looks: the peer gives up and goes back
+     * to advertising, which is heard as "ready to pair" a second time. The
+     * commands return on their own when they are done. --timeout stays on
+     * "scan on", which never returns by itself. */
+    if (nd_btaudio_cmd_build(&cmd, "pair", devices[choice].addr, 0) == ND_OK)
+        (void)nd_btaudio_run(&cmd, NULL, 0u);
+    if (nd_btaudio_cmd_build(&cmd, "trust", devices[choice].addr, 0) == ND_OK)
+        (void)nd_btaudio_run(&cmd, NULL, 0u);
+
+    /* bluealsa has to be listening before the connection completes, or the
+     * A2DP transport arrives with nothing to hand it to. */
+    (void)nd_btaudio_bluealsa_start();
+
+    if (nd_btaudio_cmd_build(&cmd, "connect", devices[choice].addr, 0) == ND_OK)
+        (void)nd_btaudio_run(&cmd, NULL, 0u);
+
+    {
+        char addr[ND_BTAUDIO_ADDR_MAX];
+
+        bt_connected_addr(addr, sizeof addr);
+        if (addr[0] != '\0') {
+            (void)nd_btaudio_route_to(addr, bt_speaker_card());
+            nd_log(ND_LOG_BTAUDIO, "connected %s; audio now goes there", addr);
+            (void)nd_infoscreen_show(ui, "Connected", NULL, "Back");
+        } else {
+            (void)nd_infoscreen_show(ui, "Could not connect", NULL, "Back");
+        }
+    }
+}
+
+static void show_bt_audio(nd_ui *ui)
+{
+    for (;;) {
+        char lines[ND_SETAPP_BT_MAX_ITEMS][ND_SETAPP_BT_LINE_MAX];
+        const char *items[ND_SETAPP_BT_MAX_ITEMS];
+        char addr[ND_BTAUDIO_ADDR_MAX];
+        nd_vlist menu;
+        nd_softkey bar;
+        bool enabled;
+        bool connected;
+        size_t count;
+        size_t i;
+        int32_t choice;
+
+        if (!nd_bt_available()) {
+            (void)nd_infoscreen_show(ui, "No Bluetooth", NULL, "Back");
+            return;
+        }
+
+        enabled = nd_btaudio_adapter_up();
+        addr[0] = '\0';
+        if (enabled)
+            bt_connected_addr(addr, sizeof addr);
+        connected = addr[0] != '\0';
+
+        count = nd_setapp_bt_lines(lines, ND_SETAPP_BT_MAX_ITEMS, enabled, connected);
+        for (i = 0u; i < count; i++)
+            items[i] = lines[i];
+
+        nd_vlist_init(&menu, ui, "BT Audio", items, count, ND_SETAPP_ROOT_ID);
+        nd_softkey_init(&bar, ui, false);
+        nd_softkey_update(&bar, "Select", false);
+        choice = nd_vlist_show(&menu);
+        if (choice < 0)
+            return;
+
+        if (!enabled && choice == 0) {
+            bt_say_working(ui, "Starting...");
+            if (nd_ui_present(ui) != ND_OK)
+                return;
+            if (nd_btaudio_daemons_start() != ND_OK) {
+                (void)nd_infoscreen_show(ui, "No Bluetooth stack", NULL, "Back");
+            } else {
+                nd_btaudio_cmd cmd;
+
+                (void)nd_bt_power(0u, true);
+                if (nd_btaudio_cmd_build(&cmd, "power", "on", 0) == ND_OK)
+                    (void)nd_btaudio_run(&cmd, NULL, 0u);
+            }
+        } else if (enabled && choice == 0) {
+            nd_btaudio_daemons_stop(bt_speaker_card());
+            (void)nd_bt_power(0u, false);
+        } else if (enabled && choice == 1) {
+            bt_scan_and_pair(ui);
+        } else if (enabled && choice == 2 && connected) {
+            nd_btaudio_cmd cmd;
+
+            if (nd_btaudio_cmd_build(&cmd, "disconnect", addr, 0) == ND_OK)
+                (void)nd_btaudio_run(&cmd, NULL, 0u);
+            (void)nd_btaudio_route_to(NULL, bt_speaker_card());
+            nd_log(ND_LOG_BTAUDIO, "disconnected; audio back on the speaker");
+        }
+
+        if (nd_app_should_exit())
+            return;
+    }
+}
+
 const char *const nd_setapp_menu[ND_SETAPP_MENU_ITEMS] = {
-    "Wallpaper", "Memory card", "Messages Style", "Engineering Mode", "About"};
+    "Wallpaper", "Memory card", "Messages Style", "BT Audio", "Engineering Mode", "About"};
 
 /* Must read the same way round as nd_msg_style_options in the Messages app:
  * index 0 is CLASSIC. test_settings_app.c pins the strings this writes. */
@@ -1039,8 +1294,10 @@ int app_run(nd_ui *ui)
         else if (selection == 2)
             show_messages_style(ui);
         else if (selection == 3)
-            show_engineering_mode(ui);
+            show_bt_audio(ui);
         else if (selection == 4)
+            show_engineering_mode(ui);
+        else if (selection == 5)
             show_about(ui);
 
         if (nd_app_should_exit())

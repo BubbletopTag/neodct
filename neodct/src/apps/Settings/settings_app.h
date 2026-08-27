@@ -107,8 +107,29 @@ extern const char *const nd_setapp_sdcard_help;
  * WAS 4. "Messages Style" is new and is placed BEFORE Engineering Mode so
  * that the two engineering-ish rows stay together at the end; the Python's
  * four are otherwise in their original order. */
-#define ND_SETAPP_MENU_ITEMS 5
+#define ND_SETAPP_MENU_ITEMS 6
 extern const char *const nd_setapp_menu[ND_SETAPP_MENU_ITEMS];
+
+/* ------------------------------------------------------------------ *
+ * The BT Audio screen
+ * ------------------------------------------------------------------ */
+
+/* "Disconnect" is the longest row by a wide margin. */
+#define ND_SETAPP_BT_LINE_MAX  24
+#define ND_SETAPP_BT_MAX_ITEMS 3
+
+/* bt_lines(): the rows, rebuilt from live state each time the screen is drawn,
+ * because the screen IS the status display -- there is nowhere else on it to
+ * say whether Bluetooth is on or whether something is connected.
+ *
+ * Off            -> Enable
+ * On, nothing    -> Disable, Scan
+ * On, connected  -> Disable, Scan, Disconnect
+ *
+ * Disconnect appears only when there is something to disconnect. A row that
+ * does nothing teaches the owner that rows sometimes do nothing. */
+size_t nd_setapp_bt_lines(char lines[][ND_SETAPP_BT_LINE_MAX], size_t max, bool enabled,
+                          bool connected);
 #define ND_SETAPP_ENG_ITEMS 2
 extern const char *const nd_setapp_eng_options[ND_SETAPP_ENG_ITEMS];
 

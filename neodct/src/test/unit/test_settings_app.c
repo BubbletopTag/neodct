@@ -75,6 +75,7 @@ static struct {
     const char *const *eng_options;
     const char *const *msgstyle_options;
     const char *const *exts;
+    size_t (*bt_lines)(char (*)[ND_SETAPP_BT_LINE_MAX], size_t, bool, bool);
 } api;
 
 static bool api_open(void *h)
@@ -95,6 +96,7 @@ static bool api_open(void *h)
     api.eng_options = dlsym(h, "nd_setapp_eng_options");
     api.msgstyle_options = dlsym(h, "nd_setapp_msgstyle_options");
     api.exts = dlsym(h, "nd_setapp_exts");
+    *(void **)&api.bt_lines = dlsym(h, "nd_setapp_bt_lines");
 
     return api.run != NULL && api.shutdown != NULL && api.is_supported != NULL &&
            api.display_name != NULL && api.dirs != NULL && api.scan != NULL && api.wrap != NULL &&
@@ -111,6 +113,56 @@ static char g_saved_root[ND_PATH_MAX];
  * 1 and 2. The strings, and the key the core reads
  * ------------------------------------------------------------------ */
 
+/* Bluetooth off: one row, and it is the only thing worth offering. Scanning
+ * with the adapter down would ask the kernel to do something it cannot, and
+ * Disconnect would be a row that does nothing. */
+static void test_bt_lines_off(void)
+{
+    char lines[ND_SETAPP_BT_MAX_ITEMS][ND_SETAPP_BT_LINE_MAX];
+    size_t n;
+
+    CHECK(api.bt_lines != NULL, "the app can build the BT Audio rows");
+    if (api.bt_lines == NULL)
+        return;
+
+    n = api.bt_lines(lines, ND_SETAPP_BT_MAX_ITEMS, false, false);
+
+    CHECK_INT(n, 1, "one row when Bluetooth is off");
+    CHECK_STR(lines[0], "Enable", "and it offers to turn it on");
+}
+
+/* On with nothing connected: turning it off and looking for something are the
+ * only two things that make sense. */
+static void test_bt_lines_on_idle(void)
+{
+    char lines[ND_SETAPP_BT_MAX_ITEMS][ND_SETAPP_BT_LINE_MAX];
+    size_t n;
+
+    if (api.bt_lines == NULL)
+        return;
+
+    n = api.bt_lines(lines, ND_SETAPP_BT_MAX_ITEMS, true, false);
+
+    CHECK_INT(n, 2, "two rows when on and idle");
+    CHECK_STR(lines[0], "Disable", "off is the first thing offered");
+    CHECK_STR(lines[1], "Scan", "then finding something");
+}
+
+/* Connected: Disconnect appears, and only then. */
+static void test_bt_lines_connected(void)
+{
+    char lines[ND_SETAPP_BT_MAX_ITEMS][ND_SETAPP_BT_LINE_MAX];
+    size_t n;
+
+    if (api.bt_lines == NULL)
+        return;
+
+    n = api.bt_lines(lines, ND_SETAPP_BT_MAX_ITEMS, true, true);
+
+    CHECK_INT(n, 3, "three rows when something is connected");
+    CHECK_STR(lines[2], "Disconnect", "and the third undoes it");
+}
+
 static void test_strings(void)
 {
     CHECK_STR(api.menu[0], "Wallpaper", "the root menu's first row");
@@ -118,8 +170,12 @@ static void test_strings(void)
     /* WAS four rows. "Messages Style" is new and sits third, before the two
      * engineering-ish rows, so the Python's own four keep their order. */
     CHECK_STR(api.menu[2], "Messages Style", "third");
-    CHECK_STR(api.menu[3], "Engineering Mode", "fourth");
-    CHECK_STR(api.menu[4], "About", "fifth");
+    /* "BT Audio" sits before the engineering rows for the reason "Messages
+     * Style" does: it is something an owner uses, not something a developer
+     * toggles, and the two engineering-ish rows stay last. */
+    CHECK_STR(api.menu[3], "BT Audio", "fourth");
+    CHECK_STR(api.menu[4], "Engineering Mode", "fifth");
+    CHECK_STR(api.menu[5], "About", "sixth");
     CHECK_STR(api.msgstyle_options[0], "Classic", "Msg. Style[0]");
     CHECK_STR(api.msgstyle_options[1], "Chat", "Msg. Style[1]");
     CHECK_STR(api.eng_options[0], "On", "Eng. Mode[0]");
@@ -523,11 +579,14 @@ static void test_messages_style_writes_the_setting(void)
 
 static void test_engineering_mode_writes_the_setting(void)
 {
-    /* 4 picks "Engineering Mode" off the root list -- it MOVED from third to
-     * fourth when Messages Style was added -- then 2 picks "Off" and 1 picks
-     * "On". VerticalList's digit shortcuts are 1-based. */
-    static const int32_t TURN_OFF[] = {ND_KEY_4, ND_KEY_2};
-    static const int32_t TURN_ON[] = {ND_KEY_4, ND_KEY_1};
+    /* 5 picks "Engineering Mode" off the root list. It has moved twice now:
+     * third to fourth when Messages Style was added, fourth to FIFTH when BT
+     * Audio was. Then 2 picks "Off" and 1 picks "On". VerticalList's digit
+     * shortcuts are 1-based, so a row moving is a keystroke changing -- which
+     * is the whole reason this test drives the real widget rather than calling
+     * the handler directly. */
+    static const int32_t TURN_OFF[] = {ND_KEY_5, ND_KEY_2};
+    static const int32_t TURN_ON[] = {ND_KEY_5, ND_KEY_1};
     int rc = -1;
     uint64_t frames = 0u;
 
@@ -723,6 +782,9 @@ int main(void)
     (void)nd_settings_init();
 
     RUN(test_strings);
+    RUN(test_bt_lines_off);
+    RUN(test_bt_lines_on_idle);
+    RUN(test_bt_lines_connected);
     RUN(test_is_supported);
     RUN(test_display_name);
     RUN(build_wallpaper_tree);
