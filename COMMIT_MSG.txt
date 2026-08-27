@@ -1451,3 +1451,183 @@ Note for whoever reads a bug report about this next: the home screen cannot
 rule Simulation Mode in or out. nd_layout.c:404 draws the element's sim_val
 when signal_level() is -1, so a phone with no modem shows CONSTANT FAKE BARS.
 Bars that move or vanish are the real ones.
+
+
+================================================================================
+
+bluetooth: the kernel is the whole stack, and an app that proves it
+
+A TP-Link UB500 (2357:0604) now works on this phone, and there is an
+engineering app -- Bluetooth, id 9007 -- whose job is to say which of the five
+things that have to be true is not.
+
+## No BlueZ, and that is the design
+
+The obvious way to talk to a dongle is bluetoothd. BR2_PACKAGE_BLUEZ5_UTILS
+selects dbus and libglib2, so "is there an adapter and what is its address"
+would have cost a message bus, ~1.5 MB of object library and a resident
+daemon, on a 64 MB device, for a feature that is engineering-only.
+
+Everything this needs is a kernel ioctl on an AF_BLUETOOTH socket, served by
+the kernel's own BlueZ core: HCIGETDEVLIST, HCIGETDEVINFO, HCIDEVUP,
+HCIINQUIRY. So userspace is lib/nd_bt.c, about 400 lines, inside libneodct,
+and nothing else exists. Measured cost of the kernel side: the uncompressed
+Image went from 14,514,688 to 15,245,824 bytes, +714 KB of resident text.
+bluetoothd plus its dependencies would have been several times that on top.
+
+That argument stops holding the day pairing, A2DP or RFCOMM is wanted -- all
+three need the event-driven HCI session bluetoothd exists to run. nd_bt.h
+says so at the point where someone would go looking. It is also why an
+inquiry reports addresses and device classes but no names or RSSI: the
+inquiry ioctl carries neither, for the same reason.
+
+## The structs are copied, and that is checked rather than asserted
+
+struct hci_dev_info lives in include/net/bluetooth/hci_sock.h, which is not a
+UAPI header -- nothing installs it, and the only userspace copy ships with
+bluez-libs, which is the dependency this module exists to avoid. So they are
+declared again in nd_bt.c, and every offset was checked against
+linux-6.12.47's own declaration AND measured on the machine: sizeof 92, name
+at 2, bdaddr at 10, flags at 16, type at 20, features at 21, pkt_type at 32.
+Nothing in them is a pointer or a long, so 32-bit ARM and the x86-64 the
+tests run on agree, which is what makes a host test meaningful at all.
+
+The ioctl numbers are computed with _IOR/_IOW rather than pasted.
+
+## ioctl's second argument has two types
+
+musl declares `int ioctl(int, int, ...)`; glibc declares
+`int ioctl(int, unsigned long, ...)`. Three of these requests have bit 31 set
+because _IOR puts _IOC_READ there -- HCIGETDEVLIST is 0x800448D2 -- so there
+is no single type for the constant that is silent under -Wconversion on both:
+as unsigned it is a sign change on musl, as int it is a sign extension on
+glibc. The phone is musl and the tests are glibc and both have to be right.
+
+One wrapper per argument shape, one explicit cast selected on __GLIBC__. The
+bits the kernel sees are identical either way; sys_ioctl takes the request as
+unsigned int. Verified clean under host gcc, aarch64-buildroot-linux-musl-gcc
+and arm-buildroot-linux-musleabihf-gcc.
+
+## The BD_ADDR is stored backwards
+
+It crosses the HCI wire least-significant byte first and the kernel hands it
+over as it arrived, so the printed form is the reverse of the bytes.
+nd_bt_addr_str() is the only place that reversal happens. Getting it the
+wrong way round produces a plausible-looking address that no other tool
+agrees with, so the test pins it against the real UB500's, which is checkable
+twice over: hciconfig says B8:FB:B3:9D:0D:C7 and the dongle's own USB iSerial
+is B8FBB39D0DC7.
+
+## The self test is the point of the app
+
+Bringing a dongle up fails in five places and four of them look identical
+from outside. KERNEL is socket(AF_BLUETOOTH) -- CONFIG_BT is off, which on
+this device means a reflash, since an .ndsw carries no kernel. ADAPTER is
+HCIGETDEVLIST empty -- btusb did not bind. ADDRESS is BD_ADDR all zeros --
+btrtl asked for rtl8761bu_fw.bin and did not get it, and this is the one that
+looks most like working hardware because hci0 exists. RADIO is HCIDEVUP.
+SCAN is the inquiry, the only step that proves the radio transmitted.
+
+Each runs only if the one before it passed and the rest show "--" rather than
+FAIL, because five failures caused by one unplugged dongle say less than one
+failure and four dashes. RADIO reads the flags back after HCIDEVUP returns 0
+rather than trusting it: a controller that fails its own init leaves HCI_UP
+clear. Hearing nobody on SCAN is a pass -- the radio worked, the room was
+empty -- and saying FAILED there would send a technician after a working
+dongle.
+
+## Two screens that block, and the frame goes out first
+
+HCIINQUIRY does not return until the controller has finished listening --
+5.12 s, no poll, no partial result. Both pages commit their "Scanning..."
+frame BEFORE the ioctl; drawing it after leaves the previous screen up for
+five seconds and the phone looks hung. The wait is interruptible (the kernel
+waits on the HCI_INQUIRY bit with TASK_INTERRUPTIBLE and nd-apprun installs
+SIGTERM without SA_RESTART), so an incoming call arrives as EINTR and
+app_shutdown() still runs on time. That is what makes a five-second blocking
+ioctl acceptable inside the teardown contract at all.
+
+## Layout, measured rather than guessed
+
+An address is 157 px in font_s. So the scan list puts it at x=8 and the class
+name at x=168, where FuelGauge's pages keep the 8/70 split -- a two-column
+address at x=70 would put its last octet past the right edge. A long class
+name is clipped by the canvas and that is fine; clipping the address would
+not be. The row struct's fields are `left`/`right` and not `label`/`value`
+for the same reason: on one of the three pages they are the other way round.
+
+"UP RUNNING PSCAN ISCAN" is 217 px against a 170 px column, so PSCAN and
+ISCAN get their own row. That is not only a layout dodge: page scan and
+inquiry scan answer "can something else find this phone" and the other flags
+answer "is the radio alive", which are the two questions a bring-up screen is
+for.
+
+## Firmware in the overlay, not from linux-firmware
+
+rtl8761bu_fw.bin and rtl8761bu_config.bin, byte for byte from upstream
+release 20251011, with LICENCE.rtlwifi_firmware.txt beside them because the
+redistribution terms require it.
+
+BR2_PACKAGE_LINUX_FIRMWARE_RTL_87XX_BT provides the same two filenames in the
+same place and was the first choice. It is not used because the tarball is
+583 MB compressed and buildroot extracts the whole tree into EACH output
+directory -- there are two here -- on a machine with 17 GB free, and it would
+put 338 KB of firmware for seven other Realtek parts onto a 128 MB NAND.
+Switching back later is a one-line defconfig edit and deleting a directory.
+
+## The Luckfox half is NOT done, and 5.10 will not work as-is
+
+The SDK tree that builds that kernel is not on this machine, so nothing was
+built or run for it. docs/HARDWARE_NOTES.md carries the defconfig fragment as
+a proposal, clearly marked.
+
+One finding there is worth more than the fragment, and it was taken from the
+real linux-5.10.110 source rather than from memory: 5.10's btrtl has ONE
+entry for LMP 0x8761 rev 0xb and does not look at the bus, so it matches a
+USB dongle against the UART part and asks for rtl8761b_fw.bin -- a different
+image from rtl8761bu_fw.bin, 45,444 bytes against 44,484. Shipping the right
+firmware is not enough; the kernel will not ask for it by that name. 6.12
+splits the entry by HCI_USB/HCI_UART and 5.10's id_table already has the
+hci_bus field and already honours IC_MATCH_FL_HCIBUS, so the backport is data
+rather than logic. The exact patch is in HARDWARE_NOTES, with a note that
+5.10 spells fw_name with the .bin extension and cfg_name without, so copying
+6.12's strings verbatim asks for rtl8761bu_config.bin.bin.
+
+There is also a hardware question nobody has answered: the Pico Mini B has
+one USB port and the SIM7600 is on it.
+
+## What is proved, and what is not
+
+Proved against the real dongle, on this host: enumeration, name, bus,
+BD_ADDR, flags, and every failure path. test_bt.c uses /sys/class/bluetooth
+as an independent oracle and asserts nd_bt_list() agrees with it, so it is
+true on a build machine with no dongle and on this desk with one -- not a
+skip on the machine that has the hardware, because a skip there is how a
+Bluetooth stack ships broken. The live self test prints KERNEL/ADAPTER/
+ADDRESS pass and RADIO "Operation not permitted", which is correct for an
+unprivileged process.
+
+NOT proved: a live inquiry. HCIDEVUP needs CAP_NET_ADMIN and there is no
+sudo here, so hci0 is registered and down and the radio has never been asked
+to transmit. HCIINQUIRY itself has no capability check, so the moment the
+adapter is up the Scan page works unprivileged. Also not proved: USB
+passthrough into QEMU, which needs write access to the dongle's
+/dev/bus/usb node. docs/BLUETOOTH.md has the udev rule to paste.
+
+## Shared assertions
+
+Twenty-four apps now, eleven of them engineering. test_appreg's app count and
+its scrollbar notch (87 to 84: the step is 99/(n-1), so 36 + 12*99/23 is
+87.65 and the notch top is three rows above), test_appsel's EXPECTED[] table
+and its engineering count. Six menu-* golden frames re-cut -- five moved at
+twenty-three apps and menu-games joined them at twenty-four. Every diff is
+inside x 228-235, the scrollbar column, 10-20 pixels each.
+
+"Bluetooth" is deliberately NOT registered in nd_log.h's tag list. It is
+already in test_nd_log.c's unregistered-band table pinned at colour 72, and
+registering it would repaint a value that is an existing asserted fact.
+
+CHANGELOG.txt and VERSION_ID are untouched: 0.4.2a is already tagged, and
+opening the next version is a release decision, not this commit's.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>

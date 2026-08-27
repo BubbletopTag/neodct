@@ -49,7 +49,7 @@ BR2_SYSTEM_DHCP=""
 BR2_TARGET_TZ_INFO=y
 BR2_ROOTFS_OVERLAY="../neodct/overlay"
 BR2_ROOTFS_POST_IMAGE_SCRIPT="board/qemu/post-image.sh ../neodct/scripts/post-image-neodct.sh"
-BR2_ROOTFS_POST_BUILD_SCRIPT="../neodct/scripts/post-build-prune-tests.sh ../neodct/scripts/post-build-system-metadata.sh"
+BR2_ROOTFS_POST_BUILD_SCRIPT="../neodct/scripts/post-build-prune-tests.sh ../neodct/scripts/post-build-system-metadata.sh ../neodct/scripts/post-build-nonfree-firmware.sh"
 BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS="qemu-aarch64"
 BR2_ROOTFS_POST_SCRIPT_ARGS="$(BR2_DEFCONFIG)"
 BR2_LINUX_KERNEL=y
@@ -132,3 +132,26 @@ BR2_PACKAGE_OPENSSH_KEY_UTILS=y
 # Selects sqlite, freetype, jpeg, libpng, zlib and openssl in its Config.in,
 # so that dropping python takes none of them with it.
 BR2_PACKAGE_NEODCT=y
+
+# --- Bluetooth (engineering) ---
+# Nothing is added here on purpose, and that is the decision worth recording.
+#
+# A TP-Link UB500 (2357:0604, an RTL8761BU) is driven entirely by the kernel:
+# CONFIG_BT + CONFIG_BT_HCIBTUSB + CONFIG_BT_HCIBTUSB_RTL in the linux.config,
+# plus two firmware files that ship in the overlay at
+# overlay/lib/firmware/rtl_bt/. Userspace is neodct/src/lib/nd_bt.c, ~400
+# lines of ioctl on an AF_BLUETOOTH socket, inside libneodct.
+#
+# BR2_PACKAGE_BLUEZ5_UTILS is deliberately NOT set. It selects dbus and
+# libglib2 and brings a resident daemon, which is a message bus and ~1.5 MB
+# of object library on a 64 MB device, for a feature that is engineering-only
+# and needs none of it. That argument stops holding the day pairing, A2DP or
+# RFCOMM is wanted -- all three need the event-driven HCI session bluetoothd
+# exists to run. docs/BLUETOOTH.md has the whole reasoning.
+#
+# The firmware is in the overlay rather than from BR2_PACKAGE_LINUX_FIRMWARE
+# (+ _RTL_87XX_BT) because that tarball is 583 MB compressed and buildroot
+# extracts the whole tree into EACH output directory -- there are two here --
+# and it would put 338 KB of firmware for seven other Realtek parts onto a
+# 128 MB NAND. Two files and their licence is 44 KB.
+

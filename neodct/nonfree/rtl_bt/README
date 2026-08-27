@@ -1,0 +1,50 @@
+Realtek RTL8761BU Bluetooth firmware
+====================================
+
+Two binaries, and the licence the redistribution terms require to be shipped
+beside them.
+
+    rtl8761bu_fw.bin        the controller's firmware image
+    rtl8761bu_config.bin    its configuration blob
+    LICENCE.rtlwifi_firmware.txt
+
+Both are byte-for-byte from upstream linux-firmware, release 20251011:
+
+    https://cdn.kernel.org/pub/linux/kernel/firmware/linux-firmware-20251011.tar.xz
+
+WHENCE in that tree lists them under the btusb driver, "Licence:
+Redistributable. See LICENCE.rtlwifi_firmware.txt for details." Nothing here
+is modified; verify with the checksums at the bottom of this file.
+
+Who asks for them, and by exactly these names
+---------------------------------------------
+btusb binds the TP-Link UB500 (2357:0604) on its USB class alone -- interface
+class e0, subclass 01, protocol 01 -- so there is no id-table entry anywhere
+naming this dongle. The part carries no firmware of its own. btrtl reads its
+LMP subversion, matches RTL_ROM_LMP_8761A / rev 0xb on HCI_USB, and asks the
+firmware loader for rtl_bt/rtl8761bu_fw.bin and rtl_bt/rtl8761bu_config.bin.
+
+Get that wrong and the failure is quiet: the controller still registers, hci0
+still exists, and its BD_ADDR is 00:00:00:00:00:00. That is what the ADDRESS
+step of the Bluetooth engineering app is for.
+
+NOT rtl8761b_fw.bin. The 8761B (UART) and 8761BU (USB) are different images
+and only kernels from roughly 5.14 onwards tell them apart. docs/BLUETOOTH.md
+and the Luckfox section of docs/HARDWARE_NOTES.md both cover this; it is the
+thing that will bite the 5.10 SDK kernel.
+
+Why these live in the overlay and not in BR2_PACKAGE_LINUX_FIRMWARE
+-------------------------------------------------------------------
+BR2_PACKAGE_LINUX_FIRMWARE_RTL_87XX_BT provides exactly these two filenames
+in exactly this place and would be the tidier route. It is not used because
+the linux-firmware tarball is 583 MB compressed and buildroot extracts the
+WHOLE tree into each output directory -- there are two of them in this repo,
+buildroot/output and build-luckfox -- and it would also put 338 KB of
+firmware for seven other Realtek parts onto a 128 MB NAND.
+
+Switching to the package later is a one-line defconfig edit plus deleting
+this directory. Nothing else references these paths.
+
+Checksums
+---------
+See SHA256SUMS beside this file.

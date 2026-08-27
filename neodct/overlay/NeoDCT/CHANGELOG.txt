@@ -1,5 +1,37 @@
 # NeoDCT OS Changelog
 
+0.4.3a
+Two engineering apps for hardware you can plug in.
+
+Both answer a question the phone could not answer about itself before: is
+the microphone working, and is the Bluetooth dongle alive. Neither needs a
+serial cable or a laptop -- you plug the thing in and look at the screen.
+
+Added
+- MicTest, in Engineering. It lists every capture device the kernel is
+  offering, by name, and draws a live waveform of whatever the one you
+  pick is hearing. Speak and the line moves; silence draws a flat line
+  rather than nothing, so a dead microphone looks like silence instead of
+  like a crashed app.
+  It lists CAPTURE devices only. A phone with a USB sound card in it has
+  at least two, and the one that can record is not always the one ALSA
+  calls "default" -- picking the wrong one is silence with no error, which
+  is the failure this app exists to end.
+- Bluetooth, in Engineering. Finds the adapter, reports its address, and
+  scans for nearby devices. Driven straight through the kernel's own HCI
+  interface, so there is no Bluetooth daemon on the phone and nothing
+  running when the app is closed.
+- Firmware for the TP-Link UB500 (an RTL8761BU), which carries none of its
+  own and is a dead adapter without it. It ships in lib/firmware/rtl_bt,
+  with the Realtek licence beside it as that licence requires.
+
+Changed
+- Non-free firmware now lives in ONE place in the source tree,
+  neodct/nonfree/, beside the Rockchip DDR blob, and is copied into the
+  image by a build step rather than sitting in the overlay. What
+  proprietary code this phone runs is now answered by listing one
+  directory.
+
 0.4.2a
 Messages can look like a chat app now, and Remote Shell finally lets you in.
 

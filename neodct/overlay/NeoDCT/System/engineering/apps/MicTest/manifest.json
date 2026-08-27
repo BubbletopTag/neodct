@@ -1,0 +1,6 @@
+{
+    "name": "MicTest",
+    "id": "9002",
+    "icon": "icon.png",
+    "exec": "main.py"
+}

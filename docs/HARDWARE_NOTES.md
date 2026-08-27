@@ -179,6 +179,133 @@ verity both require) and `CONFIG_SQUASHFS_XZ`. Note there is **no**
 `CONFIG_SQUASHFS_ZSTD`, so the luckfox defconfig must build squashfs with XZ
 while qemu uses zstd.
 
+## SDK kernel: Bluetooth -- NOT DONE, and the 5.10 table is wrong for this dongle
+
+**Nothing here has been built or run.** The Luckfox SDK tree that produces
+this kernel is `~/Documents/Projects/luckfox-pico`, and it is **not on this
+machine** -- the directory does not exist, and the box has 17 GB free, so
+re-cloning it was not attempted either. What follows is what a build would
+need, derived from the 5.10 sources themselves rather than from memory, and
+it has to be treated as a proposal until someone runs it.
+
+The rootfs half IS done and needs nothing further: the Realtek firmware ships
+in `neodct/overlay/lib/firmware/rtl_bt/`, and both defconfigs use that same
+overlay. A kernel with no `CONFIG_BT` makes it moot, which is the whole of
+what is missing.
+
+### The defconfig fragment
+
+`sysdrv/source/kernel/arch/arm/configs/luckfox_rv1106_linux_defconfig`, the
+same file the backlight and dm-verity notes above edit (keep the
+`.bak-YYYYMMDD` habit):
+
+```
+CONFIG_BT=y
+CONFIG_BT_BREDR=y
+CONFIG_BT_HCIBTUSB=y
+CONFIG_BT_HCIBTUSB_RTL=y
+CONFIG_FW_LOADER=y
+```
+
+`=y` and not `=m` for the reason the backlight note gives: the SDK kernel's
+modules never reach this rootfs, because buildroot builds the rootfs and its
+`/lib/modules` belongs to a different kernel version entirely. A module here
+is a file that does not exist on the phone.
+
+No `CONFIG_BT_HCIVHCI` -- that is a QEMU test hook and has no business on
+hardware. No `CONFIG_RFKILL` unless a radio switch is ever wired.
+
+### The part that will actually bite: 5.10's btrtl asks for the wrong firmware
+
+This was checked against the real `linux-5.10.110` source, not assumed.
+
+The UB500 is an RTL8761BU: LMP subversion `0x8761`, HCI revision `0xb`, on
+`HCI_USB`. In **6.12** `drivers/bluetooth/btrtl.c` has two entries for that
+combination and tells them apart by bus:
+
+```c
+{ IC_INFO(RTL_ROM_LMP_8761A, 0xb, 0xa, HCI_UART), .fw_name = "rtl_bt/rtl8761b_fw",  ... }
+{ IC_INFO(RTL_ROM_LMP_8761A, 0xb, 0xa, HCI_USB),  .fw_name = "rtl_bt/rtl8761bu_fw", ... }
+```
+
+In **5.10** there is only one, and it does not look at the bus at all:
+
+```c
+	/* 8761B */
+	{ IC_INFO(RTL_ROM_LMP_8761A, 0xb),
+	  .config_needed = false,
+	  .has_rom_version = true,
+	  .fw_name  = "rtl_bt/rtl8761b_fw.bin",
+	  .cfg_name = "rtl_bt/rtl8761b_config" },
+```
+
+So a 5.10 kernel matches the USB dongle against the **UART** part and asks
+for `rtl8761b_fw.bin`, which is a different image from `rtl8761bu_fw.bin`
+(45,444 bytes against 44,484). Shipping the correct firmware is not enough:
+the kernel will not ask for it by that name.
+
+Two ways out, and the second is the honest one.
+
+**(a) Rename.** Ship `rtl8761bu_fw.bin` as `rtl8761b_fw.bin`. It works only
+because the 5.10 entry is bus-agnostic, and it silently breaks the day the
+kernel is updated or a genuine 8761BTV is attached. Fine for a bring-up
+afternoon, wrong to commit.
+
+**(b) Backport the split.** 5.10's `struct id_table` already has an
+`hci_bus` field and `btrtl_match_ic()` already honours `IC_MATCH_FL_HCIBUS`
+-- three other entries use it -- so this is data, not logic. Replace the
+single 8761B entry with:
+
+```c
+	/* 8761BTV (UART) */
+	{ .match_flags = IC_MATCH_FL_LMPSUBV | IC_MATCH_FL_HCIREV |
+			 IC_MATCH_FL_HCIBUS,
+	  .lmp_subver = RTL_ROM_LMP_8761A,
+	  .hci_rev = 0xb,
+	  .hci_bus = HCI_UART,
+	  .config_needed = false,
+	  .has_rom_version = true,
+	  .fw_name  = "rtl_bt/rtl8761b_fw.bin",
+	  .cfg_name = "rtl_bt/rtl8761b_config" },
+
+	/* 8761BU (USB) */
+	{ .match_flags = IC_MATCH_FL_LMPSUBV | IC_MATCH_FL_HCIREV |
+			 IC_MATCH_FL_HCIBUS,
+	  .lmp_subver = RTL_ROM_LMP_8761A,
+	  .hci_rev = 0xb,
+	  .hci_bus = HCI_USB,
+	  .config_needed = false,
+	  .has_rom_version = true,
+	  .fw_name  = "rtl_bt/rtl8761bu_fw.bin",
+	  .cfg_name = "rtl_bt/rtl8761bu_config" },
+```
+
+Note the naming convention differs between the two kernels and the 5.10 one
+is what matters here: `fw_name` carries the `.bin` extension and `cfg_name`
+does not, because `btrtl_initialize()` appends `"%s.bin"` to the config name
+itself. Copying 6.12's strings verbatim would ask for `rtl8761bu_fw` and
+`rtl8761bu_config.bin.bin`.
+
+### How to tell which one happened, without a serial cable
+
+Open the Bluetooth engineering app (id 9007) and run Self test. The five steps
+separate every one of these failures:
+
+* `KERNEL FAIL` -- the defconfig fragment above did not take.
+* `ADAPTER FAIL` -- `CONFIG_BT_HCIBTUSB` missing, or nothing on the USB port.
+* `ADDRESS FAIL`, BD_ADDR all zeros -- the firmware did not load. On a 5.10
+  kernel with the correct files installed, **this is the expected result**,
+  and it is the signature of the wrong-name problem above.
+* `RADIO FAIL` -- the controller is there and does not answer.
+
+### The hardware question nobody has answered
+
+The Pico Mini B has **one** USB port and the SIM7600 is on it. A dongle and a
+modem at the same time needs a hub. The UB500's descriptor asks for 500 mA
+(`MaxPower 500mA`, self-powered), on a board that is itself powered over that
+same USB, so the power budget wants measuring before any of this is trusted
+on a bench, let alone in a case.
+
 ## NAND images
 
 `neodct/tools/mknand.sh <images-dir> <target-dir> [host-dir]` turns a finished

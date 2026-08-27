@@ -25,6 +25,7 @@
 #   NEODCT_RECOVERY=1 ...                     boot into recovery mode
 #   NEODCT_RECTTY=/dev/console ...            drive recovery over serial
 #   NEODCT_MODEM=1 ...                        pass the SIM7600 through
+#   NEODCT_BT=1 ...                           pass the UB500 dongle through
 #   NEODCT_NET=1 ...                          add a virtio NIC (browser testing)
 #   NEODCT_AUDIO=none ...                     no audio device
 #   NEODCT_DISPLAY=none ...                   no panel at all (the UI cannot
@@ -52,6 +53,11 @@ EXTRA="${NEODCT_QEMU_EXTRA:-}"
 # SIM7600 as seen on the USB bus.
 MODEM_VENDOR="${NEODCT_MODEM_VENDOR:-0x1e0e}"
 MODEM_PRODUCT="${NEODCT_MODEM_PRODUCT:-0x9001}"
+
+# TP-Link UB500, an RTL8761BU. Overridable because any btusb-class dongle
+# works: btusb matches on the USB class (e0/01/01), not on the id.
+BT_VENDOR="${NEODCT_BT_VENDOR:-0x2357}"
+BT_PRODUCT="${NEODCT_BT_PRODUCT:-0x0604}"
 
 for required in Image initramfs.cpio.gz system.img userdata.ext4; do
     if [ ! -f "$IMAGES/$required" ]; then
@@ -154,6 +160,7 @@ esac
 NEED_XHCI=""
 [ "$AUDIO" != "none" ] && NEED_XHCI=1
 [ -n "${NEODCT_MODEM:-}" ] && NEED_XHCI=1
+[ -n "${NEODCT_BT:-}" ] && NEED_XHCI=1
 [ -n "$NEED_XHCI" ] && set -- "$@" -device qemu-xhci,id=xhci
 
 if [ "$AUDIO" != "none" ]; then
@@ -166,6 +173,21 @@ if [ -n "${NEODCT_MODEM:-}" ]; then
     # Needs the SIM7600 plugged in and readable (udev rule or root).
     set -- "$@" -device \
         "usb-host,bus=xhci.0,vendorid=$MODEM_VENDOR,productid=$MODEM_PRODUCT"
+fi
+
+if [ -n "${NEODCT_BT:-}" ]; then
+    # Same deal as the modem: QEMU has to OPEN the dongle's /dev/bus/usb node
+    # read-write, and those nodes are crw-rw-r-- root:root. Without a rule
+    # QEMU fails with "libusb: bad access (-3)" and the guest simply sees no
+    # USB device -- no error reaches the phone, so the symptom is a Bluetooth
+    # app that says "no controller" for a reason nothing on screen can
+    # explain. The durable fix is a udev rule; docs/BLUETOOTH.md has it.
+    #
+    # QEMU's own emulated Bluetooth stack is NOT an alternative: it was
+    # removed in QEMU 6.0 and this host runs 11.0.3. For an hci device with
+    # no dongle at all, the kernel's CONFIG_BT_HCIVHCI is the way in.
+    set -- "$@" -device \
+        "usb-host,bus=xhci.0,vendorid=$BT_VENDOR,productid=$BT_PRODUCT"
 fi
 
 # --- networking (off by default, as in the modem test invocation) --------
