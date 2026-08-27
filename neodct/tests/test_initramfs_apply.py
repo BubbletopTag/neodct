@@ -573,3 +573,204 @@ def test_a_different_package_under_the_same_name_is_refused(tmp_path):
     assert device.read_bytes() == b"\0" * (len(image) + 8192), "it installed!"
     assert staging.read_pending(state) is None
     assert staging.read_result(state)["result"] == "failed"
+
+
+# --- UBI, which is what the real phone actually has ----------------------
+#
+# On the Luckfox the system partition is raw NAND behind UBI, and the cmdline
+# hands the initramfs a ubiblock device:
+#
+#     ubi.mtd=4 ubi.block=0,system neodct.sys=/dev/ubiblock0_0
+#
+# ubiblock is READ-ONLY -- the kernel registers that disk read-only on
+# purpose. So `dd of=/dev/ubiblock0_0` cannot ever succeed, and the applier's
+# own error path turns that into a silent no-op: it logs "write failed;
+# retrying on the next boot" and boots the old system. From the outside the
+# phone downloads an update, reboots, and is exactly where it started, which
+# is the bug this whole file failed to catch -- every test above writes to an
+# ordinary file, and dd is perfectly happy with those.
+#
+# Writing a UBI volume goes through the character device instead, and for a
+# static volume ubiupdatevol is the only way: the update is a transaction
+# opened with the final size, not a seek-and-write.
+
+
+def fake_ubiupdatevol(tmp_path):
+    """A stand-in that records its arguments and performs the write."""
+    log = tmp_path / "ubiupdatevol.args"
+    tool = tmp_path / "fake-ubiupdatevol"
+    body = "\n".join([
+        "#!/bin/sh",
+        'echo "$*" >> "@LOG@"',
+        '# -s SIZE DEVICE - : consume stdin into the volume',
+        'size=""; dev=""',
+        'while [ $# -gt 0 ]; do',
+        '  case "$1" in',
+        '    -s) size=$2; shift 2 ;;',
+        '    -) shift ;;',
+        '    *) dev=$1; shift ;;',
+        '  esac',
+        'done',
+        'cat > "$dev"',
+        "",
+    ]).replace("@LOG@", str(log))
+    tool.write_text(body)
+    tool.chmod(0o755)
+    return tool, log
+
+
+def run_ubi(state, sys_dev, tmp_path, tool):
+    user = tmp_path / "user"
+    (user / "logs").mkdir(parents=True, exist_ok=True)
+    script = (
+        'STATE_DIR="%s"; MNT_USER="%s"; SYS_DEV="%s"; USER_MOUNTED=1\n'
+        'NDSYS_UBIUPDATEVOL="%s"\n'
+        '. "%s"\napply_pending\n' % (state, user, sys_dev, tool, APPLY_SH)
+    )
+    return subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+
+
+def test_a_ubiblock_system_device_is_written_with_ubiupdatevol(tmp_path):
+    state, image, _ = stage_an_update(tmp_path)
+    dev_dir = tmp_path / "dev"
+    dev_dir.mkdir()
+    # The volume character device is what may be written; the ubiblock disk
+    # beside it is the read-only view the rest of the boot uses.
+    volume = dev_dir / "ubi0_0"
+    volume.write_bytes(b"")
+    sys_dev = dev_dir / "ubiblock0_0"
+    sys_dev.write_bytes(b"\x00" * len(image))
+    tool, log = fake_ubiupdatevol(tmp_path)
+
+    result = run_ubi(state, sys_dev, tmp_path, tool)
+
+    assert result.returncode == 0, result.stderr
+    assert log.exists(), "ubiupdatevol was never called; the applier still dd'd"
+    args = log.read_text()
+    assert str(volume) in args, "wrote to the wrong node: %r" % args
+    assert "-s %d" % len(image) in args, "no explicit size: %r" % args
+    assert volume.read_bytes()[:len(image)] == image
+
+    # And it has to actually FINISH. returncode 0 is not evidence: every
+    # "retrying on the next boot" path returns 0 too, which is the whole
+    # reason a failed install looks like a plain reboot from the outside.
+    # The volume holds the new image but the ubiblock disk beside it still
+    # reads as zeros -- exactly the situation on hardware, where reading back
+    # through a block device that was never told anything changed can serve
+    # the old contents from its page cache.
+    assert staging.read_result(state)["result"] == "ok", result.stdout
+    assert staging.read_installed(state) is not None, "installed.prop not written"
+    assert staging.read_pending(state) is None, "pending record not cleared"
+
+
+def test_the_ubi_volume_is_derived_from_the_ubiblock_name(tmp_path):
+    """/dev/ubiblock0_0 -> /dev/ubi0_0, and only for ubiblock names."""
+    script = (
+        '. "%s"\n'
+        'ubi_volume_for /dev/ubiblock0_0 || echo NONE\n'
+        'ubi_volume_for /dev/ubiblock1_3 || echo NONE\n'
+        'ubi_volume_for /dev/vda || echo NONE\n'
+        'ubi_volume_for /dev/mmcblk0p2 || echo NONE\n' % APPLY_SH
+    )
+    out = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+    assert out.stdout.split() == [
+        "/dev/ubi0_0", "/dev/ubi1_3", "NONE", "NONE"], out.stdout
+
+
+def test_an_ordinary_block_device_is_still_written_with_dd(tmp_path):
+    """The QEMU path must not start needing a tool that is not there."""
+    state, image, _ = stage_an_update(tmp_path)
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\x00" * len(image))
+    tool, log = fake_ubiupdatevol(tmp_path)
+
+    result = run_ubi(state, device, tmp_path, tool)
+
+    assert result.returncode == 0, result.stderr
+    assert not log.exists(), "a plain device should not go through ubiupdatevol"
+    assert device.read_bytes()[:len(image)] == image
+
+
+# --- growing the volume --------------------------------------------------
+#
+# mknand.sh gives the `system` volume no explicit size, so ubinize sizes it to
+# exactly the image being flashed ("assume minimum to fit image"). A static
+# UBI volume cannot take more than it was made for, and NeoDCT images grow --
+# 0.4.4a added 2.7 MB when Bluetooth arrived. Proven against real UBI in
+# neodct/tools/test_update_ubi.sh, where a 1.25 MB image into a 1 MB volume
+# does not install at all.
+#
+# There is room to grow into: the partition is 100 MB and the image is under
+# 50 MB. It just has to be asked for.
+
+
+def fake_tool(tmp_path, name, body="exit 0"):
+    log = tmp_path / (name + ".args")
+    tool = tmp_path / ("fake-" + name)
+    tool.write_text("#!/bin/sh\necho \"$*\" >> \"%s\"\n%s\n" % (log, body))
+    tool.chmod(0o755)
+    return tool, log
+
+
+def fake_ubi_sysfs(tmp_path, volume, reserved_ebs, usable_eb_size):
+    root = tmp_path / "sysfs"
+    d = root / volume
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "reserved_ebs").write_text("%d\n" % reserved_ebs)
+    (d / "usable_eb_size").write_text("%d\n" % usable_eb_size)
+    return root
+
+
+def run_ubi_full(state, sys_dev, tmp_path, upd, rsvol, sysfs):
+    user = tmp_path / "user"
+    (user / "logs").mkdir(parents=True, exist_ok=True)
+    script = (
+        'STATE_DIR="%s"; MNT_USER="%s"; SYS_DEV="%s"; USER_MOUNTED=1\n'
+        'NDSYS_UBIUPDATEVOL="%s"; NDSYS_UBIRSVOL="%s"; NDSYS_UBI_SYSFS="%s"\n'
+        '. "%s"\napply_pending\n'
+        % (state, user, sys_dev, upd, rsvol, sysfs, APPLY_SH)
+    )
+    return subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+
+
+def test_a_volume_too_small_for_the_image_is_grown_first(tmp_path):
+    state, image, _ = stage_an_update(tmp_path)
+    dev = tmp_path / "dev"
+    dev.mkdir()
+    volume = dev / "ubi0_0"
+    volume.write_bytes(b"")
+    sys_dev = dev / "ubiblock0_0"
+    sys_dev.write_bytes(b"")
+    # One eraseblock short of the image.
+    leb = 4096
+    sysfs = fake_ubi_sysfs(tmp_path, "ubi0_0", (len(image) // leb) - 1, leb)
+    upd, _ = fake_ubiupdatevol(tmp_path)
+    rsvol, rslog = fake_tool(tmp_path, "ubirsvol")
+
+    run_ubi_full(state, sys_dev, tmp_path, upd, rsvol, sysfs)
+
+    assert rslog.exists(), "the volume was never resized"
+    args = rslog.read_text()
+    assert "-n 0" in args, "wrong volume id: %r" % args
+    assert "-s %d" % len(image) in args, "wrong size: %r" % args
+    assert str(dev / "ubi0") in args, "resize must name the DEVICE: %r" % args
+
+
+def test_a_volume_that_already_fits_is_left_alone(tmp_path):
+    """Resizing a static volume rewrites its table; do not do it for nothing."""
+    state, image, _ = stage_an_update(tmp_path)
+    dev = tmp_path / "dev"
+    dev.mkdir()
+    volume = dev / "ubi0_0"
+    volume.write_bytes(b"")
+    sys_dev = dev / "ubiblock0_0"
+    sys_dev.write_bytes(b"")
+    leb = 4096
+    sysfs = fake_ubi_sysfs(tmp_path, "ubi0_0", (len(image) // leb) + 8, leb)
+    upd, _ = fake_ubiupdatevol(tmp_path)
+    rsvol, rslog = fake_tool(tmp_path, "ubirsvol")
+
+    result = run_ubi_full(state, sys_dev, tmp_path, upd, rsvol, sysfs)
+
+    assert not rslog.exists(), "resized a volume that already fits"
+    assert staging.read_result(state)["result"] == "ok", result.stdout

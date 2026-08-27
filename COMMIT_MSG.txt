@@ -1805,3 +1805,104 @@ initramfs before /lib/firmware is mounted, and whether that race exists on
 this board is not known yet. It costs one directory read if it does not.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+================================================================================
+
+update: the phone's system partition cannot be written with dd
+
+Updates have never once installed on real hardware. They download, the phone
+reboots, and nothing has changed. Three separate bugs, each of which alone is
+enough to produce exactly that, and none of which any test could see.
+
+## 1. dd cannot write the system partition
+
+The Luckfox cmdline hands the initramfs
+
+    ubi.mtd=4 ubi.block=0,system neodct.sys=/dev/ubiblock0_0
+
+and ubiblock is READ-ONLY. The kernel registers that disk read-only on
+purpose: it exists so squashfs and dm-verity have a block device to READ.
+`dd of=/dev/ubiblock0_0` therefore fails for everyone, always -- and
+apply_pending's error path turns that into silence:
+
+    elif ! dd if="$image" of="$SYS_DEV" ...; then
+        log "write to $SYS_DEV failed; retrying on the next boot"
+        return 0
+
+It logs, returns, boots the old system, and after three attempts discards the
+update. The owner sees a reboot.
+
+Writing a UBI volume goes through its character device, and a STATIC volume
+cannot be seek-and-written at all: an update is a transaction opened with the
+final size. That is ubiupdatevol's whole job, and why no ordinary tool
+substitutes. ubi_volume_for() maps /dev/ubiblock0_0 to /dev/ubi0_0 and
+write_system() picks the writer, keeping the no-copy streaming design --
+busybox's ubiupdatevol takes "-" as stdin with -s SIZE.
+
+## 2. the read-back hashed a device nothing had invalidated
+
+The check after writing hashed $SYS_DEV, the ubiblock disk. The kernel's only
+reaction to a static volume being updated is ubiblock_resize()
+(drivers/mtd/ubi/block.c, UBI_VOLUME_UPDATED), so when a new image happens to
+be the same size as the old one there is no capacity change and no reason for
+the block device to drop its cached pages. The read-back would then hash the
+PREVIOUS system and reject a write that was perfectly good. It now reads back
+through the node it wrote.
+
+## 3. the volume is exactly as big as the image that was flashed
+
+mknand.sh gives the system volume no size, so ubinize "assume[s] minimum to
+fit image". A static volume cannot take a larger one, and NeoDCT images grow:
+0.4.4a added 2.7 MB when Bluetooth arrived. Fixing only #1 would have bought
+one working update and then failed again on the next release that grew.
+
+ubi_fit() reads the real capacity out of sysfs (reserved_ebs * usable_eb_size)
+and grows the volume with ubirsvol only when it has to -- a resize rewrites
+the volume table, which is not worth doing on every update that already fits.
+There is room: 100 MB partition, sub-50 MB image.
+
+## why none of this was caught
+
+test_initramfs_apply.py drives the applier with ordinary files standing in for
+the partition, and dd is perfectly happy writing a file. QEMU's system device
+is /dev/vda, which is genuinely writable. The QEMU kernel had NO MTD or UBI at
+all, so nothing on this side could exercise the phone's storage even in
+principle. Every test was true and none of them were about the phone.
+
+That is fixed structurally, not just for these three bugs: the QEMU kernel now
+builds CONFIG_MTD_UBI and UBI_BLOCK, with mtdram as a MODULE so it costs
+nothing on an ordinary boot, and neodct/tools/test_update_ubi.sh attaches a
+real UBI device, creates a real static volume, and drives the real applier at
+it. Both cases are covered -- an image that fits, and one that does not and
+has to grow the volume. Scenario B failed before the fix and passes after.
+
+neodct/tools/test_update_e2e.sh is the other half: a real signed package on a
+real card, staged into the real state directory, applied by the real initramfs
+across a real reboot, with VERSION_ID read back off the running system.
+Proven 0.4.4a -> 0.4.3a. It also caught the applier retrying correctly after
+the harness killed QEMU mid-write, which was not planned and is the crash
+safety working.
+
+## the applets have to be in the INITRAMFS
+
+ubiupdatevol and ubirsvol are added to mkinitramfs.APPLETS and enabled in the
+busybox fragment; CONFIG_UBIUPDATEVOL was explicitly "not set", so the tool did
+not exist at all. Both are named by tests directly, because ndsys-apply.sh
+calls them through $NDSYS_UBIUPDATEVOL / $NDSYS_UBIRSVOL and the scanner in
+test_initramfs_applets.py can only see literal command names.
+
+ubirsvol was very nearly missed: test_update_ubi.sh sources the applier on a
+RUNNING phone, where every applet the target build installed is on the PATH,
+while apply_pending really runs one step earlier in the initramfs, which has
+only what mkinitramfs symlinks. It would have passed the test and failed on
+the phone -- the same shape as the bug being fixed.
+
+## delivery
+
+CONFIG_INITRAMFS_SOURCE in the SDK kernel defconfig named the COPY of this
+repo on the external drive rather than this one. The kernel embedded whatever
+initramfs that tree last produced, so a fix to the applier could be committed,
+tested and released here and still never reach the phone. Repointed, with the
+previous defconfig kept beside it.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>

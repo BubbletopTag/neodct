@@ -122,3 +122,42 @@ def test_the_applet_list_has_no_duplicates():
 
 def test_sh_is_available_because_the_kernel_needs_it_for_the_shebang():
     assert "sh" in mkinitramfs.APPLETS
+
+
+# --- commands reached through a variable ---------------------------------
+#
+# The scan above can only see literal command names. ndsys-apply.sh calls the
+# UBI writer as "$NDSYS_UBIUPDATEVOL", so that the host tests can substitute a
+# stand-in -- which means the scanner cannot see it and would let the applet
+# go missing without a word.
+#
+# It going missing is not a small thing. It is the ONLY way to write the
+# phone's system partition: on the Luckfox that partition is a static UBI
+# volume behind a read-only ubiblock disk, so if the applet is absent every
+# update fails to install, retries three times across three boots, and is
+# then discarded -- with the phone reporting nothing worse than having
+# rebooted.
+def test_the_ubi_writer_is_in_the_initramfs():
+    assert "ubiupdatevol" in mkinitramfs.APPLETS
+
+
+def test_the_ubi_resizer_is_in_the_initramfs():
+    """Growing the volume happens in the initramfs, not on the booted phone.
+
+    Easy to get wrong, and it was: neodct/tools/test_update_ubi.sh sources the
+    applier on a RUNNING phone, where every busybox applet the target build
+    installed is on the PATH. apply_pending really runs one step earlier, in
+    the initramfs, which has only the applets mkinitramfs symlinks. A resize
+    that works in that test and not on the phone is exactly the shape of bug
+    this whole exercise is about.
+    """
+    assert "ubirsvol" in mkinitramfs.APPLETS
+
+
+def test_busybox_is_configured_to_build_the_ubi_writer():
+    """The applet symlink is useless if busybox was built without it."""
+    fragment = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "..", "buildroot", "board", "qemu", "busybox.fragment")
+    text = open(os.path.normpath(fragment)).read()
+    assert "CONFIG_UBIUPDATEVOL=y" in text

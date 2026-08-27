@@ -2,3 +2,27 @@
 # T-Mobile is IPv6-only, so the modem data path needs ping -6 / ping6
 # for the S45modem connectivity check and on-device debugging.
 CONFIG_PING6=y
+
+# The boot-time update applier writes the system partition. On the Luckfox
+# that partition is a static UBI volume, and a static volume can only be
+# rewritten as a transaction opened with its final size -- ubiupdatevol's
+# whole job. Its ubiblock disk is read-only by design, so dd cannot stand in.
+# Without this, updates install on QEMU and never on hardware.
+CONFIG_UBIUPDATEVOL=y
+
+# Growing the system volume when a new image is bigger than the one the phone
+# was flashed with. mknand.sh gives that volume no size of its own, so ubinize
+# makes it exactly the size of the image being flashed and a static volume
+# cannot then take a larger one -- which is every release that grew.
+CONFIG_UBIRSVOL=y
+
+# Test-only, and on the phone too because both defconfigs share this file.
+# ubiattach/ubimkvol build the volume that neodct/tools/test_update_ubi.sh
+# drives the applier at; the phone's volume is made by ubinize at flash time
+# and attached by the kernel from the cmdline, so it needs neither. They are
+# a few hundred bytes of applet each and buy a test that runs against real UBI
+# instead of a file pretending to be one -- which is the trade that would have
+# caught this bug years earlier.
+CONFIG_UBIATTACH=y
+CONFIG_UBIDETACH=y
+CONFIG_UBIMKVOL=y

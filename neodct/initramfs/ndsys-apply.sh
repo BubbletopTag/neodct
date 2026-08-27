@@ -42,6 +42,9 @@ fi
 
 # Where the kernel publishes block-device identity, and where the nodes are.
 # Both overridable for the host tests.
+: "${NDSYS_UBIUPDATEVOL:=ubiupdatevol}"
+: "${NDSYS_UBIRSVOL:=ubirsvol}"
+: "${NDSYS_UBI_SYSFS:=/sys/class/ubi}"
 : "${NDSYS_SYSFS_BLOCK:=/sys/block}"
 : "${NDSYS_DEV_DIR:=/dev}"
 # The disk serials QEMU is told to hand out; see neodct/tools/run_qemu.sh.
@@ -224,6 +227,36 @@ umount_card() {
     return 0
 }
 
+# ubi_volume_for DEV -- the UBI volume character device behind a ubiblock
+# disk, or nothing at all for anything else.
+#
+# THE PHONE'S SYSTEM PARTITION IS ONE OF THESE. The Luckfox cmdline says
+#
+#     ubi.mtd=4 ubi.block=0,system neodct.sys=/dev/ubiblock0_0
+#
+# and ubiblock is READ-ONLY: the kernel registers that disk read-only on
+# purpose, because it exists so squashfs and dm-verity have a block device to
+# read. `dd of=/dev/ubiblock0_0` therefore cannot succeed for anyone, ever --
+# and apply_pending's own error path turns that into a silent no-op, logging
+# "write failed; retrying on the next boot" and booting the old system. What
+# the owner sees is an update that downloads, reboots, and changes nothing.
+#
+# It was invisible to every host test in test_initramfs_apply.py because they
+# all write to ordinary files, which dd is perfectly happy with, and invisible
+# in QEMU because there the system device is /dev/vda.
+#
+# The writable side of a UBI volume is its character device. A STATIC volume
+# in particular cannot be seek-and-written at all: an update is a transaction
+# opened with the volume's final size, which is exactly what ubiupdatevol
+# does and why no ordinary tool substitutes for it.
+ubi_volume_for() {
+    case "${1##*/}" in
+        ubiblock[0-9]*_[0-9]*) ;;
+        *) return 1 ;;
+    esac
+    echo "${1%/*}/ubi${1##*/ubiblock}"
+}
+
 # find_package NAME -- echo the path to NAME on the card, if it is there.
 #
 # By name, never by the path the record carries: the card is mounted
@@ -294,6 +327,54 @@ verity_table() {
     hash_start=$((image_blocks + 1))
     echo "0 $sectors verity 1 $SYS_DEV $SYS_DEV $block_size $block_size" \
          "$image_blocks $hash_start sha256 $root_hash $salt"
+}
+
+# write_system BYTES -- the image arrives on stdin and goes to the system
+# partition, whichever kind it is. UBI_VOL is set by the caller.
+#
+# The size is passed rather than measured because ubiupdatevol needs it up
+# front: a static volume update declares its final size when the transaction
+# opens, and a stream has no length to ask for. dd does not care, and taking
+# the argument anyway keeps one signature for both.
+# ubi_fit VOLUME BYTES -- make sure the volume is big enough, growing it if
+# it is not.
+#
+# The phone's system volume is created by mknand.sh with no size of its own,
+# so ubinize sizes it to exactly the image being flashed. A static volume
+# cannot then take a larger one, and NeoDCT images grow -- 0.4.4a added 2.7 MB
+# when Bluetooth arrived. Without this, the first update bigger than the build
+# on the phone fails to install and says nothing more than "retrying".
+#
+# There is room: the partition is 100 MB and the image is under 50 MB. UBI
+# simply has to be asked, because a static volume's size is part of its table
+# rather than something it discovers.
+#
+# Doing nothing when it already fits is not just an optimisation -- a resize
+# rewrites the volume table, and that is not worth risking on every update
+# that happens to be the same size or smaller.
+ubi_fit() {
+    vol=${1##*/}
+    num=${vol#ubi}; num=${num%%_*}
+    vid=${vol##*_}
+    ebs="$(cat "$NDSYS_UBI_SYSFS/$vol/reserved_ebs" 2>/dev/null)" || return 0
+    leb="$(cat "$NDSYS_UBI_SYSFS/$vol/usable_eb_size" 2>/dev/null)" || return 0
+    [ -n "$ebs" ] && [ -n "$leb" ] || return 0
+    have=$((ebs * leb))
+    [ "$have" -ge "$2" ] && return 0
+    log "volume $1 holds $have bytes and the image needs $2; growing it"
+    "$NDSYS_UBIRSVOL" -n "$vid" -s "$2" "${1%/*}/ubi$num"
+}
+
+write_system() {
+    if [ -n "${UBI_VOL:-}" ]; then
+        if ! ubi_fit "$UBI_VOL" "$1"; then
+            log "could not grow $UBI_VOL to $1 bytes"
+            return 1
+        fi
+        "$NDSYS_UBIUPDATEVOL" -s "$1" "$UBI_VOL" -
+    else
+        dd of="$SYS_DEV" bs=1M conv=fsync 2>/dev/null
+    fi
 }
 
 # Install a staged update, if there is one. Safe to call on every boot and
@@ -383,18 +464,25 @@ apply_pending() {
         return 0
     fi
 
-    log "installing $version ($image_bytes bytes) to $SYS_DEV"
+    # UBI or an ordinary block device -- decided once, here, so the two
+    # streaming callers below do not each have to know.
+    if UBI_VOL="$(ubi_volume_for "$SYS_DEV")"; then
+        log "installing $version ($image_bytes bytes) to $UBI_VOL (ubi volume)"
+    else
+        UBI_VOL=""
+        log "installing $version ($image_bytes bytes) to $SYS_DEV"
+    fi
+
     if [ -n "$package" ]; then
         # Straight from the zip to the partition. No copy is made anywhere:
         # there is nowhere on this phone to put one.
-        if ! unzip -p "$image" rootfs.squashfs 2>/dev/null \
-                | dd of="$SYS_DEV" bs=1M conv=fsync 2>/dev/null; then
-            log "write to $SYS_DEV failed; retrying on the next boot"
+        if ! unzip -p "$image" rootfs.squashfs 2>/dev/null | write_system "$image_bytes"; then
+            log "write to ${UBI_VOL:-$SYS_DEV} failed; retrying on the next boot"
             umount_card
             return 0
         fi
-    elif ! dd if="$image" of="$SYS_DEV" bs=1M conv=fsync 2>/dev/null; then
-        log "write to $SYS_DEV failed; retrying on the next boot"
+    elif ! write_system "$image_bytes" < "$image"; then
+        log "write to ${UBI_VOL:-$SYS_DEV} failed; retrying on the next boot"
         return 0
     fi
     sync
@@ -403,8 +491,22 @@ apply_pending() {
     # Read it back off the device. A write that reported success but landed
     # badly is exactly what verity would trip over on every later boot, and
     # by then the staged copy would be gone.
-    if [ "$(hash_prefix "$SYS_DEV" "$image_bytes")" != "$want_sha" ]; then
-        log "read-back mismatch on $SYS_DEV; retrying on the next boot"
+    #
+    # Read back through whatever was WRITTEN, which for UBI is the volume
+    # character device and not the ubiblock disk. Two reasons, and either one
+    # alone would be enough:
+    #
+    #   - The block device has a page cache that nothing invalidated. The
+    #     kernel's only reaction to a static volume being updated is
+    #     ubiblock_resize() (drivers/mtd/ubi/block.c, UBI_VOLUME_UPDATED), so
+    #     if the new image happens to be the same size as the old one there
+    #     is no capacity change and no reason for it to drop anything. The
+    #     read-back would then hash the PREVIOUS system and report a mismatch
+    #     on a write that was perfectly good.
+    #   - Reading the character device is what the write did in reverse, so
+    #     the check is over the same bytes through the same path.
+    if [ "$(hash_prefix "${UBI_VOL:-$SYS_DEV}" "$image_bytes")" != "$want_sha" ]; then
+        log "read-back mismatch on ${UBI_VOL:-$SYS_DEV}; retrying on the next boot"
         return 0
     fi
 

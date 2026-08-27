@@ -43,6 +43,16 @@ APPLETS = (
     "modprobe", "losetup", "head", "cut", "date", "expr",
     "wc", "tr", "dirname", "basename", "mountpoint", "chmod", "ln",
     "unzip", "stty", "reboot", "clear", "mkfifo", "kill",
+    # The system partition on real hardware is a static UBI volume behind a
+    # READ-ONLY ubiblock disk, so dd cannot write it and this is the only
+    # thing that can. Reached through $NDSYS_UBIUPDATEVOL in ndsys-apply.sh,
+    # which is why the scanner in test_initramfs_applets.py cannot see it and
+    # a test names it directly instead.
+    "ubiupdatevol",
+    # And growing that volume when a new image is bigger than the one the
+    # phone was flashed with -- mknand.sh sizes the volume to exactly the
+    # image, so this is the ordinary case for any release that grew.
+    "ubirsvol",
 )
 
 
