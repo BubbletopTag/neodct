@@ -132,12 +132,15 @@ static void show_ntp_menu(nd_ui *ui)
     (void)nd_settings_set(ND_SET_CLOCK_NTP, enabled ? "ON" : "OFF");
     nd_log(ND_LOG_CLOCK_APP, "NTP sync set to %s", enabled ? "ON" : "OFF");
 
-    /* Says what it changed AND what that means, because "On" on its own does
-     * not tell you the change lands at the next boot rather than now. Nothing
-     * here starts or stops the running sync thread: the core owns it, and an
-     * app reaching into the core's threads is the thing nd_app.h forbids. */
+    /* "On" gets a second line because it needs one: the change lands at the
+     * next boot rather than now, and nothing on the row says so. "Off" needs
+     * no explaining and gets none -- one short line also keeps the dialog in
+     * its centred alert look rather than the left-aligned paragraph.
+     *
+     * Nothing here starts or stops the running sync thread: the core owns it,
+     * and an app reaching into the core's threads is what nd_app.h forbids. */
     say(ui, enabled ? "NTP sync is on.\n\nThe network sets the clock from the next boot."
-                    : "NTP sync is off.\n\nThe clock is yours to set.");
+                    : "NTP sync is off.");
 }
 
 /* ------------------------------------------------------------------ *
