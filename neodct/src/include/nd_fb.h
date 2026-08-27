@@ -97,8 +97,37 @@ nd_err nd_fb_pack_rgb565(const nd_image *src, uint8_t *out, size_t out_sz);
  * Backlight -- the panel's brightness, not the framebuffer's contents
  * ------------------------------------------------------------------ */
 
+/* The pin the panel's BL wire is on: header pin 11, GPIO1_C5, gpio53.
+ * docs/HARDWARE_NOTES.md is the record of how it got there -- it used to be
+ * strapped to 3V3, and moving it to a GPIO is what made "screen off" a thing
+ * the software can do at all. Dimming needs pwm9 in the device tree, which
+ * lives in the boot partition and therefore arrives on a reflash rather than
+ * on an update, so the GPIO tier below is not a fallback that will go away.
+ *
+ * Default the pin ON before software runs (a pull-up on the enable): "no
+ * software yet" and "software broken" should both show a lit screen, because
+ * the initramfs boot logo and the recovery sad-face are exactly the screens
+ * you need when the rootfs is the thing that is wrong. */
+#define ND_BL_GPIO_PIN 53
+
+#define ND_BL_GPIO_ROOT      "/sys/class/gpio"
+#define ND_BL_BACKLIGHT_ROOT "/sys/class/backlight"
+
+/* Getting this backwards darkens the screen exactly when somebody starts
+ * using the phone, which is the hardest possible failure to interpret from
+ * the far side of a serial cable. It is a constant, not a probe, because
+ * there is nothing to probe: the polarity is a property of the wiring. */
+#define ND_BL_ACTIVE_LOW false
+
+/* "On but very dim" must not read as a broken screen, so a nonzero request
+ * below this is raised to it rather than honoured. Zero still means off. */
+#define ND_BL_MIN_ON_PERCENT 5
+
 typedef enum { ND_BL_PWM = 0, ND_BL_GPIO, ND_BL_NONE } nd_bl_mode;
 
+/* Probing the GPIO tier EXPORTS the pin -- there is no way to ask whether a
+ * pin can be driven other than by claiming it. Harmless and idempotent, and
+ * the Python behaved the same way, but it means mode() is not a pure read. */
 nd_bl_mode nd_backlight_mode(void);
 bool nd_backlight_available(void);
 bool nd_backlight_set_percent(int32_t percent);

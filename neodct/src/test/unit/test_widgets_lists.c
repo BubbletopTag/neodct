@@ -709,6 +709,51 @@ static void test_vlist_layout(void)
     fx_free(&fx);
 }
 
+/* A caller that PRESELECTS a row past the first windowful gets it drawn.
+ *
+ * draw() has always pulled window_start DOWN to meet a selected_index above
+ * it, so opening a list on row 0 or 1 worked and nobody noticed the other
+ * direction was missing: with six items and selected_index 5, window_start
+ * stayed 0, the window showed rows 0..2, and the frame came back with NO
+ * selection bar anywhere -- a menu that looks like it has lost its place.
+ *
+ * The key loop maintains this invariant itself, which is why the widget went
+ * this long without it. It only bites the callers who set selected_index by
+ * hand, and until Sleepy's CPU menu -- which opens on whichever frequency is
+ * already pinned, and on this chip that is often the last row -- every one of
+ * them happened to preselect a row inside the first window. */
+static void test_vlist_preselected_row_scrolls_into_view(void)
+{
+    fixture fx;
+    nd_vlist list;
+
+    if (!fx_init(&fx)) {
+        CHECK(false);
+        return;
+    }
+
+    /* Six items, three visible: the last row can only be drawn in the bottom
+     * slot, with the window scrolled to start at item 3. */
+    nd_vlist_init(&list, &fx.ui, "Phonebook", PHONEBOOK, ND_ARRAY_LEN(PHONEBOOK), 1);
+    list.selected_index = 5u;
+    nd_vlist_draw(&list);
+
+    CHECK_INT(list.window_start, 3);
+    CHECK(row_is_selection_bar(fx.canvas, 106));
+    CHECK(row_is_selection_bar(fx.canvas, 135));
+    CHECK(!row_is_selection_bar(fx.canvas, 40));
+
+    /* And back the other way, which already worked -- kept so a fix to one
+     * direction cannot quietly break the other. */
+    list.selected_index = 0u;
+    nd_vlist_draw(&list);
+
+    CHECK_INT(list.window_start, 0);
+    CHECK(row_is_selection_bar(fx.canvas, 40));
+
+    fx_free(&fx);
+}
+
 /* The notch position is a float that Pillow TRUNCATES. With 3 items the step
  * is 50.0 and nothing rounds; with 7 it is 16.666..., and index 1 lands at
  * 56.66 -> the box is 53.66..59.66 -> rows 53..59. Rounding instead would give
@@ -1433,6 +1478,7 @@ int main(void)
     RUN(test_header);
     RUN(test_softkey);
     RUN(test_vlist_layout);
+    RUN(test_vlist_preselected_row_scrolls_into_view);
     RUN(test_vlist_notch_truncates);
     RUN(test_vlist_keys);
     RUN(test_vlist_title_is_trimmed);

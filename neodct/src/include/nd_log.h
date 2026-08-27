@@ -63,6 +63,7 @@ extern "C" {
 #define ND_LOG_BROWSER  "Browser"  /* 141 purple -- netsurf and its noise    */
 #define ND_LOG_CRASH    "CRASH"    /* 196 red -- something broke             */
 #define ND_LOG_MICTEST  "MicTest"  /*     derived -- an app tag              */
+#define ND_LOG_SLEEPY   "Sleepy"   /*     derived -- an app tag              */
 #define ND_LOG_ERROR    "ERROR"    /* 196                                    */
 #define ND_LOG_FATAL    "FATAL"    /* 196                                    */
 

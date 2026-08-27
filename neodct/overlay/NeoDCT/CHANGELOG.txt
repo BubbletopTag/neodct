@@ -1,5 +1,45 @@
 # NeoDCT OS Changelog
 
+0.4.4a
+The first two pieces of sleep, on a phone that has never slept.
+
+Sleep on this phone is going to be a fake one. The RV1103 has no suspend
+path that keeps the modem alive, and a phone that stops answering calls
+when the screen goes off is not a phone. So sleep here will mean dropping
+the CPU to its slowest speed, blanking the panel, stopping everything
+that can be stopped, and carrying on polling i2c and the modem at the
+bare minimum. Before any of that can be built, two questions have to have
+answers: does the backlight really go off, and does the CPU really change
+speed. Nobody had ever asked this hardware either one.
+
+Added
+- Sleepy, in Engineering. Two rows. CPU lists the operating points the
+  kernel is offering -- 408 MHz to 1.2 GHz on this chip -- and pins the
+  CPU to whichever you pick, then reports back what the phone says it is
+  actually running at. Display has one row, BLANK!, which turns the panel
+  off for ten seconds and turns it back on.
+  The pin is deliberately sticky: nothing puts the speed back when you
+  leave the app, because a test whose effect vanished when you closed it
+  could not be used to measure anything. The blank is deliberately not
+  sticky: the light comes back on every way out, an incoming call
+  included, because a phone that rang in the dark would be a worse fault
+  than any this app was written to find.
+- Backlight control, which the C rewrite had declared and never written.
+  Three tiers, best first: PWM dimming through /sys/class/backlight when
+  the device tree has pwm9, on/off through gpio53 when it does not, and
+  an honest "no" when neither is there. gpio53 is header pin 11, the wire
+  the panel's BL went to when it stopped being strapped to 3V3.
+
+Fixed
+- A menu opened on a row below the first three showed no highlight at all.
+  Every list in the OS scrolls to keep the selected row visible while you
+  move, but a list that was ASKED to open on a particular row only ever
+  scrolled upwards to reach it -- so Sleepy's CPU menu, which opens on
+  whichever frequency is already pinned, drew the top three rows and no
+  selection anywhere. It looked like a menu that had lost its place.
+  Nothing shipped had hit it, because until now every screen that preselects
+  a row happened to preselect one of the first three.
+
 0.4.3a
 Two engineering apps for hardware you can plug in.
 
