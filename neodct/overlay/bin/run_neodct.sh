@@ -26,6 +26,24 @@ clear > /dev/tty0
 CRASH_LOG=/NeoDCT/User/logs/crash.log
 mkdir -p /NeoDCT/User/logs 2>/dev/null || CRASH_LOG=/tmp/crash.log
 
+# Optional developer environment, on the WRITABLE partition. The rootfs is a
+# read-only squashfs, so without this the only way to set a variable for
+# nd-core is to rebuild the image -- which is a long way to go to flip a
+# switch in QEMU. nd-core inherits whatever this exports, and so does every
+# app it forks.
+#
+# The one most people want:
+#
+#     echo 'export NEODCT_T9=1' > /NeoDCT/User/env.sh
+#
+# which turns on T9 -- multi-tap, predictive, the # mode cycle and the mode
+# indicator -- on a keyboard that would otherwise take the QWERTY path and
+# have no modes at all. See docs/c-rewrite/spec-hw-input.md.
+if [ -r /NeoDCT/User/env.sh ]; then
+  echo "[NeoDCT] Sourcing /NeoDCT/User/env.sh" > /dev/tty0
+  . /NeoDCT/User/env.sh
+fi
+
 # nd-core replaces `python3 /NeoDCT/launcher.py`. It is the same program:
 # nd_main.c is launcher.py's main() followed by System/core/main.py's run().
 # No LD_LIBRARY_PATH is needed -- the binary carries an RPATH of

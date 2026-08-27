@@ -75,8 +75,10 @@ const int32_t nd_msg_arrow_keys[ND_MSG_ARROW_KEYS_N] = {ND_KEY_UP, ND_KEY_LEFT, 
 
 const char *const nd_msg_menu_items[ND_MSG_MENU_ITEMS] = {"Inbox", "Outbox", "Write Message"};
 
-const char *const nd_msg_inbox_options[ND_MSG_INBOX_OPTIONS_N] = {"Just Erase for now"};
-const char *const nd_msg_outbox_options[ND_MSG_OUTBOX_OPTIONS_N] = {"Erase", "Send"};
+/* WAS {"Just Erase for now"} and {"Erase", "Send"}. The placeholder wording
+ * was the Python's and was never a feature; Forward is new in both. */
+const char *const nd_msg_inbox_options[ND_MSG_INBOX_OPTIONS_N] = {"Delete", "Forward"};
+const char *const nd_msg_outbox_options[ND_MSG_OUTBOX_OPTIONS_N] = {"Delete", "Forward", "Send"};
 
 /* The composer's Options menu. Not in messages.h: nothing outside this file
  * needs it and the Python builds it inline. */
@@ -496,6 +498,12 @@ static void strip_copy(char *out, size_t out_sz, const char *text)
 
 bool nd_msg_send_flow(nd_ui *ui, const char *text, int32_t root_id, int32_t sub_index)
 {
+    return nd_msg_send_flow_to(ui, text, root_id, sub_index, NULL);
+}
+
+bool nd_msg_send_flow_to(nd_ui *ui, const char *text, int32_t root_id, int32_t sub_index,
+                         const char *to)
+{
     char body[ND_MSG_TEXT_MAX];
     char raw[ND_TEXTINPUT_CAP];
     char number[ND_TEXTINPUT_CAP];
@@ -526,8 +534,15 @@ bool nd_msg_send_flow(nd_ui *ui, const char *text, int32_t root_id, int32_t sub_
         return false;
     }
 
-    if (nd_msg_number_input_show(ui, "Send To", "Number:", raw, sizeof raw) == NULL)
+    /* A conversation already knows who it is talking to, so a reply from
+     * inside one does not ask again. The number still goes through the same
+     * filter, so a contact saved as "555-4321" is dialled as "5554321"
+     * whichever way it arrived. */
+    if (to != NULL && to[0] != '\0') {
+        (void)nd_strlcpy(raw, to, sizeof raw);
+    } else if (nd_msg_number_input_show(ui, "Send To", "Number:", raw, sizeof raw) == NULL) {
         return false;
+    }
 
     nd_msg_filter_number(number, sizeof number, raw);
     if (number[0] == '\0') {
@@ -559,6 +574,16 @@ bool nd_msg_send_flow(nd_ui *ui, const char *text, int32_t root_id, int32_t sub_
      * modem's own (ok, detail), so "Send failed: <reason>" still names the
      * reason the modem gave. nd_svc.h; spec-app-services.md. */
     if (nd_svc_send_sms(ui, number, body, detail, sizeof detail)) {
+        /* NOT A PORT. _send_message_flow() wrote nothing on success, so the
+         * Outbox held only hand-saved drafts -- a screen called "Outbox"
+         * that did not contain what had been sent. Recording it here is what
+         * gives Classic's Outbox the sent messages it always implied, and
+         * Chat the right-hand side of a conversation.
+         *
+         * The write is not allowed to fail the send: the message IS gone,
+         * and telling the user otherwise because sqlite could not open a
+         * file would be a lie about the network. */
+        (void)nd_msg_save_outbox_to(body, number);
         dialog(ui, "Message sent!");
         return true;
     }
@@ -660,8 +685,16 @@ nd_msg_detail_result nd_msg_show_detail(nd_ui *ui, const char *title, const char
                 selection = nd_vlist_show(&options);
                 if (selection == 0 && message_id >= 0) {
                     nd_msg_delete_inbox(message_id);
-                    dialog(ui, "Erased!");
+                    dialog(ui, "Deleted!");
                     return ND_MSG_DETAIL_DELETED;
+                }
+                if (selection == 1) {
+                    /* Forward: the composer, with this message already in it
+                     * and NO recipient -- forwarding is by definition to
+                     * somebody other than whoever sent it, so the Send To
+                     * field still asks. */
+                    (void)nd_msg_show_write_prefill(ui, ND_MESSAGES_ROOT_ID, sub_index, message,
+                                                    NULL);
                 }
             } else if (title != NULL && strcmp(title, "Outbox") == 0) {
                 nd_vlist_init(&options, ui, "Options", nd_msg_outbox_options,
@@ -670,10 +703,14 @@ nd_msg_detail_result nd_msg_show_detail(nd_ui *ui, const char *title, const char
                 selection = nd_vlist_show(&options);
                 if (selection == 0 && message_id >= 0) {
                     nd_msg_delete_outbox(message_id);
-                    dialog(ui, "Erased!");
+                    dialog(ui, "Deleted!");
                     return ND_MSG_DETAIL_DELETED;
                 }
                 if (selection == 1) {
+                    (void)nd_msg_show_write_prefill(ui, ND_MESSAGES_ROOT_ID, sub_index, message,
+                                                    NULL);
+                }
+                if (selection == 2) {
                     /* The Python passes root_id here, which at this call site
                      * is the STRING "2-2" and at the composer's is the
                      * INTEGER 2. Neither is ever read, so the C passes the
@@ -850,20 +887,59 @@ void nd_msg_show_outbox(nd_ui *ui, int32_t root_id, int32_t sub_index)
 
 void nd_msg_show_write(nd_ui *ui, int32_t root_id, int32_t sub_index)
 {
+    (void)nd_msg_show_write_prefill(ui, root_id, sub_index, NULL, NULL);
+}
+
+/* nd_textlong borrows its title rather than copying it, so the storage has to
+ * outlive the widget. One composer is open at a time -- it is a modal screen
+ * on a phone with one screen -- so one buffer is enough, and it is also what
+ * nd_msg_composer_title() reads back. */
+static char g_composer_title[ND_MSG_SENDER_MAX];
+
+const char *nd_msg_composer_title(void)
+{
+    return g_composer_title;
+}
+
+bool nd_msg_show_write_prefill(nd_ui *ui, int32_t root_id, int32_t sub_index, const char *body,
+                               const char *to)
+{
     char text[ND_TEXTLONG_CAP];
     char options_root[16];
     nd_textlong input_widget;
+    const char *title;
     nd_softkey softkey;
     bool cursor_on = true;
     double last_blink;
 
     if (ui == NULL)
-        return;
+        return false;
     if (nd_snprintf(options_root, sizeof options_root, "%d-%d", root_id, sub_index) != ND_OK)
-        return;
-    if (nd_textlong_init(&input_widget, ui, "Write", text, sizeof text, "", ND_T9_FILTER_ANY) !=
-        ND_OK)
-        return;
+        return false;
+
+    /* The header's top right already carries the T9 mode indicator. When the
+     * composer was reached from inside a conversation the row's LEFT should
+     * say who the message is for -- "Write" does not, and in Chat you got here
+     * by picking a person. Falls back to the number, which still beats
+     * "Write": it is the one fact the screen has about the destination.
+     *
+     * Every Classic caller, and both New Message and Forward, pass no
+     * recipient and keep the ported title untouched. */
+    title = ND_MSG_COMPOSER_TITLE;
+    if (to != NULL && to[0] != '\0') {
+        if (!nd_contacts_lookup_name(to, g_composer_title, sizeof g_composer_title) ||
+            g_composer_title[0] == '\0')
+            (void)nd_strlcpy(g_composer_title, to, sizeof g_composer_title);
+        title = g_composer_title;
+    } else {
+        (void)nd_strlcpy(g_composer_title, ND_MSG_COMPOSER_TITLE, sizeof g_composer_title);
+    }
+    /* The prefill goes in as the widget's INITIAL text, so the cursor lands
+     * after it and Clear deletes it a character at a time -- a forwarded
+     * message is a draft you can edit, not a fixed payload. */
+    if (nd_textlong_init(&input_widget, ui, title, text, sizeof text, (body != NULL) ? body : "",
+                         ND_T9_FILTER_ANY) != ND_OK)
+        return false;
 
     nd_softkey_init(&softkey, ui, false);
     last_blink = nd_time_now();
@@ -884,7 +960,7 @@ void nd_msg_show_write(nd_ui *ui, int32_t root_id, int32_t sub_index)
         if (key == ND_KEY_NONE)
             continue;
         if (nd_app_should_exit())
-            return;
+            return false;
 
         if (key == ND_KEY_ENTER || key == ND_KEY_KPENTER) {
             nd_vlist options;
@@ -896,11 +972,14 @@ void nd_msg_show_write(nd_ui *ui, int32_t root_id, int32_t sub_index)
             selection = nd_vlist_show(&options);
 
             if (selection == 0) {
-                if (nd_msg_send_flow(ui, nd_textlong_get_text(&input_widget), root_id, sub_index))
-                    return; /* sent -- leave the composer */
+                if (nd_msg_send_flow_to(ui, nd_textlong_get_text(&input_widget), root_id,
+                                        sub_index, to))
+                    return true; /* sent -- leave the composer */
                 /* failed or cancelled: fall through, keep the draft on screen */
             } else if (selection == 1) {
-                (void)nd_msg_save_outbox(nd_textlong_get_text(&input_widget));
+                /* A DRAFT keeps its recipient too, when there is one, so a
+                 * reply saved half-written still knows who it is for. */
+                (void)nd_msg_save_outbox_to(nd_textlong_get_text(&input_widget), to);
                 dialog(ui, "Saved!");
             }
 
@@ -910,7 +989,7 @@ void nd_msg_show_write(nd_ui *ui, int32_t root_id, int32_t sub_index)
         }
 
         if (nd_textlong_handle_key(&input_widget, key) == ND_WIDGET_RESULT_EMPTY_BACKSPACE)
-            return; /* Back on an empty field exits the composer */
+            return false; /* Back on an empty field exits the composer */
         nd_textlong_draw(&input_widget, cursor_on);
         nd_softkey_update(&softkey, "Options", true);
     }
@@ -926,6 +1005,16 @@ int app_run(nd_ui *ui)
 
     if (ui == NULL)
         return 1;
+
+    /* The one place the setting is read. Read ONCE, at entry, and not per
+     * screen: a style that changed underneath an open app would leave the
+     * user halfway down a list that no longer exists. Settings takes effect
+     * the next time Messages is opened, which is also when the core re-reads
+     * engineering mode. */
+    if (nd_msg_style_current() == ND_MSG_STYLE_CHAT) {
+        nd_msg_show_threads(ui);
+        return 0;
+    }
 
     /* Built ONCE, outside the loop -- see the file header. root_id is the
      * integer 2 here and PagedList formats it with "%s", so there is no
@@ -966,6 +1055,21 @@ int app_open_message(nd_ui *ui, int64_t message_id)
     }
 
     nd_msg_mark_read(row.id);
+
+    /* CHAT OPENS THE CONVERSATION, not the one message. Tapping a
+     * notification and landing on a single message with no way back to what
+     * was said before it is the thing chat style exists to stop. The name
+     * resolution is the thread list's, so the title reads the same both
+     * ways. */
+    if (nd_msg_style_current() == ND_MSG_STYLE_CHAT) {
+        char display[ND_MSG_SENDER_MAX];
+
+        if (!nd_contacts_lookup_name(row.sender, display, sizeof display) || display[0] == '\0')
+            (void)nd_strlcpy(display, row.sender, sizeof display);
+        nd_msg_show_thread(ui, row.sender, display);
+        return 0;
+    }
+
     (void)nd_msg_show_detail(ui, "Inbox", "2-1", 1, row.message, row.id, row.sender, row.timestamp);
     return 0;
 }
@@ -975,6 +1079,12 @@ int app_open_inbox(nd_ui *ui)
 {
     if (ui == NULL)
         return 1;
+    /* Several unread: the conversation LIST, where the unread threads are
+     * the ones with a "*" against them. */
+    if (nd_msg_style_current() == ND_MSG_STYLE_CHAT) {
+        nd_msg_show_threads(ui);
+        return 0;
+    }
     nd_msg_show_inbox(ui, ND_MESSAGES_ROOT_ID, 1);
     return 0;
 }

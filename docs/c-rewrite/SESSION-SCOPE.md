@@ -101,6 +101,9 @@ The bar for "done" this session:
 2. `make test` passes, including under AddressSanitizer
 3. `nd-shoot` renders the home screen, the app selector and the stub dialog
 4. Those frames match the golden reference pixel for pixel
+   — *superseded 2026-08-26: the port is done and screens are now being
+   deliberately redesigned, so this is no longer a bar for anything. See
+   CODING-STANDARDS.md section 7.*
 5. Idle RSS measured and reported against the ~15–17 MB Python baseline
 
 Frames that are allowed not to match exactly are listed in `OPEN-QUESTIONS.md`
