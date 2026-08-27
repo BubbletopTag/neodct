@@ -259,6 +259,7 @@ void nd_pagedlist_init(nd_pagedlist *p, nd_ui *ui, const char *title, const char
     p->ui = ui;
     p->title = title;
     p->items = items;
+    p->values = NULL;
     p->n_items = (items != NULL) ? n_items : 0u;
     p->selected_index = 0u;
 
@@ -274,11 +275,31 @@ void nd_pagedlist_init(nd_pagedlist *p, nd_ui *ui, const char *title, const char
     p->bar_x = nd_ui_width(ui) - 5;
 }
 
+/* Between the name's last line and the value. Wide enough that the two read
+ * as a pair rather than as one wrapped sentence. */
+#define PAGEDLIST_VALUE_GAP 10
+
 static const char *item_name(const nd_pagedlist *p, size_t idx)
 {
     if (p->n_items == 0u || idx >= p->n_items)
         return "";
     return (p->items[idx] != NULL) ? p->items[idx] : "";
+}
+
+/* "" for every row unless a caller supplied values, which is what keeps the
+ * three lists that predate this unchanged to the pixel. */
+static const char *item_value(const nd_pagedlist *p, size_t idx)
+{
+    if (p->values == NULL || p->n_items == 0u || idx >= p->n_items)
+        return "";
+    return (p->values[idx] != NULL) ? p->values[idx] : "";
+}
+
+void nd_pagedlist_set_values(nd_pagedlist *p, const char *const *values)
+{
+    if (p == NULL)
+        return;
+    p->values = values;
 }
 
 void nd_pagedlist_draw(nd_pagedlist *p)
@@ -290,6 +311,8 @@ void nd_pagedlist_draw(nd_pagedlist *p)
     int32_t header_y;
     int32_t max_w;
     int32_t line_h = 0;
+    int32_t value_h = 0;
+    const char *value;
     int32_t total_h;
     int32_t y0;
     int32_t track_top;
@@ -339,6 +362,17 @@ void nd_pagedlist_draw(nd_pagedlist *p)
      * VerticalList the row pitch does not move with the item's own letters. */
     nd_text_size(ui->font_xl, "Ag", NULL, &line_h);
     total_h = (int32_t)lines.n * (line_h + 6) - 6;
+
+    /* The value joins the block BEFORE it is centred, so name and value move
+     * together. Probed with "Ag" for the same reason line_h is: a value of
+     * "Off" and one of "11:54 am" must not sit at different heights. */
+    value = item_value(p, p->selected_index);
+    if (value[0] != '\0') {
+        nd_text_size(ui->font_n, "Ag", NULL, &value_h);
+        value_h += PAGEDLIST_VALUE_GAP;
+        total_h += value_h;
+    }
+
     y0 = p->content_top + nd_max32(0, ((p->content_bottom - p->content_top) - total_h) / 2);
 
     for (li = 0u; li < lines.n; li++) {
@@ -350,6 +384,16 @@ void nd_pagedlist_draw(nd_pagedlist *p)
         /* Centred inside max_w, NOT inside screen_w. See the header comment. */
         x = nd_max32(5, floor_div2(max_w - w));
         (void)nd_draw_text(d, x, y0 + (int32_t)li * (line_h + 6), line, ui->font_xl, ND_WHITE);
+    }
+
+    if (value[0] != '\0') {
+        int32_t w = 0;
+        int32_t x;
+        int32_t y = y0 + (int32_t)lines.n * (line_h + 6) - 6 + PAGEDLIST_VALUE_GAP;
+
+        nd_text_size(ui->font_n, value, &w, NULL);
+        x = nd_max32(5, floor_div2(max_w - w));
+        (void)nd_draw_text(d, x, y, value, ui->font_n, ND_WHITE);
     }
 
     /* Scrollbar: white, width 2, so columns bar_x and bar_x + 1. */

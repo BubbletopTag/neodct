@@ -60,6 +60,11 @@ bool nd_clock_sync(const char *const *servers, size_t n, int timeout_s, time_t *
  * ignores failures. */
 void nd_clock_start(bool background, const char *const *servers, size_t n);
 
+/* Whether the background NTP sync is allowed to run -- system.clock.ntp_sync,
+ * which the Clock app owns. The boot floor ignores this; see nd_clock_start()
+ * and nd_settings.h for why the two are not the same question. */
+bool nd_clock_ntp_enabled(void);
+
 bool nd_clock_has_route(void);
 
 #ifdef __cplusplus
