@@ -377,6 +377,7 @@ Grepped across the whole overlay. This is the complete set.
 | `system.modem.allow_calls` | — | `"ON"` | `ModemService/__init__.py:173` | never |
 | `system.ui.wpeverywhere` | — | `"ON"` | `lib/nd_ui.c` `chrome_settings_load()` | never in-app |
 | `system.ui.wpeverywhere_dim` | — | `"0.75"` | `lib/nd_ui.c` `chrome_settings_load()` | never in-app |
+| `system.ui.wpanimate` | — | `"ALWAYS"` | `lib/nd_ui.c` `chrome_settings_load()` | never in-app |
 | `calllog.duration.last` | — | `"0"` | `apps/CallLog/main.py:95` | `apps/CallLog/main.py:103` |
 | `calllog.duration.received` | — | `"0"` | same | same |
 | `calllog.duration.dialed` | — | `"0"` | same | same |
@@ -392,6 +393,21 @@ above), and these two are consulted from inside the render path, which would
 turn every repaint into a flash write. Neither has a screen in the Settings
 app; they are taste, and the wallpaper picker is already where a person goes
 to change how the phone looks.
+
+`system.ui.wpanimate` takes one of three words rather than a boolean, because
+they are three different costs and not three degrees of one:
+
+| Value | Home screen | Menus and apps | Decoder held open in an app process |
+| --- | --- | --- | --- |
+| `ALWAYS` (default) | animates | animates | yes |
+| `HOME` | animates | still | no |
+| `OFF` | still | still | no |
+
+`HOME` is what the phone did before blocking widgets learned to repaint
+themselves; `OFF` is a `.gif` reduced to its first frame, costing exactly what
+a `.jpg` costs. Compared case-insensitively (`NEVER` is accepted for `OFF`);
+anything unrecognised is the default, which is deliberately the prettiest of
+the three — a typo must not quietly turn the feature off.
 
 `system.ui.wpeverywhere_dim` is a SECOND brightness multiplier applied on top
 of the 0.3 the home screen already uses, so the default 0.75 puts chrome at

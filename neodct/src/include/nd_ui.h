@@ -93,6 +93,14 @@ int32_t nd_ui_header_divider_y(const struct nd_ui *ui); /* max(30, H*0.11) = 30 
 
 typedef enum { ND_UI_STATE_HOME = 0, ND_UI_STATE_HOME_DIALING, ND_UI_STATE_MENU } nd_ui_state;
 
+/* Where an animated wallpaper is allowed to run -- system.ui.wpanimate. The
+ * three values are three different costs; see nd_settings.h. */
+typedef enum {
+    ND_UI_ANIM_ALWAYS = 0, /* home, menus and apps                        */
+    ND_UI_ANIM_HOME,       /* the home screen only; no decoder in an app  */
+    ND_UI_ANIM_OFF         /* nowhere; a .gif is its first frame          */
+} nd_ui_anim_mode;
+
 #define ND_APP_NAME_MAX 64
 #define ND_APP_PATH_MAX 192
 #define ND_APP_EXEC_MAX 64
@@ -206,6 +214,10 @@ typedef struct nd_ui {
         bool chrome_ready; /* the SETTINGS have been read, not the image */
         bool chrome_enabled;
         double chrome_dim;
+
+        /* system.ui.wpanimate, read with the two chrome settings above and
+         * cached with them. See nd_ui_anim_mode(). */
+        nd_ui_anim_mode anim_mode;
     } home_;
 
     /* --- services, all owned by the core process --- */
@@ -358,8 +370,14 @@ nd_image *nd_ui_load_wallpaper(const char *path);
  * That is the feature, not an oversight: the pixels have to come from
  * somewhere and the core cannot hand them across a process boundary. The
  * other three are untouched, an app that opted out pays nothing at all, and
- * an app that never clears a background never loads it either. What an app
- * does NOT do is animate -- see drives_wallpaper.
+ * an app that never clears a background never loads it either.
+ *
+ * An app that loads it also ANIMATES it, under the default
+ * system.ui.wpanimate: it runs no frame loop, but every widget it opens
+ * blocks in nd_ui_wait_for_key(), which is where the wallpaper advances --
+ * see nd_ui_set_repaint() and drives_wallpaper. That is the one cost
+ * system.ui.wpanimate=HOME exists to take back, and it takes back the
+ * decoder with it.
  */
 nd_image *nd_ui_wallpaper(nd_ui *ui);
 const nd_home_layout *nd_ui_home_layout(nd_ui *ui);
@@ -402,8 +420,31 @@ bool nd_ui_tick_wallpaper(nd_ui *ui);
 /* How long a caller may block before the wallpaper owes another frame, in
  * seconds, never more than `dflt` and never less than zero. `dflt` back when
  * nothing is animating, which is what makes this safe to wrap around the core
- * loop's existing 0.1 s poll unconditionally. */
+ * loop's existing 0.1 s poll unconditionally.
+ *
+ * FOR THE CORE LOOP, which advances the wallpaper itself every time round. A
+ * caller that does NOT advance it must use nd_ui_widget_timeout() instead --
+ * see the warning there. */
 double nd_ui_frame_timeout(nd_ui *ui, double dflt);
+
+/* The same question asked by a BLOCKING WIDGET, and the answer is not the
+ * same one.
+ *
+ * nd_ui_frame_timeout() reports the time until a frame is DUE, and once one
+ * is overdue that is zero. For the core loop zero is right: it draws the
+ * frame immediately and the deadline moves on. For a widget it is a trap --
+ * if nothing in this wait advances the wallpaper, the deadline never moves,
+ * the timeout stays zero, and the wait becomes a 100% CPU spin on a phone
+ * that is sitting still. Measured with the frame forced overdue: one second
+ * of wall time in the wait burned 1.0006 s of CPU before this existed and
+ * 0.0013 s after, in every mode that does not tick from the widget.
+ *
+ * So this returns the short timeout only when this wait really is going to
+ * advance the wallpaper -- a repainter is registered AND system.ui.wpanimate
+ * allows it here -- and `dflt` otherwise. Every loop that waits without
+ * registering a repainter (the crash screen, an app's own key loop) therefore
+ * polls exactly as it always did. */
+double nd_ui_widget_timeout(nd_ui *ui, double dflt);
 
 /* ------------------------------------------------------------------ *
  * The background under the framework's own chrome
@@ -438,6 +479,11 @@ void nd_ui_paint_chrome(nd_ui *ui, nd_rect r);
  * about the off-by-one that is deliberately preserved. */
 void nd_ui_paint_chrome_full(nd_ui *ui);
 void nd_ui_paint_chrome_content(nd_ui *ui);
+
+/* system.ui.wpanimate, read once per process and again after each app exit.
+ * Public because nd-shoot and the tests want to see which mode is in force
+ * without re-reading the setting themselves. */
+nd_ui_anim_mode nd_ui_anim_mode_of(nd_ui *ui);
 
 /* Drop the cached chrome image and re-read both settings. Called from
  * nd_ui_refresh_after_app(), because Settings is an app and turning the

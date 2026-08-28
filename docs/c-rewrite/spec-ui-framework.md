@@ -11,6 +11,16 @@
 > unchanged, including the off-by-one in `(0, 0, 240, 145)`; read every
 > `fill="black"` below as "the background", not as "black". See `nd_ui.h`.
 
+> **⚠ SUPERSEDED IN ONE MORE PLACE: "draws once, then blocks".** That is still
+> the shape of every `show()` below, but the background underneath it can now
+> move. A widget registers a redraw with `nd_ui_set_repaint()` before its loop
+> and restores the previous one after, and `nd_ui_wait_for_key()` advances an
+> animated wallpaper and calls it. The widget's own `draw()` is unchanged —
+> it is simply called again, and must therefore stay safe to call at any
+> moment with no argument but its own state. `system.ui.wpanimate=HOME` or
+> `=OFF` turns this off; the still-wallpaper case is unaffected either way,
+> because there is nothing to advance. See `nd_ui.h`.
+
 > **⚠ STALE: measured on a raqm host.** Any font advance / text-width table in this
 > document is wrong. Pillow on the phone is built `-Craqm=disable` and uses BASIC
 > layout: `getlength("Menu")@20` is **68**, not 65. Take all text metrics from

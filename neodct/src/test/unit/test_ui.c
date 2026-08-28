@@ -190,7 +190,7 @@ static void drop_stage(void)
 /* NULL for either extra means "leave it out", which is what a phone that has
  * never been configured has and therefore what the defaults must cover. */
 static void write_settings_full(const char *wallpaper_name, const char *wpeverywhere,
-                                const char *wp_dim)
+                                const char *wp_dim, const char *wp_animate)
 {
     char path[ND_PATH_MAX];
     FILE *f;
@@ -216,12 +216,14 @@ static void write_settings_full(const char *wallpaper_name, const char *wpeveryw
         (void)fprintf(f, "system.ui.wpeverywhere=%s\n", wpeverywhere);
     if (wp_dim != NULL)
         (void)fprintf(f, "system.ui.wpeverywhere_dim=%s\n", wp_dim);
+    if (wp_animate != NULL)
+        (void)fprintf(f, "system.ui.wpanimate=%s\n", wp_animate);
     (void)fclose(f);
 }
 
 static void write_settings(const char *wallpaper_name)
 {
-    write_settings_full(wallpaper_name, NULL, NULL);
+    write_settings_full(wallpaper_name, NULL, NULL, NULL);
 }
 
 /* ------------------------------------------------------------------ *
@@ -630,7 +632,7 @@ static void test_chrome_background(nd_fb *fb)
     nd_ui_teardown(&ui);
 
     /* --- 2. the setting turns it off, and only it --- */
-    write_settings_full("Palestine.jpg", "OFF", NULL);
+    write_settings_full("Palestine.jpg", "OFF", NULL, NULL);
     nd_vclock_enable();
     nd_ui_sim_clear(&ui);
     if (nd_ui_init(&ui, fb) != ND_OK) {
@@ -646,7 +648,7 @@ static void test_chrome_background(nd_fb *fb)
     nd_ui_teardown(&ui);
 
     /* --- 3. no wallpaper configured: black, whatever the setting says --- */
-    write_settings_full(NULL, "ON", NULL);
+    write_settings_full(NULL, "ON", NULL, NULL);
     nd_vclock_enable();
     nd_ui_sim_clear(&ui);
     if (nd_ui_init(&ui, fb) != ND_OK) {
@@ -679,7 +681,7 @@ static void test_chrome_background(nd_fb *fb)
         for (c = 0u; c < ND_ARRAY_LEN(CASES); c++) {
             int32_t x;
 
-            write_settings_full("Palestine.jpg", "ON", CASES[c]);
+            write_settings_full("Palestine.jpg", "ON", CASES[c], NULL);
             nd_vclock_enable();
             nd_ui_sim_clear(&ui);
             if (nd_ui_init(&ui, fb) != ND_OK) {
@@ -898,6 +900,121 @@ static void test_animated_wallpaper(nd_fb *fb)
             g_repaint_ui = NULL;
         }
         nd_ui_teardown(&ui);
+    }
+
+    /* ---- system.ui.wpanimate: the three tiers ---- *
+     *
+     * ALWAYS is the default and is what the other tests above exercise.
+     * These two are the ways out, and each has to cost something real --
+     * a mode that changed only where frames were drawn, while still holding
+     * a decoder open in every app, would not be worth having. */
+    {
+        static const struct {
+            const char *value;
+            bool core_decoder;   /* does the CORE keep one open?          */
+            bool app_decoder;    /* does an APP process keep one open?    */
+            bool widget_repaint; /* does a blocked widget animate?        */
+        } CASES[] = {
+            {"ALWAYS", true, true, true},
+            /* HOME's whole point: the home screen still moves, and an app
+             * costs nothing at all. Collapsing it into ALWAYS or into OFF
+             * fails on one of these three columns. */
+            {"HOME", true, false, false},
+            {"OFF", false, false, false},
+            /* Anything unrecognised is the default, and the default is the
+             * one that looks best -- a typo must not quietly turn it off. */
+            {"banana", true, true, true},
+        };
+        size_t c;
+
+        for (c = 0u; c < ND_ARRAY_LEN(CASES); c++) {
+            write_settings_full("Classroom.gif", NULL, NULL, CASES[c].value);
+            nd_vclock_enable();
+            nd_ui_sim_clear(&ui);
+            if (nd_ui_init(&ui, fb) != ND_OK) {
+                CHECK(false, "nd_ui_init (wpanimate)");
+                continue;
+            }
+            if (nd_ui_wallpaper(&ui) == NULL) {
+                g_skips++;
+                nd_ui_teardown(&ui);
+                continue;
+            }
+
+            CHECK((ui.home_.wallpaper_gif != NULL) == CASES[c].core_decoder,
+                  "wpanimate decides whether the core holds a decoder");
+            nd_ui_teardown(&ui);
+
+            /* THE APP SIDE, which is the whole cost claim of HOME: an app
+             * process must open no decoder under it, because the repaint path
+             * is inert there and the 226 KB would buy a frame that can never
+             * be shown. anim_allowed_here() tells an app from the core by
+             * nd_app_dir(), so setting one is all it takes to be an app --
+             * the same thing nd-apprun does before it loads app.so. */
+            (void)nd_app_set_dir("/NeoDCT/System/apps/PhoneBook");
+            nd_vclock_enable();
+            nd_ui_sim_clear(&ui);
+            if (nd_ui_init(&ui, fb) == ND_OK && nd_ui_wallpaper(&ui) != NULL) {
+                CHECK((ui.home_.wallpaper_gif != NULL) == CASES[c].app_decoder,
+                      "wpanimate decides whether an APP holds a decoder");
+            }
+            (void)nd_app_set_dir(NULL);
+            nd_ui_teardown(&ui);
+
+            /* Back to a core context for the repaint check below. */
+            nd_vclock_enable();
+            nd_ui_sim_clear(&ui);
+            if (nd_ui_init(&ui, fb) != ND_OK) {
+                CHECK(false, "nd_ui_init (wpanimate, second)");
+                continue;
+            }
+            if (nd_ui_wallpaper(&ui) == NULL) {
+                g_skips++;
+                nd_ui_teardown(&ui);
+                continue;
+            }
+
+            {
+                int calls = 0;
+                nd_ui_repaint saved;
+                int i;
+
+                g_repaint_ui = &ui;
+                (void)nd_ui_present(&ui);
+                saved = nd_ui_set_repaint(&ui, count_repaint, &calls);
+                for (i = 0; i < 5; i++)
+                    (void)nd_ui_read_keypress(&ui, 0.0);
+                nd_ui_restore_repaint(&ui, saved);
+                g_repaint_ui = NULL;
+
+                CHECK((calls > 0) == CASES[c].widget_repaint,
+                      "wpanimate decides whether a blocked widget animates");
+
+                /* And the poll a widget uses must only shorten when it is
+                 * going to advance the wallpaper -- otherwise the deadline
+                 * never moves and the wait becomes a 100% CPU spin.
+                 *
+                 * Forced overdue by hand, because that is the state the spin
+                 * needs and the virtual clock will not reach it on its own: it
+                 * advances on a committed frame, and a widget blocked in
+                 * nd_ui_wait_for_key() commits nothing. On the device wall
+                 * time gets there within one frame of the widget going up. */
+                ui.home_.wallpaper_due = 0.0;
+                CHECK(nd_ui_frame_timeout(&ui, 0.1) == 0.0 || !CASES[c].core_decoder,
+                      "an overdue frame is what makes the core loop redraw at once");
+                CHECK(nd_ui_widget_timeout(&ui, 0.1) == 0.1,
+                      "a wait with no repainter keeps its own timeout");
+
+                /* Same deadline, repainter back on: only ALWAYS may shorten,
+                 * because only ALWAYS ticks -- under HOME the wait would poll
+                 * a deadline nothing is going to move. */
+                saved = nd_ui_set_repaint(&ui, count_repaint, &calls);
+                CHECK((nd_ui_widget_timeout(&ui, 0.1) == 0.1) != CASES[c].widget_repaint,
+                      "only a wait that will advance the wallpaper shortens its poll");
+                nd_ui_restore_repaint(&ui, saved);
+            }
+            nd_ui_teardown(&ui);
+        }
     }
 
     /* ---- an app process gets the still and no decoder ---- *

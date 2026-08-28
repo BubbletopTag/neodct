@@ -108,6 +108,29 @@ extern "C" {
 #define ND_SET_UI_WP_EVERYWHERE "system.ui.wpeverywhere"     /* "ON"     */
 #define ND_SET_UI_WP_APP_DIM    "system.ui.wpeverywhere_dim" /* "0.75"   */
 
+/* WHERE AN ANIMATED WALLPAPER IS ALLOWED TO RUN. Three values, because they
+ * are three different costs, not three degrees of one:
+ *
+ *   ALWAYS  home screen, menus and apps. A widget is a blocking wait, so
+ *           this is the one that keeps a decoder open in every app process
+ *           and redraws the screen at the GIF's rate for as long as a menu
+ *           is on it. The prettiest and the most expensive.
+ *   HOME    the home screen only, which is what the phone did before menus
+ *           learned to repaint themselves. An app opens no decoder at all
+ *           under this, so it is 226 KB and a file descriptor cheaper as
+ *           well as quieter.
+ *   OFF     nowhere. A .gif wallpaper is its first frame and nothing else,
+ *           which costs exactly what a .jpg costs.
+ *
+ * This exists because the honest answer to "what does the animation do to
+ * the battery" is that nobody has measured it on the real hardware yet. It
+ * is a way out that does not require picking a different wallpaper.
+ *
+ * Compared case-insensitively against those three words; anything else is
+ * the default. Read once per process, like the two above. */
+#define ND_SET_UI_WP_ANIMATE      "system.ui.wpanimate" /* "ALWAYS" */
+#define ND_SET_UI_WP_ANIMATE_DFLT "ALWAYS"
+
 /* NTP sync, owned by the Clock app and read by the clock service at boot.
  * Defaults to ON: a phone whose clock is wrong fails every TLS "not valid
  * before" check, so the useful default is the one that fixes itself.

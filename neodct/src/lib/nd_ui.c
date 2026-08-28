@@ -542,6 +542,24 @@ static bool wallpaper_ext_ok(const char *path)
     return ends_with_ci(path, ".jpg") || ends_with_ci(path, ".jpeg") || ends_with_ci(path, ".gif");
 }
 
+/* Is an animation allowed to run in THIS process, under the configured mode?
+ *
+ * nd_app_dir() is "" in the core and the app's own directory in an app
+ * process, which is the only distinction HOME needs and one the context
+ * already carries -- see nd_app.h. */
+static bool anim_allowed_here(nd_ui *ui)
+{
+    switch (nd_ui_anim_mode_of(ui)) {
+    case ND_UI_ANIM_OFF:
+        return false;
+    case ND_UI_ANIM_HOME:
+        return nd_app_dir()[0] == '\0';
+    case ND_UI_ANIM_ALWAYS:
+    default:
+        return true;
+    }
+}
+
 /* A .gif wallpaper, taken from ONE decoder.
  *
  * The obvious shape -- load the still with nd_ui_load_wallpaper(), then open a
@@ -577,10 +595,18 @@ static bool load_gif_wallpaper(nd_ui *ui, const char *path)
     }
     ui->home_.wallpaper = still;
 
-    /* A context that runs no loop cannot advance a decoder, and holding one
-     * open there would cost 226 KB and a descriptor on the SD card for a
-     * frame that can never arrive. The core and every app do run one. */
-    if (!nd_gif_animated(g) || !ui->drives_wallpaper) {
+    /* Three reasons not to keep the decoder, all of which mean the same
+     * thing: no second frame will ever be shown here, so holding it open
+     * would cost 226 KB and a descriptor on the SD card for nothing.
+     *
+     *   - the file has one frame;
+     *   - this context runs no loop that could advance it (a test fixture);
+     *   - system.ui.wpanimate says not here. OFF means nowhere; HOME means
+     *     the core only, and an app under HOME is exactly the case this is
+     *     worth checking for, because an app would otherwise carry the
+     *     decoder through its whole life to show one frame.
+     */
+    if (!nd_gif_animated(g) || !ui->drives_wallpaper || !anim_allowed_here(ui)) {
         nd_gif_close(g);
         return true;
     }
@@ -883,6 +909,19 @@ void nd_ui_set_wallpaper(nd_ui *ui, nd_image *img)
  * Animated wallpaper
  * ------------------------------------------------------------------ */
 
+/* Is there an animation in this process at all?
+ *
+ * A plain field read, and deliberately the FIRST question every caller below
+ * asks. The alternatives -- reading system.ui.wpanimate, or calling into the
+ * decoder -- both cost something, and nd_settings_get() costs a rewrite of
+ * settings.prop whatever key it is handed (the R-24 quirk in nd_settings.h).
+ * An app that opted out of the wallpaper never opens a decoder and must go on
+ * paying nothing, including from the key poll. */
+static bool has_animation(const nd_ui *ui)
+{
+    return ui->home_.wallpaper_ready && ui->home_.wallpaper_gif != NULL;
+}
+
 bool nd_ui_tick_wallpaper(nd_ui *ui)
 {
     const nd_image *frame;
@@ -894,7 +933,7 @@ bool nd_ui_tick_wallpaper(nd_ui *ui)
     /* Deliberately not nd_ui_wallpaper(): the tick must not be what FORCES
      * the lazy load. Every app process runs a loop; if ticking loaded the
      * wallpaper, every app would pay the load it was made lazy to avoid. */
-    if (!ui->home_.wallpaper_ready || ui->home_.wallpaper_gif == NULL)
+    if (!has_animation(ui))
         return false;
 
     now = nd_time_now();
@@ -910,17 +949,27 @@ bool nd_ui_tick_wallpaper(nd_ui *ui)
         return false;
     }
 
+    /* BEFORE the paint, and that ordering is load-bearing.
+     *
+     * Scheduled from NOW, not from the previous due time: a phone that spent
+     * 400 ms inside a dialog must not then race through ten frames catching
+     * up. Dropping frames is the right failure for a background.
+     *
+     * And it moves even if the paint below fails, which is the part worth
+     * being careful about. A caller that asked because nd_ui_frame_timeout()
+     * said zero will ask again the instant this returns; if a failed paint
+     * left the deadline in the past, that is a 100% CPU spin -- and the way
+     * the paint fails is an allocation failure on the non-panel-sized path,
+     * so the spin would arrive exactly when the phone was already short of
+     * memory. Moving the deadline first costs one dropped frame instead. */
+    ui->home_.wallpaper_due = now + (double)delay_ms / 1000.0;
+
     /* IN PLACE -- see wallpaper_paint_frame(). The pointer every consumer
      * holds never changes for the life of the wallpaper, and a panel-sized
      * GIF allocates nothing at all per frame. */
     if (!wallpaper_paint_frame(ui->home_.wallpaper, frame))
         return false;
     ui->home_.wallpaper_gen++;
-
-    /* Scheduled from NOW, not from the previous due time: a phone that spent
-     * 400 ms inside a dialog must not then race through ten frames catching
-     * up. Dropping frames is the right failure for a background. */
-    ui->home_.wallpaper_due = now + (double)delay_ms / 1000.0;
     return true;
 }
 
@@ -928,7 +977,7 @@ double nd_ui_frame_timeout(nd_ui *ui, double dflt)
 {
     double left;
 
-    if (ui == NULL || !ui->home_.wallpaper_ready || ui->home_.wallpaper_gif == NULL)
+    if (ui == NULL || !has_animation(ui))
         return dflt;
 
     left = ui->home_.wallpaper_due - nd_time_now();
@@ -967,6 +1016,28 @@ static void chrome_settings_load(nd_ui *ui)
     if (end == raw || !(v >= 0.0) || v > 1.0)
         v = strtod(ND_SET_UI_WP_APP_DIM_DFLT, NULL);
     ui->home_.chrome_dim = v;
+
+    /* Three words rather than a boolean, and compared here rather than
+     * through one of nd_settings.h's three boolean parsers, because it is not
+     * a boolean: see the setting's comment. Anything unrecognised is the
+     * default, which is the prettiest of the three -- a typo must not quietly
+     * turn the feature off. */
+    raw = nd_settings_get(ND_SET_UI_WP_ANIMATE, ND_SET_UI_WP_ANIMATE_DFLT);
+    if (raw != NULL && eq_ci(raw, "HOME"))
+        ui->home_.anim_mode = ND_UI_ANIM_HOME;
+    else if (raw != NULL && (eq_ci(raw, "OFF") || eq_ci(raw, "NEVER")))
+        ui->home_.anim_mode = ND_UI_ANIM_OFF;
+    else
+        ui->home_.anim_mode = ND_UI_ANIM_ALWAYS;
+}
+
+nd_ui_anim_mode nd_ui_anim_mode_of(nd_ui *ui)
+{
+    if (ui == NULL)
+        return ND_UI_ANIM_ALWAYS;
+    if (!ui->home_.chrome_ready)
+        chrome_settings_load(ui);
+    return ui->home_.anim_mode;
 }
 
 void nd_ui_invalidate_chrome(nd_ui *ui)
@@ -1553,6 +1624,17 @@ static void repaint_if_wallpaper_moved(nd_ui *ui)
 {
     if (ui->repaint_.fn == NULL || ui->repaint_.running)
         return;
+    /* Before the mode, for the same reason nd_ui_widget_timeout() does it in
+     * this order: this is a key poll and it must stay free. */
+    if (!has_animation(ui))
+        return;
+    /* HOME and OFF both mean "not from a widget": under HOME the home screen
+     * still animates, because that is nd_ui_update()'s tick and not this one.
+     * Checked before the tick so that neither mode advances the decoder the
+     * core is holding -- a widget must not consume frames the home screen is
+     * going to want. */
+    if (nd_ui_anim_mode_of(ui) != ND_UI_ANIM_ALWAYS)
+        return;
     if (!nd_ui_tick_wallpaper(ui))
         return;
 
@@ -1593,14 +1675,27 @@ int32_t nd_ui_read_keypress(nd_ui *ui, double timeout_s)
     return nd_input_read_key(ui->input, timeout_s);
 }
 
+double nd_ui_widget_timeout(nd_ui *ui, double dflt)
+{
+    if (ui == NULL || ui->repaint_.fn == NULL)
+        return dflt;
+    /* Before the mode, because asking the mode reads two settings and this
+     * answers the question for free -- see has_animation(). */
+    if (!has_animation(ui))
+        return dflt;
+    if (nd_ui_anim_mode_of(ui) != ND_UI_ANIM_ALWAYS)
+        return dflt;
+    return nd_ui_frame_timeout(ui, dflt);
+}
+
 int32_t nd_ui_wait_for_key(nd_ui *ui)
 {
     for (;;) {
-        /* 0.1 s unless an animated wallpaper owes a frame sooner, which is
-         * what makes a menu animate at the GIF's own rate rather than at the
-         * 10 Hz this poll used to run at. A still wallpaper, or none, gets
-         * exactly the 0.1 s it always got. */
-        int32_t key = nd_ui_read_keypress(ui, nd_ui_frame_timeout(ui, 0.1));
+        /* 0.1 s unless THIS WAIT is one that advances the wallpaper, in which
+         * case it wakes when the next frame is due and a menu animates at the
+         * GIF's own rate. nd_ui_widget_timeout(), not nd_ui_frame_timeout():
+         * the difference is a busy-spin, and its comment says why. */
+        int32_t key = nd_ui_read_keypress(ui, nd_ui_widget_timeout(ui, 0.1));
 
         if (key != ND_KEY_NONE)
             return key;
