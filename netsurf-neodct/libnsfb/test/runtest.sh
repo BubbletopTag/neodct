@@ -7,6 +7,7 @@ TEST_PATH=$1
 TEST_FRONTEND=ram
 
 ${TEST_PATH}/test_evdev
+${TEST_PATH}/test_fbformat
 ${TEST_PATH}/test_frontend ${TEST_FRONTEND}
 ${TEST_PATH}/test_plottest ${TEST_FRONTEND}
 ${TEST_PATH}/test_bitmap ${TEST_FRONTEND}

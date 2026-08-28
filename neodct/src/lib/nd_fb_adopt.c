@@ -12,9 +12,11 @@
  *     black. That already happened, in the core, before this process existed.
  *     Zeroing again would blank the panel between the app starting and its
  *     first frame, which is a visible flash the Python never had.
- *   - the geometry is re-queried rather than assumed, because the descriptor
- *     is the only thing that crossed the boundary and a driver may have been
- *     reconfigured since.
+ *   - the geometry AND the channel order are re-queried rather than assumed,
+ *     because the descriptor is the only thing that crossed the boundary and
+ *     a driver may have been reconfigured since. The order matters as much as
+ *     the size: an app that packs B G R A into a framebuffer whose driver
+ *     said R G B x draws the whole screen with red and blue swapped.
  *
  * Kept out of nd_fb.c on purpose: that file is the device driver and this is
  * the process-boundary helper that happens to build the same struct.
@@ -71,6 +73,7 @@ nd_err nd_fb_adopt_fd(nd_fb **out, int fd)
         free(fb);
         return rc;
     }
+    nd_fb_set_channel_order(fb, (int32_t)var.red.offset, (int32_t)var.blue.offset);
 
     fb->mem = mmap(NULL, fb->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (fb->mem == MAP_FAILED) {

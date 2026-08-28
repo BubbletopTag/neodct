@@ -77,9 +77,17 @@ def elf_machine(path):
 def bmp_to_xrgb8888(path, width, height):
     """Read an uncompressed 24-bit BMP into framebuffer bytes.
 
-    neodctDisplay.c force_mode() asks the fb for 32bpp and reads it as
-    XRGB8888 -- bytes B,G,R,X -- so that is what a blob written straight to
-    /dev/fb0 has to be. Rows are emitted top-down; BMP stores them bottom-up.
+    Bytes B,G,R,X, which is what a 32bpp DRM framebuffer -- QEMU's -- wants.
+    Rows are emitted top-down; BMP stores them bottom-up.
+
+    ON THE PHONE THIS IS THE WRONG WAY ROUND AND IT DOES NOT MATTER YET.
+    fb0 there is vfb, which declares red in the low byte, and neodct_displayd
+    now believes that declaration rather than assuming B,G,R,X, so a blob
+    cat'ed to /dev/fb0 reaches the panel with red and blue exchanged. Both
+    splashes are pure black and white, so nothing is visible either way, and
+    one blob still serves both targets. A boot logo with any colour in it
+    would need the order chosen per target instead -- there is no single
+    answer, because the two framebuffers genuinely disagree.
 
     Deliberately hand-rolled rather than using Pillow: this runs on the build
     host during `make`, where nothing guarantees PIL is installed.

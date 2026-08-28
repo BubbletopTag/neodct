@@ -20,6 +20,12 @@
 #include "nd_image.h"
 #include "nd_types.h"
 
+/* nd_fb_set_channel_order() is libneodct-internal -- nd_fb.h keeps the struct
+ * opaque so widget code cannot reach past nd_fb_update(). The order it picks
+ * is exactly what these tests exist to pin, so the test includes the private
+ * header by relative path, as test_modem.c and test_notify.c do. */
+#include "../../lib/nd_fb_priv.h"
+
 #include "fb_ref.inc"
 
 static int failures;
@@ -376,11 +382,105 @@ static void test_update_refusals(void)
     nd_fb_close(fb);
 }
 
+/* ------------------------------------------------------------------ *
+ * The channel order the driver asked for
+ * ------------------------------------------------------------------ */
+
+/* nd_fb.h: a bit depth says how wide a pixel is and nothing about where red
+ * sits in it, and the two framebuffers NeoDCT runs on disagree -- QEMU's DRM
+ * emulation puts red at bit 16, the phone's vfb puts it at bit 0. Packing one
+ * order into both is what left netsurf and mpv with red and blue swapped, so
+ * these check the bytes that actually reach the mapping, not just the label.
+ *
+ * A 1x1 framebuffer is enough: nd_fb_update() takes the contiguous fast path
+ * for it, which is the path the phone runs every frame. */
+static void check_pixel(int32_t bpp, int32_t red_off, int32_t blue_off, uint8_t r, uint8_t g,
+                        uint8_t b, nd_fb_path want_path, const uint8_t *want, size_t want_n,
+                        const char *name)
+{
+    nd_fb *fb = NULL;
+    nd_image *src = nd_image_new(1, 1, ND_PIXFMT_RGB888);
+    const uint8_t *bytes;
+    size_t size = 0u;
+
+    CHECK(src != NULL, "%s: source allocation failed", name);
+    if (src == NULL)
+        return;
+    src->pixels[0] = r;
+    src->pixels[1] = g;
+    src->pixels[2] = b;
+
+    if (nd_fb_open_mem(&fb, 1, 1, bpp, 0u) != ND_OK) {
+        fail("%s: nd_fb_open_mem failed", name);
+        nd_image_free(src);
+        return;
+    }
+    nd_fb_set_channel_order(fb, red_off, blue_off);
+
+    CHECK(nd_fb_pixel_path(fb) == want_path, "%s: pixel path %d != %d", name,
+          (int)nd_fb_pixel_path(fb), (int)want_path);
+    CHECK(nd_fb_update(fb, src) == ND_OK, "%s: update failed", name);
+
+    bytes = nd_fb_mem_bytes(fb, &size);
+    CHECK(bytes != NULL && size == want_n, "%s: mapping is %zu bytes, wanted %zu", name, size,
+          want_n);
+    if (bytes != NULL && size == want_n)
+        CHECK(memcmp(bytes, want, want_n) == 0, "%s: packed bytes differ", name);
+
+    nd_image_free(src);
+    nd_fb_close(fb);
+}
+
+static void test_channel_order(void)
+{
+    static const uint8_t bgra_red[4] = {0x00u, 0x00u, 0xFFu, 0xFFu};
+    static const uint8_t rgba_red[4] = {0xFFu, 0x00u, 0x00u, 0xFFu};
+    static const uint8_t rgb565_red[2] = {0x00u, 0xF8u};
+    static const uint8_t bgr565_red[2] = {0x1Fu, 0x00u};
+    static const uint8_t bgr565_blue[2] = {0x00u, 0xF8u};
+    nd_fb *fb = NULL;
+
+    /* QEMU: virtio-gpu through DRM's fbdev emulation, red at bit 16. The
+     * order the Python always assumed, and still the default. */
+    check_pixel(32, 16, 0, 255u, 0u, 0u, ND_FB_PATH_BGRA32, bgra_red, sizeof bgra_red,
+                "32bpp red@16");
+
+    /* The phone: vfb, red at bit 0. Same pixel, other way round. */
+    check_pixel(32, 0, 16, 255u, 0u, 0u, ND_FB_PATH_RGBA32, rgba_red, sizeof rgba_red,
+                "32bpp red@0");
+
+    /* A driver that never filled the masks in has told us nothing, and the
+     * answer it used to get is the one it keeps getting. */
+    check_pixel(32, 0, 0, 255u, 0u, 0u, ND_FB_PATH_BGRA32, bgra_red, sizeof bgra_red,
+                "32bpp masks unset");
+
+    /* 16bpp has the same two ends: DRM says red at bit 11, vfb says bit 0. */
+    check_pixel(16, 11, 0, 255u, 0u, 0u, ND_FB_PATH_RGB565, rgb565_red, sizeof rgb565_red,
+                "16bpp red@11");
+    check_pixel(16, 0, 11, 255u, 0u, 0u, ND_FB_PATH_BGR565, bgr565_red, sizeof bgr565_red,
+                "16bpp red@0");
+    check_pixel(16, 0, 11, 0u, 0u, 255u, ND_FB_PATH_BGR565, bgr565_blue, sizeof bgr565_blue,
+                "16bpp blue@11");
+
+    /* 24bpp writes raw RGB triples and has no order to choose. */
+    if (nd_fb_open_mem(&fb, 4, 2, 24, 0u) == ND_OK) {
+        nd_fb_set_channel_order(fb, 0, 16);
+        CHECK(nd_fb_pixel_path(fb) == ND_FB_PATH_RGB888, "24bpp path changed");
+        nd_fb_close(fb);
+    } else {
+        fail("24bpp open failed");
+    }
+
+    /* Nothing to re-pick on a framebuffer that is not there. */
+    nd_fb_set_channel_order(NULL, 0, 16);
+}
+
 int main(void)
 {
     test_against_python();
     test_packers();
     test_packer_bounds();
+    test_channel_order();
     test_band_at_row_32();
     test_side_padding();
     test_bad_geometry();

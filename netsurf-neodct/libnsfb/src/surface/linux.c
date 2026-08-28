@@ -34,6 +34,7 @@
 #include "cursor.h"
 
 #include "linux_evdev.h"
+#include "linux_format.h"
 
 
 
@@ -119,39 +120,32 @@ static int linux_set_geometry(nsfb_t *nsfb, int width, int height, enum nsfb_for
     return 0;
 }
 
+/*
+ * NeoDCT: where red sits comes from the driver, not from the bit depth.
+ *
+ * This used to answer XBGR8888 for every 32bpp framebuffer, which is a guess
+ * with nothing behind it -- a bit depth says how wide a pixel is and nothing
+ * about the order of the channels inside it. The two framebuffers NeoDCT runs
+ * on disagree, so the guess was wrong on one of them whichever way it went:
+ *
+ *   QEMU     virtio-gpu through DRM's fbdev emulation: red.offset 16,
+ *            i.e. bytes B G R x. The guess was wrong here, and this is the
+ *            "html.duckduckgo.com is the wrong colour" bug.
+ *   hardware the kernel's vfb, mirrored to the ST7789 by neodct_displayd:
+ *            red.offset 0, i.e. bytes R G B x. The guess happened to be
+ *            right.
+ *
+ * fb_var_screeninfo carries the answer, so ask it and stop guessing. The
+ * decision itself is in linux_format.c, where a test can reach it without a
+ * framebuffer to point it at.
+ */
 static enum nsfb_format_e
 format_from_lstate(struct lnx_priv *lstate) 
 {
-    enum nsfb_format_e fmt = NSFB_FMT_ANY;
-
-    switch(lstate->VarInfo.bits_per_pixel) {
-    case 32:
-	if (lstate->VarInfo.transp.length == 0)
-	    fmt = NSFB_FMT_XBGR8888;
-	else
-	    fmt = NSFB_FMT_ABGR8888;
-	break;
-
-    case 24:
-	fmt = NSFB_FMT_RGB888;
-	break;
-
-    case 16:
-	fmt = NSFB_FMT_RGB565;
-	break;
-
-    case 8:
-	fmt = NSFB_FMT_I8;
-	break;
-
-    case 1:
-	fmt = NSFB_FMT_RGB565;
-	break;
-
-    }
-
-
-    return fmt;
+    return nsfb_linux_format_of(lstate->VarInfo.bits_per_pixel,
+				lstate->VarInfo.red.offset,
+				lstate->VarInfo.blue.offset,
+				lstate->VarInfo.transp.length);
 }
 
 static int linux_initialise(nsfb_t *nsfb)

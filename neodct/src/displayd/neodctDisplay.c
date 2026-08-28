@@ -15,6 +15,10 @@
  *     kernel cmdline to cut ioctl count 16x; falls back to 4096).
  *   - Periodic stats: sent/skipped frames, avg rect, convert/spi ms.
  *
+ * Since: the red/blue channel order is READ FROM fb_var_screeninfo rather
+ * than assumed, so programs that are not NeoDCT reach the panel in their
+ * own colours. See the comment above convert_rect().
+ *
  * Usage:
  *   neodct_displayd --test              hardware self-check (R/G/B/W/K fills)
  *   neodct_displayd                     mirror /dev/fb0 (diff-based) forever
@@ -22,7 +26,7 @@
  *   neodct_displayd --speed 40000000    SPI clock in Hz (values < 1000 mean MHz)
  *   neodct_displayd --fps 30            poll rate cap
  *   neodct_displayd --full              disable diffing (v1 behavior)
- *   neodct_displayd --swap-rb           swap R/B channels
+ *   neodct_displayd --swap-rb           invert the detected R/B order
  *   neodct_displayd --stats             print stats every 5 s
  *
  * Wiring (matches proven-good harness):
@@ -99,6 +103,7 @@ static volatile int quit_flag = 0;
 static struct fb_var_screeninfo vinfo;
 static struct fb_fix_screeninfo finfo;
 static unsigned int fb_bytespp = 2;     /* granted fb bytes per pixel (2 or 4) */
+static int fb_swap_rb = 0;              /* red/blue order, decided at init */
 
 static unsigned char *out_buf  = NULL;  /* converted RGB565 big-endian rect */
 static size_t out_buf_size = 0;
@@ -370,9 +375,23 @@ static int init_framebuffer(void)
         return -1;
     }
     fb_bytespp = vinfo.bits_per_pixel / 8;
+
+    /* Which end of the pixel red is on is the driver's to say, and this
+     * daemon used to assume. vfb says red.offset 0 (bytes R G B x); DRM's
+     * fbdev emulation says 16 (bytes B G R x). --swap-rb now inverts
+     * whatever was detected, which is what it was always for: a driver
+     * that fills the struct in wrongly. */
+    fb_swap_rb = (vinfo.red.offset < vinfo.blue.offset) ? 1 : 0;
+    if (opt_swap_rb)
+        fb_swap_rb = !fb_swap_rb;
+
+    printf("fb channels: red@%u green@%u blue@%u -> %s%s\n",
+           vinfo.red.offset, vinfo.green.offset, vinfo.blue.offset,
+           fb_swap_rb ? "red first" : "blue first",
+           opt_swap_rb ? " (--swap-rb inverted it)" : "");
     printf("pixel path: %s\n", fb_bytespp == 4
-           ? "fb XRGB8888 -> daemon packs RGB565 (Python uses fast BGRA)"
-           : "fb RGB565 -> byte swap only (Python must pack 565 itself)");
+           ? "fb 32bpp -> daemon packs RGB565"
+           : "fb 16bpp -> daemon repacks 565 big-endian");
 
     fb_size = (size_t)finfo.line_length * vinfo.yres;
     fb_data = mmap(NULL, fb_size, PROT_READ, MAP_SHARED, fb_fd, 0);
@@ -393,8 +412,25 @@ static int init_framebuffer(void)
 
 /* Convert fb rect to panel big-endian RGB565 into out_buf.
  * 16bpp fb: byte-swap the native little-endian 565.
- * 32bpp fb: pack XRGB8888 (bytes B,G,R,X) down to 565 -- this is the
- * work Python used to do in a 346 ms/frame interpreter loop. */
+ * 32bpp fb: pack the 8888 pixel down to 565 -- this is the work Python
+ * used to do in a 346 ms/frame interpreter loop.
+ *
+ * ============ WHICH END RED IS ON IS NOT OURS TO DECIDE ============
+ *
+ * This read bytes B G R x unconditionally, and the UI packed bytes B G R A
+ * unconditionally, so the two halves of NeoDCT agreed with each other and
+ * the panel looked right. They agreed on something the driver disagreed
+ * with: the phone's fb0 is the kernel's vfb, which declares red.offset 0 --
+ * bytes R G B x (drivers/video/fbdev/vfb.c, the 32bpp case of
+ * vfb_check_var). Everything on the phone that is not NeoDCT believes that
+ * declaration -- mpv's fbdev output, netsurf through libnsfb, the
+ * framebuffer console behind the recovery menu -- so all of them drew
+ * R G B x into a buffer this function read as B G R x, and video and web
+ * pages reached the panel with red and blue swapped.
+ *
+ * fb_swap_rb now comes from fb_var_screeninfo, so the daemon and the UI
+ * both follow the driver instead of each other, and a program that has
+ * never heard of NeoDCT gets its colours through intact. */
 static size_t convert_rect(unsigned int x0, unsigned int y0,
                            unsigned int x1, unsigned int y1)
 {
@@ -405,7 +441,7 @@ static size_t convert_rect(unsigned int x0, unsigned int y0,
             for (unsigned int x = x0; x <= x1; x++) {
                 const unsigned char *p = src + (size_t)x * 4;
                 unsigned char b = p[0], g = p[1], r = p[2];
-                if (opt_swap_rb) { unsigned char t = r; r = b; b = t; }
+                if (fb_swap_rb) { unsigned char t = r; r = b; b = t; }
                 unsigned short px = (unsigned short)(((r & 0xF8) << 8) |
                                                      ((g & 0xFC) << 3) |
                                                      (b >> 3));
@@ -415,7 +451,7 @@ static size_t convert_rect(unsigned int x0, unsigned int y0,
         } else {
             for (unsigned int x = x0; x <= x1; x++) {
                 unsigned short px = src[x * 2] | (src[x * 2 + 1] << 8);
-                if (opt_swap_rb)
+                if (fb_swap_rb)
                     px = (unsigned short)(((px & 0xF800) >> 11) | (px & 0x07E0) | ((px & 0x001F) << 11));
                 out_buf[n++] = px >> 8;
                 out_buf[n++] = px & 0xFF;

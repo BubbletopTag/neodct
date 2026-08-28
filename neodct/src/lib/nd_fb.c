@@ -64,8 +64,10 @@ static size_t out_bytes(nd_fb_path path)
 {
     switch (path) {
     case ND_FB_PATH_BGRA32:
+    case ND_FB_PATH_RGBA32:
         return 4u;
     case ND_FB_PATH_RGB565:
+    case ND_FB_PATH_BGR565:
         return 2u;
     case ND_FB_PATH_RGB888:
         break;
@@ -88,10 +90,22 @@ static void pack_px(uint8_t out[4], const uint8_t *src, nd_fb_path path)
          * alpha it arrived with is already gone. */
         out[3] = 255u;
         return;
+    case ND_FB_PATH_RGBA32:
+        out[0] = src[0];
+        out[1] = src[1];
+        out[2] = src[2];
+        out[3] = 255u;
+        return;
     case ND_FB_PATH_RGB565:
         v = (uint32_t)((src[0] & 0xF8u) << 8) | (uint32_t)((src[1] & 0xFCu) << 3) |
             (uint32_t)(src[2] >> 3);
         /* Low byte first: little-endian, which is both ARM and x86 here. */
+        out[0] = (uint8_t)(v & 0xFFu);
+        out[1] = (uint8_t)((v >> 8) & 0xFFu);
+        return;
+    case ND_FB_PATH_BGR565:
+        v = (uint32_t)((src[2] & 0xF8u) << 8) | (uint32_t)((src[1] & 0xFCu) << 3) |
+            (uint32_t)(src[0] >> 3);
         out[0] = (uint8_t)(v & 0xFFu);
         out[1] = (uint8_t)((v >> 8) & 0xFFu);
         return;
@@ -117,11 +131,29 @@ static void pack_row(uint8_t *dst, const uint8_t *src, size_t n, size_t src_bpp,
             dst[i * 4u + 3u] = 255u;
         }
         return;
+    case ND_FB_PATH_RGBA32:
+        for (i = 0u; i < n; i++) {
+            const uint8_t *p = src + i * src_bpp;
+            dst[i * 4u + 0u] = p[0];
+            dst[i * 4u + 1u] = p[1];
+            dst[i * 4u + 2u] = p[2];
+            dst[i * 4u + 3u] = 255u;
+        }
+        return;
     case ND_FB_PATH_RGB565:
         for (i = 0u; i < n; i++) {
             const uint8_t *p = src + i * src_bpp;
             uint32_t v = (uint32_t)((p[0] & 0xF8u) << 8) | (uint32_t)((p[1] & 0xFCu) << 3) |
                          (uint32_t)(p[2] >> 3);
+            dst[i * 2u + 0u] = (uint8_t)(v & 0xFFu);
+            dst[i * 2u + 1u] = (uint8_t)((v >> 8) & 0xFFu);
+        }
+        return;
+    case ND_FB_PATH_BGR565:
+        for (i = 0u; i < n; i++) {
+            const uint8_t *p = src + i * src_bpp;
+            uint32_t v = (uint32_t)((p[2] & 0xF8u) << 8) | (uint32_t)((p[1] & 0xFCu) << 3) |
+                         (uint32_t)(p[0] >> 3);
             dst[i * 2u + 0u] = (uint8_t)(v & 0xFFu);
             dst[i * 2u + 1u] = (uint8_t)((v >> 8) & 0xFFu);
         }
@@ -223,16 +255,31 @@ nd_err nd_fb_derive_geometry(struct nd_fb *fb, int32_t xres, int32_t yres, int32
     return ND_OK;
 }
 
+void nd_fb_set_channel_order(struct nd_fb *fb, int32_t red_offset, int32_t blue_offset)
+{
+    if (fb == NULL || red_offset >= blue_offset)
+        return;
+
+    if (fb->path == ND_FB_PATH_BGRA32)
+        fb->path = ND_FB_PATH_RGBA32;
+    else if (fb->path == ND_FB_PATH_RGB565)
+        fb->path = ND_FB_PATH_BGR565;
+}
+
 static const char *path_name(nd_fb_path path)
 {
     switch (path) {
     case ND_FB_PATH_BGRA32:
         return "BGRA 32bpp (C, fast)";
+    case ND_FB_PATH_RGBA32:
+        return "RGBA 32bpp (C, fast)";
     case ND_FB_PATH_RGB565:
         /* The Python prints this only when Pillow still has the "BGR;16"
          * packer, and otherwise a warning about 350 ms/frame. C has no slow
          * variant to warn about, so 16bpp is always the fast line. */
         return "BGR;16 16bpp (C, fast)";
+    case ND_FB_PATH_BGR565:
+        return "BGR565 16bpp (C, fast)";
     case ND_FB_PATH_RGB888:
         break;
     }
@@ -314,6 +361,7 @@ nd_err nd_fb_open(nd_fb **out, const char *path)
                    vinfo.xres, vinfo.yres, vinfo.bits_per_pixel, finfo.line_length);
         goto done;
     }
+    nd_fb_set_channel_order(fb, (int32_t)vinfo.red.offset, (int32_t)vinfo.blue.offset);
 
     mapped = mmap(NULL, fb->size, PROT_READ | PROT_WRITE, MAP_SHARED, fb->fd, 0);
     if (mapped == MAP_FAILED) {
@@ -506,7 +554,7 @@ static nd_err write_center_band(struct nd_fb *fb, const nd_image *src, int32_t c
 static void fill_black_row(uint8_t *dst, size_t n, nd_fb_path path)
 {
     memset(dst, 0, n);
-    if (path == ND_FB_PATH_BGRA32) {
+    if (out_bytes(path) == 4u) {
         size_t i;
         for (i = 3u; i < n; i += 4u)
             dst[i] = 255u;

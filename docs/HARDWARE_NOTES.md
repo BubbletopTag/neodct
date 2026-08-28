@@ -101,6 +101,21 @@ Abandoned in favor of neodct_displayd (src/neodct_displayd.c), which
 drives the panel directly over /dev/spidev0.0 and mirrors a Linux
 virtual framebuffer (vfb) to it. Proven working.
 
+### vfb puts red in the FIRST byte, unlike almost everything else
+At 32bpp `vfb_check_var()` declares red.offset 0, green 8, blue 16,
+transp 24 - so a pixel in /dev/fb0 is bytes R G B A, not the B G R x that
+a DRM framebuffer (QEMU's, and every desktop) gives you. See
+`drivers/video/fbdev/vfb.c`. At 16bpp it is likewise blue-first: red 0,
+green 5, blue 11.
+
+This is not a detail you can skip. The UI and the daemon used to assume
+B G R x on both targets; being wrong together, they looked right, and
+every program that read the declaration instead - mpv, netsurf, the
+framebuffer console - drew into fb0 in an order the daemon then undid.
+Both ends read fb_var_screeninfo now. If you write anything new that
+touches fb0 directly, read the offsets; do not assume a depth implies an
+order.
+
 ## Build gotchas
 - SDK build MUST happen in Ubuntu 22.04 (distrobox). Native Arch hangs
   silently on the atbm wifi driver.
