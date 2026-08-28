@@ -19,7 +19,9 @@ Added
   clock. The decoder walks the file instead and keeps one composed frame, so
   an animation costs about 226 KB no matter how long it is. The main loop
   wakes for the frame that is due and no sooner; a still wallpaper polls
-  exactly as it always did.
+  exactly as it always did. Apps show the first frame and hold no decoder --
+  only the process running the frame loop can advance one, so anything else
+  would be 226 KB and an open file waiting for a frame that never comes.
   The decoder is ours -- GIF87a and GIF89a, interlace, transparency and all
   three disposal methods -- because adding a Buildroot package to read one
   wallpaper format costs more than six hundred lines of a 1984 algorithm.
@@ -33,6 +35,9 @@ Added
   looks. system.ui.wpeverywhere turns the whole thing off (default ON), and
   system.ui.wpeverywhere_dim is how much darker chrome is than the home
   screen (default 0.75, i.e. 0.3 * 0.75 of the original picture).
+  The crash screen is the one framework screen that stays black. It carries
+  a stack summary in 14 px type, and a photograph behind that is a
+  legibility problem on the one screen where legibility is the point.
 - "useWallpaper" in manifest.json. An app that says false gets the old flat
   black. Absent means true, so every manifest written before this key
   existed -- and every third-party one -- keeps the wallpaper without being

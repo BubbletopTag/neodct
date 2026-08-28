@@ -15,13 +15,25 @@
  * and that is what nd_gif.c does and what test_dispose_previous() below
  * asserts, with a file whose correct output can be worked out on paper.
  *
- * ============ THE ENCODER ============
+ * ============ TWO ENCODERS, AND WHY BOTH ============
  *
- * gif_lzw_literals() emits a legal but deliberately unhelpful LZW stream: a
- * clear code, then every pixel as its own 9-bit literal, with another clear
- * before the dictionary can widen the codes. Every GIF decoder must accept
- * it, it needs no compressor, and it means a fixture's bytes and its pixels
- * are the same list written twice.
+ * gif_lzw_literals() emits a legal but deliberately unhelpful stream: a clear
+ * code, then every pixel as its own literal, with another clear before the
+ * dictionary can widen. It needs no compressor and a fixture's bytes and its
+ * pixels are the same list written twice, which is what makes the small
+ * hand-checked fixtures readable.
+ *
+ * It also exercises exactly one path through the decoder. The four things an
+ * LZW implementation actually gets wrong -- building the dictionary, expanding
+ * a multi-byte string, growing the code width, and the KwKwK case where a code
+ * one past the end of the table is legal -- are all unreachable from it. So
+ * gif_lzw_compress() is a real GIF compressor, and test_lzw_compressed()
+ * round-trips data chosen to force every one of them.
+ *
+ * The two encoders check each other: the same pixels through both must decode
+ * to the same picture, and if the compressor were wrong in the same direction
+ * as the decoder that comparison would still fail, because the literal encoder
+ * shares no code with either.
  *
  * Runs with no arguments and writes only under NEODCT_ROOT.
  */
@@ -56,11 +68,31 @@ static void fail(const char *fmt, ...)
             fail(__VA_ARGS__); \
     } while (0)
 
+#define CHECK_INT(got, want, what)                           \
+    do {                                                     \
+        int32_t got_ = (int32_t)(got);                       \
+        int32_t want_ = (int32_t)(want);                     \
+        checks++;                                            \
+        if (got_ != want_)                                   \
+            fail("%s: got %d want %d", (what), got_, want_); \
+    } while (0)
+
+#define CHECK_SIZE(got, want, what)                            \
+    do {                                                       \
+        size_t got_ = (got);                                   \
+        size_t want_ = (want);                                 \
+        checks++;                                              \
+        if (got_ != want_)                                     \
+            fail("%s: got %zu want %zu", (what), got_, want_); \
+    } while (0)
+
 /* ------------------------------------------------------------------ *
  * A GIF builder
  * ------------------------------------------------------------------ */
 
-#define BUF_MAX 65536u
+/* The largest fixture is 3400 one-pixel frames with a GCE each (about 78 KB)
+ * and a compressed 240x175 noise frame (about 60 KB). */
+#define BUF_MAX 262144u
 
 typedef struct {
     uint8_t b[BUF_MAX];
@@ -169,6 +201,172 @@ static void gif_lzw_literals(buf *o, const uint8_t *px, size_t n)
     }
     put(o, 0u); /* sub-block terminator */
 #undef EMIT
+}
+
+/* A real LZW compressor, so the decoder's dictionary is exercised by
+ * something other than itself.
+ *
+ * The dictionary is a flat array searched linearly: fixtures here are a few
+ * thousand pixels and a hash table would be more code to get wrong than the
+ * thing under test. The code-width rule is the mirror of the decoder's --
+ * emit at the current width, THEN add the entry and widen if next_code has
+ * reached 1 << width -- because that is the only pairing that keeps an
+ * encoder and a decoder in step. */
+typedef struct {
+    buf *o;
+    uint8_t block[255];
+    size_t bn;
+    uint32_t acc;
+    uint32_t nbits;
+    uint32_t width;
+} bitout;
+
+static void bo_flush_block(bitout *b)
+{
+    if (b->bn > 0u) {
+        put(b->o, (uint8_t)b->bn);
+        put_n(b->o, b->block, b->bn);
+        b->bn = 0u;
+    }
+}
+
+static void bo_put(bitout *b, uint32_t code)
+{
+    b->acc |= code << b->nbits;
+    b->nbits += b->width;
+    while (b->nbits >= 8u) {
+        b->block[b->bn++] = (uint8_t)(b->acc & 0xFFu);
+        b->acc >>= 8;
+        b->nbits -= 8u;
+        if (b->bn == 255u)
+            bo_flush_block(b);
+    }
+}
+
+static void gif_lzw_compress(buf *o, uint8_t min_code_size, const uint8_t *px, size_t n)
+{
+    /* prefix[c] / suffix[c] describe entry c exactly as the decoder's tables
+     * do, which is what makes a linear search for (prefix, suffix) the same
+     * lookup the decoder performs implicitly. */
+    static uint16_t prefix[4096];
+    static uint8_t suffix[4096];
+    bitout b;
+    uint32_t clear_code = 1u << min_code_size;
+    uint32_t end_code = clear_code + 1u;
+    uint32_t next_code;
+    uint32_t cur;
+    size_t i;
+
+    memset(&b, 0, sizeof b);
+    b.o = o;
+
+    put(o, min_code_size);
+
+/* Note the two DIFFERENT comparisons. At a reset both sides ask the same
+ * question -- "can this width name every code that exists right now" -- and
+ * the answer is >=, which only ever fires for min_code_size 1. After an entry
+ * is added they differ, because a decoder is a step behind: see the comment
+ * at the widen below. Getting either wrong shifts every code past the first
+ * width boundary, which is why test_lzw_every_code_size() sweeps 1 to 8. */
+#define RESET()                                            \
+    do {                                                   \
+        next_code = clear_code + 2u;                       \
+        b.width = (uint32_t)min_code_size + 1u;            \
+        if (next_code >= (1u << b.width) && b.width < 12u) \
+            b.width++;                                     \
+    } while (0)
+
+    RESET();
+    bo_put(&b, clear_code);
+
+    if (n == 0u) {
+        bo_put(&b, end_code);
+        goto flush;
+    }
+
+    cur = px[0];
+    for (i = 1u; i < n; i++) {
+        uint32_t c = px[i];
+        uint32_t found = 0xFFFFFFFFu;
+        uint32_t k;
+
+        for (k = clear_code + 2u; k < next_code; k++) {
+            if (prefix[k] == (uint16_t)cur && suffix[k] == (uint8_t)c) {
+                found = k;
+                break;
+            }
+        }
+        if (found != 0xFFFFFFFFu) {
+            cur = found;
+            continue;
+        }
+
+        bo_put(&b, cur);
+        if (next_code < 4096u) {
+            prefix[next_code] = (uint16_t)cur;
+            suffix[next_code] = (uint8_t)c;
+            next_code++;
+            /* STRICTLY GREATER, where the decoder uses >=. That asymmetry is
+             * the whole of LZW's famous off-by-one: a decoder is always one
+             * entry behind, because it can only create the entry for a code
+             * once it has read the code AFTER it. So the encoder must stay a
+             * code narrower for exactly one step, or every code past the
+             * first 9-to-10 bit boundary is read at the wrong width. */
+            if (next_code > (1u << b.width) && b.width < 12u)
+                b.width++;
+        } else {
+            /* Full. The decoder holds at 12 bits until a clear, so say clear
+             * and start again -- which is also the path that proves the
+             * decoder's mid-stream reset works. */
+            bo_put(&b, clear_code);
+            RESET();
+        }
+        cur = c;
+    }
+    bo_put(&b, cur);
+    bo_put(&b, end_code);
+
+flush:
+    if (b.nbits > 0u)
+        b.block[b.bn++] = (uint8_t)(b.acc & 0xFFu);
+    bo_flush_block(&b);
+    put(o, 0u); /* sub-block terminator */
+#undef RESET
+}
+
+/* As gif_frame(), but with the pixels actually compressed. */
+static void gif_frame_compressed(buf *o, uint32_t left, uint32_t top, uint32_t w, uint32_t h,
+                                 const uint8_t *px, uint8_t min_code_size)
+{
+    put(o, 0x2Cu);
+    put_u16(o, left);
+    put_u16(o, top);
+    put_u16(o, w);
+    put_u16(o, h);
+    put(o, 0x00u);
+    gif_lzw_compress(o, min_code_size, px, (size_t)w * (size_t)h);
+}
+
+/* An image descriptor carrying its OWN palette, which the decoder must prefer
+ * over the global one for this frame and this frame only. */
+static void gif_frame_lct(buf *o, uint32_t left, uint32_t top, uint32_t w, uint32_t h,
+                          const uint8_t *lct, uint32_t n_colours, const uint8_t *px)
+{
+    uint32_t bits = 0u;
+    uint32_t size = 2u;
+
+    while (size < n_colours) {
+        size <<= 1;
+        bits++;
+    }
+    put(o, 0x2Cu);
+    put_u16(o, left);
+    put_u16(o, top);
+    put_u16(o, w);
+    put_u16(o, h);
+    put(o, (uint8_t)(0x80u | bits)); /* local colour table present */
+    put_n(o, lct, (size_t)size * 3u);
+    gif_lzw_literals(o, px, (size_t)w * (size_t)h);
 }
 
 static void gif_frame(buf *o, uint32_t left, uint32_t top, uint32_t w, uint32_t h, bool interlaced,
@@ -703,6 +901,468 @@ static void test_image_open_gif(void)
     }
 }
 
+/* ------------------------------------------------------------------ *
+ * 11. Real LZW: the dictionary, wide codes, and KwKwK
+ * ------------------------------------------------------------------ */
+
+/* Pixels chosen to force each thing the literal encoder cannot reach.
+ *
+ * A long run of one value is what produces the KwKwK case: the encoder builds
+ * "aa", "aaa", "aaaa"... and each time emits the code it has only just
+ * created, which the decoder has not seen yet and must reconstruct as
+ * "previous string plus its own first byte".
+ *
+ * The rest is a repeating pattern long enough to push next_code past 511, so
+ * the stream widens from 9 bits to 10 mid-frame and the decoder has to widen
+ * with it -- the failure mode being that everything after the boundary is
+ * shifted garbage. */
+static void fill_lzw_torture(uint8_t *px, size_t n)
+{
+    size_t i;
+
+    for (i = 0u; i < n; i++) {
+        if (i < 600u)
+            px[i] = 1u; /* one long run -> KwKwK, repeatedly */
+        else if (i < 1200u)
+            px[i] = (uint8_t)(1u + (i % 3u)); /* a short cycle -> long strings */
+        else
+            px[i] = (uint8_t)(1u + ((i * 7u + (i / 13u)) % 3u)); /* churn */
+    }
+}
+
+static void test_lzw_compressed(void)
+{
+    enum { W = 60, H = 40, N = W * H };
+    static uint8_t px[N];
+    buf o = {{0}, 0u};
+    nd_gif *g;
+    const nd_image *f;
+    int32_t x;
+    int32_t y;
+    bool ok = true;
+
+    fill_lzw_torture(px, (size_t)N);
+
+    gif_header(&o, (uint32_t)W, (uint32_t)H, PAL, 4u);
+    gif_frame_compressed(&o, 0u, 0u, (uint32_t)W, (uint32_t)H, px, 8u);
+    gif_trailer(&o);
+
+    /* Genuinely compressed: a literal stream of 2400 nine-bit codes would be
+     * about 2700 bytes plus block overhead. If this fixture were not smaller
+     * than that, the compressor emitted literals and the test proves nothing. */
+    CHECK(o.n < 1600u, "the compressor actually compressed (%zu bytes for %d pixels)", o.n, (int)N);
+
+    g = nd_gif_open_mem(o.b, o.n);
+    CHECK(g != NULL, "a compressed GIF opens");
+    if (g == NULL)
+        return;
+
+    f = nd_gif_next(g, NULL);
+    CHECK(f != NULL, "a compressed frame decodes");
+    if (f != NULL) {
+        for (y = 0; y < H && ok; y++) {
+            for (x = 0; x < W; x++) {
+                nd_color c = nd_image_get_px(f, x, y);
+                uint8_t want = px[(size_t)y * (size_t)W + (size_t)x];
+
+                if (c.r != PAL[want * 3u + 0u] || c.g != PAL[want * 3u + 1u] ||
+                    c.b != PAL[want * 3u + 2u]) {
+                    fail("compressed pixel (%d,%d): got %u,%u,%u want index %u", x, y, c.r, c.g,
+                         c.b, want);
+                    ok = false;
+                    break;
+                }
+            }
+        }
+    }
+    CHECK(ok, "every pixel of the compressed frame round-trips");
+    nd_gif_close(g);
+}
+
+/* The dictionary filling to 4096 and being cleared mid-stream, which is the
+ * one path gif_lzw_compress() takes only on a big enough image. 240x175 is
+ * the panel, so this is also the size a real wallpaper frame is. */
+static void test_lzw_dictionary_wraps(void)
+{
+    enum { W = 240, H = 175, N = W * H };
+    static uint8_t px[N];
+    buf o = {{0}, 0u};
+    nd_gif *g;
+    const nd_image *f;
+    size_t i;
+    bool ok = true;
+
+    /* Pseudo-random over four palette entries: incompressible enough that the
+     * dictionary fills, which forces the encoder's clear and the decoder's
+     * reset. The generator is a fixed integer hash so the fixture is the same
+     * on every machine. */
+    for (i = 0u; i < (size_t)N; i++) {
+        uint32_t v = (uint32_t)i * 2654435761u;
+
+        v ^= v >> 13;
+        v *= 0x5BD1E995u;
+        px[i] = (uint8_t)((v >> 15) & 3u);
+    }
+
+    gif_header(&o, (uint32_t)W, (uint32_t)H, PAL, 4u);
+    gif_frame_compressed(&o, 0u, 0u, (uint32_t)W, (uint32_t)H, px, 8u);
+    gif_trailer(&o);
+
+    g = nd_gif_open_mem(o.b, o.n);
+    CHECK(g != NULL, "a panel-sized compressed GIF opens");
+    if (g == NULL)
+        return;
+    f = nd_gif_next(g, NULL);
+    CHECK(f != NULL, "it decodes");
+    if (f != NULL) {
+        for (i = 0u; i < (size_t)N; i++) {
+            int32_t x = (int32_t)(i % (size_t)W);
+            int32_t y = (int32_t)(i / (size_t)W);
+            nd_color c = nd_image_get_px(f, x, y);
+            uint8_t want = px[i];
+
+            if (c.r != PAL[want * 3u + 0u] || c.g != PAL[want * 3u + 1u] ||
+                c.b != PAL[want * 3u + 2u]) {
+                fail("dictionary-wrap pixel %zu: got %u,%u,%u want index %u", i, c.r, c.g, c.b,
+                     want);
+                ok = false;
+                break;
+            }
+        }
+    }
+    CHECK(ok, "42,000 pixels round-trip through a dictionary that filled and cleared");
+    nd_gif_close(g);
+}
+
+/* Every legal minimum code size, each with pixels that fit its palette.
+ *
+ * ============ WHAT THIS DOES AND DOES NOT PROVE ============
+ *
+ * For sizes 2..8 the fixtures this encoder produces were checked against
+ * PILLOW, which reads them pixel-identically at 8x8, 60x40 and 240x175 --
+ * the last being 42,000 pixels, well past every code-width boundary. So for
+ * those sizes this is a genuine round trip against a third party and not the
+ * decoder agreeing with itself.
+ *
+ * SIZE 1 IS DIFFERENT and the comment is here so nobody reads more into the
+ * assertion than it carries. Pillow refuses a min_code_size of 1 outright --
+ * "image file is truncated" -- whichever of the two defensible initial code
+ * widths the stream uses, so there is no third opinion available. GIF89a
+ * effectively rules the size out too (a two-colour image is written with 2).
+ * What is asserted for size 1 is that this decoder and this encoder agree and
+ * that nothing crashes; that it matches some other implementation is NOT
+ * claimed, because no other implementation would read it. */
+static void test_lzw_every_code_size(void)
+{
+    uint8_t pal[256u * 3u];
+    uint8_t px[64];
+    uint32_t mcs;
+    size_t i;
+
+    for (i = 0u; i < 256u; i++) {
+        pal[i * 3u + 0u] = (uint8_t)i;
+        pal[i * 3u + 1u] = (uint8_t)(255u - i);
+        pal[i * 3u + 2u] = (uint8_t)((i * 7u) & 0xFFu);
+    }
+
+    for (mcs = 1u; mcs <= 8u; mcs++) {
+        buf o = {{0}, 0u};
+        uint32_t colours = 1u << mcs;
+        nd_gif *g;
+        const nd_image *f;
+        bool ok = true;
+
+        for (i = 0u; i < sizeof px; i++)
+            px[i] = (uint8_t)((i * 5u) % colours);
+
+        gif_header(&o, 8u, 8u, pal, colours);
+        gif_frame_compressed(&o, 0u, 0u, 8u, 8u, px, (uint8_t)mcs);
+        gif_trailer(&o);
+
+        g = nd_gif_open_mem(o.b, o.n);
+        CHECK(g != NULL, "every minimum code size 1..8 opens");
+        if (g == NULL)
+            continue;
+        f = nd_gif_next(g, NULL);
+        if (f != NULL) {
+            for (i = 0u; i < sizeof px; i++) {
+                nd_color c = nd_image_get_px(f, (int32_t)(i % 8u), (int32_t)(i / 8u));
+                uint8_t want = px[i];
+
+                if (c.r != pal[want * 3u] || c.g != pal[want * 3u + 1u] ||
+                    c.b != pal[want * 3u + 2u]) {
+                    fail("code size %u, pixel %zu: got %u,%u,%u want index %u", mcs, i, c.r, c.g,
+                         c.b, want);
+                    ok = false;
+                    break;
+                }
+            }
+        } else {
+            ok = false;
+        }
+        CHECK(ok, "every minimum code size round-trips");
+        nd_gif_close(g);
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * 12. A local colour table wins over the global one
+ * ------------------------------------------------------------------ */
+
+static void test_local_colour_table(void)
+{
+    buf o = {{0}, 0u};
+    /* Global: index 1 is red. Local: index 1 is white. */
+    static const uint8_t LCT[2u * 3u] = {0, 0, 0, 255, 255, 255};
+    static const uint8_t PX[1] = {1};
+    nd_gif *g;
+    const nd_image *f;
+
+    gif_header(&o, 2u, 1u, PAL, 4u);
+    gif_frame(&o, 0u, 0u, 1u, 1u, false, PX); /* global palette: red */
+    gif_frame_lct(&o, 1u, 0u, 1u, 1u, LCT, 2u, PX);
+    gif_trailer(&o);
+
+    g = nd_gif_open_mem(o.b, o.n);
+    CHECK(g != NULL, "a GIF with a local colour table opens");
+    if (g == NULL)
+        return;
+
+    f = nd_gif_next(g, NULL);
+    px_is(f, 0, 0, 255, 0, 0, 255, "the global table paints the first frame red");
+    f = nd_gif_next(g, NULL);
+    px_is(f, 1, 0, 255, 255, 255, 255, "the local table paints the second frame white");
+    px_is(f, 0, 0, 255, 0, 0, 255, "and does not disturb what the global table drew");
+    nd_gif_close(g);
+}
+
+/* ------------------------------------------------------------------ *
+ * 13. Interlace at heights that are not multiples of eight
+ * ------------------------------------------------------------------ */
+
+/* The four passes are rows 0,8,16...; 4,12,20...; 2,6,10...; 1,3,5...
+ * Computed here from the spec rather than from nd_gif.c, so a decoder that
+ * agrees with itself but not with GIF89a fails. Heights that are multiples of
+ * eight are the ones where several wrong formulas give the right answer, so
+ * the point of this test is the heights that are not. */
+static void test_interlace_heights(void)
+{
+    static const int32_t HEIGHTS[] = {1, 2, 3, 4, 5, 6, 7, 9, 11, 13, 16, 17, 23};
+    size_t hi;
+
+    for (hi = 0u; hi < ND_ARRAY_LEN(HEIGHTS); hi++) {
+        int32_t fh = HEIGHTS[hi];
+        buf o = {{0}, 0u};
+        uint8_t stored[32];
+        int32_t display_of[32];
+        nd_gif *g;
+        const nd_image *f;
+        int32_t k = 0;
+        int32_t start;
+        int32_t step;
+        int32_t pass;
+        int32_t y;
+        bool ok = true;
+
+        for (pass = 0; pass < 4; pass++) {
+            start = (pass == 0) ? 0 : (pass == 1) ? 4 : (pass == 2) ? 2 : 1;
+            step = (pass == 0) ? 8 : (pass == 1) ? 8 : (pass == 2) ? 4 : 2;
+            for (y = start; y < fh; y += step)
+                display_of[k++] = y;
+        }
+        CHECK_INT(k, fh, "the four passes cover every row exactly once");
+
+        /* Store a value that identifies the DISPLAY row, so a decoder that
+         * gets the mapping wrong produces visibly wrong rows rather than a
+         * shuffle that happens to look plausible. */
+        for (y = 0; y < fh; y++)
+            stored[y] = (uint8_t)(1u + ((uint32_t)display_of[y] % 3u));
+
+        gif_header(&o, 1u, (uint32_t)fh, PAL, 4u);
+        gif_frame(&o, 0u, 0u, 1u, (uint32_t)fh, true, stored);
+        gif_trailer(&o);
+
+        g = nd_gif_open_mem(o.b, o.n);
+        CHECK(g != NULL, "an interlaced fixture opens at every height");
+        if (g == NULL)
+            continue;
+        f = nd_gif_next(g, NULL);
+        if (f != NULL) {
+            for (y = 0; y < fh; y++) {
+                uint8_t want = (uint8_t)(1u + ((uint32_t)y % 3u));
+                nd_color c = nd_image_get_px(f, 0, y);
+
+                if (c.r != PAL[want * 3u] || c.g != PAL[want * 3u + 1u] ||
+                    c.b != PAL[want * 3u + 2u]) {
+                    fail("interlace h=%d row %d: got %u,%u,%u want index %u", fh, y, c.r, c.g, c.b,
+                         want);
+                    ok = false;
+                    break;
+                }
+            }
+        } else {
+            ok = false;
+        }
+        CHECK(ok, "interlaced rows land where GIF89a says at every height");
+        nd_gif_close(g);
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * 14. The two hostile-input bounds, each with a complete payload behind it
+ * ------------------------------------------------------------------ */
+
+/* A frame descriptor claiming more pixels than the logical screen. The index
+ * scratch is exactly w*h bytes, so this is the check that stops a hostile
+ * descriptor writing past it -- SECURITY.md's case, since a wallpaper comes
+ * off an SD card. The LZW payload behind it is COMPLETE and well-formed, so
+ * the bound is what refuses the frame rather than the stream running out. */
+static void test_oversize_frame_is_refused(void)
+{
+    static uint8_t big[64 * 64];
+    buf o = {{0}, 0u};
+    static const uint8_t SMALL[4] = {1, 1, 1, 1};
+    nd_gif *g;
+    const nd_image *f;
+    size_t i;
+
+    for (i = 0u; i < sizeof big; i++)
+        big[i] = (uint8_t)(i & 3u);
+
+    /* A 4x4 logical screen. Frame 0 fills it; frame 1 claims 64x64. */
+    gif_header(&o, 4u, 4u, PAL, 4u);
+    gif_frame(&o, 0u, 0u, 2u, 2u, false, SMALL);
+    gif_frame_compressed(&o, 0u, 0u, 64u, 64u, big, 8u);
+    gif_trailer(&o);
+
+    g = nd_gif_open_mem(o.b, o.n);
+    CHECK(g != NULL, "the oversize fixture opens");
+    if (g == NULL)
+        return;
+
+    f = nd_gif_next(g, NULL);
+    px_is(f, 0, 0, 255, 0, 0, 255, "the in-bounds frame decodes");
+
+    /* The oversize frame is refused AND stepped over, so what comes back is
+     * the wrap to frame 0 rather than garbage read out of its payload. */
+    f = nd_gif_next(g, NULL);
+    CHECK(f != NULL, "the decoder survives an oversize descriptor");
+    CHECK_SIZE(nd_gif_position(g), 0u, "and wraps rather than decoding it");
+    nd_gif_close(g);
+}
+
+/* A frame whose LZW minimum code size is illegal, with its data sub-blocks
+ * arranged to parse as a whole image descriptor if they are ever read as
+ * blocks. The decoder must step OVER them: refusing the frame is not enough
+ * if the file position is left inside the compressed data, because then the
+ * block walk resumes in the middle of a payload and renders pixels out of a
+ * region no image block covers. */
+static void test_bad_code_size_does_not_desync(void)
+{
+    buf o = {{0}, 0u};
+    static const uint8_t F0[4] = {1, 1, 1, 1};
+    size_t payload_len;
+    size_t i;
+
+    gif_header(&o, 2u, 2u, PAL, 4u);
+    gif_frame(&o, 0u, 0u, 2u, 2u, false, F0);
+
+    /* An image descriptor the decoder will accept, then min_code_size 0. */
+    put(&o, 0x2Cu);
+    put_u16(&o, 0u);
+    put_u16(&o, 0u);
+    put_u16(&o, 2u);
+    put_u16(&o, 2u);
+    put(&o, 0x00u);
+    put(&o, 0u); /* illegal minimum code size */
+
+    /* One sub-block whose bytes spell a complete 1x1 image descriptor with a
+     * local colour table painting green -- the thing that must NOT appear. */
+    {
+        buf inner = {{0}, 0u};
+        static const uint8_t GREEN_LCT[2u * 3u] = {0, 0, 0, 0, 255, 0};
+        static const uint8_t ONE[1] = {1};
+
+        gif_frame_lct(&inner, 0u, 0u, 1u, 1u, GREEN_LCT, 2u, ONE);
+        CHECK(inner.n <= 255u, "the smuggled descriptor fits one sub-block");
+        payload_len = inner.n;
+        put(&o, (uint8_t)payload_len);
+        for (i = 0u; i < payload_len; i++)
+            put(&o, inner.b[i]);
+    }
+    put(&o, 0u); /* sub-block terminator */
+    gif_trailer(&o);
+
+    {
+        nd_gif *g = nd_gif_open_mem(o.b, o.n);
+        const nd_image *f;
+
+        CHECK(g != NULL, "the desync fixture opens");
+        if (g == NULL)
+            return;
+        /* The scan must see ONE usable frame plus the rejected one, never a
+         * third smuggled out of the payload. */
+        CHECK(nd_gif_frame_count(g) <= 2u, "no frame is counted out of LZW payload (%zu)",
+              nd_gif_frame_count(g));
+
+        f = nd_gif_next(g, NULL);
+        px_is(f, 0, 0, 255, 0, 0, 255, "frame 0 is red");
+        f = nd_gif_next(g, NULL);
+        CHECK(f != NULL, "the decoder keeps going past the illegal frame");
+        if (f != NULL) {
+            /* Whatever it hands back, the smuggled green must never appear:
+             * that colour exists only inside the compressed payload. */
+            int32_t x;
+            int32_t y;
+            bool green = false;
+
+            for (y = 0; y < 2; y++) {
+                for (x = 0; x < 2; x++) {
+                    nd_color c = nd_image_get_px(f, x, y);
+
+                    if (c.r == 0u && c.g == 255u && c.b == 0u)
+                        green = true;
+                }
+            }
+            CHECK(!green, "nothing was rendered out of the skipped frame's payload");
+        }
+        nd_gif_close(g);
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * 15. The open-time scan's arithmetic cannot overflow
+ * ------------------------------------------------------------------ */
+
+/* A GCE delay is a uint16_t of centiseconds, so one frame can claim 655,350
+ * ms and ND_GIF_MAX_FRAMES of them is 2.68e9 -- past INT32_MAX. The sum is
+ * accumulated in 64 bits and saturated; before it was, this file produced
+ * signed overflow under UBSan and a negative duration. */
+static void test_duration_saturates(void)
+{
+    buf o = {{0}, 0u};
+    static const uint8_t PX[1] = {1};
+    nd_gif *g;
+    size_t i;
+    const size_t FRAMES = 3400u; /* comfortably past the old overflow point */
+
+    gif_header(&o, 1u, 1u, PAL, 4u);
+    for (i = 0u; i < FRAMES; i++) {
+        gif_gce(&o, 0u, false, 0u, 0xFFFFu); /* 655,350 ms */
+        gif_frame(&o, 0u, 0u, 1u, 1u, false, PX);
+    }
+    gif_trailer(&o);
+
+    g = nd_gif_open_mem(o.b, o.n);
+    CHECK(g != NULL, "a file claiming years of animation still opens");
+    if (g == NULL)
+        return;
+    CHECK(nd_gif_duration_ms(g) > 0, "the reported duration is not negative (%d)",
+          nd_gif_duration_ms(g));
+    CHECK_SIZE(nd_gif_frame_count(g), FRAMES, "and every frame was counted");
+    nd_gif_close(g);
+}
+
 int main(void)
 {
     test_single_frame();
@@ -715,6 +1375,14 @@ int main(void)
     test_delay_clamp();
     test_rejects_rubbish();
     test_image_open_gif();
+    test_lzw_compressed();
+    test_lzw_dictionary_wraps();
+    test_lzw_every_code_size();
+    test_local_colour_table();
+    test_interlace_heights();
+    test_oversize_frame_is_refused();
+    test_bad_code_size_does_not_desync();
+    test_duration_saturates();
 
     if (failures) {
         printf("test_gif: %d check(s), %d failure(s)\n", checks, failures);

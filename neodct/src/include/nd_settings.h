@@ -85,24 +85,28 @@ extern "C" {
  * point of the feature; a phone whose owner wants the old look turns it off
  * here and nothing else changes.
  *
- * NOT in DEFAULTS, deliberately. A key in that table is written into
- * settings.prop on the first read, and these two are read from inside the
- * render path -- see the R-24 quirk above, which would turn every frame into
- * a flash write. Read them with nd_settings_get(key, dflt) instead, which
- * touches nothing.
+ * NOT in DEFAULTS, deliberately -- but NOT because reading them is free.
+ * R-24 above is worse than it first looks: nd_settings_get() rewrites
+ * settings.prop on EVERY call whatever key it was asked for, because the
+ * "missing keys" test walks the DEFAULTS table rather than the key. So what
+ * protects the render path is not the table, it is the CALLER: lib/nd_ui.c
+ * reads both of these exactly once per process, and once more after each app
+ * exit, in chrome_settings_load(), and never from a draw. Keeping them out of
+ * DEFAULTS only avoids adding two more keys to what every such rewrite has to
+ * carry.
  *
  * There is also deliberately no Settings screen for either. They are taste,
  * not policy, and the wallpaper picker is already where a person goes to
  * change how the phone looks.
  *
  * ND_SET_UI_WP_APP_DIM is a SECOND brightness multiplier applied on top of
- * the 0.3 the home screen already uses, so 0.45 here means chrome sits on
- * 0.3 * 0.45 = 0.135 of the original picture. Chrome carries text at every
- * size the phone has; the home screen carries a clock. Parsed with strtod and
- * clamped to [0, 1]; anything unparseable reads as the default rather than
- * blanking the screen. */
-#define ND_SET_UI_WP_EVERYWHERE "system.ui.wpeverywhere"     /* "ON"      */
-#define ND_SET_UI_WP_APP_DIM    "system.ui.wpeverywhere_dim" /* "0.45"   */
+ * the 0.3 the home screen already uses, so the default 0.75 puts chrome at
+ * 0.3 * 0.75 = 0.225 of the original picture. Chrome carries text at every
+ * size the phone has; the home screen carries a clock. Parsed with strtod;
+ * unparseable, negative and above-1 values all fall back to the default
+ * rather than being clamped to an extreme nobody can then explain. */
+#define ND_SET_UI_WP_EVERYWHERE "system.ui.wpeverywhere"     /* "ON"     */
+#define ND_SET_UI_WP_APP_DIM    "system.ui.wpeverywhere_dim" /* "0.75"   */
 
 /* NTP sync, owned by the Clock app and read by the clock service at boot.
  * Defaults to ON: a phone whose clock is wrong fails every TLS "not valid

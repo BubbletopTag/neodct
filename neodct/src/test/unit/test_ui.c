@@ -784,10 +784,69 @@ static void test_animated_wallpaper(nd_fb *fb)
     nd_ui_set_wallpaper(&ui, nd_image_new_filled(ND_UI_W, ND_UI_H, ND_PIXFMT_RGB888, ND_GRAY));
     CHECK(ui.home_.wallpaper_gif == NULL, "set_wallpaper closes the animation");
     CHECK(!nd_ui_tick_wallpaper(&ui), "and nothing ticks afterwards");
-    CHECK_INT((int)nd_ui_frame_timeout(&ui, 0.1), 0, "a still gets the caller's own timeout");
-    CHECK(nd_ui_frame_timeout(&ui, 0.1) == 0.1, "exactly the default, not a shortened poll");
+    /* Exactly the caller's own value. A truncating cast to int would pass for
+     * anything under 1.0 including 0.0, which is the spin this rules out. */
+    CHECK(nd_ui_frame_timeout(&ui, 0.1) == 0.1, "a still gets the default back, not a short poll");
 
     nd_ui_teardown(&ui);
+
+    /* ---- and the wiring that makes it play on the phone ---- *
+     *
+     * Everything above drives nd_ui_tick_wallpaper() by hand. On the phone
+     * nothing does: the animation exists only because nd_ui_update() calls it
+     * once per frame, and that one line is what a refactor would drop without
+     * failing anything else. Drive the frame loop the way core_run() does and
+     * assert the picture actually moves. */
+    write_settings("Classroom.gif");
+    nd_vclock_enable();
+    nd_ui_sim_clear(&ui);
+    if (nd_ui_init(&ui, fb) == ND_OK) {
+        if (nd_ui_wallpaper(&ui) == NULL) {
+            g_skips++;
+            fprintf(stderr, "SKIP frame-loop animation: Classroom.gif did not load\n");
+        } else {
+            nd_image *f0 = nd_image_copy(nd_ui_wallpaper(&ui));
+            uint32_t gen0 = ui.home_.wallpaper_gen;
+            int i;
+
+            nd_ui_sim_status(&ui, 4, 4, "Tello");
+            /* Three frames through the real dispatcher. The virtual clock
+             * advances 0.1 s per committed frame and the wallpaper is due
+             * every 40 ms, so each one owes a frame. */
+            for (i = 0; i < 3; i++)
+                nd_ui_update(&ui);
+
+            CHECK(ui.home_.wallpaper_gen > gen0,
+                  "nd_ui_update() advances the wallpaper without being asked");
+            if (f0 != NULL) {
+                CHECK(!rect_matches(nd_ui_wallpaper(&ui), f0,
+                                    ND_RECT(0, 0, nd_ui_width(&ui) - 1, nd_ui_height(&ui) - 1)),
+                      "and the picture on the canvas is a different frame");
+                nd_image_free(f0);
+            }
+        }
+        nd_ui_teardown(&ui);
+    }
+
+    /* ---- an app process gets the still and no decoder ---- *
+     *
+     * nd_ui_tick_wallpaper() has one caller and an app never reaches it, so
+     * an app that opened a decoder would hold ~226 KB and a descriptor on the
+     * SD card for a frame that can never arrive. nd_ui_init_app() clears
+     * drives_wallpaper; this reproduces that context without needing a real
+     * app process. */
+    write_settings("Classroom.gif");
+    nd_vclock_enable();
+    nd_ui_sim_clear(&ui);
+    if (nd_ui_init(&ui, fb) == ND_OK) {
+        ui.drives_wallpaper = false;
+        if (nd_ui_wallpaper(&ui) != NULL) {
+            CHECK(ui.home_.wallpaper_gif == NULL, "a process that cannot tick opens no decoder");
+            CHECK(!nd_ui_tick_wallpaper(&ui), "and has nothing to tick");
+            CHECK(nd_ui_frame_timeout(&ui, 0.1) == 0.1, "so it never shortens anybody's poll");
+        }
+        nd_ui_teardown(&ui);
+    }
 
     /* A .jpg opens no decoder at all -- 226 KB not spent on a still. */
     write_settings("Palestine.jpg");

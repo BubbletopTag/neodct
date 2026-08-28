@@ -213,6 +213,15 @@ typedef struct nd_ui {
     nd_battery *battery;
     nd_notify *notify;
 
+    /* --- whether THIS PROCESS drives the animation --- *
+     *
+     * true in the core, false in an app. nd_ui_tick_wallpaper() has exactly
+     * one caller, nd_ui_update(), and an app process never calls it -- so an
+     * app that opened a decoder would hold ~226 KB and a file descriptor on
+     * the SD card for a frame it can never advance to. It gets the still
+     * first frame instead, which is what it would have shown anyway. */
+    bool drives_wallpaper;
+
     /* --- what THIS PROCESS is allowed to draw the wallpaper behind --- *
      *
      * true in the core and in any app whose manifest.json does not say
@@ -327,6 +336,20 @@ nd_image *nd_ui_load_wallpaper(const char *path);
  * nd_ui_refresh_after_app() invalidates all four rather than reloading them,
  * so returning from an app costs the reload only if the home screen is
  * actually drawn again.
+ *
+ * ============ WHAT WALLPAPER-EVERYWHERE CHANGED HERE ============
+ *
+ * "Nothing in apps/ reads any of them" stopped being true for the wallpaper
+ * when the framework started drawing it behind app chrome. An app whose
+ * manifest does not say "useWallpaper": false now loads it on its FIRST
+ * BACKGROUND CLEAR -- lazily still, and once, but it is a cost that app did
+ * not pay before, and it is the largest of the four.
+ *
+ * That is the feature, not an oversight: the pixels have to come from
+ * somewhere and the core cannot hand them across a process boundary. The
+ * other three are untouched, an app that opted out pays nothing at all, and
+ * an app that never clears a background never loads it either. What an app
+ * does NOT do is animate -- see drives_wallpaper.
  */
 nd_image *nd_ui_wallpaper(nd_ui *ui);
 const nd_home_layout *nd_ui_home_layout(nd_ui *ui);

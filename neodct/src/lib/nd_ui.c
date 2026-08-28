@@ -453,9 +453,23 @@ static bool wallpaper_paint_frame(nd_image *dst, const nd_image *frame)
         if (nd_image_blit(dst, frame, 0, 0) != ND_OK)
             return false;
     } else {
-        nd_image *scaled = nd_image_resize_lanczos(frame, dst->w, dst->h);
+        /* The expensive branch, and the reason open_wallpaper logs a warning
+         * for a GIF that is not panel-sized.
+         *
+         * FLATTEN TO RGB888 FIRST. nd_image_resize_lanczos() on an RGBA
+         * source premultiplies the whole source and unpremultiplies the whole
+         * output around the resample (nd_resample.c) -- two extra full-image
+         * passes and an extra copy, per frame, for an alpha channel that is
+         * about to be discarded anyway. Converting first drops both passes
+         * and shrinks every remaining one by a quarter. */
+        nd_image *flat = nd_image_convert(frame, ND_PIXFMT_RGB888);
+        nd_image *scaled;
         nd_err rc;
 
+        if (flat == NULL)
+            return false;
+        scaled = nd_image_resize_lanczos(flat, dst->w, dst->h);
+        nd_image_free(flat);
         if (scaled == NULL)
             return false;
         rc = nd_image_blit(dst, scaled, 0, 0);
@@ -563,7 +577,10 @@ static bool load_gif_wallpaper(nd_ui *ui, const char *path)
     }
     ui->home_.wallpaper = still;
 
-    if (!nd_gif_animated(g)) {
+    /* Only the core animates. An app process never calls nd_ui_update(), so
+     * it never ticks -- holding the decoder open there would cost 226 KB and
+     * a descriptor on the SD card for a frame that can never arrive. */
+    if (!nd_gif_animated(g) || !ui->drives_wallpaper) {
         nd_gif_close(g);
         return true;
     }
@@ -1242,8 +1259,10 @@ nd_err nd_ui_init(nd_ui *ui, nd_fb *fb)
         return ND_ERR_INVAL;
     memset(ui, 0, sizeof *ui);
     ui->keypad_fd = -1;
-    /* The core is not an app and has no manifest to opt out in. */
+    /* The core is not an app and has no manifest to opt out in, and it is
+     * the only process that runs the frame loop the animation needs. */
     ui->app_use_wallpaper = true;
+    ui->drives_wallpaper = true;
     g_ring_seen_at = 0.0;
 
     (void)nd_settings_init();

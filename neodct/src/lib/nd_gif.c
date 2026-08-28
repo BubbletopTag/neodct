@@ -260,13 +260,23 @@ static size_t lzw_decode(nd_gif *g, uint8_t min_code_size, size_t count)
     uint32_t bit_buf = 0u;
     uint32_t bit_cnt = 0u;
 
+    sb_init(&sb, g);
+
     /* min_code_size 1..8. Anything else is not a GIF this decoder will
      * pretend to understand -- 0 would make clear_code 1 and the dictionary
-     * degenerate, and >8 cannot index a 256-entry palette. */
+     * degenerate, and >8 cannot index a 256-entry palette.
+     *
+     * CHECKED AFTER sb_init AND LEAVING THROUGH done:, not with a bare
+     * return. decode_frame() promises its caller that a rejected frame has
+     * still been stepped over, and nd_gif_next() reads the next byte as a
+     * block introducer on the strength of that. Returning here without
+     * draining would leave the walk pointing at the first sub-block length
+     * byte of the compressed data, and a file can arrange for those bytes to
+     * parse as a whole image descriptor -- so the decoder would render pixels
+     * out of a region no image block covers. */
     if (min_code_size < 1u || min_code_size > 8u)
-        return 0u;
+        goto done;
 
-    sb_init(&sb, g);
     clear_code = 1u << min_code_size;
     end_code = clear_code + 1u;
     next_code = clear_code + 2u;
@@ -430,7 +440,11 @@ static bool scan_structure(nd_gif *g)
 {
     uint8_t delay_pending_valid = 0u;
     int32_t delay_ms = 0;
-    int32_t total = 0;
+    /* 64-bit, and saturated below. A GCE delay is a uint16_t of centiseconds,
+     * so one frame can legally claim 655,350 ms; 4096 of them is 2.68e9 and
+     * overflows an int32_t, which is undefined behaviour on a file that came
+     * off an SD card. The frame cap bounds the loop, not the sum. */
+    int64_t total = 0;
     size_t frames = 0u;
 
     for (;;) {
@@ -507,7 +521,12 @@ static bool scan_structure(nd_gif *g)
     }
 
     g->n_frames = frames;
-    g->duration_ms = frames > 1u ? total : 0;
+    /* Saturating rather than wrapping: a file claiming more than 24 days of
+     * animation is lying, and the honest answer to "how long is this" is
+     * "longer than this number can say". */
+    if (total > (int64_t)INT32_MAX)
+        total = (int64_t)INT32_MAX;
+    g->duration_ms = frames > 1u ? (int32_t)total : 0;
     return frames > 0u;
 }
 
