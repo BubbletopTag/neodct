@@ -499,3 +499,138 @@ line in the build's acceptance check.
 | 10 | SMS text and SNTP replies parsed on the core's own threads | Low (High once MMS lands) | 3 |
 | 12 | SNTP accepts any reply without matching the origin timestamp; clock is a TLS validity input | Low | 0 |
 | 11 | squashfs built without xattrs, so labelling is impossible later | Low | 0 |
+| 13 | NetSurf pinned at 3.11 and forked, so its parsers cannot be bumped by a version change | Medium | 0 |
+| 14 | Hand-written parsers eat untrusted bytes and are never fuzzed; `nd_json.c` runs *before* signature verification | Medium | 0 |
+
+---
+
+## 10. Obscurity, and what it is actually buying you
+
+Two users, one of them on QEMU, neither using it as a main device, and nobody
+writing malware for "NeoDCT OS". That is a real defence and it deserves to be
+counted honestly rather than dismissed. But it does not apply evenly, and the
+line it falls along is not the one people expect.
+
+**Obscurity is a property of attacker economics, not of code.** It protects
+against anything that has to *choose* you. It does nothing against anything that
+arrives without knowing what it hit.
+
+### What it genuinely buys
+
+Quite a lot, and more than the userbase alone suggests:
+
+- **No app store and no user-installable app path** (section 4, Q6). The single
+  largest malware vector on every real phone does not exist here.
+- **sshd binds `127.0.0.1`.** There is no inbound network service at all. An
+  attacker cannot reach this phone; the phone has to reach them.
+- **Nobody has NeoDCT to test against.** Exploits are brittle. Even a bug that is
+  genuinely present needs offsets, and nobody has an image to derive them from.
+- **The userbase is two people who are not interesting targets.** Targeted attack
+  probability is, honestly, about zero.
+
+### What it does not touch
+
+Everything reachable **without knowing what NeoDCT is**:
+
+- **A hostile web page.** libpng does not know what distro it is running on. A
+  malicious image or CSS file works the same in NetSurf on this phone as
+  anywhere else, and NetSurf here runs as root with the whole filesystem.
+- **An SMS from anyone who has the number.** Zero-click by definition, and it
+  reaches `nd_modem_at.c`'s parser without the sender knowing anything.
+- **Physical access.** SD cards auto-mount `rw,suid,dev` on insertion, the serial
+  console is a root login with no password (`AGENTS.md`, "Hardware access"), and
+  `authorized_keys` is loadable straight off a card (section 4, Q5, vector 4).
+- **You.** The most likely cause of data loss on this phone is a bug in it.
+
+And note what obscurity does to the three criticals in section 9: **nothing.**
+`env.sh`, `.remote/state.prop` and the update path are not entry points, they are
+*amplifiers* — they turn one moment of code execution into permanent ownership.
+Obscurity gates the entry; it has no effect on the outcome once something is
+through. A single browser bug becomes a permanent backdoor regardless of how few
+people run this OS.
+
+### The inversion worth knowing about
+
+The kernel is a standard Linux 6.12.x, which is the opposite of obscure. But the
+*reachable* part of it here is much smaller than that sounds, and for a reason
+that reads like a joke:
+
+**Because everything already runs as root, local privilege-escalation bugs are
+worthless against this phone.** There is nothing to escalate to. The entire
+category of kernel LPE — historically most kernel CVEs that matter on a phone —
+is inert here.
+
+That stops being true the moment Phase 1 lands and `ndusr` exists. Dropping root
+is still unambiguously the right move; it just means the kernel's LPE surface
+becomes relevant on the same day, and the kernel point release starts mattering
+in a way it currently does not.
+
+What is reachable today is narrow: the network stack, the USB/modem paths, and
+whatever the browser's syscalls touch. Small, but it is the part obscurity does
+not cover.
+
+### Where the bundled code actually stands
+
+Measured, not assumed. Buildroot is **2025.11** and the pins are current:
+
+| | |
+| --- | --- |
+| OpenSSL 3.6.0 · OpenSSH 10.2p1 · libcurl 8.17.0 | current |
+| libpng 1.6.53 · jpeg-turbo 3.1.2 · freetype 2.14.1 | current |
+| zlib 1.3.1 · sqlite 3.51.1 · expat 2.7.3 · busybox 1.37.0 | current |
+| **NetSurf 3.11** | **2023, and forked** |
+
+So the dependency hygiene is good, with one exception — and the exception is the
+one that eats attacker-controlled bytes. NetSurf 3.11 brings its own
+libcss/libdom/hubbub/libnsgif/libnsbmp, and because `netsurf-neodct/` is a
+**fork** (22 MB, 418 `.c` files, replaced framebuffer frontend and libnsfb),
+bumping it is a merge rather than a version bump. That cost compounds: the longer
+the fork sits, the more expensive the security bump becomes.
+
+Worth doing now, while the divergence is small enough to be remembered: rebase
+the fork onto current NetSurf, and write down what was changed and why, so the
+next bump is mechanical.
+
+### The part obscurity makes *worse*
+
+This is the half that gets missed. Obscurity means **nobody else is looking at
+the code you wrote**, and that is precisely the code with the fewest eyes on it.
+
+NetSurf's parsers have had years of fuzzing and thousands of readers. These have
+had one:
+
+| Module | Lines | Fed by |
+| --- | --- | --- |
+| `lib/nd_json.c` | 1462 | app manifests, **and update manifests** |
+| `lib/nd_id3.c` | 711 | any MP3 copied onto an SD card |
+| `lib/nd_modem_at.c` | 600 | modem output, including SMS text from strangers |
+| `lib/nd_props.c` | 728 | settings, staging records, `verity_state.prop` |
+| `lib/nd_manifest.c` | 503 | update packages |
+
+The image decoders are *not* on this list, correctly: `nd_png.c` and `nd_jpeg.c`
+are thin wrappers over libpng and libjpeg, which is the right call and worth not
+undoing.
+
+One ordering detail deserves attention. `apps/Update/main.c` opens the package,
+parses `manifest.json`, checks compatibility, and **only then** verifies the
+signature — an ordering three of the Python's tests depend on. So **`nd_json.c`
+parses bytes from an unsigned, unverified package.** The signature check cannot
+protect the parser that runs before it.
+
+The mitigation is cheap and the machinery is already built: `make ASAN=1 test` is
+in the acceptance gate (`tools/verify-c-build.sh:179`), so a fuzz target is a
+`main()` that reads stdin into a buffer and calls one function. There is no
+`fuzz` anywhere in the tree today. Three targets — `nd_json`, `nd_id3`,
+`nd_modem_at` — would be an afternoon and would cover the surface obscurity most
+conspicuously does not.
+
+### The summary
+
+Obscurity is doing real work, mostly by removing entry points rather than by
+being unknown. It is also a **decaying asset**: the first popular release, or the
+first HN post, spends it all at once — and security debt is far cheaper to pay
+before that than after. The two things worth doing about it are not "assume
+obscurity holds" or "assume it does not", but: **fix the amplifiers**, because
+they convert any single bug into a permanent one, and **fuzz the code only you
+have read**, because that is the part the outside world's attention has never
+covered.
