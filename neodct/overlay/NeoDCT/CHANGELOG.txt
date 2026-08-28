@@ -1,36 +1,10 @@
 # NeoDCT OS Changelog
 
-0.4.8a
-Calls send your voice again.
+0.4.9a
+Wallpaper everywhere, and wallpaper that moves.
 
-Fixed
-- The microphone works on a call. The phone has two sound devices that can
-  record: the sound card the microphone is actually plugged into, and one
-  built into the processor that is wired to nothing at all. Calls picked
-  whichever came first, which on this phone is the one wired to nothing --
-  so the other end heard silence while the phone played their voice back
-  perfectly. Nothing reported an error, because nothing had failed; the
-  phone was recording exactly what it was asked to.
-  Calls now use the sound card the earpiece is on, so both halves of a call
-  are on the same piece of hardware.
-
-0.4.7a
-Tab completion in the Linux shell.
-
-Added
-- The * key completes what you have typed, the way Tab does on any other
-  terminal. Typing a path on a keypad means a letter at a time out of a
-  multi-tap cycle, and the shell has always been able to complete -- there
-  was simply no key that sent a Tab.
-  * did nothing at all in the letter modes before this, so nothing has been
-  taken away to make room. The # key still cycles abc/ABC/123, and in 123
-  the * key still types a literal *, because a shell that cannot glob would
-  be a poor trade for one that can complete.
-
-0.4.6a
-Sleep groundwork, a working Clock, and the microphone finally records.
-
---- Wallpaper everywhere, and wallpaper that moves ---
+The wallpaper was one picture behind the clock. It is now the background of
+the whole phone, and it is allowed to be a GIF.
 
 The wallpaper was one picture behind the clock. It is now the background of
 the whole phone, and it is allowed to be a GIF.
@@ -98,6 +72,40 @@ Changed
   wallpaper configured and were drawing black over it; the widget gallery,
   the engineering apps, the crash screen and both games are unchanged to the
   pixel, which is the check that this went where it was meant to.
+
+Also
+- A security audit of the whole C rewrite, written down rather than kept in
+  somebody's head: docs/c-rewrite/SECURITY-AUDIT.md.
+
+0.4.8a
+Calls send your voice again.
+
+Fixed
+- The microphone works on a call. The phone has two sound devices that can
+  record: the sound card the microphone is actually plugged into, and one
+  built into the processor that is wired to nothing at all. Calls picked
+  whichever came first, which on this phone is the one wired to nothing --
+  so the other end heard silence while the phone played their voice back
+  perfectly. Nothing reported an error, because nothing had failed; the
+  phone was recording exactly what it was asked to.
+  Calls now use the sound card the earpiece is on, so both halves of a call
+  are on the same piece of hardware.
+
+0.4.7a
+Tab completion in the Linux shell.
+
+Added
+- The * key completes what you have typed, the way Tab does on any other
+  terminal. Typing a path on a keypad means a letter at a time out of a
+  multi-tap cycle, and the shell has always been able to complete -- there
+  was simply no key that sent a Tab.
+  * did nothing at all in the letter modes before this, so nothing has been
+  taken away to make room. The # key still cycles abc/ABC/123, and in 123
+  the * key still types a literal *, because a shell that cannot glob would
+  be a poor trade for one that can complete.
+
+0.4.6a
+Sleep groundwork, a working Clock, and the microphone finally records.
 
 --- The first two pieces of sleep ---
 

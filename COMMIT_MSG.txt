@@ -2056,3 +2056,30 @@ listed capture nodes on both card0 and card1, which is the fact the QEMU
 comment could not have known.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+================================================================================
+
+0.4.9a: animated wallpapers, and a written-down security audit
+
+Merges PR #13 (animated GIF wallpapers, 84 files) and PR #12 (security
+audit). Both merged without conflicts; the whole C suite passes, test_gif
+alone contributing 155 checks over the LZW decoder.
+
+## the changelog needed moving
+
+PR #13 branched from a main that was six commits behind, where the heading
+its notes belong under was still "Unreleased". By the time it merged that
+heading had become 0.4.6a -- tagged, pushed, and published with assets. Git
+put the wallpaper section straight inside it, cleanly and wrongly: 0.4.6a
+would have promised a feature it does not contain, in notes people can
+already download.
+
+Moved to 0.4.9a. 0.4.6a is byte-for-byte what it shipped.
+
+This will keep happening while branches start from origin/main, because
+release.sh pushes tags and never commits, so origin/main has been sitting at
+0.4.3a while eight releases were cut from it. The same thing bit the
+sleepy/clock merge earlier today. Pushing main is the fix; not doing it in
+this commit because that is the user's call to make.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
