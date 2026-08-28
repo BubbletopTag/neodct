@@ -283,6 +283,101 @@ static void test_the_shell_bridge_sends_nothing_on_a_mode_change(void)
 }
 
 /* ------------------------------------------------------------------ *
+ * Tab completion on the star key
+ * ------------------------------------------------------------------ */
+
+/* A shell without completion on a keypad is a cruel thing: every path is
+ * typed a letter at a time out of a multi-tap cycle. Tab is what fixes that,
+ * and busybox ash has had FEATURE_TAB_COMPLETION all along -- there was simply
+ * no key that produced a Tab.
+ *
+ * Star is where it goes because in the shell's letter modes star does nothing
+ * whatsoever: the engine resets and returns an op with no character, so the
+ * press has always been swallowed. Mode cycling is on #, not star, so digits
+ * are unaffected. */
+static void test_star_sends_tab_in_the_shell(void)
+{
+    fake_kbd fk;
+    nd_t9_bridge *b;
+    ev_native recs[32];
+
+    fake_kbd_open(&fk);
+    b = nd_t9_bridge_new_for_test(ND_BRIDGE_SHELL, &fk.kbd);
+    CHECK(b != NULL);
+
+    nd_t9_bridge_handle_code(b, ND_KEY_STAR);
+    CHECK_INT(drain(&fk, recs, 32u), 4);
+    check_rec(&recs[0], EV_KEY_T, 15u, 1, "tab");
+
+    nd_t9_bridge_free_for_test(b);
+    fake_kbd_close(&fk);
+}
+
+/* A half-typed multi-tap letter is committed, not carried across the Tab.
+ * Pressing 2 then star must complete "a", not leave the cycle live so that
+ * the next 2 turns it into "b" after the shell has already seen it. */
+static void test_star_commits_a_pending_letter_first(void)
+{
+    fake_kbd fk;
+    nd_t9_bridge *b;
+    ev_native recs[32];
+
+    fake_kbd_open(&fk);
+    b = nd_t9_bridge_new_for_test(ND_BRIDGE_SHELL, &fk.kbd);
+    CHECK(b != NULL);
+
+    nd_t9_bridge_handle_code(b, 3); /* 'a', still cycling */
+    CHECK_INT(drain(&fk, recs, 32u), 4);
+    nd_t9_bridge_handle_code(b, ND_KEY_STAR);
+    CHECK_INT(drain(&fk, recs, 32u), 4);
+    check_rec(&recs[0], EV_KEY_T, 15u, 1, "tab");
+
+    /* The cycle is over, so this is a fresh 'a' rather than a backspace
+     * and a 'b'. Four events, not eight. */
+    nd_t9_bridge_handle_code(b, 3);
+    CHECK_INT(drain(&fk, recs, 32u), 4);
+    check_rec(&recs[0], EV_KEY_T, 30u, 1, "a again");
+
+    nd_t9_bridge_free_for_test(b);
+    fake_kbd_close(&fk);
+}
+
+/* 123 mode keeps the literal star. A shell without '*' cannot glob, and that
+ * is a worse loss than completion is a gain -- so the two share the key by
+ * mode rather than one replacing the other. */
+static void test_star_still_types_a_star_in_numeric_mode(void)
+{
+    fake_kbd fk;
+    nd_t9_bridge *b;
+    ev_native recs[32];
+    int guard;
+
+    fake_kbd_open(&fk);
+    b = nd_t9_bridge_new_for_test(ND_BRIDGE_SHELL, &fk.kbd);
+    CHECK(b != NULL);
+
+    /* # cycles: abc -> ABC -> 123. Walk to 123 by label rather than by a
+     * fixed number of presses, so this does not break if a mode is added. */
+    for (guard = 0; guard < 8; guard++) {
+        if (strcmp(nd_t9_bridge_mode_label(b), "123") == 0)
+            break;
+        nd_t9_bridge_handle_code(b, ND_KEY_HASH);
+        (void)drain(&fk, recs, 32u);
+    }
+    CHECK_STR(nd_t9_bridge_mode_label(b), "123");
+
+    /* '*' is shift+8 on the far side of a uinput device: two keys, eight
+     * events, shift first. */
+    nd_t9_bridge_handle_code(b, ND_KEY_STAR);
+    CHECK_INT(drain(&fk, recs, 32u), 8);
+    check_rec(&recs[0], EV_KEY_T, 42u, 1, "leftshift");
+    check_rec(&recs[2], EV_KEY_T, 9u, 1, "8, shifted into '*'");
+
+    nd_t9_bridge_free_for_test(b);
+    fake_kbd_close(&fk);
+}
+
+/* ------------------------------------------------------------------ *
  * The browser bridge
  * ------------------------------------------------------------------ */
 
@@ -407,6 +502,9 @@ int main(void)
     RUN(test_the_shell_bridge_types_multi_tap_letters);
     RUN(test_the_shell_bridge_passes_navigation_straight_through);
     RUN(test_the_shell_bridge_sends_nothing_on_a_mode_change);
+    RUN(test_star_sends_tab_in_the_shell);
+    RUN(test_star_commits_a_pending_letter_first);
+    RUN(test_star_still_types_a_star_in_numeric_mode);
     RUN(test_the_browser_starts_as_a_dpad);
     RUN(test_every_other_key_is_inert_while_scrolling);
     RUN(test_hash_walks_nav_abc_upper_123_and_back);

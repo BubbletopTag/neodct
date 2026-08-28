@@ -1,5 +1,18 @@
 # NeoDCT OS Changelog
 
+0.4.7a
+Tab completion in the Linux shell.
+
+Added
+- The * key completes what you have typed, the way Tab does on any other
+  terminal. Typing a path on a keypad means a letter at a time out of a
+  multi-tap cycle, and the shell has always been able to complete -- there
+  was simply no key that sent a Tab.
+  * did nothing at all in the letter modes before this, so nothing has been
+  taken away to make room. The # key still cycles abc/ABC/123, and in 123
+  the * key still types a literal *, because a shell that cannot glob would
+  be a poor trade for one that can complete.
+
 0.4.6a
 Sleep groundwork, a working Clock, and the microphone finally records.
 

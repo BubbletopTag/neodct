@@ -1984,3 +1984,37 @@ draw the identical flat line. For an app whose whole purpose is answering "is
 the microphone working", that is the wrong answer to give twice.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+================================================================================
+
+shell: the star key completes
+
+A shell driven from a phone keypad types every path one letter at a time out
+of a multi-tap cycle. busybox ash has had FEATURE_TAB_COMPLETION enabled the
+whole time; there was simply no key that produced a Tab.
+
+Star is where it goes, and nothing is displaced to put it there. In the
+shell's letter modes the engine already resets and returns an op carrying no
+character, so the press has always been swallowed -- measured, not assumed:
+the first version of the test asserted four events and got zero. Mode cycling
+is on #, not star, so digits are untouched.
+
+123 mode keeps the literal '*'. A shell that cannot glob is a worse loss than
+one that cannot complete, so the two share the key by mode rather than one
+replacing the other.
+
+The engine is reset before the Tab for the same reason nav keys reset it: a
+half-finished multi-tap letter has to be committed before anything else
+reaches the terminal, or the next press of that digit would backspace over
+text the shell has already been given. A test covers exactly that -- 2 then
+star then 2 is "a", Tab, "a", not "a", Tab, backspace, "b".
+
+Two of the three tests failed first for the right reason and one failed
+because the assertion was wrong rather than the code: '*' is shift+8 on the
+far side of a uinput device, eight events with the shift first, not the four
+this expected. Corrected to match the device rather than the guess.
+
+Cut as 0.4.7a to be the first update installed over the air, now that the
+three faults that stopped that ever working are fixed.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>

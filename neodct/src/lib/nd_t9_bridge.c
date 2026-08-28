@@ -111,9 +111,38 @@ static void browser_cycle_mode(nd_t9_bridge *b)
     }
 }
 
+/* KEY_TAB. Spelled out rather than included from linux/input-event-codes.h,
+ * which this file does not otherwise need and which is not available on every
+ * host the tests build on. */
+#define SHELL_KEY_TAB 15u
+
 static void shell_handle(nd_t9_bridge *b, int32_t code)
 {
     nd_t9_op op;
+
+    /* Star completes. A shell driven from a keypad types every path a letter
+     * at a time out of a multi-tap cycle, and busybox ash has had
+     * FEATURE_TAB_COMPLETION the whole time -- there was just no key that
+     * produced a Tab.
+     *
+     * Star is free here, in the exact sense that matters: in the letter modes
+     * the engine resets and returns an op carrying no character, so the press
+     * has always been swallowed. Nothing is being taken away. Mode cycling
+     * lives on #, so digits are untouched.
+     *
+     * 123 mode is left alone, where star is a literal '*'. A shell that
+     * cannot glob is a worse thing than one that cannot complete, so the two
+     * share the key by mode instead of one displacing the other.
+     *
+     * The engine is reset first for the same reason nav keys reset it: a
+     * half-finished multi-tap letter has to be committed before something
+     * else reaches the terminal, or the next press of that digit would
+     * backspace over text the shell has already been given. */
+    if (code == ND_KEY_STAR && nd_t9_engine_mode(&b->engine) != ND_T9_MODE_123) {
+        nd_t9_engine_reset(&b->engine);
+        (void)nd_uinput_send_key(b->kbd, SHELL_KEY_TAB, false);
+        return;
+    }
 
     if (is_passthrough(code)) {
         nd_t9_engine_reset(&b->engine);
