@@ -26,12 +26,28 @@
  * the difference between the two apps is real, not an oversight in one of
  * them. Ported as found.
  *
+ * WHAT IS NO LONGER TRUE is "the app owns it". nd_db_record_call() writes the
+ * rows now, from the core, because that is where calls happen and this app is
+ * a separate process that is not running when one does. It creates the file
+ * the same lazy way for the same reason: whichever of the two opens it first
+ * fixes its journal mode forever, so both have to make the same file.
+ *
  * ============ WIDGET LIFETIME DECIDES WHETHER A MENU REMEMBERS ============
  *
- * spec-apps-core.md section 0b tabulates this and it is observable. The two
- * PagedLists here are built ONCE, before their loop, so the page survives a
- * trip into a submenu; the two VerticalLists are rebuilt INSIDE their loop,
- * so the selection resets after every detail screen. Keep both.
+ * spec-apps-core.md section 0b tabulates this and it is observable. Every
+ * PagedList here -- the root, the three call lists and the duration menu -- is
+ * built ONCE, before its loop, so the page survives a trip into a submenu. The
+ * call lists now follow that rule rather than the VerticalList's: coming back
+ * from a call's details lands on the call you were reading, not at the top.
+ * The one VerticalList left, the clear menu, is built and shown once.
+ *
+ * ============ THE LISTS SHOW TEN, IN BIG TYPE ============
+ *
+ * calllog.h has the reasoning. The three call lists were VerticalLists over
+ * "ORDER BY id DESC LIMIT 20"; they are PagedLists over LIMIT 10, one number to
+ * a page with its date and time on the value line under it, and Select opens
+ * the call's duration. Deliberate -- the redesign AGENTS.md's note about golden
+ * frames is about.
  *
  * ============ THE CLEAR MENU'S INDEX MAP IS NOT IN LIST ORDER ============
  *
@@ -148,15 +164,19 @@ size_t nd_calllog_fetch(const char *call_type, nd_call_rec *out, size_t max)
         return 0u;
     }
 
+    /* The LIMIT is BOUND rather than spelled in the SQL, so calllog.h's
+     * ND_CALLLOG_MAX_CALLS really is the one place the number lives -- the
+     * query and the array it fills cannot disagree about it. */
     if (sqlite3_prepare_v2(db,
-                           "SELECT number, timestamp FROM calls WHERE type=? "
-                           "ORDER BY id DESC LIMIT 20",
+                           "SELECT number, timestamp, duration FROM calls WHERE type=? "
+                           "ORDER BY id DESC LIMIT ?",
                            -1, &st, NULL) != SQLITE_OK) {
         nd_log(ND_LOG_CALLLOG, "DB read failed: %s", sqlite3_errmsg(db));
         nd_db_close(db);
         return 0u;
     }
     (void)sqlite3_bind_text(st, 1, call_type, -1, SQLITE_STATIC);
+    (void)sqlite3_bind_int(st, 2, ND_CALLLOG_MAX_CALLS);
 
     while (n < max && sqlite3_step(st) == SQLITE_ROW) {
         const unsigned char *num = sqlite3_column_text(st, 0);
@@ -167,6 +187,10 @@ size_t nd_calllog_fetch(const char *call_type, nd_call_rec *out, size_t max)
         (void)nd_strlcpy(out[n].number, (num != NULL) ? (const char *)num : "",
                          sizeof out[n].number);
         out[n].timestamp = (int64_t)sqlite3_column_int64(st, 1);
+        /* DEFAULT 0 covers a row written before the column was used, and
+         * sqlite3_column_int64 answers 0 for a NULL, so a missed call and an
+         * ancient row both read as the zero seconds they were connected. */
+        out[n].duration = (int64_t)sqlite3_column_int64(st, 2);
         n++;
     }
 
@@ -324,47 +348,71 @@ const char *nd_calllog_format_call_time(int64_t timestamp, char *out, size_t out
  * The screens
  * ------------------------------------------------------------------ */
 
-/* show_call_list(ui, title, call_type).
+/* show_call_list(ui, title, call_type, root_id) -- one of "Missed calls",
+ * "Received calls", "Dialed calls".
+ *
+ * root_id is the PLAIN app id, "3", so the pages read "3-1" .. "3-10" -- which
+ * is the breadcrumb the VerticalList drew here (nd_vlist_init took app_id and
+ * nd_vlist_draw passed selected_index + 1), and is kept rather than made into
+ * the composite "3-1-1" the duration menu's "3-5" would suggest. A 24 px title
+ * and a breadcrumb share a 240 px row, so two more breadcrumb characters cost
+ * three of "Received calls", and the title is the half worth reading.
  *
  * fetch_calls() runs ONCE, outside the loop: viewing a detail and coming back
  * does not re-read the table, so a call arriving while the list is up is not
- * shown until the screen is left and re-entered. The VerticalList, by
- * contrast, is rebuilt every iteration, so the cursor returns to the top. */
-static void show_call_list(nd_ui *ui, const char *title, const char *call_type)
+ * shown until the screen is left and re-entered. The PagedList is built once
+ * as well, which is what makes the return land on the same call.
+ *
+ * `whens` and `items` are what the widget reads while it draws, so both have
+ * to outlive it -- nd_widgets.h: strings passed to init are BORROWED. They are
+ * this function's own frames, and the widget never leaves it. */
+static void show_call_list(nd_ui *ui, const char *title, const char *call_type, const char *root_id)
 {
     nd_call_rec calls[ND_CALLLOG_MAX_CALLS];
     const char *items[ND_CALLLOG_MAX_CALLS];
+    char whens[ND_CALLLOG_MAX_CALLS][ND_CALLLOG_TIME_MAX];
+    const char *values[ND_CALLLOG_MAX_CALLS];
+    nd_pagedlist menu;
     size_t n;
     size_t i;
 
     n = nd_calllog_fetch(call_type, calls, ND_ARRAY_LEN(calls));
     if (n == 0u) {
+        /* NOT the PagedList's own "No Items" page: an empty call list has said
+         * "No numbers" since the Python, and it is the wording the three lists
+         * share with nothing else on the phone. */
         (void)nd_infoscreen_show(ui, title, "No numbers", "Back");
         return;
     }
 
-    for (i = 0u; i < n; i++)
+    for (i = 0u; i < n; i++) {
         items[i] = (calls[i].number[0] != '\0') ? calls[i].number : nd_calllog_unknown;
+        values[i] = nd_calllog_format_call_time(calls[i].timestamp, whens[i], sizeof whens[i]);
+    }
+
+    /* show_select_hint, so the strip reads "Select" the way every other
+     * PagedList on the phone does. The VerticalList this replaced said
+     * "Details"; the widget offers one word and consistency with the rest of
+     * the menus is worth more than the more precise one. */
+    nd_pagedlist_init(&menu, ui, title, items, n, root_id, true);
+    nd_pagedlist_set_values(&menu, values);
 
     for (;;) {
-        nd_vlist menu;
-        nd_softkey bar;
-        int32_t choice;
-        char when[ND_CALLLOG_TIME_MAX];
+        int32_t choice = nd_pagedlist_show(&menu);
+        char duration[ND_CALLLOG_TIME_MAX];
 
-        nd_vlist_init(&menu, ui, title, items, n, ND_CALLLOG_APP_ID);
-        nd_softkey_init(&bar, ui, false);
-        nd_softkey_update(&bar, "Details", false);
-
-        choice = nd_vlist_show(&menu);
         if (choice == ND_WIDGET_BACK)
             return;
         if (choice < 0 || (size_t)choice >= n)
             return;
 
+        /* The page already carries the number and the time, so the detail
+         * screen is the one thing it does not: how long the call lasted.
+         * 00:00:00 for a missed one, and for every row a phone recorded before
+         * there was a writer to fill the column in. */
         (void)nd_infoscreen_show(
             ui, items[choice],
-            nd_calllog_format_call_time(calls[choice].timestamp, when, sizeof when), "Back");
+            nd_calllog_format_duration(calls[choice].duration, duration, sizeof duration), "Back");
 
         /* Not in the Python, which had IncomingCall to unwind it. nd_app.h:
          * a loop that outlives a frame polls this. */
@@ -468,7 +516,9 @@ int app_run(nd_ui *ui)
         case 0:
         case 1:
         case 2:
-            show_call_list(ui, nd_calllog_titles[choice], nd_calllog_types[choice]);
+            /* The root menu's own id, so a call's page reads "3-1" the way it
+             * did when this was a VerticalList. */
+            show_call_list(ui, nd_calllog_titles[choice], nd_calllog_types[choice], root_id);
             break;
         case 3:
             show_clear_menu(ui);

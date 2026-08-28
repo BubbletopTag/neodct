@@ -89,6 +89,7 @@
 #pragma weak nd_modem_dial
 #pragma weak nd_modem_answer
 #pragma weak nd_modem_hangup
+#pragma weak nd_modem_last_call_secs
 
 #pragma weak nd_battery_open
 #pragma weak nd_battery_close
@@ -1378,6 +1379,114 @@ void nd_ui_update(nd_ui *ui)
 }
 
 /* ------------------------------------------------------------------ *
+ * The call log
+ * ------------------------------------------------------------------ *
+ *
+ * Every call this phone places or takes passes through this file, so this is
+ * the only place a row can be written from: the CallLog app is a separate
+ * process that is almost never running when a call arrives, and nd_modem.h has
+ * the core signal and reap whatever app WAS running before it draws the call
+ * screen. Recording happens where an outcome is finally known: the two dial
+ * paths in nd_ui_handle_input(), and the three ways
+ * nd_ui_handle_incoming_call() can finish.
+ *
+ * The Python wrote no rows at all -- `calls` was created by the first READ and
+ * stayed empty -- which is why all three lists have said "No numbers" on every
+ * phone shipped so far.
+ *
+ * A DECLINED call is filed as missed, the same as one whose caller gave up.
+ * That is the 5110's own behaviour and the reason "Missed calls" is the first
+ * entry in the menu: what it means is "calls I did not speak on", not "calls I
+ * failed to notice".
+ */
+
+/* int(get_setting(key, "0") or 0), folded to 0 on anything unparseable --
+ * which is what the app's own py_int() does with the same three keys, and
+ * whitespace either side is accepted for the same reason it is there. A total
+ * this side cannot read is a total this side then overwrites, so the two
+ * readers agreeing about what a value means is worth the four lines. */
+static int64_t timer_read(const char *key)
+{
+    char buf[32];
+    const char *p;
+    char *end = NULL;
+    long long v;
+
+    if (nd_settings_get_copy(key, "0", buf, sizeof buf) != ND_OK)
+        return 0;
+    v = strtoll(buf, &end, 10);
+    if (end == NULL || end == buf)
+        return 0;
+    for (p = end; *p == ' ' || (*p >= '\t' && *p <= '\r'); p++) {}
+    if (*p != '\0')
+        return 0;
+    return (v > 0) ? (int64_t)v : 0;
+}
+
+static void timer_store(const char *key, int64_t secs)
+{
+    char buf[32];
+
+    if (nd_snprintf(buf, sizeof buf, "%lld", (long long)secs) != ND_OK)
+        return;
+    if (nd_settings_set(key, buf) != ND_OK)
+        nd_log_err(ND_LOG_CALLLOG, "Timer write failed: cannot store %s", key);
+}
+
+/* The two totals accumulate and `last` is replaced, which is what the three
+ * rows of "Show call duration" have always claimed to be. A call that never
+ * connected -- a missed one, or a dial nobody picked up -- leaves all three
+ * alone rather than zeroing "Last call duration" with it. */
+static void note_duration(const char *type, int64_t secs)
+{
+    if (secs <= 0)
+        return;
+
+    timer_store(ND_SET_CALLLOG_DUR_LAST, secs);
+
+    if (strcmp(type, ND_CALL_TYPE_DIALED) == 0)
+        timer_store(ND_SET_CALLLOG_DUR_DIALED, timer_read(ND_SET_CALLLOG_DUR_DIALED) + secs);
+    else if (strcmp(type, ND_CALL_TYPE_RECEIVED) == 0)
+        timer_store(ND_SET_CALLLOG_DUR_RECEIVED, timer_read(ND_SET_CALLLOG_DUR_RECEIVED) + secs);
+}
+
+/* One finished call. secs comes from the modem, which latched it as the line
+ * went down -- by the time we get here the call is over and a live readout
+ * would say -1.
+ *
+ * Nothing here can fail in a way the caller should act on. A phone whose
+ * userdata partition is full still has to be able to make the next call, so a
+ * refused write is logged by nd_db_record_call() and dropped. */
+static void record_call(nd_ui *ui, const char *type, const char *number)
+{
+    int64_t secs = 0;
+
+    if (ui != NULL && ui->modem != NULL && nd_modem_last_call_secs != NULL)
+        secs = (int64_t)nd_modem_last_call_secs(ui->modem);
+
+    (void)nd_db_record_call(type, number, (int64_t)nd_time_now(), secs);
+    note_duration(type, secs);
+}
+
+/* The caller ID as it stands NOW, which is not necessarily what the ring
+ * started with: +CLIP lands just after the first RING, and show_incoming()
+ * picks it up mid-screen for the same reason. The RING handler clears the
+ * field, so this can never be the previous caller. */
+static void incoming_number(nd_ui *ui, const char *given, char *out, size_t out_sz)
+{
+    const char *cid;
+
+    (void)nd_strlcpy(out, (given != NULL) ? given : "", out_sz);
+    if (out[0] != '\0')
+        return;
+    if (ui == NULL || ui->modem == NULL || nd_modem_caller_id == NULL)
+        return;
+    cid = nd_modem_caller_id(ui->modem);
+    if (cid != NULL)
+        (void)nd_strlcpy(out, cid, out_sz);
+}
+
+/* ------------------------------------------------------------------ *
  * Keys
  * ------------------------------------------------------------------ */
 
@@ -1490,6 +1599,10 @@ void nd_ui_handle_input(nd_ui *ui, int32_t code)
                 (void)nd_modem_dial(ui->modem, ui->dial_buffer);
             if (nd_dialer_show_calling != NULL)
                 nd_dialer_show_calling(ui, ui->dial_buffer, NULL);
+            /* Logged whether or not the modem took the dial. "Dialed calls"
+             * is a record of what was dialled from this handset, and a number
+             * that failed to connect is the one you most want to find again. */
+            record_call(ui, ND_CALL_TYPE_DIALED, ui->dial_buffer);
             ui->dial_buffer[0] = '\0';
             ui->state = ND_UI_STATE_HOME;
         }
@@ -1517,6 +1630,10 @@ void nd_ui_handle_input(nd_ui *ui, int32_t code)
                 (void)nd_modem_dial(ui->modem, target.number);
             if (nd_dialer_show_calling != NULL)
                 nd_dialer_show_calling(ui, target.number, target.name);
+            /* The NUMBER, not the contact's name: the log stores numbers and
+             * the app resolves them, so a contact renamed tomorrow does not
+             * rewrite yesterday's calls. */
+            record_call(ui, ND_CALL_TYPE_DIALED, target.number);
         }
         return;
     }
@@ -1543,6 +1660,7 @@ void nd_ui_handle_incoming_call(nd_ui *ui, const char *number)
     /* ND_CALL_GONE is the Python's "the caller hung up before we answered",
      * which is also what happens when the Dialer is not linked in. */
     nd_incoming_result result = ND_CALL_GONE;
+    char logged[ND_MODEM_NUMBER_MAX];
 
     if (ui == NULL)
         return;
@@ -1560,6 +1678,11 @@ void nd_ui_handle_incoming_call(nd_ui *ui, const char *number)
     if (ui->notify != NULL && nd_notify_stop_ring != NULL)
         nd_notify_stop_ring(ui->notify);
 
+    /* Read AFTER the ring screen, not before: `number` is NULL on the path the
+     * core actually uses (nd_main.c passes it), and a +CLIP arriving during
+     * the ring is the only thing that ever names the caller. */
+    incoming_number(ui, number, logged, sizeof logged);
+
     if (result == ND_CALL_ANSWERED) {
         bool ok = ui->modem != NULL && nd_modem_answer != NULL && nd_modem_answer(ui->modem);
 
@@ -1573,12 +1696,18 @@ void nd_ui_handle_incoming_call(nd_ui *ui, const char *number)
          * line is really down either way. */
         if (ui->modem != NULL && nd_modem_hangup != NULL)
             (void)nd_modem_hangup(ui->modem);
+        /* AFTER the hangup, because that is what latches the duration. An
+         * answer the modem refused never became a call, so it is filed where
+         * a call you did not speak on belongs. */
+        record_call(ui, ok ? ND_CALL_TYPE_RECEIVED : ND_CALL_TYPE_MISSED, logged);
     } else if (result == ND_CALL_DECLINED) {
         nd_log(ND_LOG_CORE, "Call declined.");
         if (ui->modem != NULL && nd_modem_hangup != NULL)
             (void)nd_modem_hangup(ui->modem);
+        record_call(ui, ND_CALL_TYPE_MISSED, logged);
     } else {
         nd_log(ND_LOG_CORE, "Caller hung up before we answered.");
+        record_call(ui, ND_CALL_TYPE_MISSED, logged);
     }
 
     if (ui->notify != NULL && nd_notify_stop_ring != NULL)

@@ -440,8 +440,11 @@ void nd_modem__stop_call_audio(nd_modem *m)
     m->pcm_active = false;
     nd_modem__lock(m);
     m->call_stat = -1;
-    m->call_connected = false;
-    m->call_connected_at = 0.0;
+    /* Was `call_connected = false; call_connected_at = 0.0`. It still is, but
+     * through the helper, because do_hangup() gets here BEFORE it reaches
+     * set_state(IDLE) and clearing the stamp outright threw away the length
+     * the call log was about to record. */
+    nd_modem__note_call_ended(m);
     nd_modem__unlock(m);
     if (m->hardware)
         m->pcm_cleanup = true; /* AT+CPCMREG=0 goes out on the next free tick */

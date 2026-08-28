@@ -26,10 +26,12 @@
  *     odd indentation -- which is in the on-disk sqlite_master row of every
  *     existing phone and therefore cannot be reformatted.
  *
- *  6. THE QUERY IS ORDER BY id DESC LIMIT 20, filtered by type. Driven
- *     against a real sqlite database with 25 rows of three types, so "newest
- *     first", "only this type" and "twenty at most" are three separate
- *     claims and not one.
+ *  6. THE QUERY IS ORDER BY id DESC LIMIT 10, filtered by type, and it reads
+ *     `duration` as well. Driven against a real sqlite database with 25 rows
+ *     of three types, so "newest first", "only this type" and "ten at most"
+ *     are three separate claims and not one. The LIMIT was 20 while the lists
+ *     were VerticalLists; calllog.h says why it is 10 now, and this is the
+ *     assertion that stops it drifting back.
  *
  *  7. A NULL `number` COLUMN COMES BACK EMPTY, which is what the app's
  *     `number or "Unknown"` turns into "Unknown".
@@ -42,6 +44,15 @@
  *
  * 10. THE GOLDEN FRAME. app-calllog is the root PagedList's first page,
  *     judged by the SHA-256 over raw RGB that goldenframe.py compares.
+ *
+ * 11. THE WRITER AND THE READER AGREE. nd_db_record_call() lives in the core,
+ *     this app reads what it wrote, and the two halves have to make the same
+ *     file: same schema, same rollback-journal mode, same three type strings.
+ *     Driven by writing rows with the core's function and reading them back
+ *     with the app's, because that round trip is the whole feature and
+ *     nothing else in the tree exercises both ends of it. And the table is
+ *     bounded per type, because it is now the only thing on this phone that
+ *     grows without anybody asking it to.
  *
  * Runs with no arguments. NEODCT_GOLDEN names the reference set.
  */
@@ -289,15 +300,18 @@ static void test_fetch(void)
     size_t n;
 
     n = api.fetch("missed", rows, ND_ARRAY_LEN(rows));
-    CHECK_INT(n, 20, "LIMIT 20 caps a 25-row list");
+    CHECK_INT(n, 10, "LIMIT 10 caps a 25-row list");
     /* ORDER BY id DESC: the newest insert first. */
     CHECK_STR(rows[0].number, "0700024", "newest missed call first");
     CHECK_INT(rows[0].timestamp, 1700000024, "and its timestamp");
-    CHECK_STR(rows[19].number, "0700005", "the twentieth is the 6th-oldest");
+    CHECK_STR(rows[9].number, "0700015", "the tenth is the 10th-newest");
 
     n = api.fetch("received", rows, ND_ARRAY_LEN(rows));
     CHECK_INT(n, 3, "WHERE type=? excludes the other 26 rows");
     CHECK_STR(rows[0].number, "0851234567", "received number");
+    /* The seeder writes no duration, so DEFAULT 0 is what comes back -- the
+     * same reading a row from a phone that predates the writer gives. */
+    CHECK_INT(rows[0].duration, 0, "an unset duration column reads 0");
 
     n = api.fetch("dialed", rows, ND_ARRAY_LEN(rows));
     CHECK_INT(n, 1, "one dialed row");
@@ -317,11 +331,180 @@ static void test_clear(void)
 
     CHECK(api.clear("received"), "clearing one type succeeds");
     CHECK_INT(api.fetch("received", rows, ND_ARRAY_LEN(rows)), 0, "received is now empty");
-    CHECK_INT(api.fetch("missed", rows, ND_ARRAY_LEN(rows)), 20, "and missed is untouched");
+    CHECK_INT(api.fetch("missed", rows, ND_ARRAY_LEN(rows)), 10, "and missed is untouched");
 
     CHECK(api.clear(NULL), "clearing everything succeeds");
     CHECK_INT(api.fetch("missed", rows, ND_ARRAY_LEN(rows)), 0, "missed is now empty");
     CHECK_INT(api.fetch("dialed", rows, ND_ARRAY_LEN(rows)), 0, "dialed is now empty");
+}
+
+/* ------------------------------------------------------------------ *
+ * 11. The writer
+ * ------------------------------------------------------------------ */
+
+/* Puts the phone back to one that has never taken a call, so the writer is
+ * the thing that creates the database. test_clear() has just emptied the
+ * table, but the FILE is what decides the journal mode and it is still the
+ * one _connect() made. */
+static void drop_db_file(void)
+{
+    char path[ND_PATH_MAX];
+
+    if (nd_snprintf(path, sizeof path, "%s%s", g_root, ND_CALLLOG_DB) != ND_OK)
+        return;
+    (void)remove(path);
+    if (nd_snprintf(path, sizeof path, "%s%s-journal", g_root, ND_CALLLOG_DB) == ND_OK)
+        (void)remove(path);
+}
+
+/* SELECT COUNT(*) straight from the file, because the app's own fetch stops
+ * at ten and the cap is fifty. */
+static int count_rows(const char *type)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    int n = -1;
+
+    if (api.connect(&db) != ND_OK)
+        return -1;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM calls WHERE type=?", -1, &st, NULL) ==
+        SQLITE_OK) {
+        (void)sqlite3_bind_text(st, 1, type, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW)
+            n = sqlite3_column_int(st, 0);
+    }
+    (void)sqlite3_finalize(st);
+    nd_db_close(db);
+    return n;
+}
+
+static void test_record_creates_the_same_file(void)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    char mode[32];
+
+    drop_db_file();
+    CHECK(!db_file_exists(), "no call_log.db before the first call");
+
+    CHECK(nd_db_record_call(ND_CALL_TYPE_MISSED, "0871111111", 1700100000, 0) > 0,
+          "the first call of the phone's life is recorded");
+    CHECK(db_file_exists(), "and recording it CREATED call_log.db");
+
+    /* The half that matters: the writer must leave the file in the mode the
+     * reader would have. journal_mode is in the header and whoever creates
+     * the file fixes it forever, so a writer that issued the WAL pragma the
+     * other three databases get would make a file the Python never made. */
+    CHECK_INT(api.connect(&db), ND_OK, "the app opens what the core created");
+    if (db == NULL)
+        return;
+    mode[0] = '\0';
+    if (sqlite3_prepare_v2(db, "PRAGMA journal_mode", -1, &st, NULL) == SQLITE_OK &&
+        sqlite3_step(st) == SQLITE_ROW) {
+        const unsigned char *m = sqlite3_column_text(st, 0);
+
+        (void)nd_strlcpy(mode, (m != NULL) ? (const char *)m : "", sizeof mode);
+    }
+    (void)sqlite3_finalize(st);
+    CHECK_STR(mode, "delete", "a core-created call_log.db is in rollback-journal mode too");
+    nd_db_close(db);
+}
+
+static void test_record_round_trip(void)
+{
+    nd_call_rec rows[ND_CALLLOG_MAX_CALLS];
+    size_t n;
+    int i;
+
+    /* One of each type, so "the row lands in the list its type names" is a
+     * claim about all three and not just the one the app opens first. */
+    CHECK(nd_db_record_call(ND_CALL_TYPE_RECEIVED, "0862222222", 1700100100, 95) > 0,
+          "a received call");
+    CHECK(nd_db_record_call(ND_CALL_TYPE_DIALED, "0873333333", 1700100200, 8) > 0, "a dialed call");
+
+    n = api.fetch(api.types[1], rows, ND_ARRAY_LEN(rows));
+    CHECK_INT(n, 1, "the received list has the received call and nothing else");
+    CHECK_STR(rows[0].number, "0862222222", "its number survived the round trip");
+    CHECK_INT(rows[0].timestamp, 1700100100, "and its timestamp");
+    CHECK_INT(rows[0].duration, 95, "and the duration the core measured");
+
+    n = api.fetch(api.types[2], rows, ND_ARRAY_LEN(rows));
+    CHECK_INT(n, 1, "the dialed list has the dialed call");
+    CHECK_INT(rows[0].duration, 8, "with its own duration");
+
+    n = api.fetch(api.types[0], rows, ND_ARRAY_LEN(rows));
+    CHECK_INT(n, 1, "and the missed list still has only the missed one");
+    CHECK_INT(rows[0].duration, 0, "a missed call was connected for no seconds");
+
+    /* A withheld caller ID: stored NULL, read back empty, drawn "Unknown".
+     * That is the column the app's `number or "Unknown"` was written for. */
+    CHECK(nd_db_record_call(ND_CALL_TYPE_MISSED, NULL, 1700100300, 0) > 0,
+          "a call from a withheld number is still a call");
+    CHECK(nd_db_record_call(ND_CALL_TYPE_MISSED, "", 1700100400, 0) > 0,
+          "and so is one the modem named with an empty string");
+    n = api.fetch(api.types[0], rows, ND_ARRAY_LEN(rows));
+    CHECK_INT(n, 3, "both landed in the missed list");
+    CHECK_STR(rows[0].number, "", "an empty number stores as the NULL the schema allows");
+    CHECK_STR(rows[1].number, "", "and so does a NULL one");
+
+    /* A negative duration cannot come from the modem, which clamps, but the
+     * column must not carry one if it ever does. */
+    CHECK(nd_db_record_call(ND_CALL_TYPE_DIALED, "0874444444", 1700100500, -30) > 0,
+          "a negative duration is accepted");
+    n = api.fetch(api.types[2], rows, ND_ARRAY_LEN(rows));
+    CHECK_INT(rows[0].duration, 0, "and stored as zero, not as a negative");
+
+    /* A type the lists do not name is refused rather than filed where nothing
+     * will ever show it. */
+    CHECK_INT(nd_db_record_call(NULL, "0875555555", 1700100600, 0), -1, "record(NULL type)");
+    CHECK_INT(nd_db_record_call("", "0875555555", 1700100600, 0), -1, "record(\"\" type)");
+
+    /* The window: eleven more dialed calls on top of the two already there,
+     * and the list shows the last ten of the thirteen. */
+    for (i = 0; i < 11; i++) {
+        char num[32];
+
+        (void)nd_snprintf(num, sizeof num, "08760000%02d", i);
+        CHECK(nd_db_record_call(ND_CALL_TYPE_DIALED, num, 1700200000 + i, i) > 0, "bulk dialed");
+    }
+    n = api.fetch(api.types[2], rows, ND_ARRAY_LEN(rows));
+    CHECK_INT(n, ND_CALLLOG_MAX_CALLS, "ten pages at most, however many were logged");
+    CHECK_STR(rows[0].number, "0876000010", "the newest call is the first page");
+    CHECK_STR(rows[9].number, "0876000001", "and the tenth page is the tenth-newest");
+
+    CHECK(api.clear(NULL), "tidy up");
+}
+
+/* The table is bounded. A phone that lives for years on one small writable
+ * partition cannot keep every row it ever wrote, and the trim is per type --
+ * a talkative dialer must not push the missed list out. */
+static void test_record_trims_the_table(void)
+{
+    int i;
+
+    for (i = 0; i < ND_CALL_LOG_KEEP + 20; i++) {
+        char num[32];
+
+        (void)nd_snprintf(num, sizeof num, "0899%06d", i);
+        CHECK(nd_db_record_call(ND_CALL_TYPE_DIALED, num, 1700300000 + i, 0) > 0, "bulk dialed");
+    }
+    CHECK(nd_db_record_call(ND_CALL_TYPE_MISSED, "0851111111", 1700400000, 0) > 0, "one missed");
+
+    CHECK_INT(count_rows(ND_CALL_TYPE_DIALED), ND_CALL_LOG_KEEP,
+              "the dialed list is trimmed to the cap");
+    CHECK_INT(count_rows(ND_CALL_TYPE_MISSED), 1, "and trimming one type left the others alone");
+
+    /* Oldest first: the rows that went is the front of the queue, and the
+     * newest call is still there. */
+    {
+        nd_call_rec rows[ND_CALLLOG_MAX_CALLS];
+
+        CHECK_INT(api.fetch(ND_CALL_TYPE_DIALED, rows, ND_ARRAY_LEN(rows)), ND_CALLLOG_MAX_CALLS,
+                  "and the list still fills");
+        CHECK_STR(rows[0].number, "0899000069", "the newest survived the trim");
+    }
+
+    CHECK(api.clear(NULL), "tidy up");
 }
 
 /* ------------------------------------------------------------------ *
@@ -511,6 +694,9 @@ int main(void)
     RUN(seed_rows);
     RUN(test_fetch);
     RUN(test_clear);
+    RUN(test_record_creates_the_same_file);
+    RUN(test_record_round_trip);
+    RUN(test_record_trims_the_table);
     RUN(test_format_duration);
     RUN(test_format_call_time);
     RUN(test_timers);

@@ -77,8 +77,8 @@ const char *nd_lines_at(const nd_lines *l, size_t i); /* "" when out of range */
  *   otherwise, for end from len-1 down to 1, try text[:end] with trailing
  *   whitespace stripped plus "..."; the first that fits wins
  *   nothing fits                 -> ""
- * Only VerticalList calls it, to keep the title clear of the breadcrumb.
- * Writes into out; returns out. */
+ * VerticalList and PagedList call it, to keep the title clear of the
+ * breadcrumb. Writes into out; returns out. */
 char *nd_text_fit(char *out, size_t out_sz, const char *text, const nd_font *f, int32_t max_w);
 
 /* _ellipsize(ui, text, font, max_w): the same idea, three differences.

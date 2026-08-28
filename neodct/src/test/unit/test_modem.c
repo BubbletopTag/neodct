@@ -1890,6 +1890,108 @@ static void test_the_thread_runs_and_stops_cleanly(void)
     nd_modem_close(m);
 }
 
+/* nd_modem_last_call_secs(): the reading that OUTLIVES the call.
+ *
+ * The core writes the call log after the hangup, and by then
+ * nd_modem_call_status() reports -1 because the modem is IDLE again. So the
+ * length is latched on the way to IDLE and has to survive until the next call
+ * replaces it. Three claims: a live call has no length yet, a finished one
+ * does, and a call that never connected has zero rather than the previous
+ * call's answer.
+ *
+ * Real seconds, deliberately: nd_modem__now() is CLOCK_MONOTONIC and is not
+ * on the virtual clock, so a simulated call has to actually last a second for
+ * this to mean anything. Simulation connects two seconds after the dial. */
+static void test_the_last_call_length_outlives_the_call(void)
+{
+    nd_modem *m = NULL;
+    int spins;
+
+    use_scratch_settings("");
+    CHECK_INT(nd_modem_open(&m), ND_OK);
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+
+    CHECK_INT(nd_modem_last_call_secs(m), 0);
+
+    CHECK(nd_modem_dial(m, "5551234"));
+    for (spins = 0; spins < 100 && nd_modem_state(m) != ND_CALL_CONNECTED; spins++)
+        settle(0.05);
+    CHECK_INT(nd_modem_state(m), ND_CALL_CONNECTED);
+    /* Still up: there is no LAST call yet. */
+    CHECK_INT(nd_modem_last_call_secs(m), 0);
+
+    settle(1.1);
+    CHECK(nd_modem_hangup(m));
+    CHECK_INT(nd_modem_state(m), ND_CALL_IDLE);
+    CHECK(nd_modem_last_call_secs(m) >= 1);
+    CHECK(nd_modem_last_call_secs(m) < 60); /* and it is seconds, not something else */
+
+    /* A second hangup does not restart the clock on a call already counted. */
+    {
+        int32_t first = nd_modem_last_call_secs(m);
+
+        CHECK(nd_modem_hangup(m));
+        CHECK_INT(nd_modem_last_call_secs(m), first);
+    }
+
+    /* A new dial clears it, and a call that is ended before it connects
+     * leaves zero rather than the previous call's length. */
+    CHECK(nd_modem_dial(m, "5551234"));
+    CHECK_INT(nd_modem_last_call_secs(m), 0);
+    CHECK(nd_modem_hangup(m));
+    CHECK_INT(nd_modem_last_call_secs(m), 0);
+
+    CHECK_INT(nd_modem_last_call_secs(NULL), 0);
+
+    nd_modem_close(m);
+}
+
+/* An ANSWERED call in simulation is stamped too. Nothing sends
+ * "VOICE CALL: BEGIN" when there is no modem, so do_answer() is the only
+ * thing that can mark a pretend call connected -- without it the in-call
+ * screen shows no timer and the call log records a call that lasted no time,
+ * while a simulated DIALLED call shows both. */
+static void test_a_simulated_answer_starts_the_clock(void)
+{
+    nd_modem *m = NULL;
+    const char *label = NULL;
+    int32_t secs = -1;
+    int spins;
+
+    use_scratch_settings("");
+    CHECK_INT(nd_modem_open(&m), ND_OK);
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+
+    pt_write_text(ND_MODEM_SIM_RING, "5559876\n");
+    for (spins = 0; spins < 40 && nd_modem_state(m) != ND_CALL_RINGING; spins++)
+        settle(0.05);
+    CHECK_INT(nd_modem_state(m), ND_CALL_RINGING);
+
+    CHECK(nd_modem_answer(m));
+    CHECK_INT(nd_modem_state(m), ND_CALL_CONNECTED);
+
+    nd_modem_call_status(m, &label, &secs);
+    CHECK_STR(label, "CONNECTED");
+    CHECK(secs >= 0); /* -1 would be "connected, but no timer" */
+
+    settle(1.1);
+    CHECK(nd_modem_hangup(m));
+    CHECK(nd_modem_last_call_secs(m) >= 1);
+
+    /* The hook file goes, so the next test does not inherit a ringing phone. */
+    {
+        char resolved[ND_PATH_MAX];
+
+        if (nd_path_resolve(resolved, sizeof resolved, ND_MODEM_SIM_RING) == ND_OK)
+            (void)unlink(resolved);
+    }
+    nd_modem_close(m);
+}
+
 static void test_requeue_puts_an_event_back_at_the_front(void)
 {
     nd_modem *m;
@@ -2022,6 +2124,8 @@ int main(void)
     RUN(test_allow_calls_parsing);
 
     RUN(test_the_thread_runs_and_stops_cleanly);
+    RUN(test_the_last_call_length_outlives_the_call);
+    RUN(test_a_simulated_answer_starts_the_clock);
     RUN(test_requeue_puts_an_event_back_at_the_front);
     RUN(test_unrepresentable_events_are_skipped_not_surfaced);
 

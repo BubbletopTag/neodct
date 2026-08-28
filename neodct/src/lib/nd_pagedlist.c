@@ -16,6 +16,20 @@
  * looks like a bug and it is what the Call Log has always looked like. Port
  * it; the golden frame will catch a "fix".
  *
+ * ============ THE TITLE IS TRIMMED, AS VerticalList's ALWAYS WAS ============
+ *
+ * nd_text_fit() against nd_header_width(), with VerticalList's own
+ * "screen_w - 5 - reserved - 6" budget. This widget used to draw the title
+ * raw, which nothing noticed while every PagedList on the phone was titled
+ * "Call log", "Tones" or "Messages" -- all short enough. The Call Log's three
+ * call lists are PagedLists now, and "Received calls" in 24 px type reaches
+ * the breadcrumb: the two were drawn on top of each other and neither could be
+ * read. The shipped "Call duration" screen (breadcrumb "3-5-1") had the same
+ * collision and is fixed by the same three lines.
+ *
+ * No golden frame moves. A title that already fits is returned unchanged, and
+ * every captured PagedList frame has one.
+ *
  * ============ THE FOURTH WRAPPER ============
  *
  * nd_pagedlist_wrap() is not any of the three in nd_text.h. It splits on ANY
@@ -317,6 +331,9 @@ void nd_pagedlist_draw(nd_pagedlist *p)
     int32_t y0;
     int32_t track_top;
     int32_t track_bottom;
+    int32_t sub;
+    int32_t reserved;
+    char title[ND_TEXT_LINE_MAX];
     char storage[PAGEDLIST_WRAP_LINES][ND_TEXT_LINE_MAX];
     nd_lines lines;
     size_t li;
@@ -331,9 +348,26 @@ void nd_pagedlist_draw(nd_pagedlist *p)
     screen_h = nd_ui_height(ui);
     header_y = nd_ui_header_divider_y(ui);
 
+    /* An empty list draws the root id alone; anything else draws "<root>-<n>",
+     * and the two are different widths. Decided before the title, because the
+     * title is trimmed to whatever the breadcrumb leaves. */
+    sub = (p->n_items == 0u) ? -1 : ((int32_t)p->selected_index + 1);
+
     /* Full-screen clear: this widget owns the softkey strip too. */
     (void)nd_draw_rect_fill(d, ND_RECT(0, 0, screen_w, screen_h), ND_BLACK);
-    (void)nd_draw_text(d, 5, 5, (p->title != NULL) ? p->title : "", ui->font_xl, ND_WHITE);
+
+    /* Trimmed so it cannot run under the right-aligned breadcrumb -- the same
+     * nd_text_fit() and the same width budget VerticalList has always used.
+     * This widget drew the title raw, which was invisible while every PagedList
+     * on the phone was titled "Call log" or "Tones", and stopped being
+     * invisible the moment one was titled "Received calls": the breadcrumb and
+     * the last two letters of the title were drawn on top of each other. Both
+     * widgets carry a 24 px title and a breadcrumb over a 240 px panel, so
+     * there is no reading of that under which they should differ. */
+    reserved = nd_header_width(&p->header, sub);
+    (void)nd_text_fit(title, sizeof title, (p->title != NULL) ? p->title : "", ui->font_xl,
+                      screen_w - 5 - reserved - 6);
+    (void)nd_draw_text(d, 5, 5, title, ui->font_xl, ND_WHITE);
     (void)nd_draw_line(d, 0, header_y, screen_w, header_y, ND_WHITE, 1);
 
     if (p->n_items == 0u) {
@@ -341,7 +375,7 @@ void nd_pagedlist_draw(nd_pagedlist *p)
         int32_t h = 0;
         int32_t y;
 
-        nd_header_draw(&p->header, -1); /* the root id alone, no "-n" */
+        nd_header_draw(&p->header, sub); /* the root id alone, no "-n" */
         nd_text_size(ui->font_n, "No Items", &w, &h);
         y = p->content_top + nd_max32(0, ((p->content_bottom - p->content_top) - h) / 2);
         (void)nd_draw_text(d, floor_div2(screen_w - w), y, "No Items", ui->font_n, ND_WHITE);
@@ -351,7 +385,7 @@ void nd_pagedlist_draw(nd_pagedlist *p)
         return;
     }
 
-    nd_header_draw(&p->header, (int32_t)p->selected_index + 1);
+    nd_header_draw(&p->header, sub);
 
     max_w = nd_max32(20, p->bar_x - 12);
     nd_lines_init(&lines, storage, PAGEDLIST_WRAP_LINES);

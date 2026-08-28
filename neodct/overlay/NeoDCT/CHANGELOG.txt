@@ -80,6 +80,51 @@ Changed
   typed and the sync thread moving it back within the minute, with nothing
   on screen admitting it happened.
 
+--- The Call log has calls in it ---
+
+The Call log has calls in it.
+
+It has had five screens, three lists and a database since the beginning, and
+nothing ever wrote a row -- the table was created by the first READ and stayed
+empty for the life of the phone, so Missed, Received and Dialed all said "No
+numbers" forever, on a phone that had been making calls.
+
+Added
+- Calls are recorded. Every number dialled from the home screen or from the
+  contact picker goes into Dialed calls; a call you answer goes into Received;
+  one you decline, or one whose caller gives up before you reach it, goes into
+  Missed. A withheld caller ID is still a call, and reads "Unknown" the way the
+  screen has always been written to.
+- Call duration. The modem already knew when a call came up and when it went
+  down; that reading is now kept past the hangup and stored with the row. It
+  is what "Show call duration" reads, so Last, Received and Dialed count
+  something at last instead of three permanent 00:00:00s.
+- Select on a call opens its duration.
+
+Changed
+- The three call lists are PagedLists, one number to a page in the big type
+  the rest of the menus use, with the call's date and time under it. They were
+  three-row VerticalLists over twenty calls; they show the last ten. One number
+  to a page is worth reading and twenty of them is not, so the list is the
+  length a list can end at.
+- The table keeps the last fifty of each kind. /NeoDCT/User is the only
+  writable partition on the phone, and a log that only ever grows is a slow
+  leak into it. Fifty is five times what a screen can reach, so nothing
+  visible is ever trimmed.
+
+Fixed
+- A simulated call you ANSWERED never started its timer, while a simulated
+  call you DIALLED did. On real hardware the modem's own "VOICE CALL: BEGIN"
+  starts it; in simulation nothing sent one, so the in-call screen sat at no
+  timer at all and the call would have been logged as lasting no time. QEMU
+  now behaves like the hardware it stands in for.
+- A one-item-per-page menu drew its title straight over the breadcrumb when
+  the title was long. Nothing had noticed, because every such menu was called
+  "Call log", "Tones" or "Messages" -- but "Call duration" already collided
+  with its own "3-5-1", and "Received calls" would have been unreadable. The
+  title is now shortened to fit beside the breadcrumb, which is what the
+  three-row menus have always done.
+
 0.4.3a
 Two engineering apps for hardware you can plug in.
 

@@ -11,8 +11,9 @@
  *      in rollback-journal mode forever. Reproduce the asymmetry; do not add
  *      the pragma.
  *
- *   2. init_databases() does NOT create call_log.db. The CallLog app creates
- *      it lazily on first connect.
+ *   2. init_databases() does NOT create call_log.db. Whoever touches it first
+ *      creates it lazily -- the CallLog app on its first read, or
+ *      nd_db_record_call() on the phone's first call.
  *
  *   3. PhoneBook consumes "SELECT * FROM contacts" POSITIONALLY as
  *      (id, name, number, speed_dial). The column order in CREATE TABLE is
@@ -62,7 +63,7 @@ nd_err nd_db_open(const char *path, struct sqlite3 **out);
 void nd_db_close(struct sqlite3 *db);
 
 /* ------------------------------------------------------------------ *
- * The two queries the CORE itself makes
+ * The two SMS queries the CORE itself makes
  * ------------------------------------------------------------------ */
 
 /* Defensively re-creates the inbox table, inserts, and returns the new rowid.
@@ -73,6 +74,52 @@ int64_t nd_db_store_incoming_sms(const char *sender, const char *body);
  * a database that does not exist yet -- a missing inbox is an empty inbox,
  * not a failure. */
 int32_t nd_db_count_unread_sms(void);
+
+/* ------------------------------------------------------------------ *
+ * The call log -- written HERE, read by the CallLog app
+ * ------------------------------------------------------------------ *
+ *
+ * The Python never wrote a row: `calls` was created on the first read and
+ * stayed empty for the life of the phone, so all three lists said "No
+ * numbers" forever. Nothing in the reference settles what the writer should
+ * look like, because there was no writer. This is it, and it lives here
+ * rather than in the app for the reason nd_db_store_incoming_sms() does: the
+ * CORE places and takes every call, the app is a separate process that is
+ * usually not even running when one arrives.
+ *
+ * It creates the database the same lazy way the app's own _connect() does --
+ * makedirs, CREATE TABLE IF NOT EXISTS, AND NO journal_mode PRAGMA. Point 1
+ * above is the whole reason that matters: whichever of the two opens the file
+ * first decides its on-disk journal mode forever, so the writer must make the
+ * same file the reader would have.
+ */
+
+/* The three `type` values the column takes. Spelled once here so a typo
+ * cannot file a call under a fourth type no list ever shows. */
+#define ND_CALL_TYPE_MISSED   "missed"
+#define ND_CALL_TYPE_RECEIVED "received"
+#define ND_CALL_TYPE_DIALED   "dialed"
+
+/* How many rows of EACH type the table keeps. The Python never wrote a row, so
+ * nothing ever had to decide this; now that every call writes one, something
+ * does. /NeoDCT/User is the only writable partition on a 128 MB phone and a log
+ * that only ever grows is a slow leak into it.
+ *
+ * Five times what a list shows, so the cap is invisible to the screen and there
+ * is history left over for anything that later wants more of it. Trimming
+ * happens inside nd_db_record_call(), oldest first, per type. */
+#define ND_CALL_LOG_KEEP 50
+
+/* One row into `calls`. number may be NULL or empty -- a withheld caller ID
+ * is a real call and is stored as the NULL the schema allows, which the app
+ * already renders as "Unknown". timestamp is seconds since the epoch, from
+ * the caller so that nd_vclock.h's capture clock reaches this too; duration is
+ * the seconds the call was connected, 0 for one that never was.
+ *
+ * Returns the new rowid, or -1 on any failure, having logged the reason. A
+ * call log that cannot be written must never take a call down with it. */
+int64_t nd_db_record_call(const char *type, const char *number, int64_t timestamp,
+                          int64_t duration);
 
 /* ------------------------------------------------------------------ *
  * Contacts -- shared because the CORE dials by name from the home screen

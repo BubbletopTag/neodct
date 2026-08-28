@@ -141,6 +141,8 @@ NeoDCT OS is an early-stage prototype. The core UI and app framework work (inclu
 - Renders wallpapers and basic UI on QEMU + real hardware, ST7789 240×240
 
 ### 🟡 Mostly Working
+- Call Log (records dialled, received and missed calls with their durations;
+  only as good as the modem underneath it)
 - Phonebook (SQLite-backed; calling action is buggy)
 - Web Browser (WebKitGTK via cage; QEMU-only; no video/downloads)
 - Music Player (MP3 playback; browse by artist/album/song from ID3 tags, volume control)
@@ -148,7 +150,6 @@ NeoDCT OS is an early-stage prototype. The core UI and app framework work (inclu
 ### 🟠 Stubbed
 - Messages (menu only)
 - Dialer (UI only, no modem logic)
-- Call Log
 - ModemService (simulation mode for QEMU)
 - Placeholder / test apps
 - Clock (technically works, but you can't change its settings easily)

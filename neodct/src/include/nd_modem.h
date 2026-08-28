@@ -238,6 +238,18 @@ nd_call_state nd_modem_state(nd_modem *m);
 const char *nd_modem_caller_id(nd_modem *m); /* NULL when none */
 bool nd_modem_has_hardware(nd_modem *m);
 
+/* ---- APPENDED, for the call log ----
+ *
+ * How many seconds the LAST FINISHED call spent connected; 0 for one that
+ * never came up, and for a call still in progress. Not a snapshot of a live
+ * call -- nd_modem_call_status()'s `secs` is that -- but the reading that
+ * survives the hangup, because the core writes the call log after the line is
+ * already down and call_status() reports -1 by then.
+ *
+ * Cleared when the next call starts, so it is only ever the most recent
+ * completed one. Appended, so no existing declaration moves. */
+int32_t nd_modem_last_call_secs(nd_modem *m);
+
 #ifdef __cplusplus
 }
 #endif

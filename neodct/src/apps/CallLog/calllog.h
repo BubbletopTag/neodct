@@ -7,14 +7,24 @@
  * test/unit/test_calllog.c dlopen()s the BUILT app.so and dlsym()s these,
  * the way test_tones.c and test_phonebook.c do.
  *
- * ============ THE ONE CAP THIS PORT ADDS ============
+ * ============ TEN ROWS, IN A PagedList ============
  *
- * None, as it happens. The Python's own SQL already says
- * "ORDER BY id DESC LIMIT 20", so ND_CALLLOG_MAX_CALLS is that 20 and not a
- * bound invented here -- a phone with a thousand calls in the table shows the
- * same twenty rows in Python and in C. ND_CALLLOG_NUMBER_MAX is 64, which is
- * ND_CONTACT_NUMBER_MAX from nd_db.h; a longer `number` column is truncated
- * for display and recorded in OPEN-QUESTIONS.md CL-2.
+ * The Python's SQL said "ORDER BY id DESC LIMIT 20" and its three list screens
+ * were VerticalLists -- three small rows at a time, twenty deep. Both are now
+ * deliberately different, and this is the redesign AGENTS.md means when it says
+ * a golden frame that stops matching because a screen was changed on purpose is
+ * the point: the lists show the LAST TEN numbers, one per page in the big type
+ * the rest of the phone's top-level menus use, with the call's date and time on
+ * the value line under it.
+ *
+ * Ten because a phone that now actually records calls fills these lists, and
+ * twenty pages of paging to reach the bottom of a list nobody scrolls is worse
+ * than a shorter list that ends. The number is the SQL's LIMIT as well as the
+ * array bound, so the query and the screen cannot disagree.
+ *
+ * ND_CALLLOG_NUMBER_MAX is 64, which is ND_CONTACT_NUMBER_MAX from nd_db.h; a
+ * longer `number` column is truncated for display and recorded in
+ * OPEN-QUESTIONS.md CL-2.
  */
 
 #ifndef ND_CALLLOG_H_INCLUDED
@@ -39,8 +49,8 @@ extern "C" {
  * Python it came from. */
 #define ND_CALLLOG_DB "/NeoDCT/User/db/call_log.db"
 
-/* The SQL's own LIMIT, not a bound this port invented. */
-#define ND_CALLLOG_MAX_CALLS  20
+/* The SQL's LIMIT and the array bound, in one place so they cannot drift. */
+#define ND_CALLLOG_MAX_CALLS  10
 #define ND_CALLLOG_NUMBER_MAX 64
 
 /* "%02d:%02d:%02d" and "%d.%m. %H:%M" both fit in this with room to spare. */
@@ -86,10 +96,15 @@ extern const char *const nd_calllog_clear_targets[ND_CALLLOG_CLEAR_ITEMS];
  * Storage
  * ------------------------------------------------------------------ */
 
-/* One row of `SELECT number, timestamp FROM calls`. */
+/* One row of `SELECT number, timestamp, duration FROM calls`.
+ *
+ * `duration` is the seconds the call was connected, and is 0 for every row a
+ * phone recorded before nd_db_record_call() existed as well as for every
+ * missed call. The lists do not show it; the detail screen does. */
 typedef struct {
     char number[ND_CALLLOG_NUMBER_MAX];
     int64_t timestamp;
+    int64_t duration;
 } nd_call_rec;
 
 /* _connect(): makedirs(/NeoDCT/User/db), open, CREATE TABLE IF NOT EXISTS.
@@ -99,7 +114,7 @@ typedef struct {
 struct sqlite3;
 nd_err nd_calllog_connect(struct sqlite3 **out);
 
-/* fetch_calls(call_type): the twenty newest rows of that type, newest first.
+/* fetch_calls(call_type): the ten newest rows of that type, newest first.
  * Zero on any failure, having logged "[CallLog] DB read failed: ...". */
 size_t nd_calllog_fetch(const char *call_type, nd_call_rec *out, size_t max);
 

@@ -73,6 +73,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <sqlite3.h>
+
 #include "nd_capture.h"
 #include "nd_db.h"
 #include "nd_draw.h"
@@ -901,6 +903,147 @@ static void test_show_incoming_results(void)
     fx_free(&fx);
 }
 
+/* ------------------------------------------------------------------ *
+ * The call log
+ * ------------------------------------------------------------------ */
+
+/* The sim ring hook, written the way test_show_incoming_results() writes it. */
+static void write_text_file(const char *path, const char *text)
+{
+    char resolved[ND_PATH_MAX];
+    FILE *f;
+
+    if (nd_path_resolve(resolved, sizeof resolved, path) != ND_OK)
+        return;
+    f = fopen(resolved, "wb");
+    if (f == NULL)
+        return;
+    (void)fputs(text, f);
+    (void)fclose(f);
+}
+
+/* How many rows of one type the call log holds, and the number on one of them,
+ * read straight from the file. The CallLog app is a separate process and this
+ * test does not dlopen it; the app's own fetch is test_calllog.c's business.
+ * MAX(number) rather than a second query because each type here has exactly
+ * one row with a number in it. */
+static int logged_calls(const char *type, char *number, size_t number_sz)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    char resolved[ND_PATH_MAX];
+    int n = -1;
+
+    if (number != NULL && number_sz > 0u)
+        number[0] = '\0';
+    if (nd_path_resolve(resolved, sizeof resolved, ND_PATH_DB_CALL_LOG) != ND_OK)
+        return -1;
+    if (sqlite3_open_v2(resolved, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        sqlite3_close(db);
+        return -1;
+    }
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*), MAX(number) FROM calls WHERE type=?", -1, &st,
+                           NULL) == SQLITE_OK) {
+        (void)sqlite3_bind_text(st, 1, type, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const unsigned char *num = sqlite3_column_text(st, 1);
+
+            n = sqlite3_column_int(st, 0);
+            if (number != NULL && num != NULL)
+                (void)nd_strlcpy(number, (const char *)num, number_sz);
+        }
+    }
+    (void)sqlite3_finalize(st);
+    (void)sqlite3_close(db);
+    return n;
+}
+
+/* nd_ui_handle_input() and nd_ui_handle_incoming_call() are where a call
+ * becomes a row. The storage itself is test_calllog.c's; what is asserted here
+ * is the WIRING -- that the three outcomes reach the three lists, which is the
+ * one thing neither side can check alone.
+ *
+ * Driven through the same simulated modem and scripted key channel the two
+ * screens above use, so the calls are real calls: dialled, rung, answered and
+ * hung up by the code the phone runs. */
+static void test_a_call_becomes_a_row(void)
+{
+    fixture fx;
+    nd_modem *m = NULL;
+    keys k;
+    char number[64];
+    char path[ND_PATH_MAX];
+
+    if (!fx_init(&fx)) {
+        g_skips++;
+        fprintf(stderr, "SKIP call log: no fonts\n");
+        return;
+    }
+    if (nd_modem_open(&m) != ND_OK || m == NULL) {
+        g_skips++;
+        fprintf(stderr, "SKIP call log: no modem\n");
+        fx_free(&fx);
+        return;
+    }
+    fx.ui.modem = m;
+    if (!keys_open(&k, &fx.ui)) {
+        g_skips++;
+        fprintf(stderr, "SKIP call log: no key channel\n");
+        nd_modem_close(m);
+        fx_free(&fx);
+        return;
+    }
+
+    /* --- 1. Dialled from the home screen. --- */
+    fx.ui.state = ND_UI_STATE_HOME_DIALING;
+    (void)nd_strlcpy(fx.ui.dial_buffer, "0741234567", sizeof fx.ui.dial_buffer);
+    /* Queued BEFORE the Enter, because show_calling does not drain the channel
+     * and this is the End press that lets it go. */
+    CHECK(keys_push(&k, ND_KEY_CLEAR), "queued the End key");
+    nd_ui_handle_input(&fx.ui, ND_KEY_ENTER);
+
+    CHECK_INT(logged_calls("dialed", number, sizeof number), 1, "the dial became one row");
+    CHECK(strcmp(number, "0741234567") == 0, "under the number that was dialled");
+    CHECK_INT(fx.ui.state, ND_UI_STATE_HOME, "and the home screen came back");
+
+    /* --- 2. Answered. --- */
+    write_text_file(DIALER_SIM_RING, "5559876\n");
+    wait_for_state(m, ND_CALL_RINGING);
+    CHECK_INT(nd_modem_state(m), ND_CALL_RINGING, "the sim ring reached the modem");
+    CHECK(keys_push(&k, ND_KEY_ENTER), "queued Answer");
+    CHECK(keys_push(&k, ND_KEY_CLEAR), "queued End");
+    nd_ui_handle_incoming_call(&fx.ui, NULL);
+
+    CHECK_INT(logged_calls("received", number, sizeof number), 1, "answering became one row");
+    /* NULL was passed for the number, as nd_main.c passes it: the caller ID
+     * came from the modem, which is the whole reason it is read late. */
+    CHECK(strcmp(number, "5559876") == 0, "with the caller ID the modem reported");
+
+    /* --- 3. Declined. --- */
+    if (nd_path_resolve(path, sizeof path, DIALER_SIM_RING) == ND_OK)
+        (void)remove(path);
+    wait_for_state(m, ND_CALL_IDLE);
+    write_text_file(DIALER_SIM_RING, "5551111\n");
+    wait_for_state(m, ND_CALL_RINGING);
+    CHECK(keys_push(&k, ND_KEY_CLEAR), "queued Decline");
+    nd_ui_handle_incoming_call(&fx.ui, NULL);
+
+    CHECK_INT(logged_calls("missed", number, sizeof number), 1,
+              "a declined call is a MISSED one, as it is on the phone this imitates");
+    CHECK(strcmp(number, "5551111") == 0, "with its caller ID");
+
+    /* And the three lists really are separate: nothing leaked sideways. */
+    CHECK_INT(logged_calls("dialed", NULL, 0u), 1, "still one dialed");
+    CHECK_INT(logged_calls("received", NULL, 0u), 1, "still one received");
+
+    if (nd_path_resolve(path, sizeof path, DIALER_SIM_RING) == ND_OK)
+        (void)remove(path);
+    keys_close(&k, &fx.ui);
+    fx.ui.modem = NULL;
+    nd_modem_close(m);
+    fx_free(&fx);
+}
+
 /* The quirk from incoming_screen.py:100-115: blink_on starts true and the
  * first pass inverts it, so the FIRST frame a ringing call puts up has no
  * "calling" on it. Driven through show_incoming() rather than asserted about
@@ -1121,7 +1264,8 @@ static void shoot_dialer_frames(nd_capture *cap, const nd_json_doc *golden)
         nd_vclock_disable();
         return;
     }
-    CHECK(nd_ui_home_layout(&ui) != NULL, "the home layout loaded (the screens borrow its elements)");
+    CHECK(nd_ui_home_layout(&ui) != NULL,
+          "the home layout loaded (the screens borrow its elements)");
     nd_ui_sim_status(&ui, 4, 4, "Tello");
 
     nd_dialer_draw_call(&ui, "0741234567", "Mum");
@@ -1176,6 +1320,9 @@ int main(void)
     test_show_calling_returns_when_the_far_end_goes();
     test_first_ring_frame_has_the_label_off();
     test_caller_label_fallbacks();
+    /* Last of the modem cases: it leaves rows in the call log, and it is the
+     * other writer of /tmp/neodct_sim_ring. */
+    test_a_call_becomes_a_row();
 
     golden = load_golden_manifest();
     if (golden == NULL) {

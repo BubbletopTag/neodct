@@ -243,6 +243,10 @@ struct nd_modem {
     int32_t call_stat; /* -1 is Python's None */
     bool call_connected;
     double call_connected_at;
+    /* How long the last finished call was CONNECTED. Latched by set_state()
+     * on the way to IDLE, because call_connected_at is reused by the next
+     * dial and the call log is written after the line is already down. */
+    int32_t last_call_secs;
 
     int32_t pcm_rate;
     char configured_port[ND_MODEM_PORT_MAX];
@@ -333,6 +337,21 @@ void nd_modem__pcm_port(char *out, size_t out_sz);
 bool nd_modem__find_capture_device(char *out, size_t out_sz);
 void nd_modem__start_call_audio(nd_modem *m);
 void nd_modem__stop_call_audio(nd_modem *m);
+
+/* The call is over: latch how long it was connected into last_call_secs and
+ * drop the connect stamp. Idempotent -- the second caller for one call finds
+ * call_connected already false and does nothing.
+ *
+ * TWO PLACES END A CALL AND THEY DO NOT AGREE ON ORDER. The URC handlers run
+ * set_state(IDLE) and then stop_call_audio(); do_hangup() runs
+ * stop_call_audio() and then set_state(IDLE). Both of those clear the connect
+ * stamp, so whichever ran first used to destroy the reading the other was
+ * going to take -- which is why this is one function called from both rather
+ * than the same three lines written twice.
+ *
+ * CALL WITH THE STATE LOCK HELD. It takes no lock of its own; both callers
+ * already hold one. */
+void nd_modem__note_call_ended(nd_modem *m);
 void nd_modem__watch_audio_proc(nd_modem *m, double now);
 
 #endif /* ND_MODEM_PRIV_H_INCLUDED */

@@ -326,9 +326,31 @@ static nd_call_state get_state(nd_modem *m)
     return s;
 }
 
+/* See nd_modem_priv.h: the two ways a call ends clear the connect stamp in
+ * different orders, so the latch has to be in one place both of them reach. */
+void nd_modem__note_call_ended(nd_modem *m)
+{
+    double secs;
+
+    if (!m->call_connected)
+        return;
+    secs = nd_modem__now() - m->call_connected_at;
+    m->last_call_secs = (secs > 0.0) ? (int32_t)secs : 0;
+    m->call_connected = false;
+    m->call_connected_at = 0.0;
+}
+
 static void set_state(nd_modem *m, nd_call_state s)
 {
     lock_state(m);
+    /* Every way a call can end passes through here -- VOICE CALL: END, NO
+     * CARRIER, MISSED_CALL, an empty CLCC list and our own AT+CHUP -- so the
+     * length is taken on the way to IDLE, before do_dial() reuses the connect
+     * stamp. The core writes the call log after the line is already down, by
+     * which time nothing else remembers. A call that never connected leaves
+     * the previous reading alone; nd_modem_dial() clears it. */
+    if (s == ND_CALL_IDLE)
+        nd_modem__note_call_ended(m);
     m->state = s;
     unlock_state(m);
 }
@@ -451,6 +473,7 @@ void nd_modem__handle_urc(nd_modem *m, const char *line)
             m->state = ND_CALL_RINGING;
             m->caller_id[0] = '\0';
             m->caller_id_known = false;
+            m->last_call_secs = 0;
             unlock_state(m);
             queue_simple(m, ND_MEV_INCOMING, NULL);
         }
@@ -1151,6 +1174,21 @@ void nd_modem_poll(nd_modem *m)
  * Call control -- lines 770, 802, 814
  * ------------------------------------------------------------------ */
 
+/* A dial that has actually gone out: the previous call's readings stop being
+ * current, last_call_secs included. BOTH branches of do_dial() need it. The
+ * simulated branch never had it -- nothing read these fields on a phone with
+ * no modem, so nobody noticed that a simulated redial inherited the last
+ * call's connect stamp and its length. */
+static void begin_outgoing_call(nd_modem *m)
+{
+    lock_state(m);
+    m->call_stat = -1;
+    m->call_connected = false;
+    m->call_connected_at = 0.0;
+    m->last_call_secs = 0;
+    unlock_state(m);
+}
+
 static bool do_dial(nd_modem *m, const char *raw)
 {
     char number[ND_MODEM_NUMBER_MAX];
@@ -1172,6 +1210,7 @@ static bool do_dial(nd_modem *m, const char *raw)
         if (m->hardware)
             nd_log(ND_LOG_MODEM, "Calls not enabled yet; simulating this dial.");
         set_state(m, ND_CALL_CALLING);
+        begin_outgoing_call(m);
         m->sim_connect_at = nd_modem__now() + 2.0;
         m->sim_connect_armed = true;
         return true;
@@ -1186,11 +1225,7 @@ static bool do_dial(nd_modem *m, const char *raw)
     }
 
     set_state(m, ND_CALL_CALLING);
-    lock_state(m);
-    m->call_stat = -1;
-    m->call_connected = false;
-    m->call_connected_at = 0.0;
-    unlock_state(m);
+    begin_outgoing_call(m);
     m->next_clcc = 0.0;
 
     /* Route audio over USB immediately so ringback is audible while the far
@@ -1214,7 +1249,22 @@ static bool do_answer(nd_modem *m)
     char final[64];
 
     if (!m->hardware || !m->allow_calls) {
-        set_state(m, ND_CALL_CONNECTED);
+        /* No modem is going to send VOICE CALL: BEGIN and no CLCC poll is
+         * going to answer, so this branch is the only thing that can ever
+         * mark a pretend call connected. Without the stamp a simulated
+         * answered call runs with no timer on screen and logs a duration of
+         * zero, while a simulated DIALED one -- which poll()'s
+         * sim_connect_armed does stamp -- shows both. Same treatment for
+         * both, so QEMU behaves like the hardware it stands in for. */
+        lock_state(m);
+        if (!m->call_connected) {
+            m->call_connected = true;
+            m->call_connected_at = nd_modem__now();
+        }
+        /* One critical section, as the VOICE CALL: BEGIN handler does it: the
+         * stamp and the state must not be separately observable. */
+        m->state = ND_CALL_CONNECTED;
+        unlock_state(m);
         return true;
     }
     if (nd_modem__command(m, "ATA", 8.0, final, sizeof final, NULL) && strcmp(final, "OK") == 0) {
@@ -2171,6 +2221,18 @@ void nd_modem_call_status(nd_modem *m, const char **label, int32_t *secs)
 nd_call_state nd_modem_state(nd_modem *m)
 {
     return (m != NULL) ? get_state(m) : ND_CALL_IDLE;
+}
+
+int32_t nd_modem_last_call_secs(nd_modem *m)
+{
+    int32_t secs;
+
+    if (m == NULL)
+        return 0;
+    lock_state(m);
+    secs = m->last_call_secs;
+    unlock_state(m);
+    return secs;
 }
 
 const char *nd_modem_caller_id(nd_modem *m)

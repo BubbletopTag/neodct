@@ -12,8 +12,9 @@
  *      journal_mode is persisted in the database header, so the call log
  *      stays in rollback-journal mode forever. The asymmetry is reproduced.
  *
- *   2. init_databases() does not create call_log.db at all; the CallLog app
- *      creates it lazily on first connect. Reproduced.
+ *   2. init_databases() does not create call_log.db at all. It is created
+ *      lazily by whoever touches it first -- the CallLog app on its first
+ *      read, or nd_db_record_call() on the phone's first call. Reproduced.
  *
  *   3. PhoneBook consumes "SELECT * FROM contacts" POSITIONALLY as
  *      (id, name, number, speed_dial), so the column order in CREATE TABLE is
@@ -305,6 +306,107 @@ int32_t nd_db_count_unread_sms(void)
         sqlite3_finalize(st);
     nd_db_close(db);
     return n;
+}
+
+/* ------------------------------------------------------------------ *
+ * The call log
+ * ------------------------------------------------------------------ */
+
+/* The app's own _connect(), rewritten from this side: makedirs, open, CREATE
+ * TABLE IF NOT EXISTS, and NOTHING ELSE. In particular no journal_mode pragma
+ * -- nd_db.h point 1. The mode is baked into the file header by whoever
+ * creates it, and on a phone that takes a call before anybody opens the Call
+ * log menu, that is this function. */
+static nd_err calls_connect(sqlite3 **out)
+{
+    sqlite3 *db = NULL;
+    nd_err rc;
+
+    *out = NULL;
+
+    rc = nd_mkdir_p(ND_PATH_DB_DIR, 0755u);
+    if (rc != ND_OK)
+        return rc;
+
+    rc = nd_db_open(ND_PATH_DB_CALL_LOG, &db);
+    if (rc != ND_OK)
+        return rc;
+
+    if (exec_sql(db, ND_SCHEMA_CALLS) != ND_OK) {
+        nd_db_close(db);
+        return ND_ERR_IO;
+    }
+
+    *out = db;
+    return ND_OK;
+}
+
+int64_t nd_db_record_call(const char *type, const char *number, int64_t timestamp, int64_t duration)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    int64_t row_id = -1;
+
+    if (type == NULL || type[0] == '\0')
+        return -1;
+
+    if (calls_connect(&db) != ND_OK) {
+        nd_log_err(ND_LOG_CALLLOG, "DB write failed: cannot open %s", ND_PATH_DB_CALL_LOG);
+        return -1;
+    }
+
+    if (sqlite3_prepare_v2(db,
+                           "INSERT INTO calls (type, number, timestamp, duration) "
+                           "VALUES (?, ?, ?, ?)",
+                           -1, &st, NULL) != SQLITE_OK) {
+        nd_log_err(ND_LOG_CALLLOG, "DB write failed: %s", sqlite3_errmsg(db));
+        goto done;
+    }
+
+    (void)sqlite3_bind_text(st, 1, type, -1, SQLITE_STATIC);
+    /* A withheld or unknown caller ID binds as NULL rather than "", because
+     * that is the column the app's `number or "Unknown"` was written for and
+     * the one an existing phone's rows would have. */
+    if (number != NULL && number[0] != '\0')
+        (void)sqlite3_bind_text(st, 2, number, -1, SQLITE_STATIC);
+    else
+        (void)sqlite3_bind_null(st, 2);
+    (void)sqlite3_bind_int64(st, 3, (sqlite3_int64)timestamp);
+    (void)sqlite3_bind_int64(st, 4, (sqlite3_int64)((duration > 0) ? duration : 0));
+
+    if (sqlite3_step(st) != SQLITE_DONE) {
+        nd_log_err(ND_LOG_CALLLOG, "DB write failed: %s", sqlite3_errmsg(db));
+        goto done;
+    }
+
+    row_id = (int64_t)sqlite3_last_insert_rowid(db);
+    nd_log(ND_LOG_CALLLOG, "Logged %s call (id %lld) %s", type, (long long)row_id,
+           (number != NULL && number[0] != '\0') ? number : "unknown");
+
+    /* Trim this type back to ND_CALL_LOG_KEEP, newest kept. A failure here is
+     * NOT a failure of the call: the row is already in and the caller is told
+     * so. It is logged and the table is simply one row longer than it should
+     * be until the next call trims it. */
+    (void)sqlite3_finalize(st);
+    st = NULL;
+    if (sqlite3_prepare_v2(db,
+                           "DELETE FROM calls WHERE type=? AND id NOT IN "
+                           "(SELECT id FROM calls WHERE type=? ORDER BY id DESC LIMIT ?)",
+                           -1, &st, NULL) != SQLITE_OK) {
+        nd_log_err(ND_LOG_CALLLOG, "DB trim failed: %s", sqlite3_errmsg(db));
+        goto done;
+    }
+    (void)sqlite3_bind_text(st, 1, type, -1, SQLITE_STATIC);
+    (void)sqlite3_bind_text(st, 2, type, -1, SQLITE_STATIC);
+    (void)sqlite3_bind_int(st, 3, ND_CALL_LOG_KEEP);
+    if (sqlite3_step(st) != SQLITE_DONE)
+        nd_log_err(ND_LOG_CALLLOG, "DB trim failed: %s", sqlite3_errmsg(db));
+
+done:
+    if (st != NULL)
+        sqlite3_finalize(st);
+    nd_db_close(db);
+    return row_id;
 }
 
 /* ------------------------------------------------------------------ *

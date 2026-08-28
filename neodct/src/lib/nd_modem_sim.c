@@ -158,6 +158,9 @@ static void poll_sim_ring(nd_modem *m)
     (void)nd_strlcpy(m->caller_id, caller, sizeof m->caller_id);
     m->caller_id_known = true;
     m->state = ND_CALL_RINGING;
+    /* A new call, as the RING URC does -- this path does not go through
+     * set_state(), so it has to say so itself. */
+    m->last_call_secs = 0;
     nd_modem__unlock(m);
 
     memset(&e, 0, sizeof e);
