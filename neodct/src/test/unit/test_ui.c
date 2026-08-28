@@ -49,6 +49,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "nd_app.h"
 #include "nd_capture.h"
 #include "nd_fb.h"
 #include "nd_image.h"
@@ -186,7 +187,10 @@ static void drop_stage(void)
 
 /* uistub._prepare_user_dir(): settings.prop with sorted keys, and the ack file
  * so the first-boot security modal is skipped. */
-static void write_settings(const char *wallpaper_name)
+/* NULL for either extra means "leave it out", which is what a phone that has
+ * never been configured has and therefore what the defaults must cover. */
+static void write_settings_full(const char *wallpaper_name, const char *wpeverywhere,
+                                const char *wp_dim)
 {
     char path[ND_PATH_MAX];
     FILE *f;
@@ -208,7 +212,16 @@ static void write_settings(const char *wallpaper_name)
         /* Stock wallpapers ship inside the read-only image. */
         (void)fprintf(f, "system.ui.wallpaper=/NeoDCT/System/wallpapers/%s\n", wallpaper_name);
     }
+    if (wpeverywhere != NULL)
+        (void)fprintf(f, "system.ui.wpeverywhere=%s\n", wpeverywhere);
+    if (wp_dim != NULL)
+        (void)fprintf(f, "system.ui.wpeverywhere_dim=%s\n", wp_dim);
     (void)fclose(f);
+}
+
+static void write_settings(const char *wallpaper_name)
+{
+    write_settings_full(wallpaper_name, NULL, NULL);
 }
 
 /* ------------------------------------------------------------------ *
@@ -491,6 +504,351 @@ static void check_frame(nd_capture *cap, const nd_json_doc *golden, const char *
     }
 }
 
+/* ------------------------------------------------------------------ *
+ * The wallpaper behind the framework's own chrome
+ * ------------------------------------------------------------------ */
+
+/* Is every pixel of `r` exactly this colour? The chrome background is either
+ * a photograph or flat black, and "flat black" is the only one that can be
+ * asserted without a second copy of the picture. */
+static bool rect_is_flat(const nd_image *img, nd_rect r, nd_color c)
+{
+    int32_t x;
+    int32_t y;
+
+    for (y = r.y0; y <= r.y1; y++) {
+        for (x = r.x0; x <= r.x1; x++) {
+            nd_color got = nd_image_get_px(img, x, y);
+
+            if (got.r != c.r || got.g != c.g || got.b != c.b)
+                return false;
+        }
+    }
+    return true;
+}
+
+static bool rect_matches(const nd_image *a, const nd_image *b, nd_rect r)
+{
+    int32_t x;
+    int32_t y;
+
+    for (y = r.y0; y <= r.y1; y++) {
+        for (x = r.x0; x <= r.x1; x++) {
+            nd_color pa = nd_image_get_px(a, x, y);
+            nd_color pb = nd_image_get_px(b, x, y);
+
+            if (pa.r != pb.r || pa.g != pb.g || pa.b != pb.b)
+                return false;
+        }
+    }
+    return true;
+}
+
+/* The whole of nd_ui_paint_chrome()'s contract, on a context built the way the
+ * core builds one. */
+static void test_chrome_background(nd_fb *fb)
+{
+    nd_ui ui;
+    const nd_image *chrome;
+    nd_image *keep;
+    nd_rect content;
+
+    /* --- 1. on by default, with a wallpaper configured --- */
+    write_settings("Palestine.jpg");
+    nd_vclock_enable();
+    nd_ui_sim_clear(&ui);
+    if (nd_ui_init(&ui, fb) != ND_OK) {
+        CHECK(false, "nd_ui_init (chrome)");
+        return;
+    }
+    content = ND_RECT(0, 0, nd_ui_width(&ui) - 1, nd_ui_content_bottom(&ui) - 1);
+
+    CHECK(ui.app_use_wallpaper, "the core is never an app that opted out");
+    chrome = nd_ui_chrome_wallpaper(&ui);
+    CHECK(chrome != NULL, "wpeverywhere defaults ON, so chrome has a wallpaper");
+    if (chrome == NULL) {
+        nd_ui_teardown(&ui);
+        return;
+    }
+    CHECK(chrome->w == nd_ui_width(&ui) && chrome->h == nd_ui_height(&ui),
+          "the chrome image is panel-sized");
+
+    /* It is DIMMER than the wallpaper the home screen draws -- that is the
+     * whole reason it is a second image and not the same pointer. */
+    CHECK(chrome != nd_ui_wallpaper(&ui), "chrome is not the home wallpaper itself");
+    {
+        const nd_image *home = nd_ui_wallpaper(&ui);
+        int64_t sum_home = 0;
+        int64_t sum_chrome = 0;
+        int32_t x;
+
+        for (x = 0; x < nd_ui_width(&ui); x++) {
+            sum_home += nd_image_get_px(home, x, 40).r;
+            sum_chrome += nd_image_get_px(chrome, x, 40).r;
+        }
+        if (sum_chrome >= sum_home)
+            fprintf(stderr, "  chrome row sum %lld, home row sum %lld\n", (long long)sum_chrome,
+                    (long long)sum_home);
+        CHECK(sum_chrome < sum_home, "chrome is dimmer than the home wallpaper");
+    }
+
+    /* Cached: the second call must not rebuild while the wallpaper has not
+     * moved, because every widget draw asks for it. */
+    CHECK(nd_ui_chrome_wallpaper(&ui) == chrome, "the chrome image is cached between calls");
+
+    /* And painting it puts THAT REGION where it belongs, not the top-left
+     * corner of the picture stretched over whatever was asked for. */
+    keep = nd_image_copy(chrome);
+    CHECK(keep != NULL, "copy the chrome image");
+    if (keep != NULL) {
+        (void)nd_image_fill(ui.canvas, ND_RGB(7, 11, 13));
+        nd_ui_paint_chrome_content(&ui);
+        CHECK(rect_matches(ui.canvas, keep, content), "paint_chrome_content lays down its region");
+        /* Rows below content_bottom are the softkey strip's and must be
+         * untouched -- nd_widgets.h rule 1, partial clears are load-bearing. */
+        CHECK(rect_is_flat(ui.canvas,
+                           ND_RECT(0, nd_ui_content_bottom(&ui) + 1, nd_ui_width(&ui) - 1,
+                                   nd_ui_height(&ui) - 1),
+                           ND_RGB(7, 11, 13)),
+              "paint_chrome_content leaves the softkey strip alone");
+
+        (void)nd_image_fill(ui.canvas, ND_RGB(7, 11, 13));
+        nd_ui_paint_chrome_full(&ui);
+        CHECK(rect_matches(ui.canvas, keep,
+                           ND_RECT(0, 0, nd_ui_width(&ui) - 1, nd_ui_height(&ui) - 1)),
+              "paint_chrome_full covers the whole panel");
+
+        /* A band from the middle of the screen must come from the middle of
+         * the picture. This is the check that fails if somebody blits the
+         * whole image at the rectangle's origin. */
+        (void)nd_image_fill(ui.canvas, ND_RGB(7, 11, 13));
+        nd_ui_paint_chrome(&ui, ND_RECT(0, 90, nd_ui_width(&ui) - 1, 120));
+        CHECK(rect_matches(ui.canvas, keep, ND_RECT(0, 90, nd_ui_width(&ui) - 1, 120)),
+              "a mid-screen band is painted with the picture's own rows");
+        nd_image_free(keep);
+    }
+    nd_ui_teardown(&ui);
+
+    /* --- 2. the setting turns it off, and only it --- */
+    write_settings_full("Palestine.jpg", "OFF", NULL);
+    nd_vclock_enable();
+    nd_ui_sim_clear(&ui);
+    if (nd_ui_init(&ui, fb) != ND_OK) {
+        CHECK(false, "nd_ui_init (chrome off)");
+        return;
+    }
+    CHECK(nd_ui_chrome_wallpaper(&ui) == NULL, "wpeverywhere=OFF means no chrome wallpaper");
+    (void)nd_image_fill(ui.canvas, ND_RGB(7, 11, 13));
+    nd_ui_paint_chrome_content(&ui);
+    CHECK(rect_is_flat(ui.canvas, content, ND_BLACK), "and the background goes back to black");
+    /* The HOME screen still has its wallpaper: this setting is about chrome. */
+    CHECK(nd_ui_wallpaper(&ui) != NULL, "the home wallpaper is unaffected by wpeverywhere");
+    nd_ui_teardown(&ui);
+
+    /* --- 3. no wallpaper configured: black, whatever the setting says --- */
+    write_settings_full(NULL, "ON", NULL);
+    nd_vclock_enable();
+    nd_ui_sim_clear(&ui);
+    if (nd_ui_init(&ui, fb) != ND_OK) {
+        CHECK(false, "nd_ui_init (no wallpaper)");
+        return;
+    }
+    CHECK(nd_ui_chrome_wallpaper(&ui) == NULL, "no wallpaper, no chrome wallpaper");
+    nd_ui_teardown(&ui);
+
+    /* --- 4. an app that opted out never even loads one --- */
+    write_settings("Palestine.jpg");
+    nd_vclock_enable();
+    nd_ui_sim_clear(&ui);
+    if (nd_ui_init(&ui, fb) != ND_OK) {
+        CHECK(false, "nd_ui_init (opted out)");
+        return;
+    }
+    ui.app_use_wallpaper = false;
+    CHECK(nd_ui_chrome_wallpaper(&ui) == NULL, "useWallpaper=false means black chrome");
+    CHECK(!ui.home_.wallpaper_ready,
+          "an opted-out app does not pay the wallpaper load -- see \"Lazy home state\"");
+    nd_ui_teardown(&ui);
+
+    /* --- 5. the dim is a real number and a junk one falls back --- */
+    {
+        static const char *const CASES[] = {"0.2", "banana", "-1", "9"};
+        int64_t bright[ND_ARRAY_LEN(CASES)];
+        size_t c;
+
+        for (c = 0u; c < ND_ARRAY_LEN(CASES); c++) {
+            int32_t x;
+
+            write_settings_full("Palestine.jpg", "ON", CASES[c]);
+            nd_vclock_enable();
+            nd_ui_sim_clear(&ui);
+            if (nd_ui_init(&ui, fb) != ND_OK) {
+                CHECK(false, "nd_ui_init with a dim setting");
+                return;
+            }
+            chrome = nd_ui_chrome_wallpaper(&ui);
+            bright[c] = 0;
+            if (chrome != NULL) {
+                for (x = 0; x < nd_ui_width(&ui); x++)
+                    bright[c] += nd_image_get_px(chrome, x, 40).r;
+            }
+            CHECK(chrome != NULL, "every dim value still produces a chrome image");
+            nd_ui_teardown(&ui);
+        }
+        CHECK(bright[0] < bright[1], "0.2 is dimmer than the default");
+        /* All three junk values take the same fallback, so they agree. */
+        CHECK(bright[1] == bright[2] && bright[2] == bright[3],
+              "an unparseable, a negative and an over-1 dim all fall back to the default");
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * The animated wallpaper
+ * ------------------------------------------------------------------ */
+
+static void test_animated_wallpaper(nd_fb *fb)
+{
+    nd_ui ui;
+    nd_image *first;
+    double t;
+
+    /* The shipped animated wallpaper. Skipped rather than failed if it is
+     * absent, so a trimmed overlay does not fail the build. */
+    write_settings("Classroom.gif");
+    nd_vclock_enable();
+    nd_ui_sim_clear(&ui);
+    if (nd_ui_init(&ui, fb) != ND_OK) {
+        CHECK(false, "nd_ui_init (animated)");
+        return;
+    }
+    if (nd_ui_wallpaper(&ui) == NULL) {
+        g_skips++;
+        fprintf(stderr, "SKIP animated wallpaper: Classroom.gif did not load\n");
+        nd_ui_teardown(&ui);
+        return;
+    }
+
+    CHECK(ui.home_.wallpaper_gif != NULL, "a .gif wallpaper opens an animation");
+    CHECK(nd_ui_wallpaper(&ui)->w == nd_ui_width(&ui) &&
+              nd_ui_wallpaper(&ui)->h == nd_ui_height(&ui),
+          "a frame is dimmed and scaled like any other wallpaper");
+
+    /* nd_ui_wallpaper() itself must NEVER advance the animation: the home
+     * screen, the softkey bar and the app selector all call it on the same
+     * frame, and a 25 fps GIF would play at 75. */
+    first = nd_image_copy(nd_ui_wallpaper(&ui));
+    CHECK(first != NULL, "copy frame 0");
+    (void)nd_ui_wallpaper(&ui);
+    (void)nd_ui_wallpaper(&ui);
+    if (first != NULL) {
+        CHECK(rect_matches(nd_ui_wallpaper(&ui), first,
+                           ND_RECT(0, 0, nd_ui_width(&ui) - 1, nd_ui_height(&ui) - 1)),
+              "reading the wallpaper does not advance it");
+    }
+
+    /* Frame 0 IS ALREADY ON SCREEN -- one decoder serves the still and the
+     * animation -- so nothing is owed until its delay has run. A tick that
+     * fired here would repaint the picture that is already there. */
+    CHECK(!nd_ui_tick_wallpaper(&ui), "nothing is due while frame 0 is still showing");
+
+    /* The core loop asks how long it may sleep. It must never be told longer
+     * than it asked for, nor a negative, and while a frame is owed later it
+     * must be a real wait rather than a spin. */
+    t = nd_ui_frame_timeout(&ui, 0.1);
+    CHECK(t > 0.0 && t <= 0.1, "the frame timeout is inside (0, dflt] while a frame is showing");
+
+    /* Time moves one 0.1 s tick per committed frame under the virtual clock,
+     * and every delay this decoder reports is at most 0.1 s -- so exactly one
+     * frame comes due per frame drawn, which is what makes nd-shoot --anim
+     * deterministic. */
+    nd_vclock_advance();
+    {
+        /* The pointer is a documented guarantee, not an accident: nd_appsel
+         * stores it for the whole life of the menu. If a tick ever starts
+         * replacing the image instead of repainting it, that store dangles. */
+        const nd_image *before = nd_ui_wallpaper(&ui);
+
+        CHECK(nd_ui_tick_wallpaper(&ui), "one tick of the clock makes the next frame due");
+        CHECK(nd_ui_wallpaper(&ui) == before, "a tick repaints the wallpaper, it does not move it");
+    }
+    if (first != NULL) {
+        CHECK(!rect_matches(nd_ui_wallpaper(&ui), first,
+                            ND_RECT(0, 0, nd_ui_width(&ui) - 1, nd_ui_height(&ui) - 1)),
+              "and it changes the picture");
+        nd_image_free(first);
+    }
+    CHECK(!nd_ui_tick_wallpaper(&ui), "a second tick in the same instant is not due");
+
+    /* Handing the UI a still replaces the animation outright, or nd-shoot and
+     * the tests would have their injected picture painted over. */
+    nd_ui_set_wallpaper(&ui, nd_image_new_filled(ND_UI_W, ND_UI_H, ND_PIXFMT_RGB888, ND_GRAY));
+    CHECK(ui.home_.wallpaper_gif == NULL, "set_wallpaper closes the animation");
+    CHECK(!nd_ui_tick_wallpaper(&ui), "and nothing ticks afterwards");
+    CHECK_INT((int)nd_ui_frame_timeout(&ui, 0.1), 0, "a still gets the caller's own timeout");
+    CHECK(nd_ui_frame_timeout(&ui, 0.1) == 0.1, "exactly the default, not a shortened poll");
+
+    nd_ui_teardown(&ui);
+
+    /* A .jpg opens no decoder at all -- 226 KB not spent on a still. */
+    write_settings("Palestine.jpg");
+    nd_vclock_enable();
+    nd_ui_sim_clear(&ui);
+    if (nd_ui_init(&ui, fb) == ND_OK) {
+        CHECK(nd_ui_wallpaper(&ui) != NULL, "the jpg still loads");
+        CHECK(ui.home_.wallpaper_gif == NULL, "a .jpg wallpaper opens no animation");
+        CHECK(!nd_ui_tick_wallpaper(&ui), "a still wallpaper never ticks");
+        nd_ui_teardown(&ui);
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * manifest.json's "useWallpaper"
+ * ------------------------------------------------------------------ */
+
+static void test_manifest_use_wallpaper(void)
+{
+    /* Absent means true, which is what every manifest written before the key
+     * existed says, and what a third-party app gets for free. */
+    CHECK(nd_app_manifest_use_wallpaper("/NeoDCT/System/apps/PhoneBook"),
+          "PhoneBook does not opt out");
+    CHECK(nd_app_manifest_use_wallpaper("/NeoDCT/System/apps/Settings"),
+          "Settings does not opt out");
+
+    /* The four the feature deliberately excludes, plus a sample engineering
+     * app -- these are read from the shipped manifests, so this fails if one
+     * of them loses its key. */
+    CHECK(!nd_app_manifest_use_wallpaper("/NeoDCT/System/apps/Games"), "Games opts out");
+    CHECK(!nd_app_manifest_use_wallpaper("/NeoDCT/System/apps/Koki"), "Koki opts out");
+    CHECK(!nd_app_manifest_use_wallpaper("/NeoDCT/System/apps/Update"), "Update opts out");
+    CHECK(!nd_app_manifest_use_wallpaper("/NeoDCT/System/apps/Browser"), "Browser opts out");
+    CHECK(!nd_app_manifest_use_wallpaper("/NeoDCT/System/engineering/apps/Modem"),
+          "an engineering app opts out");
+
+    /* Every engineering app, by directory scan, so a new one that forgets the
+     * key is caught here rather than by somebody noticing on the phone. */
+    {
+        nd_app_entry apps[ND_APP_MAX];
+        size_t n = nd_ui_scan_apps(ND_PATH_ENG_APPS_DIR, apps, ND_APP_MAX);
+        size_t i;
+        bool all_out = n > 0u;
+
+        for (i = 0u; i < n; i++) {
+            if (nd_app_manifest_use_wallpaper(apps[i].path)) {
+                all_out = false;
+                fprintf(stderr, "  %s (%s) does not opt out\n", apps[i].name, apps[i].path);
+            }
+        }
+        CHECK(all_out, "every engineering app opts out of the wallpaper");
+    }
+
+    /* Nonsense is true, not a crash: a background is a preference, and the
+     * strict parsing lives in nd_manifest.c where it decides whether to
+     * overwrite the root filesystem. */
+    CHECK(nd_app_manifest_use_wallpaper(""), "the core, which has no manifest");
+    CHECK(nd_app_manifest_use_wallpaper(NULL), "a NULL directory");
+    CHECK(nd_app_manifest_use_wallpaper("/NeoDCT/System/apps/NoSuchApp"), "a missing manifest");
+}
+
 static void shoot_home_frames(nd_capture *cap, const nd_json_doc *golden)
 {
     nd_fb *fb = nd_capture_fb(cap);
@@ -631,6 +989,7 @@ int main(void)
     test_image_cache();
     test_home_path_fixup();
     test_app_scan();
+    test_manifest_use_wallpaper();
 
     golden = load_golden_manifest();
     if (golden == NULL) {
@@ -640,6 +999,11 @@ int main(void)
         if (nd_snprintf(frames_dir, sizeof frames_dir, "/frames") == ND_OK &&
             nd_capture_open(&cap, frames_dir, 0u) == ND_OK) {
             shoot_home_frames(cap, golden);
+            /* After the frames: these rebuild the context several times and
+             * would otherwise renumber the virtual clock ticks the six
+             * reference frames depend on. */
+            test_chrome_background(nd_capture_fb(cap));
+            test_animated_wallpaper(nd_capture_fb(cap));
             CHECK(nd_capture_write_manifest(cap) == ND_OK, "manifest written");
             printf("test_ui: frames in %s/frames\n", g_stage);
             nd_capture_close(cap);

@@ -116,4 +116,8 @@ static inline uint8_t nd_img_bands(nd_pixfmt fmt)
  * other's file handling. */
 nd_image *nd_jpeg_decode_mem(const uint8_t *data, size_t len);
 
+/* Implemented in nd_gif.c, and reached the same way: the first frame of an
+ * in-memory GIF, for the update package's thumbnail and Koki's bundles. */
+nd_image *nd_gif_decode_mem(const uint8_t *data, size_t len);
+
 #endif /* ND_IMAGE_PRIV_H_INCLUDED */

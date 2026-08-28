@@ -5,6 +5,60 @@ Not cut yet. Rename this heading to the version being released and
 set VERSION_ID in etc/os-release to match -- release.sh requires a
 section headed exactly the version it is tagging.
 
+--- Wallpaper everywhere, and wallpaper that moves ---
+
+The wallpaper was one picture behind the clock. It is now the background of
+the whole phone, and it is allowed to be a GIF.
+
+Added
+- Animated wallpapers. A .gif in the wallpaper list plays, looping, on the
+  home screen and the dialling screen. One ships: Classroom, 240x175 and
+  125 frames of a rain-lit classroom window.
+  Nothing is held in memory: 125 frames of this panel decoded at once would
+  be 15.75 MB, which is a third of the phone's RAM for a picture behind the
+  clock. The decoder walks the file instead and keeps one composed frame, so
+  an animation costs about 226 KB no matter how long it is. The main loop
+  wakes for the frame that is due and no sooner; a still wallpaper polls
+  exactly as it always did.
+  The decoder is ours -- GIF87a and GIF89a, interlace, transparency and all
+  three disposal methods -- because adding a Buildroot package to read one
+  wallpaper format costs more than six hundred lines of a 1984 algorithm.
+- Wallpaper behind the framework. Every list, dialog, text box, info screen,
+  progress bar and detail page used to open by filling itself black. They now
+  draw the wallpaper, dimmed a second time so that white text over a
+  photograph stays readable. So does the Settings app, the phone book, the
+  message list, the calculator, the call screen and the music player.
+  Two settings, neither of which has a screen in Settings: they are taste,
+  and the wallpaper picker is already where you go to change how the phone
+  looks. system.ui.wpeverywhere turns the whole thing off (default ON), and
+  system.ui.wpeverywhere_dim is how much darker chrome is than the home
+  screen (default 0.75, i.e. 0.3 * 0.75 of the original picture).
+- "useWallpaper" in manifest.json. An app that says false gets the old flat
+  black. Absent means true, so every manifest written before this key
+  existed -- and every third-party one -- keeps the wallpaper without being
+  edited.
+  Games, Koki, Update, the Browser and all twelve engineering apps say
+  false. Games and Koki paint their own screen; Update and the engineering
+  apps are diagnostics, and a photograph behind a dm-verity root hash helps
+  nobody.
+- nd-shoot grew three flags for reviewing all of this: --wallpaper forces one
+  into every group including the ones whose recipe has none, --set adds a
+  line to the settings.prop it writes, and --anim N writes N consecutive
+  home frames so an animated wallpaper can be looked at rather than guessed
+  about.
+
+Changed
+- The wallpaper list accepts .gif alongside .jpg and .jpeg, and the SD card
+  help now says 240x175 -- the panel's real content size -- rather than
+  240x240.
+- The softkey strip under a widget draws the chrome background rather than
+  black. It is still opaque; a black band under a wallpapered list was a
+  seam a third of the way up the phone.
+- Fourteen reference frames re-cut. All fourteen are screens that had a
+  wallpaper configured and were drawing black over it; the widget gallery,
+  the engineering apps, the crash screen and both games are unchanged to the
+  pixel, which is the check that this went where it was meant to.
+
 --- The first two pieces of sleep ---
 
 The first two pieces of sleep, on a phone that has never slept.

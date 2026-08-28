@@ -307,7 +307,6 @@ void nd_pagedlist_draw(nd_pagedlist *p)
     nd_ui *ui;
     nd_draw *d;
     int32_t screen_w;
-    int32_t screen_h;
     int32_t header_y;
     int32_t max_w;
     int32_t line_h = 0;
@@ -328,11 +327,10 @@ void nd_pagedlist_draw(nd_pagedlist *p)
     ui = p->ui;
     d = ui->draw;
     screen_w = nd_ui_width(ui);
-    screen_h = nd_ui_height(ui);
     header_y = nd_ui_header_divider_y(ui);
 
     /* Full-screen clear: this widget owns the softkey strip too. */
-    (void)nd_draw_rect_fill(d, ND_RECT(0, 0, screen_w, screen_h), ND_BLACK);
+    nd_ui_paint_chrome_full(ui);
     (void)nd_draw_text(d, 5, 5, (p->title != NULL) ? p->title : "", ui->font_xl, ND_WHITE);
     (void)nd_draw_line(d, 0, header_y, screen_w, header_y, ND_WHITE, 1);
 

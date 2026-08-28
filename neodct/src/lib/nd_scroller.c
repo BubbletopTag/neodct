@@ -160,8 +160,6 @@ size_t nd_scroller_paginate(const nd_scroller *s, size_t *line_h_out)
 bool nd_scroller_draw(nd_scroller *s)
 {
     nd_ui *ui;
-    int32_t screen_w;
-    int32_t content_bottom;
     size_t n_pages;
     size_t line_h = 0u;
     size_t i;
@@ -173,8 +171,6 @@ bool nd_scroller_draw(nd_scroller *s)
         return true;
 
     ui = s->ui;
-    screen_w = nd_ui_width(ui);
-    content_bottom = nd_ui_content_bottom(ui);
 
     n_pages = nd_scroller_paginate(s, &line_h);
     if (n_pages == 0u)
@@ -182,7 +178,7 @@ bool nd_scroller_draw(nd_scroller *s)
     if (s->page > n_pages - 1u)
         s->page = n_pages - 1u;
 
-    (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, screen_w, content_bottom), ND_BLACK);
+    nd_ui_paint_chrome_content(ui);
 
     y = s->top;
     for (i = g_page_start[s->page]; i < g_page_start[s->page + 1u]; i++) {

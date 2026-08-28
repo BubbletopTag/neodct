@@ -51,6 +51,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "nd_app.h"
 #include "nd_capture.h"
 #include "nd_draw.h"
 #include "nd_fb.h"
@@ -218,6 +219,9 @@ ND_UNUSED_FN static bool sa_overlay_root(char *out, size_t out_sz)
     return nd_snprintf(out, out_sz, "%s/overlay", sa_neodct) == ND_OK;
 }
 
+/* The apps/<Name> directory sa_begin() was given. */
+static char sa_app_name[64];
+
 /* build/<variant>/test/<test> -> build/<variant>/apps/<Name>/app.so, so an
  * ASan run loads the ASan app and never a stale default-variant one. */
 ND_UNUSED_FN static bool sa_resolve_app_so(const char *app_name, char *out, size_t out_sz)
@@ -267,6 +271,11 @@ typedef struct {
 
 ND_UNUSED_FN static void sa_fx_free(sa_fixture *fx)
 {
+    /* The wallpaper and the chrome copy the fixture caused to be loaded. A
+     * real app process ends and the kernel takes them back; a test process
+     * runs sixty fixtures and LeakSanitizer counts every one. */
+    nd_ui_invalidate_chrome(&fx->ui);
+    nd_ui_set_wallpaper(&fx->ui, NULL);
     if (fx->in != NULL)
         nd_input_close(fx->in);
     nd_input_channel_close(&fx->ch);
@@ -281,6 +290,68 @@ ND_UNUSED_FN static void sa_fx_free(sa_fixture *fx)
     memset(fx, 0, sizeof *fx);
     fx->ch.read_fd = -1;
     fx->ch.write_fd = -1;
+}
+
+/* ============ WHY THE FIXTURE HAS A WALLPAPER ============
+ *
+ * The frames sa_expect_golden() compares against come out of nd-shoot, whose
+ * app group runs every stock app with Palestine.jpg set -- so since the
+ * framework started drawing the wallpaper behind its own chrome, that is what
+ * those reference frames contain. A fixture that renders on black would
+ * differ from every one of them in three quarters of its pixels, and the
+ * difference would be the background rather than anything the app did.
+ *
+ * So the fixture reproduces the same two facts nd_ui_init_app() establishes
+ * for a real app process:
+ *
+ *   1. the configured wallpaper, loaded and dimmed the way the phone does it;
+ *   2. manifest.json's "useWallpaper", READ FROM THE APP'S OWN MANIFEST in
+ *      the overlay rather than from a list kept here -- so an app that opts
+ *      out (Games, every engineering app) renders on black in this harness
+ *      for exactly the reason it does on the phone, and a manifest edited
+ *      later needs no matching edit in the tests.
+ *
+ * ND_ROOT is pointed at the overlay for the duration and put back: these two
+ * reads are the only ones in the fixture that want the reference tree rather
+ * than the test's scratch directory.
+ */
+ND_UNUSED_FN static bool sa_overlay_root(char *out, size_t out_sz);
+
+ND_UNUSED_FN static void sa_apply_reference_wallpaper(sa_fixture *fx)
+{
+    static const char *const REL[] = {"/NeoDCT/System/apps", "/NeoDCT/System/engineering/apps"};
+    char overlay[ND_PATH_MAX];
+    char saved[ND_PATH_MAX];
+    char dir[ND_PATH_MAX];
+    size_t i;
+
+    /* Default to what a manifest-less app gets, so a failure below leaves the
+     * fixture in the same state it had before this existed. */
+    fx->ui.app_use_wallpaper = false;
+
+    if (sa_app_name[0] == '\0' || !sa_overlay_root(overlay, sizeof overlay))
+        return;
+    (void)nd_strlcpy(saved, nd_path_root(), sizeof saved);
+    if (nd_path_set_root(overlay) != ND_OK)
+        return;
+
+    for (i = 0u; i < ND_ARRAY_LEN(REL); i++) {
+        if (nd_snprintf(dir, sizeof dir, "%s/%s", REL[i], sa_app_name) != ND_OK)
+            continue;
+        if (!nd_path_exists(dir))
+            continue;
+        fx->ui.app_use_wallpaper = nd_app_manifest_use_wallpaper(dir);
+        break;
+    }
+
+    if (fx->ui.app_use_wallpaper) {
+        /* shoot_stock_apps()'s wallpaper, so the fixture and the reference
+         * frame are looking at the same picture. */
+        nd_ui_set_wallpaper(&fx->ui,
+                            nd_ui_load_wallpaper("/NeoDCT/System/wallpapers/Palestine.jpg"));
+    }
+
+    (void)nd_path_set_root(saved[0] != '\0' ? saved : NULL);
 }
 
 ND_UNUSED_FN static bool sa_fx_init(sa_fixture *fx)
@@ -343,6 +414,8 @@ ND_UNUSED_FN static bool sa_fx_init(sa_fixture *fx)
     fx->ui.softkey_exists = true;
     fx->ui.image_cache = nd_imgcache_new(ND_IMGCACHE_MAX);
     fx->ok = fx->ui.image_cache != NULL;
+    if (fx->ok)
+        sa_apply_reference_wallpaper(fx);
     return fx->ok;
 }
 
@@ -461,8 +534,7 @@ ND_UNUSED_FN static int32_t sa_diff_pixels(const nd_image *got, const char *name
 
         ref = NULL;
         if (f != NULL) {
-            if (fseek(f, 0, SEEK_END) == 0 && (len = ftell(f)) > 0 &&
-                fseek(f, 0, SEEK_SET) == 0) {
+            if (fseek(f, 0, SEEK_END) == 0 && (len = ftell(f)) > 0 && fseek(f, 0, SEEK_SET) == 0) {
                 buf = malloc((size_t)len);
                 if (buf != NULL) {
                     got_bytes = fread(buf, 1u, (size_t)len, f);
@@ -596,6 +668,10 @@ ND_UNUSED_FN static void *sa_begin(const char *app_name, const char *tmp_stem)
 {
     char so[ND_PATH_MAX];
     void *h;
+
+    /* Stashed for sa_fx_init(), which builds the context this app will run in
+     * and needs to know which app it is -- see sa_apply_reference_wallpaper(). */
+    (void)nd_strlcpy(sa_app_name, app_name != NULL ? app_name : "", sizeof sa_app_name);
 
     if (!sa_resolve_golden()) {
         fprintf(stderr, "smallapp_test: cannot find the golden set; set NEODCT_GOLDEN\n");

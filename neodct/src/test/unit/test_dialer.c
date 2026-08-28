@@ -377,6 +377,29 @@ static int32_t lit_count(const nd_image *img, int32_t bx0, int32_t by0, int32_t 
     return ink_in(img, bx0, by0, bx1, by1).n;
 }
 
+/* How many pixels of a band differ from the background the framework would
+ * have painted there -- the chrome wallpaper when one is in force, black
+ * otherwise. "Something was drawn here" and "nothing was" are what the two
+ * softkey-strip assertions below are really about, and this is the only way
+ * to say it that does not assume the background is any particular colour. */
+static int32_t painted_over(const nd_image *img, const nd_image *bg, int32_t by0, int32_t by1)
+{
+    int32_t n = 0;
+    int32_t x;
+    int32_t y;
+
+    for (y = by0; y <= by1; y++) {
+        for (x = 0; x < ND_UI_W; x++) {
+            nd_color got = nd_image_get_px(img, x, y);
+            nd_color want = bg != NULL ? nd_image_get_px(bg, x, y) : ND_BLACK;
+
+            if (got.r != want.r || got.g != want.g || got.b != want.b)
+                n++;
+        }
+    }
+    return n;
+}
+
 /* ------------------------------------------------------------------ *
  * 1. The handset glyph
  * ------------------------------------------------------------------ */
@@ -1089,19 +1112,29 @@ static void check_frame(const nd_json_doc *golden, const char *name, const nd_im
     }
 }
 
-/* Rows 148..174 are black in both reference frames because the draw halves
- * never build a SoftKeyBar -- shoot_telephony() calls them and flushes by
- * hand. Rows 146..147 are NOT black: the status sprites are 26x131 at y=17
- * and reach y=148, three rows past content_bottom, and on the home screen the
- * bar covers that overhang. Here nothing does. Asserted as two separate
- * numbers so "the bar came back" and "the sprites stopped overhanging" fail
- * differently. */
-static void check_no_softkey_bar(const nd_image *img, const char *what)
+/* Neither draw half builds a SoftKeyBar -- shoot_telephony() calls them and
+ * flushes by hand -- so rows 148..174 carry no softkey LABEL, while rows
+ * 146..147 do carry ink: the status sprites are 26x131 at y=17 and reach
+ * y=148, three rows past content_bottom, and on the home screen the bar
+ * covers that overhang. Here nothing does. Asserted as two separate numbers
+ * so "the bar came back" and "the sprites stopped overhanging" fail
+ * differently.
+ *
+ * AGAINST THE BACKGROUND, not against black. This used to count any non-black
+ * pixel, and the overhang it was detecting is antialiasing whose brightest
+ * channel is 25 -- so the check worked only while the background was exactly
+ * zero, and wallpaper-everywhere ends that. Comparing with what the framework
+ * would have painted says the same two things ("the sprites reach here",
+ * "nothing drew here") on any background, including the old black one. */
+static void check_no_softkey_bar(nd_ui *ui, const nd_image *img, const char *what)
 {
+    const nd_image *bg;
+
     if (img == NULL)
         return;
-    CHECK(lit_count(img, 0, 146, 239, 147) > 0, what);
-    CHECK_INT(lit_count(img, 0, 148, 239, 174), 0, what);
+    bg = nd_ui_chrome_wallpaper(ui);
+    CHECK(painted_over(img, bg, 146, 147) > 0, what);
+    CHECK_INT(painted_over(img, bg, 148, 174), 0, what);
 }
 
 static void shoot_dialer_frames(nd_capture *cap, const nd_json_doc *golden)
@@ -1121,20 +1154,21 @@ static void shoot_dialer_frames(nd_capture *cap, const nd_json_doc *golden)
         nd_vclock_disable();
         return;
     }
-    CHECK(nd_ui_home_layout(&ui) != NULL, "the home layout loaded (the screens borrow its elements)");
+    CHECK(nd_ui_home_layout(&ui) != NULL,
+          "the home layout loaded (the screens borrow its elements)");
     nd_ui_sim_status(&ui, 4, 4, "Tello");
 
     nd_dialer_draw_call(&ui, "0741234567", "Mum");
     (void)nd_ui_present(&ui);
     CHECK_INT(nd_vclock_frame(), 1, "call-active is the block's first frame");
     check_frame(golden, "call-active", nd_capture_recent(cap, 0u));
-    check_no_softkey_bar(nd_capture_recent(cap, 0u), "call-active has no softkey bar");
+    check_no_softkey_bar(&ui, nd_capture_recent(cap, 0u), "call-active has no softkey bar");
 
     nd_dialer_draw_incoming(&ui, "Mum", true);
     (void)nd_ui_present(&ui);
     CHECK_INT(nd_vclock_frame(), 2, "call-incoming is the block's second frame");
     check_frame(golden, "call-incoming", nd_capture_recent(cap, 0u));
-    check_no_softkey_bar(nd_capture_recent(cap, 0u), "call-incoming has no softkey bar");
+    check_no_softkey_bar(&ui, nd_capture_recent(cap, 0u), "call-incoming has no softkey bar");
 
     nd_ui_teardown(&ui);
     nd_ui_sim_clear(&ui);

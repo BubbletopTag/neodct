@@ -1,5 +1,6 @@
 {
     "name": "LCD Test",
+    "useWallpaper": false,
     "id": "9001",
     "icon": "icon.png",
     "exec": "main.py"

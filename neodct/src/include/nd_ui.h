@@ -150,9 +150,9 @@ typedef struct nd_ui {
 
     /* --- chrome --- */
     nd_ui_state state;
-    bool softkey_exists;         /* see the header comment; set at step 9 */
-    struct nd_softkey *softkey;  /* the core's own, transparent, bar */
-    nd_imgcache *image_cache;    /* 32-entry FIFO */
+    bool softkey_exists;        /* see the header comment; set at step 9 */
+    struct nd_softkey *softkey; /* the core's own, transparent, bar */
+    nd_imgcache *image_cache;   /* 32-entry FIFO */
 
     /* --- the home screen's own state. PRIVATE, and named with a trailing
      * underscore so that it says so at every use: until the matching _ready
@@ -173,12 +173,54 @@ typedef struct nd_ui {
         bool eng_mode_ready;
         bool apps_ready;
         bool unread_sms_ready;
+
+        /* --- the animated wallpaper, when the setting names a .gif --- *
+         *
+         * `wallpaper` above stays exactly what it always was: one 240x175
+         * RGB888 image, dimmed to 30%. An animation does not add a second
+         * surface for its consumers to know about -- it REDRAWS THAT ONE, in
+         * place, whenever nd_ui_tick_wallpaper() decides a frame is due. So
+         * the home screen, the app selector and the transparent softkey bar
+         * animate without any of them being told that anything changed.
+         *
+         * IN PLACE IS A GUARANTEE, not an implementation detail. The pointer
+         * nd_ui_wallpaper() returns is stable for the life of the wallpaper,
+         * which is what makes nd_appsel_init() -- which stores it for the
+         * whole life of the menu -- safe whatever else ticks in between.
+         *
+         * The decoder is NULL for a .jpg, and for a .gif with one frame:
+         * there is nothing to tick, and holding a decoder open to say so
+         * would cost 226 KB for no motion. */
+        struct nd_gif *wallpaper_gif;
+        double wallpaper_due;   /* nd_time_now() when the next frame is owed */
+        uint32_t wallpaper_gen; /* bumped whenever `wallpaper`'s pixels move */
+
+        /* The same frame again, dimmed a second time, for the chrome that
+         * apps and dialogs sit on -- see nd_ui_chrome_wallpaper(). Derived
+         * lazily and rebuilt only when wallpaper_gen moves, so a still
+         * wallpaper builds it once for the life of the process and an
+         * animated one rebuilds it only on the frames something actually
+         * draws chrome. 240x175 RGB888 = 126,000 bytes. */
+        nd_image *chrome;
+        uint32_t chrome_gen;
+        bool chrome_ready; /* the SETTINGS have been read, not the image */
+        bool chrome_enabled;
+        double chrome_dim;
     } home_;
 
     /* --- services, all owned by the core process --- */
     nd_modem *modem;
     nd_battery *battery;
     nd_notify *notify;
+
+    /* --- what THIS PROCESS is allowed to draw the wallpaper behind --- *
+     *
+     * true in the core and in any app whose manifest.json does not say
+     * otherwise. nd-apprun reads the app's own manifest before app_run() and
+     * clears this for an app that declared "useWallpaper": false, so the
+     * framework's shared background call turns back into a black fill for
+     * that process and for nothing else. See nd_app.h. */
+    bool app_use_wallpaper;
 
     /* --- transient core state --- */
     char dial_buffer[ND_DIAL_BUFFER_MAX];
@@ -255,7 +297,10 @@ void nd_ui_refresh_after_app(nd_ui *ui);
 size_t nd_ui_scan_apps(const char *dir, nd_app_entry *out, size_t max);
 
 /* Wallpaper: load, resize to 240x175 with LANCZOS, then dim to 30% with the
- * TRUNCATING brightness formula in nd_image.h. NULL on any failure. */
+ * TRUNCATING brightness formula in nd_image.h. NULL on any failure.
+ *
+ * A .gif loads its FIRST FRAME here. Animation belongs to the context, not to
+ * a loose image -- see nd_ui_tick_wallpaper(). */
 nd_image *nd_ui_load_wallpaper(const char *path);
 
 /* ------------------------------------------------------------------ *
@@ -293,8 +338,78 @@ size_t nd_ui_app_count(nd_ui *ui);
 
 /* Hand the UI a wallpaper directly, taking ownership of it and freeing
  * whatever was there. Marks it loaded, so the configured one is never read.
- * For tests and for nd-shoot; the phone gets its wallpaper from settings. */
+ * Also closes any animation, so an injected still stays the still it is.
+ * For tests and for nd-shoot; the phone gets its wallpaper from settings.
+ *
+ * This is the ONE call that changes the pointer nd_ui_wallpaper() returns,
+ * and no widget may be holding it across one. */
 void nd_ui_set_wallpaper(nd_ui *ui, nd_image *img);
+
+/* ------------------------------------------------------------------ *
+ * Animated wallpaper
+ * ------------------------------------------------------------------ *
+ *
+ * A .gif wallpaper is decoded one frame at a time and painted over the SAME
+ * nd_image every consumer of nd_ui_wallpaper() already holds, so nothing
+ * downstream needs to know an animation exists. What the core does need to
+ * know is when to ask for the next frame, and how long it may sleep first.
+ */
+
+/* Advance the wallpaper if its current frame has been on screen long enough.
+ * Cheap and idempotent: a still wallpaper, a wallpaper that is not due yet
+ * and a phone with no wallpaper at all all return false without touching a
+ * pixel. true means the image changed and the screen wants repainting.
+ *
+ * CALLED FROM ONE PLACE, nd_ui_update(). Advancing inside nd_ui_wallpaper()
+ * would run the animation once per CALLER -- the home screen, the softkey bar
+ * and the app selector each ask for the wallpaper on the same frame -- and
+ * play a 25 fps GIF at 75. */
+bool nd_ui_tick_wallpaper(nd_ui *ui);
+
+/* How long a caller may block before the wallpaper owes another frame, in
+ * seconds, never more than `dflt` and never less than zero. `dflt` back when
+ * nothing is animating, which is what makes this safe to wrap around the core
+ * loop's existing 0.1 s poll unconditionally. */
+double nd_ui_frame_timeout(nd_ui *ui, double dflt);
+
+/* ------------------------------------------------------------------ *
+ * The background under the framework's own chrome
+ * ------------------------------------------------------------------ *
+ *
+ * Every list, dialog, text box and info screen used to open by filling itself
+ * black. They now call nd_ui_paint_chrome() instead, which paints the
+ * wallpaper -- dimmed a second time, so that white 20 px text stays readable
+ * over a photograph -- or black, and the widget does not care which.
+ *
+ * It is black when ANY of these is true:
+ *   - there is no wallpaper;
+ *   - system.ui.wpeverywhere is off;
+ *   - this process is an app whose manifest says "useWallpaper": false.
+ */
+
+/* The extra-dimmed wallpaper, or NULL for "use black". Owned by the UI and
+ * rebuilt under the caller whenever the animation advances -- blit from it,
+ * do not free it, do not keep it. */
+const nd_image *nd_ui_chrome_wallpaper(nd_ui *ui);
+
+/* Paint `r` (INCLUSIVE, like every other rectangle here) with the chrome
+ * background: the matching REGION of the wallpaper, or black. The region
+ * matters -- a widget that clears rows 0..145 must not be handed the
+ * wallpaper's rows 0..145 stretched, it must be handed its rows 0..145, or
+ * the softkey strip stops lining up with the screen above it. */
+void nd_ui_paint_chrome(nd_ui *ui, nd_rect r);
+
+/* The whole screen, and the content area above the softkey bar: the two
+ * rectangles almost every call site wants. Both are passed exactly as the
+ * widgets have always written them -- see the note at the implementation
+ * about the off-by-one that is deliberately preserved. */
+void nd_ui_paint_chrome_full(nd_ui *ui);
+void nd_ui_paint_chrome_content(nd_ui *ui);
+
+/* Drop the cached chrome image and re-read both settings. Called from
+ * nd_ui_refresh_after_app(), because Settings is an app and turning the
+ * feature off must show on the next screen drawn. */
+void nd_ui_invalidate_chrome(nd_ui *ui);
 
 /* The unread-SMS count. It lives with the home state because that is the
  * only thing that reads it: the flashing envelope in nd_ui_render_home().

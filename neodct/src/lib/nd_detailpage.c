@@ -579,7 +579,6 @@ void nd_detailpage_draw(nd_detailpage *p)
     nd_image *col;
     const nd_font *font_small;
     int32_t width;
-    int32_t bottom;
     int32_t vh;
     int32_t y;
     size_t i;
@@ -591,11 +590,10 @@ void nd_detailpage_draw(nd_detailpage *p)
     ui = p->ui;
     d = ui->draw;
     width = nd_ui_width(ui);
-    bottom = nd_ui_content_bottom(ui);
     vh = nd_max32(1, viewport_h(p));
     font_small = small_font_of(ui);
 
-    (void)nd_draw_rect_fill(d, ND_RECT(0, 0, width, bottom), ND_BLACK);
+    nd_ui_paint_chrome_content(ui);
 
     if (p->header != NULL && p->header[0] != '\0') {
         int32_t small_h = 0;
@@ -619,7 +617,19 @@ void nd_detailpage_draw(nd_detailpage *p)
     }
     if (nd_draw_bind(&col_draw, col) != ND_OK)
         return;
-    (void)nd_draw_rect_fill(&col_draw, ND_RECT(0, 0, col->w, vh - 1), ND_BLACK);
+    /* The column is pasted at (0, viewport.y0), so it is cleared with the
+     * wallpaper's rows STARTING THERE. Clearing it with the wallpaper's rows
+     * 0..vh would paste the top of the picture into the middle of the screen
+     * and the seam would be obvious against the header above it. */
+    {
+        const nd_image *paper = nd_ui_chrome_wallpaper(ui);
+
+        if (paper != NULL)
+            (void)nd_image_blit_region(
+                col, paper, ND_RECT(0, p->viewport.y0, col->w - 1, p->viewport.y0 + vh - 1), 0, 0);
+        else
+            (void)nd_draw_rect_fill(&col_draw, ND_RECT(0, 0, col->w, vh - 1), ND_BLACK);
+    }
 
     /* A page that fits is centred: a few words pinned to the top of an
      * otherwise black screen reads as a crash rather than as an answer. */

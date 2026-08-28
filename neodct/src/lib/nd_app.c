@@ -27,6 +27,7 @@
 
 #include "nd_app.h"
 #include "nd_fb.h"
+#include "nd_json.h"
 #include "nd_log.h"
 #include "nd_paths.h"
 #include "nd_types.h"
@@ -93,6 +94,30 @@ nd_err nd_app_set_dir(const char *dir)
 const char *nd_app_dir(void)
 {
     return g_app_dir;
+}
+
+bool nd_app_manifest_use_wallpaper(const char *app_dir)
+{
+    char path[ND_PATH_MAX];
+    nd_json_doc *doc = NULL;
+    const nd_json_val *root;
+    bool use;
+
+    /* The core passes "" here and gets true, which is right: the core has no
+     * manifest and nothing to opt out of. */
+    if (app_dir == NULL || app_dir[0] == '\0')
+        return true;
+    if (nd_snprintf(path, sizeof path, "%s/manifest.json", app_dir) != ND_OK)
+        return true;
+    if (nd_json_parse_file(path, &doc, NULL, 0u) != ND_OK)
+        return true;
+
+    root = nd_json_root(doc);
+    use = (root != NULL && nd_json_type_of(root) == ND_JSON_OBJECT)
+              ? nd_json_get_bool(root, ND_APP_KEY_USE_WALLPAPER, true)
+              : true;
+    nd_json_free(doc);
+    return use;
 }
 
 nd_err nd_app_asset_path(char *out, size_t out_sz, const char *name)

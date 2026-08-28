@@ -1,5 +1,6 @@
 {
     "name": "Games",
+    "useWallpaper": false,
     "id": "6",
     "icon": "icon.png",
     "exec": "main.py"

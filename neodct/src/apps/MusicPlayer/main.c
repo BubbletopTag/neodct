@@ -166,14 +166,13 @@ static bool playlist_load(playlist *p, nd_music_backend backend)
  * other key is ignored and NOTHING is redrawn. */
 static void show_no_music(nd_ui *ui, nd_softkey *bar)
 {
-    int32_t screen_w = nd_ui_width(ui);
     int32_t content_bottom = nd_ui_content_bottom(ui);
     int32_t y = nd_max32(12, nd_trunc32((double)content_bottom * 0.35));
 
     /* rectangle((0, 0, screen_w, content_bottom)) -- INCLUSIVE, so row 145
      * is painted black and the softkey update below then repaints 145..175
      * over it. Pillow clips column 240 away; so does nd_draw. */
-    (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, screen_w, content_bottom), ND_BLACK);
+    nd_ui_paint_chrome_content(ui);
     (void)nd_draw_text(ui->draw, 10, y, "No Music Found", ui->font_n, ND_WHITE);
     (void)nd_draw_text(ui->draw, 10, y + 30, "Add mp3s to:", ui->font_s, ND_GRAY);
     /* Stale, and on screen. See note 3 in the file header. */
@@ -388,8 +387,7 @@ typedef struct {
 } now_layout;
 
 static void draw_now_playing(nd_ui *ui, nd_softkey *bar, const now_layout *L,
-                             const nd_music_meta *meta, const nd_image *art,
-                             double current_elapsed)
+                             const nd_music_meta *meta, const nd_image *art, double current_elapsed)
 {
     char line[ND_MUSIC_TEXT_MAX + 8];
     char stamp[32];
@@ -398,7 +396,7 @@ static void draw_now_playing(nd_ui *ui, nd_softkey *bar, const now_layout *L,
     double pct;
     int32_t fill_width;
 
-    (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, L->screen_w, L->content_bottom), ND_BLACK);
+    nd_ui_paint_chrome_content(ui);
 
     /* -- Header -- */
     (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, L->screen_w, L->header_h), ND_WHITE);
@@ -412,18 +410,17 @@ static void draw_now_playing(nd_ui *ui, nd_softkey *bar, const now_layout *L,
          * converts to the destination mode and DROPS alpha rather than
          * compositing it, which is what nd_image_blit does. */
         (void)nd_image_blit(ui->canvas, art, L->art_x, L->art_y);
-        (void)nd_draw_rect_outline(ui->draw,
-                                   ND_RECT(L->art_x - 1, L->art_y - 1, L->art_x + L->art_size,
-                                           L->art_y + L->art_size),
-                                   ND_WHITE, 1);
+        (void)nd_draw_rect_outline(
+            ui->draw,
+            ND_RECT(L->art_x - 1, L->art_y - 1, L->art_x + L->art_size, L->art_y + L->art_size),
+            ND_WHITE, 1);
     } else {
         int32_t cx = L->art_x + (L->art_size / 2);
         int32_t cy = L->art_y + (L->art_size / 2);
 
         (void)nd_draw_rect_outline(
-            ui->draw,
-            ND_RECT(L->art_x, L->art_y, L->art_x + L->art_size, L->art_y + L->art_size), ND_WHITE,
-            1);
+            ui->draw, ND_RECT(L->art_x, L->art_y, L->art_x + L->art_size, L->art_y + L->art_size),
+            ND_WHITE, 1);
         /* The note: a filled head, a stem and a flag. A wide line grows in
          * the MINOR AXIS ONLY, so width 2 on the vertical stem lights columns
          * cx+1 and cx+2 -- nd_draw.h rule 2. */
@@ -445,9 +442,9 @@ static void draw_now_playing(nd_ui *ui, nd_softkey *bar, const now_layout *L,
     }
 
     /* -- Progress bar -- */
-    (void)nd_draw_rect_fill(
-        ui->draw, ND_RECT(L->bar_x, L->bar_y, L->bar_x + L->bar_width, L->bar_y + 4),
-        MUSIC_BAR_GREY);
+    (void)nd_draw_rect_fill(ui->draw,
+                            ND_RECT(L->bar_x, L->bar_y, L->bar_x + L->bar_width, L->bar_y + 4),
+                            MUSIC_BAR_GREY);
 
     if (meta->length > 0.0) {
         pct = current_elapsed / meta->length;
@@ -458,9 +455,8 @@ static void draw_now_playing(nd_ui *ui, nd_softkey *bar, const now_layout *L,
     }
     /* int(bar_width * pct): Pillow and Python both truncate toward zero. */
     fill_width = nd_trunc32((double)L->bar_width * pct);
-    (void)nd_draw_rect_fill(ui->draw,
-                            ND_RECT(L->bar_x, L->bar_y, L->bar_x + fill_width, L->bar_y + 4),
-                            ND_WHITE);
+    (void)nd_draw_rect_fill(
+        ui->draw, ND_RECT(L->bar_x, L->bar_y, L->bar_x + fill_width, L->bar_y + 4), ND_WHITE);
 
     /* -- Timestamps -- */
     nd_music_format_time(nd_trunc32(current_elapsed), stamp, sizeof stamp);
@@ -542,7 +538,7 @@ static np_result run_now_playing(nd_ui *ui, nd_softkey *bar, const char *filepat
 
     /* 1. The loading card. Note it clears the WHOLE screen including the
      *    softkey strip, and presents directly rather than through the bar. */
-    (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, screen_w, screen_h), ND_BLACK);
+    nd_ui_paint_chrome_full(ui);
     nd_text_size(ui->font_n, "Loading...", &lw, &lh);
     (void)nd_draw_text(ui->draw, (screen_w - lw) / 2, nd_max32(10, (content_bottom - lh) / 2),
                        "Loading...", ui->font_n, ND_WHITE);
@@ -885,8 +881,7 @@ static void browse_albums(nd_ui *ui, nd_softkey *bar)
         /* The artist is part of the row here and not in the per-artist view,
          * because two bands really do both have a "Greatest Hits" and this
          * is the one screen where they sit next to each other. */
-        (void)nd_snprintf(label, sizeof label, "%s - %s", alb->name,
-                          (ar != NULL) ? ar->name : "");
+        (void)nd_snprintf(label, sizeof label, "%s - %s", alb->name, (ar != NULL) ? ar->name : "");
         music_list_set(&list, ui, i, label);
     }
     list.n = n;
@@ -1023,7 +1018,6 @@ static void volume_screen(nd_ui *ui)
 {
     nd_softkey bar;
     int32_t screen_w = nd_ui_width(ui);
-    int32_t content_bottom = nd_ui_content_bottom(ui);
 
     nd_softkey_init(&bar, ui, false);
 
@@ -1039,7 +1033,7 @@ static void volume_screen(nd_ui *ui)
         int32_t x0 = (screen_w - total) / 2;
         int32_t y0 = 74;
 
-        (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, screen_w, content_bottom), ND_BLACK);
+        nd_ui_paint_chrome_content(ui);
 
         nd_text_size(ui->font_n, "Volume", &w, NULL);
         (void)nd_draw_text(ui->draw, (screen_w - w) / 2, 14, "Volume", ui->font_n, ND_WHITE);
@@ -1100,8 +1094,7 @@ static void music_run(nd_ui *ui, nd_softkey *bar)
         nd_softkey ok;
         int32_t sel;
 
-        (void)nd_snprintf(volume_label, sizeof volume_label, "Volume: %d",
-                          (int)nd_music_volume());
+        (void)nd_snprintf(volume_label, sizeof volume_label, "Volume: %d", (int)nd_music_volume());
 
         items[MENU_ARTISTS] = "Artists";
         items[MENU_ALBUMS] = "Albums";

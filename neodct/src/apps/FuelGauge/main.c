@@ -148,7 +148,8 @@ size_t nd_fg_rows(const nd_battery_snap *snap, bool ok, const char *error, bool 
     if (n >= max)
         return n;
 
-    (void)snprintf(buf, sizeof buf, "%.2f %%  (0x%04X)", snap->soc_percent, (unsigned)snap->raw_soc);
+    (void)snprintf(buf, sizeof buf, "%.2f %%  (0x%04X)", snap->soc_percent,
+                   (unsigned)snap->raw_soc);
     row_set(&out[n++], "SOC", buf);
     if (n >= max)
         return n;
@@ -207,7 +208,7 @@ static void draw_readout(nd_ui *ui, const nd_fg_row *rows, size_t n_rows, bool h
     int32_t line_h;
     size_t i;
 
-    (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, screen_w, bottom), ND_BLACK);
+    nd_ui_paint_chrome_content(ui);
     (void)nd_draw_text(ui->draw, 5, 0, "FuelGauge", ui->font_xl, ND_WHITE);
     (void)nd_draw_line(ui->draw, 0, 30, screen_w, 30, ND_WHITE, 1);
 

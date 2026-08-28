@@ -23,7 +23,7 @@ Which is also why these were done first and why they are now frozen. Changing a
 header after people have started writing against it breaks their work
 retroactively.
 
-**28 headers, all in `neodct/src/include/`.** Everything else in the port is an
+**29 headers, all in `neodct/src/include/`.** Everything else in the port is an
 implementation of something described in one of them.
 
 ---
@@ -36,6 +36,7 @@ implementation of something described in one of them.
 | `nd_widgets.h` | All fourteen parts of `framework.py`: the menus, the text boxes, the warning dialog, the progress bar, the app selector, plus the two Dialer screens. |
 | `nd_image.h` | The fifteen Pillow operations the project actually uses. Not a Pillow port — I counted every call in the whole overlay and it comes to fifteen. |
 | `nd_draw.h` | `ImageDraw`: rectangle, line, text, point, polygon, ellipse. Seven functions, 255 call sites. |
+| `nd_gif.h` | Animated GIF, one frame at a time. No Python equivalent — Pillow could seek a GIF and nothing in the overlay ever did. It exists so a wallpaper can move without holding the whole animation in RAM. |
 | `nd_font.h` | FreeType on `font.ttf` at 14/18/20/24, and the text measurement everything centres itself with. |
 | `nd_settings.h` | `get_setting` / `set_setting`, and every key the overlay uses, listed. |
 | `nd_storage.h` | Is there an SD card, is it one of ours, where are the update files. |

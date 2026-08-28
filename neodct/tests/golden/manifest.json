@@ -3,7 +3,7 @@
   "frames": [
     {
       "name": "app-calculator",
-      "sha256": "e35833fd7990a1173fc6e8e61b29c1c0713596ddc72d217c3c2880f4adbefc43",
+      "sha256": "0c1ea2660a1694f3eb1862e1f9d99a443003d898ff737255276e9b94a564a991",
       "size": [
         240,
         175
@@ -11,7 +11,7 @@
     },
     {
       "name": "app-calculator-options",
-      "sha256": "8ae49eaabf1f2745262a5d28e43ae98aaa2c9217532639a428ce6bd17f73bbaa",
+      "sha256": "532976dfb603a7c7a796fabb06bfb9599d4fb55292b146c2272df05b6b9ae198",
       "size": [
         240,
         175
@@ -19,7 +19,7 @@
     },
     {
       "name": "app-calllog",
-      "sha256": "10a5224128fa5a7cd18c3c424c0de37d87418743d916badf05312760e70ce844",
+      "sha256": "e2ff2263fd5e794d9d1c84183dbb4c07dcbda9f8487539fa0f62ba6c2dd4e694",
       "size": [
         240,
         175
@@ -27,7 +27,7 @@
     },
     {
       "name": "app-clock",
-      "sha256": "94c8faefbc70bb2b944dc43dd92575ddc3cea021f46a7ec87bc8389c33e260c8",
+      "sha256": "9afc9f4395492788757b9e1f579151370643e5626c1d81788e2fc1d8ba73d43f",
       "size": [
         240,
         175
@@ -51,7 +51,7 @@
     },
     {
       "name": "app-messages",
-      "sha256": "09e383b3ee85f0b75c0fe0dd668ea030ba4398bb020ea46e8b01ae71c3b1c6b3",
+      "sha256": "2858ed33d84537647c29f9705579daa57029e64162c62ca87f948fa26cd5d35d",
       "size": [
         240,
         175
@@ -59,7 +59,7 @@
     },
     {
       "name": "app-messages-inbox",
-      "sha256": "75c5e2791f49d14db91266f181499333395d3f8c53cd07c71cb49c8a671295c1",
+      "sha256": "62949ee8bd74630db771759473b2af6369833d5e05d39e1b540b9b1eadd72841",
       "size": [
         240,
         175
@@ -67,7 +67,7 @@
     },
     {
       "name": "app-musicplayer",
-      "sha256": "a105994ad726f565629bdb645d17debcc73587e8e3a2b37a17eea5aa13805365",
+      "sha256": "cd51788b915765ef6ea0c21110b507cd42f78886143b84840ec4dcb712acb909",
       "size": [
         240,
         175
@@ -75,7 +75,7 @@
     },
     {
       "name": "app-phonebook",
-      "sha256": "61d58a73d5090a960b6a6a290fa28c6bc49eb255b841d5600335dd911c58871b",
+      "sha256": "39188b003fd90ce254af7bf7c61ffa406a5abf7a22fa9b1dfb1d25ecbe7eb0c4",
       "size": [
         240,
         175
@@ -83,7 +83,7 @@
     },
     {
       "name": "app-settings",
-      "sha256": "811e9be5258df1ca020c02045f56603f55dfe0a8510f1d6b1dd6676bc156ed1e",
+      "sha256": "d19e9a55fc8bd7d11c99bdc1b6465aeae972dc28f124869274cf8cc629dc3ced",
       "size": [
         240,
         175
@@ -91,7 +91,7 @@
     },
     {
       "name": "app-settings-wallpaper",
-      "sha256": "937340a8b6a2c19d209d0456cb32421e97e9538ba3c2cf9cc6a447f84d1db2ae",
+      "sha256": "5fb4e5e24241804c66123dc204bd5292dda4d80cc917987e511bab7c517e56aa",
       "size": [
         240,
         175
@@ -99,7 +99,7 @@
     },
     {
       "name": "app-tones",
-      "sha256": "24e892d9597786372b9b81513488a5c30057de5a5943c2d68313043661e1d1b2",
+      "sha256": "83b6360727bf533327a8fc005c0b2b7d55830945d2385cc8885b415f744f40db",
       "size": [
         240,
         175
@@ -107,7 +107,7 @@
     },
     {
       "name": "call-active",
-      "sha256": "fac95f35366935184508d9c4d42e0397de4137215b1fcd13f8bfd7acadf3f5bf",
+      "sha256": "fe23e908a49484444440ed1626ed5b32f61516214df95f77b7ef9eb5735edee9",
       "size": [
         240,
         175
@@ -115,7 +115,7 @@
     },
     {
       "name": "call-incoming",
-      "sha256": "889be8feca6880f8feadd587a2c80f3db4ed807d68bd62002a4eabcb618d1163",
+      "sha256": "71120c2d829620962585450fe32f8fa0df9e4f1a0d8959ccfb35bff1707e33dd",
       "size": [
         240,
         175
@@ -123,7 +123,7 @@
     },
     {
       "name": "contacts-picker",
-      "sha256": "ebbd04a665919101b589191eae8a7aeed1083fcd78dea18159e8dd73a621df2e",
+      "sha256": "668ae52a41c956a31838f8397dde0fc32172e3fd1ac12671e1a967466432910e",
       "size": [
         240,
         175
@@ -151,8 +151,7 @@
       "size": [
         240,
         175
-      ],
-      "tolerance": "recut"
+      ]
     },
     {
       "name": "eng-lcdtest",
@@ -184,8 +183,7 @@
       "size": [
         240,
         175
-      ],
-      "tolerance": "recut"
+      ]
     },
     {
       "name": "home",

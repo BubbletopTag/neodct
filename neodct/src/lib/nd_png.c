@@ -172,6 +172,9 @@ nd_image *nd_image_open_mem(const uint8_t *data, size_t len)
         return png_decode(NULL, &r);
     if (data[0] == 0xFFu && data[1] == 0xD8u)
         return nd_jpeg_decode_mem(data, len);
+    if (len >= 6u && memcmp(data, "GIF8", 4) == 0 &&
+        (memcmp(data + 4u, "7a", 2) == 0 || memcmp(data + 4u, "9a", 2) == 0))
+        return nd_gif_decode_mem(data, len);
     return NULL;
 }
 

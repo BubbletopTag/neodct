@@ -389,7 +389,6 @@ void nd_textlong_draw(nd_textlong *t, bool blink_state)
     nd_draw *d;
     char count[16];
     int32_t screen_w;
-    int32_t content_bottom;
     int32_t header_y;
     int32_t cw = 0;
     int32_t line_h = 0;
@@ -407,10 +406,9 @@ void nd_textlong_draw(nd_textlong *t, bool blink_state)
     d = ui->draw;
 
     screen_w = nd_ui_width(ui);
-    content_bottom = nd_ui_content_bottom(ui);
     header_y = nd_ui_header_divider_y(ui);
 
-    (void)nd_draw_rect_fill(d, ND_RECT(0, 0, screen_w, content_bottom), ND_BLACK);
+    nd_ui_paint_chrome_content(ui);
 
     /* The title is drawn with no fitting and the character count is drawn
      * flush right, so a long title runs UNDER the count. widget-textinputlong

@@ -375,12 +375,29 @@ Grepped across the whole overlay. This is the complete set.
 | `system.hw.modem_pcm_port` | — | `"AUTO"` | `ModemService/__init__.py:632` | never |
 | `system.hw.modem_mic_device` | — | `"AUTO"` | `ModemService/__init__.py:652` | never |
 | `system.modem.allow_calls` | — | `"ON"` | `ModemService/__init__.py:173` | never |
+| `system.ui.wpeverywhere` | — | `"ON"` | `lib/nd_ui.c` `chrome_settings_load()` | never in-app |
+| `system.ui.wpeverywhere_dim` | — | `"0.75"` | `lib/nd_ui.c` `chrome_settings_load()` | never in-app |
 | `calllog.duration.last` | — | `"0"` | `apps/CallLog/main.py:95` | `apps/CallLog/main.py:103` |
 | `calllog.duration.received` | — | `"0"` | same | same |
 | `calllog.duration.dialed` | — | `"0"` | same | same |
 | `games.snake.level` | — | `5` | `apps/Games/main.py:68,72` | `apps/Games/main.py:75` |
 | `games.snake.topscore` | — | `0` | `apps/Games/main.py:54,77` | `apps/Games/main.py:56` |
 | `games.memory.topscore` | — | `0` | `apps/Games/main.py:54,91` | `apps/Games/main.py:56` |
+
+The last two have no Python ancestor: they arrived with the C build, when the
+framework started drawing the wallpaper behind its own chrome. Both are read
+with a call-site default and are deliberately **not** in `DEFAULTS` — a key in
+that table is written into `settings.prop` on the first read (the R-24 quirk
+above), and these two are consulted from inside the render path, which would
+turn every repaint into a flash write. Neither has a screen in the Settings
+app; they are taste, and the wallpaper picker is already where a person goes
+to change how the phone looks.
+
+`system.ui.wpeverywhere_dim` is a SECOND brightness multiplier applied on top
+of the 0.3 the home screen already uses, so the default 0.75 puts chrome at
+`0.3 * 0.75` of the original picture. It is parsed with `strtod` and anything
+unparseable, negative or above 1 falls back to the default rather than being
+clamped to an extreme nobody can then explain.
 
 Boolean parsing is **not** uniform. Two distinct rules exist:
 

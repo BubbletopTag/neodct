@@ -49,6 +49,8 @@ extern "C" {
 #define ND_SET_AUDIO_RINGTOME_DFLT   "/NeoDCT/System/tones/Low.mp3"
 #define ND_SET_UI_WALLPAPER_DFLT     "NONE"
 #define ND_SET_UI_ENG_MODE_DFLT      "ON"
+#define ND_SET_UI_WP_EVERYWHERE_DFLT "ON"
+#define ND_SET_UI_WP_APP_DIM_DFLT    "0.75"
 #define ND_SET_OS_VERSIONNUMBER_DFLT "0.3.1a"
 #define ND_SET_OS_VERSIONNAME_DFLT   "NeoDCT System v0.3.1a"
 #define ND_SET_OS_PLATFORM_DFLT      "unknown"
@@ -77,6 +79,30 @@ extern "C" {
 #define ND_SET_HW_MODEM_PCM_PORT "system.hw.modem_pcm_port"   /* "AUTO"    */
 #define ND_SET_HW_MODEM_MIC_DEV  "system.hw.modem_mic_device" /* "AUTO"    */
 #define ND_SET_MODEM_ALLOW_CALLS "system.modem.allow_calls"   /* "ON"      */
+
+/* Wallpaper behind the framework's own chrome -- lists, dialogs, text boxes,
+ * every screen that used to be flat black. ON by default, because that is the
+ * point of the feature; a phone whose owner wants the old look turns it off
+ * here and nothing else changes.
+ *
+ * NOT in DEFAULTS, deliberately. A key in that table is written into
+ * settings.prop on the first read, and these two are read from inside the
+ * render path -- see the R-24 quirk above, which would turn every frame into
+ * a flash write. Read them with nd_settings_get(key, dflt) instead, which
+ * touches nothing.
+ *
+ * There is also deliberately no Settings screen for either. They are taste,
+ * not policy, and the wallpaper picker is already where a person goes to
+ * change how the phone looks.
+ *
+ * ND_SET_UI_WP_APP_DIM is a SECOND brightness multiplier applied on top of
+ * the 0.3 the home screen already uses, so 0.45 here means chrome sits on
+ * 0.3 * 0.45 = 0.135 of the original picture. Chrome carries text at every
+ * size the phone has; the home screen carries a clock. Parsed with strtod and
+ * clamped to [0, 1]; anything unparseable reads as the default rather than
+ * blanking the screen. */
+#define ND_SET_UI_WP_EVERYWHERE "system.ui.wpeverywhere"     /* "ON"      */
+#define ND_SET_UI_WP_APP_DIM    "system.ui.wpeverywhere_dim" /* "0.45"   */
 
 /* NTP sync, owned by the Clock app and read by the clock service at boot.
  * Defaults to ON: a phone whose clock is wrong fails every TLS "not valid

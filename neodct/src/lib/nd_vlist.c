@@ -115,7 +115,7 @@ void nd_vlist_draw(nd_vlist *l)
     header_y = nd_ui_header_divider_y(ui);
 
     /* 1. Clear -- rows 0..content_bottom only. See the header comment. */
-    (void)nd_draw_rect_fill(d, ND_RECT(0, 0, screen_w, content_bottom), ND_BLACK);
+    nd_ui_paint_chrome_content(ui);
 
     /* 2. Title, trimmed so it cannot run under the right-aligned breadcrumb,
      *    and drawn at y = 0 -- every other widget's title sits at y = 5. */

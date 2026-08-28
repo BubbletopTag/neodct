@@ -157,7 +157,7 @@ void nd_textinput_draw(nd_textinput *t, bool blink_state)
     /* Rows 0..content_bottom only. A caller's earlier softkey update survives
      * into this frame -- widget-textinput.png still carries the "Select" the
      * PagedList before it painted. */
-    (void)nd_draw_rect_fill(d, ND_RECT(0, 0, screen_w, content_bottom), ND_BLACK);
+    nd_ui_paint_chrome_content(ui);
 
     /* No fit_text: a long title runs off the right edge. Port the bug. */
     (void)nd_draw_text(d, 5, 5, nz(t->title), ui->font_xl, ND_WHITE);

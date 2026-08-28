@@ -179,7 +179,6 @@ static void dialog_draw(nd_msgdialog *d)
     nd_ui *ui;
     nd_draw *dr;
     int32_t screen_w;
-    int32_t screen_h;
     int32_t content_bottom;
     const nd_image *icon = NULL;
     const nd_font *font_title;
@@ -206,11 +205,10 @@ static void dialog_draw(nd_msgdialog *d)
     ui = d->ui;
     dr = ui->draw;
     screen_w = nd_ui_width(ui);
-    screen_h = nd_ui_height(ui);
     content_bottom = nd_ui_content_bottom(ui);
 
     /* 1. Full clear -- rows 0..175, softkey strip included. */
-    (void)nd_draw_rect_fill(dr, ND_RECT(0, 0, screen_w, screen_h), ND_BLACK);
+    nd_ui_paint_chrome_full(ui);
 
     /* 2. Icon. `icon_path or DEFAULT_WARNING_ICON`: NULL and "" both give the
      *    triangle, and there is no way to ask for no icon short of a path

@@ -1,5 +1,16 @@
 # UI framework (widgets) — C port specification
 
+> **⚠ SUPERSEDED IN ONE PLACE: the background.** Every `fill="black"` clear
+> below is now a call to `nd_ui_paint_chrome()`, `nd_ui_paint_chrome_full()` or
+> `nd_ui_paint_chrome_content()` over the *same rectangle*. Those paint the
+> configured wallpaper — dimmed a second time by
+> `system.ui.wpeverywhere_dim`, on top of the 0.3 the home screen uses — or
+> flat black when there is no wallpaper, when `system.ui.wpeverywhere` is off,
+> or when the running app's `manifest.json` says `"useWallpaper": false`. The
+> rectangles, the partial-versus-full clears and everything drawn on top are
+> unchanged, including the off-by-one in `(0, 0, 240, 145)`; read every
+> `fill="black"` below as "the background", not as "black". See `nd_ui.h`.
+
 > **⚠ STALE: measured on a raqm host.** Any font advance / text-width table in this
 > document is wrong. Pillow on the phone is built `-Craqm=disable` and uses BASIC
 > layout: `getlength("Menu")@20` is **68**, not 65. Take all text metrics from
