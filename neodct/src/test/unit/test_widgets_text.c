@@ -49,6 +49,7 @@
 #include "nd_paths.h"
 #include "nd_t9.h"
 #include "nd_text.h"
+#include "nd_timeset.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_widgets.h"
@@ -589,6 +590,64 @@ static void test_textinput_qwerty(void)
     CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_CLEAR), ND_WIDGET_RESULT_CANCEL);
 }
 
+/* A masked field is a different input method wearing the same widget. The
+ * cases that matter are the ones where it must NOT behave like the field
+ * around it: no letters, no multi-tap, no growing past the mask, and Clear
+ * removing the separator along with the digit that pulled it in. */
+static void test_textinput_mask(void)
+{
+    fixture *fx = &g_fx;
+    char buf[ND_TIMESET_TEXT_MAX];
+    nd_textinput t;
+
+    CHECK_INT(
+        nd_textinput_init(&t, &fx->ui, "Clock", "Time:", buf, sizeof buf, "", ND_T9_FILTER_NUMBERS),
+        ND_OK);
+    nd_textinput_set_mask(&t, ND_TIMESET_TIME_MASK);
+
+    /* The colon arrives with the second digit, not with the third. */
+    CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_2), ND_WIDGET_RESULT_TYPED);
+    CHECK_STR(t.text, "2");
+    CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_3), ND_WIDGET_RESULT_TYPED);
+    CHECK_STR(t.text, "23:");
+    CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_5), ND_WIDGET_RESULT_TYPED);
+    CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_9), ND_WIDGET_RESULT_TYPED);
+    CHECK_STR(t.text, "23:59");
+
+    /* Full: the press is ignored, and nothing already typed is lost. */
+    CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_1), ND_WIDGET_RESULT_NONE);
+    CHECK_STR(t.text, "23:59");
+
+    /* A letter off the dev keyboard is not a digit. Without the mask branch
+     * this same code would reach the QWERTY path and insert an 'a'. */
+    CHECK_INT(nd_textinput_handle_key(&t, 30), ND_WIDGET_RESULT_NONE);
+    CHECK_STR(t.text, "23:59");
+
+    /* One press, one digit -- and the third takes the colon with it. */
+    CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_CLEAR), ND_WIDGET_RESULT_BACKSPACE);
+    CHECK_STR(t.text, "23:5");
+    CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_CLEAR), ND_WIDGET_RESULT_BACKSPACE);
+    CHECK_STR(t.text, "23:");
+    CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_CLEAR), ND_WIDGET_RESULT_BACKSPACE);
+    CHECK_STR(t.text, "2");
+    CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_CLEAR), ND_WIDGET_RESULT_BACKSPACE);
+    CHECK_STR(t.text, "");
+
+    /* Empty is the way out, as on any one-line field. */
+    CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_CLEAR), ND_WIDGET_RESULT_CANCEL);
+    CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_ENTER), ND_WIDGET_RESULT_CONFIRM);
+
+    /* Clearing the mask hands the field back to the ordinary path. Two digits
+     * are the proof: masked they would read "11:", unmasked they are just
+     * "11". (A letter would still be refused -- the field's NUMBERS filter is
+     * a separate thing from the mask and outlives it.) */
+    nd_textinput_set_mask(&t, NULL);
+    CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_1), ND_WIDGET_RESULT_TYPED);
+    CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_1), ND_WIDGET_RESULT_TYPED);
+    CHECK_STR(t.text, "11");
+    CHECK_INT(nd_textinput_handle_key(&t, 30), ND_WIDGET_RESULT_NONE);
+}
+
 static void test_input_filters(void)
 {
     fixture *fx = &g_fx;
@@ -1122,6 +1181,7 @@ int main(void)
     test_pencil_pixel_counts();
     test_indicator_size();
     test_textinput_qwerty();
+    test_textinput_mask();
     test_input_filters();
     test_textinput_cap();
     test_textinput_multitap();

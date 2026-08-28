@@ -137,6 +137,14 @@ void nd_vlist_draw(nd_vlist *l)
 
     if (l->selected_index < l->window_start)
         l->window_start = l->selected_index;
+    /* And the same the other way. The key loop below keeps this invariant
+     * itself, so this only ever fires on the first draw after a CALLER set
+     * selected_index by hand -- Settings and Sleepy both open a list on the
+     * value already in force. Without it a preselected row past the first
+     * windowful is simply not in the window, and the frame comes back with no
+     * selection bar at all: a menu that looks like it has lost its place. */
+    else if (l->selected_index >= l->window_start + l->max_lines)
+        l->window_start = l->selected_index - l->max_lines + 1u;
     max_start = (l->n_items > l->max_lines) ? (l->n_items - l->max_lines) : 0u;
     if (l->window_start > max_start)
         l->window_start = max_start;

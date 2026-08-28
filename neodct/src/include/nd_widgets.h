@@ -200,6 +200,8 @@ typedef struct {
     bool show_select_hint;
     const char *title;
     const char *const *items;
+    /* Parallel to items, or NULL. See nd_pagedlist_set_values(). */
+    const char *const *values;
     size_t n_items;
     size_t selected_index;
     int32_t content_top;    /* 38  */
@@ -209,6 +211,17 @@ typedef struct {
 
 void nd_pagedlist_init(nd_pagedlist *p, nd_ui *ui, const char *title, const char *const *items,
                        size_t n_items, const char *root_id, bool show_select_hint);
+
+/* Give each row a second line showing what it is currently SET to -- "Off"
+ * under "Alarm clock", "11:54 am" under "Clock settings". The array is
+ * parallel to items and is not copied; a NULL array, or a NULL or empty entry
+ * within it, draws nothing and leaves the row exactly as it was.
+ *
+ * The pair is centred as one block, so a row with a value sits slightly higher
+ * than one without rather than the name staying put and the value hanging off
+ * the bottom. A list that passes no values is unchanged to the pixel, which is
+ * what keeps the Call Log, Tones and Messages frames valid. */
+void nd_pagedlist_set_values(nd_pagedlist *p, const char *const *values);
 void nd_pagedlist_draw(nd_pagedlist *p);
 int32_t nd_pagedlist_show(nd_pagedlist *p);
 
@@ -257,11 +270,27 @@ typedef struct {
     size_t cap; /* its capacity in bytes               */
     nd_t9_engine t9;
     nd_predictive predict;
+    /* NULL for an ordinary field. See nd_textinput_set_mask(). */
+    const char *mask;
 } nd_textinput;
 
 /* filter is passed straight to the T9 engine and also gates the QWERTY path. */
 nd_err nd_textinput_init(nd_textinput *t, nd_ui *ui, const char *title, const char *prompt,
                          char *text_buf, size_t cap, const char *initial, nd_t9_filter filter);
+
+/* Turn the field into a fixed-shape numeric one: "##:##" for a time,
+ * "##/##/####" for a date. See nd_timeset.h, which owns the engine and the
+ * reasoning; this is only the wiring.
+ *
+ * A masked field BYPASSES T9 ENTIRELY -- no multi-tap, no predictive word, no
+ * # mode cycle, and no mode indicator drawn. That is not a shortcut: none of
+ * them mean anything when every slot takes one digit and only one, and a
+ * multi-tap timeout on a keypad where 2 must be 2 rather than A would make
+ * the field unusable on the hardware it is for.
+ *
+ * The buffer must be at least strlen(mask) + 1. Pass NULL to go back to an
+ * ordinary field. */
+void nd_textinput_set_mask(nd_textinput *t, const char *mask);
 
 /* blink_state draws the trailing "_" cursor. Because the cursor changes the
  * measured INK HEIGHT of the line, the text visibly jumps as you type:

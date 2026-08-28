@@ -295,7 +295,7 @@ static void check_frame(nd_capture *cap, const nd_json_doc *golden, const char *
  * The registry
  * ------------------------------------------------------------------ */
 
-/* The 24 shipped manifests in the order `sort(key=lambda x: x["id"])` puts
+/* The 25 shipped manifests in the order `sort(key=lambda x: x["id"])` puts
  * them. This is the list the menu walks, so the index of each name is also
  * its page number minus one, and every scrollbar notch in the nine frames is
  * derived from it. */
@@ -325,6 +325,7 @@ static const struct {
     {9005, "ModemInfo", "/NeoDCT/System/engineering/apps/Modem"},
     {9006, "Downgrade", "/NeoDCT/System/engineering/apps/Downgrade"},
     {9007, "Bluetooth", "/NeoDCT/System/engineering/apps/Bluetooth"},
+    {9008, "Sleepy", "/NeoDCT/System/engineering/apps/Sleepy"},
     {9990, "Remote Shell", "/NeoDCT/System/engineering/apps/RemoteShell"},
     {9997, "Crash", "/NeoDCT/System/engineering/apps/Crash"},
     {9998, "Cube Bench", "/NeoDCT/System/engineering/apps/CubeBench"},
@@ -399,7 +400,7 @@ static void test_engineering_off(void)
     stock = nd_ui_scan_apps(ND_PATH_APPS_DIR, apps, ND_APP_MAX);
     eng = nd_ui_scan_apps(ND_PATH_ENG_APPS_DIR, apps, ND_APP_MAX);
     CHECK_INT(stock, 13, "thirteen stock apps");
-    CHECK_INT(eng, 11, "eleven engineering apps");
+    CHECK_INT(eng, 12, "twelve engineering apps");
 }
 
 /* ------------------------------------------------------------------ *

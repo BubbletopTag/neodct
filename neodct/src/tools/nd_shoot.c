@@ -1081,10 +1081,13 @@ static void shoot_telephony(nd_capture *cap)
  *                   here by the app rather than by the widget gallery.
  *   app-messages-   the "No Messages" empty state, and the ONE case in this
  *   inbox           table that is not app_run(). See below.
- *   app-clock       section 3.6 records app-clock as byte-identical to
- *                   widget-messagedialog because the Clock app IS a "This
- *                   application has not been implemented yet." dialog, so the
- *                   one shipped stub app.so draws it for real.
+ *   app-clock       the Clock app's three-row PagedList. It WAS byte-identical
+ *                   to widget-messagedialog -- section 3.6 records that, and
+ *                   it was true for as long as the Clock app was a "not
+ *                   implemented yet" dialog. The app is real now and
+ *                   the frame is its root menu; the two are no longer the
+ *                   same picture and section 3.6 is history rather than a
+ *                   rule.
  *
  * The other ten stock apps draw their own screens; the stub cannot stand in
  * for any of them and they stay skipped.
@@ -1324,7 +1327,12 @@ static const struct {
      ND_APP_SYM_RUN},
     {"Calculator", CALC_OPT_FRAMES, "app-calculator-options", CALC_OPT_KEYS,
      ND_ARRAY_LEN(CALC_OPT_KEYS), ND_KEY_NONE, ND_APP_SYM_RUN},
-    {"Clock", 240, "app-clock", NULL, 0u, ND_KEY_ENTER, ND_APP_SYM_RUN},
+    /* CLEAR, not ENTER. The Clock app is a three-row PagedList
+     * now rather than a dialog, so it behaves like Tones directly below:
+     * ENTER would open the Alarm row's dialog, dismiss it, come back to the
+     * menu and do it again for ever. Back on the first screen returns from
+     * run() at once and the frame already committed is the one saved. */
+    {"Clock", 240, "app-clock", NULL, 0u, ND_KEY_CLEAR, ND_APP_SYM_RUN},
     /* Tones' PagedList flushes the channel before it draws, so its way out
      * has to be a held key like Clock's rather than a queued one. Back on
      * the first screen returns from run() at once, and the frame already

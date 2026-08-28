@@ -68,6 +68,7 @@
 #include "nd_clock.h"
 #include "nd_log.h"
 #include "nd_paths.h"
+#include "nd_settings.h"
 #include "nd_types.h"
 #include "nd_vclock.h"
 
@@ -749,6 +750,16 @@ static clock_worker_args *worker_args_new(const char *const *servers, size_t n)
     return args;
 }
 
+bool nd_clock_ntp_enabled(void)
+{
+    char stored[32];
+
+    (void)nd_settings_get_copy(ND_SET_CLOCK_NTP, ND_SET_CLOCK_NTP_DFLT, stored, sizeof stored);
+    /* Default true on an unreadable or absent value: a phone that lost its
+     * settings should come back with a clock that fixes itself. */
+    return nd_setting_is_enabled(stored, true);
+}
+
 void nd_clock_start(bool background, const char *const *servers, size_t n)
 {
     clock_worker_args *args;
@@ -764,8 +775,21 @@ void nd_clock_start(bool background, const char *const *servers, size_t n)
     }
 
     /* Synchronous, because it needs no network and everything that follows --
-     * the TLS handshake the browser is about to attempt -- depends on it. */
+     * the TLS handshake the browser is about to attempt -- depends on it.
+     *
+     * ALWAYS, whatever the NTP setting says. The floor is not a sync: it moves
+     * a clock that reads 1970 up to the build epoch, and a phone that skipped
+     * it could not verify an update's signature or complete a TLS handshake.
+     * "I set my own time" is a request to be left alone by the network, not a
+     * request to be allowed to boot into 1970. */
     (void)nd_clock_apply_floor(NULL);
+
+    /* The setting gates the NETWORK half only, and is read here rather than in
+     * the worker so that a phone with it off never starts a thread at all. */
+    if (!nd_clock_ntp_enabled()) {
+        nd_log(ND_LOG_CLOCK, "NTP sync is off; keeping the clock as it is");
+        return;
+    }
 
     if (!background) {
         clock_sync_when_routed(servers, n);

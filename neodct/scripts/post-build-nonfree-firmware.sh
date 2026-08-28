@@ -40,4 +40,26 @@ for f in "$NONFREE"/rtl_bt/*.bin "$NONFREE"/rtl_bt/LICENCE.*; do
     install -m 0644 "$f" "$TARGET/lib/firmware/rtl_bt/"
 done
 
+# The same blob under the name THIS kernel asks for.
+#
+# btrtl picks a filename from what the chip reports about itself. The UB500
+# answers lmp_subver=0x8761, hci_rev=0x0b, and the phone's 5.10 kernel maps
+# that pair to "rtl8761b_fw.bin". Kernels from 5.15 on split the USB part out
+# as its own entry and ask for "rtl8761bu_fw.bin" instead -- which is the name
+# linux-firmware ships, and the name in neodct/nonfree/.
+#
+# Same silicon, same bytes, two spellings across kernel vintages. Installing
+# both means the image does not care which kernel it is booted under, and the
+# alternative -- patching the filename into btrtl -- would put a rootfs concern
+# inside the kernel and break a genuine 8761B if one were ever attached.
+#
+# Copied, not linked: the rootfs is squashfs and a dangling link here is a
+# firmware load that fails with -2 and a Bluetooth adapter with no address.
+for pair in "rtl8761bu_fw.bin:rtl8761b_fw.bin" \
+            "rtl8761bu_config.bin:rtl8761b_config.bin"; do
+    src="$NONFREE/rtl_bt/${pair%%:*}"
+    dst="$TARGET/lib/firmware/rtl_bt/${pair##*:}"
+    [ -f "$src" ] && install -m 0644 "$src" "$dst"
+done
+
 echo "[post-build] non-free firmware: $(ls "$TARGET/lib/firmware/rtl_bt" | tr '\n' ' ')"

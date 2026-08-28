@@ -27,7 +27,7 @@
     },
     {
       "name": "app-clock",
-      "sha256": "351c038a8c2447ae2f182495a63dfb933f221ee8172e9e8d369a099ba7e0aff7",
+      "sha256": "94c8faefbc70bb2b944dc43dd92575ddc3cea021f46a7ec87bc8389c33e260c8",
       "size": [
         240,
         175
@@ -237,7 +237,7 @@
     },
     {
       "name": "menu-browser",
-      "sha256": "2a799bfc61c5f0c8af59c0a0a4e1a5bfd07c227f29038f6e4a0d7294e0664c31",
+      "sha256": "a5102ee4e9b740801da40bcc79ed68f0be14d35925998193f1e19674b85c7280",
       "size": [
         240,
         175
@@ -245,7 +245,7 @@
     },
     {
       "name": "menu-calculator",
-      "sha256": "3770493e63bc23afbc722897c0552dffe138a7f413d3c275611c7ef6c8dc96be",
+      "sha256": "e0bea80057d8d5b0baf481bb9b7a4094d52a9bc84af550a18f780eb2d1a37eb7",
       "size": [
         240,
         175
@@ -253,7 +253,7 @@
     },
     {
       "name": "menu-games",
-      "sha256": "8e17991c6c1f2507dfcad7d2f9baf556671ff7ebe60a1bb837af5a0e3542179c",
+      "sha256": "90cd31cb91c8ddb3142e3dd75cb80e4360505e7dcff8b78eaefd410fbe3bbe75",
       "size": [
         240,
         175
@@ -261,7 +261,7 @@
     },
     {
       "name": "menu-koki-mobile",
-      "sha256": "3e8b6cca90efa67b87ea7634fe95d536fbef667c471f87b77d996ba186cdaac7",
+      "sha256": "5c61eebfe0fead01a8f032da8086fa568368d64ba65130f59d2b9f585e6ae70b",
       "size": [
         240,
         175
@@ -277,7 +277,7 @@
     },
     {
       "name": "menu-music",
-      "sha256": "bf138a5a19933f5d3b6e186dc18c4f1f9b8336b23613c05a8bc4e6d172da68e5",
+      "sha256": "aecbf9f42fecf138c1bb46b6c8aef74b7aba2e44224a993a5d8c034e0b8077b0",
       "size": [
         240,
         175
