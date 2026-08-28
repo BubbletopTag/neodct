@@ -1906,3 +1906,81 @@ tested and released here and still never reach the phone. Repointed, with the
 previous defconfig kept beside it.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+================================================================================
+
+audio: S17audio never turned the capture path on
+
+Hardening, NOT a fix for the bug it was written chasing. Read the last
+section before believing otherwise.
+
+S17audio has always done the routing -- find the USB card by usbid, write
+asound.conf, bypass dmix -- and then stopped. It never touched the mixer, and
+nothing else does either: there is no alsactl in this image, so no saved
+state is restored at boot. The phone gets whatever the driver defaults to, on
+every boot and every replug. That is a real gap whatever else is true.
+
+enable_capture() now switches on anything named "... Capture Switch" and
+raises anything named "... Capture Volume" to NEODCT_CAPTURE_LEVEL (80%).
+
+## by numid, and only where the name is unambiguous
+
+The obvious version is `amixer sset Mic 80%`, and on the hardware this was
+written for it is WRONG. A real C-Media adapter (0d8c:0014), read off the
+device itself, publishes:
+
+    Mic Capture Volume      Mic Capture Switch
+    Mic Playback Volume     Mic Playback Switch    <- monitor, mic to speaker
+    Auto Gain Control       Speaker Playback Volume/Switch
+
+ALSA's simple mixer merges the two Mic rows into ONE control carrying both
+pvolume and cvolume, so sset raises the monitor path as well and puts the
+microphone into the earpiece. On a phone that is feedback -- a worse bug than
+the silence being chased. The first version of this commit did exactly that
+and its own test passed, because the fake amixer in that test had no control
+with both capabilities. The test now models the real card's control list.
+
+Kernel control names have no such ambiguity, and numid avoids quoting a name
+with spaces in it. A volume whose name does not say Capture is left alone:
+snd-dummy publishes "Mic Volume" + "Mic Capture Switch", an old ISA-style
+mixer where one volume serves both directions, and on the cards that matter
+that shape is the monitor path. Switch on, volume untouched, deliberately.
+
+Auto Gain Control is left alone too. It is a sound-quality choice rather than
+a correctness one and not this script's decision to make.
+
+## tests
+
+Seven in test_s17audio.py against the real card's control layout, including
+explicit ones that the monitor path, the speaker and AGC are NOT touched.
+The script gained NEODCT_ASOUND_CONF / NEODCT_PROC_ASOUND / NEODCT_AMIXER
+overrides so the whole thing can be driven, routing included -- it had no
+tests at all before.
+
+neodct/tools/test_mic_capture.sh does it against real ALSA: snd-dummy (a
+module, so it costs nothing on an ordinary boot) gives a card with genuine
+capture controls, it is muted first, and the real script with the real amixer
+turns it back on. The unit tests use an amixer this commit wrote, so they
+would pass just as happily if the parsing were wrong; this one would not.
+
+## what this does NOT fix
+
+The bug that prompted it: an electret on a C-Media card recording nothing on
+the phone. Measured over the serial console on the hardware itself, capture
+was already ON -- switch on, AGC on, volume 20 of 35 -- so this changes
+nothing there. Raised to maximum, the capsule gives peak 27 and mean 12 out
+of 32767, which is the noise floor. arecord runs clean at the right rate and
+returns real data; there is simply no signal in it. The one promising number,
+a peak of 8308, was the open-the-device transient and vanished on the next
+recording.
+
+The card, the driver, the mixer and MicTest are all behaving correctly. That
+leaves the capsule or its wiring.
+
+Also worth its own change, not made here: MicTest cannot tell those apart. It
+sends arecord's stderr to /dev/null and treats an empty pipe as normal, so a
+recorder that failed to open the device and a microphone recording silence
+draw the identical flat line. For an app whose whole purpose is answering "is
+the microphone working", that is the wrong answer to give twice.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
