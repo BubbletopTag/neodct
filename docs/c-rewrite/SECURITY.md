@@ -3,28 +3,39 @@
 **Status: not being implemented now.** This records a design conversation so the hooks
 stay in place and none of it needs retrofitting later. Nothing here blocks the port.
 
+**For what the phone actually does today, read `SECURITY-AUDIT.md` instead.** This file
+is a plan; that one is a measurement, with the line numbers. Where they disagree, the
+audit is right.
+
 ---
 
 ## Where the phone stands today
 
-Two things are already right:
+One thing is already right:
 
 - **`/` is read-only squashfs under dm-verity.** Only `/NeoDCT/User` is writable, so
-  malware cannot modify the OS.
-- **The update signing key lives in that read-only image.** Even a total root compromise
-  cannot make a malicious `.ndsw` verify, because the attacker can neither replace the
-  trusted public key nor forge a signature without the private half. The phone can be
-  attacked but it cannot be permanently backdoored through the update path. That is a
-  better property than many shipping devices have.
+  nothing running on the phone can modify the OS image in place.
 
-One thing is not:
+Two are not:
 
 - **Everything runs as root.** Every process has every permission. A bug anywhere is a
   bug everywhere.
+- **dm-verity is an integrity guarantee, not an authenticity one.** This paragraph used
+  to claim the phone "cannot be permanently backdoored through the update path", on the
+  grounds that the signing key lives in the read-only image. That was wrong, and it was
+  wrong in the direction that matters. The signature is checked by the Update *app*, in
+  userspace; the record it produces (`/NeoDCT/User/.ndsys/pending.prop`) and the verity
+  root hash it later installs (`installed.prop`) both live on the **writable** partition,
+  and `initramfs/ndsys-apply.sh` verifies no signature before writing the image to the
+  system device. So a root process stages its own image, records its own root hash, and
+  the next boot verifies cleanly against it forever. `initramfs/init` says as much in its
+  own comment. See SECURITY-AUDIT.md section 3 for the chain and the two fixes; the real
+  one is `CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG` with the release certificate in the
+  kernel, which the init script already names as the upgrade path.
 
-Traditional Unix permissions cannot fix that, because root bypasses them by definition.
-Mandatory access control — SELinux — is the mechanism that constrains root, which makes
-it the right tool for exactly this situation.
+Traditional Unix permissions cannot fix the root problem, because root bypasses them by
+definition. Mandatory access control — SELinux — is the mechanism that constrains root,
+which makes it the right tool for exactly this situation.
 
 ---
 
