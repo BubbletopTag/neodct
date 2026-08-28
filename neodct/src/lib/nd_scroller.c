@@ -196,21 +196,30 @@ bool nd_scroller_draw(nd_scroller *s)
     return last_page;
 }
 
+/* See nd_ui_set_repaint(). The return value says whether this is the last
+ * page, which a repaint cannot change -- it redraws the page that is up. */
+static void scroller_repaint(void *ctx)
+{
+    (void)nd_scroller_draw((nd_scroller *)ctx);
+}
+
 void nd_scroller_show(nd_scroller *s)
 {
+    nd_ui_repaint saved;
     bool last_page;
 
     if (s == NULL)
         return;
 
     last_page = nd_scroller_draw(s);
+    saved = nd_ui_set_repaint(s->ui, scroller_repaint, s);
 
     for (;;) {
         int32_t key = nd_ui_wait_for_key(s->ui);
 
         if (key == ND_KEY_ENTER || key == ND_KEY_DOWN) {
             if (last_page)
-                return;
+                break;
             s->page++;
             last_page = nd_scroller_draw(s);
         } else if (key == ND_KEY_UP) {
@@ -219,7 +228,9 @@ void nd_scroller_show(nd_scroller *s)
                 last_page = nd_scroller_draw(s);
             }
         } else if (key == ND_KEY_CLEAR) {
-            return;
+            break;
         }
     }
+
+    nd_ui_restore_repaint(s->ui, saved);
 }

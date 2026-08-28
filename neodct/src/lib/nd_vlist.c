@@ -235,19 +235,31 @@ int32_t nd_vlist_handle_key(nd_vlist *l, int32_t key)
     return ND_VLIST_CONTINUE;
 }
 
+/* See nd_ui_set_repaint(). */
+static void vlist_repaint(void *ctx)
+{
+    nd_vlist_draw((nd_vlist *)ctx);
+}
+
 int32_t nd_vlist_show(nd_vlist *l)
 {
+    nd_ui_repaint saved;
+    int32_t out;
+
     if (l == NULL)
         return ND_WIDGET_BACK;
 
     nd_vlist_draw(l);
+    saved = nd_ui_set_repaint(l->ui, vlist_repaint, l);
 
     for (;;) {
         int32_t key = nd_ui_wait_for_key(l->ui);
         int32_t r = nd_vlist_handle_key(l, key);
 
-        if (r != ND_VLIST_CONTINUE)
-            return r;
+        if (r != ND_VLIST_CONTINUE) {
+            out = r;
+            break;
+        }
 
         /* Python redraws on Up and Down UNCONDITIONALLY -- including at the
          * ends of the list, where nothing moved. Keep it: the redraw is what
@@ -257,6 +269,9 @@ int32_t nd_vlist_show(nd_vlist *l)
         if (key == ND_KEY_UP || key == ND_KEY_DOWN)
             nd_vlist_draw(l);
     }
+
+    nd_ui_restore_repaint(l->ui, saved);
+    return out;
 }
 
 /* ================================================================== *

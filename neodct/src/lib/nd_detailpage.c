@@ -716,17 +716,34 @@ static bool key_in(const int32_t *keys, size_t n, int32_t key)
     return false;
 }
 
+/* See nd_ui_set_repaint(). */
+static void detailpage_repaint(void *ctx)
+{
+    nd_detailpage_draw((nd_detailpage *)ctx);
+}
+
 int32_t nd_detailpage_show(nd_detailpage *p)
 {
     if (p == NULL)
         return ND_KEY_NONE;
 
     nd_detailpage_draw(p);
-    for (;;) {
-        int32_t key = nd_ui_wait_for_key(p->ui);
+    {
+        nd_ui_repaint saved = nd_ui_set_repaint(p->ui, detailpage_repaint, p);
+        int32_t out;
 
-        if (key_in(p->accept_keys, p->n_accept, key) || key_in(p->cancel_keys, p->n_cancel, key))
-            return key;
-        (void)nd_detailpage_handle_key(p, key);
+        for (;;) {
+            int32_t key = nd_ui_wait_for_key(p->ui);
+
+            if (key_in(p->accept_keys, p->n_accept, key) ||
+                key_in(p->cancel_keys, p->n_cancel, key)) {
+                out = key;
+                break;
+            }
+            (void)nd_detailpage_handle_key(p, key);
+        }
+
+        nd_ui_restore_repaint(p->ui, saved);
+        return out;
     }
 }

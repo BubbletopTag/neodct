@@ -19,9 +19,11 @@ Added
   clock. The decoder walks the file instead and keeps one composed frame, so
   an animation costs about 226 KB no matter how long it is. The main loop
   wakes for the frame that is due and no sooner; a still wallpaper polls
-  exactly as it always did. Apps show the first frame and hold no decoder --
-  only the process running the frame loop can advance one, so anything else
-  would be 226 KB and an open file waiting for a frame that never comes.
+  exactly as it always did.
+  It keeps moving inside menus and inside apps, which took more than the
+  frame loop: every widget is a blocking wait, and the frame loop is stuck
+  inside whichever one is open. A widget hands the UI a way to redraw itself
+  for the duration, and the key wait advances the wallpaper and calls it.
   The decoder is ours -- GIF87a and GIF89a, interlace, transparency and all
   three disposal methods -- because adding a Buildroot package to read one
   wallpaper format costs more than six hundred lines of a 1984 algorithm.

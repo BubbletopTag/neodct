@@ -706,6 +706,20 @@ static void test_chrome_background(nd_fb *fb)
  * The animated wallpaper
  * ------------------------------------------------------------------ */
 
+/* A stand-in for a widget's draw(). It PRESENTS, because under the virtual
+ * clock time only moves when a frame is committed -- which is also true of
+ * every real widget's draw, and is what lets one repaint lead to the next. */
+static nd_ui *g_repaint_ui;
+
+static void count_repaint(void *ctx)
+{
+    int *n = ctx;
+
+    (*n)++;
+    if (g_repaint_ui != NULL)
+        (void)nd_ui_present(g_repaint_ui);
+}
+
 static void test_animated_wallpaper(nd_fb *fb)
 {
     nd_ui ui;
@@ -824,6 +838,64 @@ static void test_animated_wallpaper(nd_fb *fb)
                       "and the picture on the canvas is a different frame");
                 nd_image_free(f0);
             }
+        }
+        nd_ui_teardown(&ui);
+    }
+
+    /* ---- a blocked widget keeps the wallpaper moving ---- *
+     *
+     * nd_ui_update() is the core's frame loop, and a widget is a BLOCKING
+     * loop that the core loop is inside. So an animated wallpaper froze the
+     * moment any menu opened -- which is most of the time anyone is looking
+     * at the phone. nd_ui_set_repaint() is the fix and this is the assertion
+     * that it is wired up: with a repainter registered, a bare
+     * nd_ui_read_keypress() must advance the wallpaper and call back. */
+    write_settings("Classroom.gif");
+    nd_vclock_enable();
+    nd_ui_sim_clear(&ui);
+    if (nd_ui_init(&ui, fb) == ND_OK) {
+        if (nd_ui_wallpaper(&ui) == NULL) {
+            g_skips++;
+            fprintf(stderr, "SKIP blocked-widget repaint: Classroom.gif did not load\n");
+        } else {
+            int calls = 0;
+            nd_ui_repaint saved;
+            int i;
+
+            /* Without a repainter, a key wait must change nothing: the core
+             * loop draws its own frames and a second tick here would be a
+             * behaviour change for it. */
+            {
+                uint32_t gen0 = ui.home_.wallpaper_gen;
+
+                for (i = 0; i < 5; i++)
+                    (void)nd_ui_read_keypress(&ui, 0.0);
+                CHECK(ui.home_.wallpaper_gen == gen0,
+                      "a key wait with no repainter leaves the wallpaper alone");
+            }
+
+            /* Every real widget draws once before it starts waiting, and
+             * under the virtual clock that first committed frame is what
+             * moves time far enough for the next wallpaper frame to be due.
+             * Without it nothing is ever owed and nothing repaints -- which
+             * is correct, not a bug: a wallpaper that is not due should not
+             * be redrawn. */
+            g_repaint_ui = &ui;
+            (void)nd_ui_present(&ui);
+
+            saved = nd_ui_set_repaint(&ui, count_repaint, &calls);
+            for (i = 0; i < 5; i++)
+                (void)nd_ui_read_keypress(&ui, 0.0);
+            CHECK(calls > 0, "a registered repainter is called while the widget waits");
+
+            /* And restoring puts back exactly what was there, which is what
+             * makes a dialog opened from a list safe. */
+            nd_ui_restore_repaint(&ui, saved);
+            calls = 0;
+            for (i = 0; i < 5; i++)
+                (void)nd_ui_read_keypress(&ui, 0.0);
+            CHECK_INT(calls, 0, "restoring the previous repainter unhooks this one");
+            g_repaint_ui = NULL;
         }
         nd_ui_teardown(&ui);
     }

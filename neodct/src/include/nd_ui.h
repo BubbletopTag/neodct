@@ -213,13 +213,23 @@ typedef struct nd_ui {
     nd_battery *battery;
     nd_notify *notify;
 
-    /* --- whether THIS PROCESS drives the animation --- *
+    /* --- how a BLOCKED widget repaints itself; see nd_ui_set_repaint() --- */
+    struct nd_ui_repaint_slot {
+        void (*fn)(void *ctx);
+        void *ctx;
+        bool running; /* reentrancy guard: a repaint must not nest */
+    } repaint_;
+
+    /* --- whether THIS PROCESS can advance the animation --- *
      *
-     * true in the core, false in an app. nd_ui_tick_wallpaper() has exactly
-     * one caller, nd_ui_update(), and an app process never calls it -- so an
-     * app that opened a decoder would hold ~226 KB and a file descriptor on
-     * the SD card for a frame it can never advance to. It gets the still
-     * first frame instead, which is what it would have shown anyway. */
+     * true in the core and in an app; false only for a hand-built context
+     * that runs no loop at all, which is what the host test fixtures are.
+     * Such a context would hold ~226 KB and a descriptor on the SD card for a
+     * frame it could never reach, so it takes the still first frame instead.
+     *
+     * An app has no frame loop of its own but does animate: every widget it
+     * opens blocks in nd_ui_wait_for_key(), which is where the wallpaper is
+     * advanced and the widget repainted. See nd_ui_set_repaint(). */
     bool drives_wallpaper;
 
     /* --- what THIS PROCESS is allowed to draw the wallpaper behind --- *
@@ -433,6 +443,43 @@ void nd_ui_paint_chrome_content(nd_ui *ui);
  * nd_ui_refresh_after_app(), because Settings is an app and turning the
  * feature off must show on the next screen drawn. */
 void nd_ui_invalidate_chrome(nd_ui *ui);
+
+/* ------------------------------------------------------------------ *
+ * Repainting a widget that is blocked on a key
+ * ------------------------------------------------------------------ *
+ *
+ * THE PROBLEM THIS SOLVES. nd_ui_update() advances the wallpaper once per
+ * frame, and the core loop calls it. But every widget is a BLOCKING loop --
+ * nd_vlist_show() draws once and then sits in nd_ui_wait_for_key() until you
+ * press something -- and while one is up, the core loop is inside it. So the
+ * animation stopped dead the moment a menu opened, which is most of the time
+ * anyone is looking at the phone.
+ *
+ * A widget therefore hands over a way to redraw itself for the duration. The
+ * key wait advances the wallpaper and, on the frames where it moved, calls
+ * that back; the widget's own draw() puts the menu back on top of the new
+ * background. Nothing else about the widget changes, and a widget that does
+ * not register one behaves exactly as it did.
+ *
+ * IT IS SAVE-AND-RESTORE, NOT SET-AND-CLEAR, because widgets nest: a dialog
+ * opened from a list must give the list its repainter back on the way out.
+ *
+ *     nd_ui_repaint saved = nd_ui_set_repaint(ui, my_repaint, self);
+ *     ... blocking loop ...
+ *     nd_ui_restore_repaint(ui, saved);
+ *
+ * THE CALLBACK MUST NOT BLOCK and must not wait for a key itself -- it is
+ * called from inside the key wait. Drawing and presenting is all it may do.
+ * A nested call is refused rather than recursed into.
+ */
+typedef struct {
+    void (*fn)(void *ctx);
+    void *ctx;
+} nd_ui_repaint;
+
+/* Returns what was there, to be handed to nd_ui_restore_repaint(). */
+nd_ui_repaint nd_ui_set_repaint(nd_ui *ui, void (*fn)(void *ctx), void *ctx);
+void nd_ui_restore_repaint(nd_ui *ui, nd_ui_repaint saved);
 
 /* The unread-SMS count. It lives with the home state because that is the
  * only thing that reads it: the flashing envelope in nd_ui_render_home().

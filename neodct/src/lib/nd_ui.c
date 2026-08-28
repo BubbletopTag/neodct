@@ -577,9 +577,9 @@ static bool load_gif_wallpaper(nd_ui *ui, const char *path)
     }
     ui->home_.wallpaper = still;
 
-    /* Only the core animates. An app process never calls nd_ui_update(), so
-     * it never ticks -- holding the decoder open there would cost 226 KB and
-     * a descriptor on the SD card for a frame that can never arrive. */
+    /* A context that runs no loop cannot advance a decoder, and holding one
+     * open there would cost 226 KB and a descriptor on the SD card for a
+     * frame that can never arrive. The core and every app do run one. */
     if (!nd_gif_animated(g) || !ui->drives_wallpaper) {
         nd_gif_close(g);
         return true;
@@ -1333,6 +1333,12 @@ nd_err nd_ui_init_app(nd_ui *ui, nd_fb *fb, int keypad_fd)
      * has already been set by nd-apprun; a hand-built app context with no
      * directory also gets true. */
     ui->app_use_wallpaper = nd_app_manifest_use_wallpaper(nd_app_dir());
+    /* An app animates too. It has no frame loop of its own, but every widget
+     * it opens blocks in nd_ui_wait_for_key(), and that is where the
+     * wallpaper is advanced and the widget repainted -- see
+     * nd_ui_set_repaint(). An app that opted out never loads a wallpaper at
+     * all, so it still opens no decoder and this costs it nothing. */
+    ui->drives_wallpaper = true;
     g_ring_seen_at = 0.0;
 
     (void)nd_settings_init();
@@ -1514,10 +1520,55 @@ static bool ring_tick(nd_ui *ui)
     return true;
 }
 
+nd_ui_repaint nd_ui_set_repaint(nd_ui *ui, void (*fn)(void *ctx), void *ctx)
+{
+    nd_ui_repaint saved;
+
+    saved.fn = NULL;
+    saved.ctx = NULL;
+    if (ui == NULL)
+        return saved;
+
+    saved.fn = ui->repaint_.fn;
+    saved.ctx = ui->repaint_.ctx;
+    ui->repaint_.fn = fn;
+    ui->repaint_.ctx = ctx;
+    return saved;
+}
+
+void nd_ui_restore_repaint(nd_ui *ui, nd_ui_repaint saved)
+{
+    if (ui == NULL)
+        return;
+    ui->repaint_.fn = saved.fn;
+    ui->repaint_.ctx = saved.ctx;
+}
+
+/* Advance the wallpaper and let a blocked widget put itself back on top.
+ *
+ * Only when a widget has registered a repainter: the core loop draws its own
+ * frame straight after this returns, so ticking for it here would change
+ * nothing and the old behaviour is worth leaving exactly as it was. */
+static void repaint_if_wallpaper_moved(nd_ui *ui)
+{
+    if (ui->repaint_.fn == NULL || ui->repaint_.running)
+        return;
+    if (!nd_ui_tick_wallpaper(ui))
+        return;
+
+    /* The callback draws, and drawing can reach code that waits for a key --
+     * a dialog inside a repaint would recurse until the stack ran out. */
+    ui->repaint_.running = true;
+    ui->repaint_.fn(ui->repaint_.ctx);
+    ui->repaint_.running = false;
+}
+
 int32_t nd_ui_read_keypress(nd_ui *ui, double timeout_s)
 {
     if (ui == NULL)
         return ND_KEY_NONE;
+
+    repaint_if_wallpaper_moved(ui);
 
     /* In the CORE these run first, every call. In an APP all three services
      * are NULL and every one is a no-op, which is the plain read nd_ui.h
@@ -1545,7 +1596,11 @@ int32_t nd_ui_read_keypress(nd_ui *ui, double timeout_s)
 int32_t nd_ui_wait_for_key(nd_ui *ui)
 {
     for (;;) {
-        int32_t key = nd_ui_read_keypress(ui, 0.1);
+        /* 0.1 s unless an animated wallpaper owes a frame sooner, which is
+         * what makes a menu animate at the GIF's own rate rather than at the
+         * 10 Hz this poll used to run at. A still wallpaper, or none, gets
+         * exactly the 0.1 s it always got. */
+        int32_t key = nd_ui_read_keypress(ui, nd_ui_frame_timeout(ui, 0.1));
 
         if (key != ND_KEY_NONE)
             return key;

@@ -325,6 +325,12 @@ static bool key_in(const int32_t *keys, size_t n, int32_t key)
     return false;
 }
 
+/* See nd_ui_set_repaint(). */
+static void msgdialog_repaint(void *ctx)
+{
+    dialog_draw((nd_msgdialog *)ctx);
+}
+
 int32_t nd_msgdialog_show(nd_msgdialog *d)
 {
     if (d == NULL)
@@ -333,14 +339,25 @@ int32_t nd_msgdialog_show(nd_msgdialog *d)
     flush_input(d);
     dialog_draw(d);
 
-    for (;;) {
-        int32_t key = nd_ui_wait_for_key(d->ui);
+    {
+        nd_ui_repaint saved = nd_ui_set_repaint(d->ui, msgdialog_repaint, d);
+        int32_t out;
 
-        /* Any other key is ignored with NO redraw. An un-cancellable notice
-         * (n_accept == n_cancel == 0) therefore never returns, which is what
-         * the low-battery shutdown wants -- it is waiting for the power to
-         * go, not for a key. */
-        if (key_in(d->accept_keys, d->n_accept, key) || key_in(d->cancel_keys, d->n_cancel, key))
-            return key;
+        for (;;) {
+            int32_t key = nd_ui_wait_for_key(d->ui);
+
+            /* Any other key is ignored with NO redraw. An un-cancellable
+             * notice (n_accept == n_cancel == 0) therefore never returns,
+             * which is what the low-battery shutdown wants -- it is waiting
+             * for the power to go, not for a key. */
+            if (key_in(d->accept_keys, d->n_accept, key) ||
+                key_in(d->cancel_keys, d->n_cancel, key)) {
+                out = key;
+                break;
+            }
+        }
+
+        nd_ui_restore_repaint(d->ui, saved);
+        return out;
     }
 }
