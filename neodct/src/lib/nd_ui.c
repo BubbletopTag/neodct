@@ -54,6 +54,7 @@
 #include "nd_draw.h"
 #include "nd_fb.h"
 #include "nd_font.h"
+#include "nd_gif.h"
 #include "nd_image.h"
 #include "nd_input.h"
 #include "nd_json.h"
@@ -388,27 +389,17 @@ const nd_image *nd_ui_get_image_scaled(nd_ui *ui, const char *path, double scale
  * Wallpaper
  * ------------------------------------------------------------------ */
 
-/* owned by the caller; free with nd_image_free() */
-nd_image *nd_ui_load_wallpaper(const char *path)
+/* Everything that turns a decoded picture into a wallpaper: to RGB888, to the
+ * panel's size with LANCZOS, then down to 30% brightness. Takes ownership of
+ * `img` either way, so the two callers -- a still file and one frame of an
+ * animation -- cannot disagree about what a wallpaper looks like. */
+static nd_image *wallpaper_from_image(nd_image *img)
 {
-    nd_image *img;
     nd_image *rgb;
     nd_image *scaled;
 
-    if (path == NULL || !nd_path_exists(path)) {
-        nd_log(ND_LOG_UI, "No wallpaper found.");
+    if (img == NULL)
         return NULL;
-    }
-
-    nd_log(ND_LOG_UI, "Loading wallpaper: %s", path);
-
-    /* LOAD_TRUNCATED_IMAGES is set globally by the Python at import; the C
-     * decoder already decodes as far as a truncated JPEG got. */
-    img = nd_image_open(path);
-    if (img == NULL) {
-        nd_log(ND_LOG_UI, "Wallpaper load error: %s", path);
-        return NULL;
-    }
 
     rgb = nd_image_convert(img, ND_PIXFMT_RGB888);
     nd_image_free(img);
@@ -431,6 +422,87 @@ nd_image *nd_ui_load_wallpaper(const char *path)
         return NULL;
     }
     return scaled;
+}
+
+/* The same three steps as wallpaper_from_image(), but INTO AN EXISTING
+ * SURFACE. Two reasons it has to work this way for the animation:
+ *
+ *   1. Every consumer of nd_ui_wallpaper() holds the pointer. nd_appsel keeps
+ *      it for the whole life of the menu (nd_appsel_init takes it as an
+ *      argument), and the softkey bar reads it every repaint. Freeing the
+ *      image and installing a new one on each frame would make all of those
+ *      correct only for as long as nobody ever ticks the wallpaper from
+ *      inside a widget loop -- an invariant nothing enforces and a plausible
+ *      future change would break.
+ *   2. CODING-STANDARDS.md section 4: nothing allocates in the render path.
+ *      A panel-sized GIF, which is what the shipped wallpaper is and what the
+ *      Settings help tells people to use, now allocates NOTHING per frame.
+ *
+ * `dst` must be ND_UI_W x ND_UI_H RGB888. A frame that is not panel-sized
+ * still pays one LANCZOS temporary -- that is the case open_wallpaper logs a
+ * warning about, and it is the resampling rather than the malloc that costs. */
+static bool wallpaper_paint_frame(nd_image *dst, const nd_image *frame)
+{
+    if (dst == NULL || frame == NULL)
+        return false;
+
+    if (frame->w == dst->w && frame->h == dst->h) {
+        /* RGBA8888 -> RGB888, dropping alpha without compositing, which is
+         * what PIL does and what the decoder's transparent-black clear was
+         * chosen to make correct: an undrawn GIF pixel lands as black. */
+        if (nd_image_blit(dst, frame, 0, 0) != ND_OK)
+            return false;
+    } else {
+        /* The expensive branch, and the reason open_wallpaper logs a warning
+         * for a GIF that is not panel-sized.
+         *
+         * FLATTEN TO RGB888 FIRST. nd_image_resize_lanczos() on an RGBA
+         * source premultiplies the whole source and unpremultiplies the whole
+         * output around the resample (nd_resample.c) -- two extra full-image
+         * passes and an extra copy, per frame, for an alpha channel that is
+         * about to be discarded anyway. Converting first drops both passes
+         * and shrinks every remaining one by a quarter. */
+        nd_image *flat = nd_image_convert(frame, ND_PIXFMT_RGB888);
+        nd_image *scaled;
+        nd_err rc;
+
+        if (flat == NULL)
+            return false;
+        scaled = nd_image_resize_lanczos(flat, dst->w, dst->h);
+        nd_image_free(flat);
+        if (scaled == NULL)
+            return false;
+        rc = nd_image_blit(dst, scaled, 0, 0);
+        nd_image_free(scaled);
+        if (rc != ND_OK)
+            return false;
+    }
+
+    return nd_image_brightness(dst, 0.3) == ND_OK;
+}
+
+/* owned by the caller; free with nd_image_free() */
+nd_image *nd_ui_load_wallpaper(const char *path)
+{
+    nd_image *img;
+
+    if (path == NULL || !nd_path_exists(path)) {
+        nd_log(ND_LOG_UI, "No wallpaper found.");
+        return NULL;
+    }
+
+    nd_log(ND_LOG_UI, "Loading wallpaper: %s", path);
+
+    /* LOAD_TRUNCATED_IMAGES is set globally by the Python at import; the C
+     * decoder already decodes as far as a truncated JPEG got. A .gif arrives
+     * here as its first frame -- nd_image.h's GIF branch -- which is exactly
+     * what a still preview of an animated wallpaper should be. */
+    img = nd_image_open(path);
+    if (img == NULL) {
+        nd_log(ND_LOG_UI, "Wallpaper load error: %s", path);
+        return NULL;
+    }
+    return wallpaper_from_image(img);
 }
 
 /* Case-insensitive equality and suffix tests, because the Python spells the
@@ -461,29 +533,129 @@ static bool ends_with_ci(const char *s, const char *suffix)
     return sl >= fl && eq_ci(s + (sl - fl), suffix);
 }
 
-/* Construction step 16, and re-run after every app exit. */
-static nd_image *load_configured_wallpaper(void)
+/* The extensions system.ui.wallpaper will accept. Kept beside the loader
+ * rather than in the Settings app, because the SETTING is what has to be
+ * valid -- Settings only offers a list, and a value can also arrive from a
+ * restored backup or a hand-edited settings.prop. */
+static bool wallpaper_ext_ok(const char *path)
+{
+    return ends_with_ci(path, ".jpg") || ends_with_ci(path, ".jpeg") || ends_with_ci(path, ".gif");
+}
+
+/* Is an animation allowed to run in THIS process, under the configured mode?
+ *
+ * nd_app_dir() is "" in the core and the app's own directory in an app
+ * process, which is the only distinction HOME needs and one the context
+ * already carries -- see nd_app.h. */
+static bool anim_allowed_here(nd_ui *ui)
+{
+    switch (nd_ui_anim_mode_of(ui)) {
+    case ND_UI_ANIM_OFF:
+        return false;
+    case ND_UI_ANIM_HOME:
+        return nd_app_dir()[0] == '\0';
+    case ND_UI_ANIM_ALWAYS:
+    default:
+        return true;
+    }
+}
+
+/* A .gif wallpaper, taken from ONE decoder.
+ *
+ * The obvious shape -- load the still with nd_ui_load_wallpaper(), then open a
+ * decoder for the animation -- decodes the file twice and, worse, leaves the
+ * decoder sitting on frame 0 with frame 0 already on screen, so the first tick
+ * repaints the picture that is already there. One decoder: pull frame 0 for
+ * the still, keep it open for everything after.
+ *
+ * A single-frame GIF closes it again. There is nothing to advance and 226 KB
+ * held open to animate one frame is 226 KB spent on nothing.
+ *
+ * Returns false when the file is not a GIF or would not decode, in which case
+ * nothing has been assigned and the ordinary still path should run. */
+static bool load_gif_wallpaper(nd_ui *ui, const char *path)
+{
+    nd_gif *g;
+    const nd_image *frame;
+    nd_image *still;
+    int32_t delay_ms = ND_GIF_DEFAULT_DELAY_MS;
+
+    if (!ends_with_ci(path, ".gif"))
+        return false;
+
+    g = nd_gif_open(path);
+    if (g == NULL)
+        return false;
+
+    frame = nd_gif_next(g, &delay_ms);
+    still = frame != NULL ? wallpaper_from_image(nd_image_copy(frame)) : NULL;
+    if (still == NULL) {
+        nd_gif_close(g);
+        return false;
+    }
+    ui->home_.wallpaper = still;
+
+    /* Three reasons not to keep the decoder, all of which mean the same
+     * thing: no second frame will ever be shown here, so holding it open
+     * would cost 226 KB and a descriptor on the SD card for nothing.
+     *
+     *   - the file has one frame;
+     *   - this context runs no loop that could advance it (a test fixture);
+     *   - system.ui.wpanimate says not here. OFF means nowhere; HOME means
+     *     the core only, and an app under HOME is exactly the case this is
+     *     worth checking for, because an app would otherwise carry the
+     *     decoder through its whole life to show one frame.
+     */
+    if (!nd_gif_animated(g) || !ui->drives_wallpaper || !anim_allowed_here(ui)) {
+        nd_gif_close(g);
+        return true;
+    }
+
+    nd_log(ND_LOG_UI, "Animated wallpaper: %zu frames, %d ms, %dx%d", nd_gif_frame_count(g),
+           nd_gif_duration_ms(g), nd_gif_width(g), nd_gif_height(g));
+
+    /* A GIF that is not already the panel's size costs a full LANCZOS resample
+     * per frame -- 42,000 output pixels through a 3-lobe filter, every frame,
+     * forever. It works, and on this CPU it is the difference between a
+     * wallpaper and a space heater, so say so once where somebody choosing a
+     * file will see it. */
+    if (nd_gif_width(g) != ND_UI_W || nd_gif_height(g) != ND_UI_H)
+        nd_log(ND_LOG_UI, "Wallpaper is %dx%d, not %dx%d: every frame will be resampled",
+               nd_gif_width(g), nd_gif_height(g), ND_UI_W, ND_UI_H);
+
+    ui->home_.wallpaper_gif = g;
+    /* Frame 0 is ON SCREEN as of now, so the next one is owed after frame 0's
+     * own delay -- not immediately, which would show frame 0 twice. */
+    ui->home_.wallpaper_due = nd_time_now() + (double)delay_ms / 1000.0;
+    return true;
+}
+
+/* Construction step 16, and re-run after every app exit. Assigns
+ * ui->home_.wallpaper, and opens the decoder when the file animates. */
+static void load_configured_wallpaper(nd_ui *ui)
 {
     char setting[ND_PATH_MAX];
 
     if (nd_settings_get_copy(ND_SET_UI_WALLPAPER, ND_SET_UI_WALLPAPER_DFLT, setting,
                              sizeof setting) != ND_OK)
-        return NULL;
+        return;
 
     /* `if wallpaper_setting and wallpaper_setting.upper() != "NONE":` -- and
      * when it IS "NONE", load_wallpaper() is never called, so the
      * "[UI] No wallpaper found." line does not appear either. */
     if (setting[0] == '\0' || eq_ci(setting, "NONE"))
-        return NULL;
+        return;
 
-    if ((ends_with_ci(setting, ".jpg") || ends_with_ci(setting, ".jpeg")) &&
-        nd_path_exists(setting))
-        return nd_ui_load_wallpaper(setting);
+    if (wallpaper_ext_ok(setting) && nd_path_exists(setting)) {
+        nd_log(ND_LOG_UI, "Loading wallpaper: %s", setting);
+        if (!load_gif_wallpaper(ui, setting))
+            ui->home_.wallpaper = nd_ui_load_wallpaper(setting);
+        return;
+    }
 
     nd_log(ND_LOG_UI, "Invalid wallpaper setting: %s", setting);
     if (nd_path_exists(ND_PATH_WALLPAPER))
-        return nd_ui_load_wallpaper(ND_PATH_WALLPAPER);
-    return NULL;
+        ui->home_.wallpaper = nd_ui_load_wallpaper(ND_PATH_WALLPAPER);
 }
 
 /* ------------------------------------------------------------------ *
@@ -643,7 +815,7 @@ nd_image *nd_ui_wallpaper(nd_ui *ui)
         /* Set BEFORE the load, not after: a wallpaper that fails to decode
          * must stay NULL rather than being retried on every frame. */
         ui->home_.wallpaper_ready = true;
-        ui->home_.wallpaper = load_configured_wallpaper();
+        load_configured_wallpaper(ui);
     }
     return ui->home_.wallpaper;
 }
@@ -722,6 +894,241 @@ void nd_ui_set_wallpaper(nd_ui *ui, nd_image *img)
         nd_image_free(ui->home_.wallpaper);
     ui->home_.wallpaper = img;
     ui->home_.wallpaper_ready = true;
+
+    /* An injected still is a still. Leaving a decoder open would let the next
+     * tick paint over the picture the caller just handed us, which is a
+     * baffling thing for a test or for nd-shoot to have to debug. */
+    if (ui->home_.wallpaper_gif != NULL) {
+        nd_gif_close(ui->home_.wallpaper_gif);
+        ui->home_.wallpaper_gif = NULL;
+    }
+    ui->home_.wallpaper_gen++;
+}
+
+/* ------------------------------------------------------------------ *
+ * Animated wallpaper
+ * ------------------------------------------------------------------ */
+
+/* Is there an animation in this process at all?
+ *
+ * A plain field read, and deliberately the FIRST question every caller below
+ * asks. The alternatives -- reading system.ui.wpanimate, or calling into the
+ * decoder -- both cost something, and nd_settings_get() costs a rewrite of
+ * settings.prop whatever key it is handed (the R-24 quirk in nd_settings.h).
+ * An app that opted out of the wallpaper never opens a decoder and must go on
+ * paying nothing, including from the key poll. */
+static bool has_animation(const nd_ui *ui)
+{
+    return ui->home_.wallpaper_ready && ui->home_.wallpaper_gif != NULL;
+}
+
+bool nd_ui_tick_wallpaper(nd_ui *ui)
+{
+    const nd_image *frame;
+    int32_t delay_ms = ND_GIF_DEFAULT_DELAY_MS;
+    double now;
+
+    if (ui == NULL)
+        return false;
+    /* Deliberately not nd_ui_wallpaper(): the tick must not be what FORCES
+     * the lazy load. Every app process runs a loop; if ticking loaded the
+     * wallpaper, every app would pay the load it was made lazy to avoid. */
+    if (!has_animation(ui))
+        return false;
+
+    now = nd_time_now();
+    if (now < ui->home_.wallpaper_due)
+        return false;
+
+    frame = nd_gif_next(ui->home_.wallpaper_gif, &delay_ms);
+    if (frame == NULL) {
+        /* Unplayable after all. Stop asking; whatever still is on screen
+         * stays there rather than the wallpaper vanishing mid-use. */
+        nd_gif_close(ui->home_.wallpaper_gif);
+        ui->home_.wallpaper_gif = NULL;
+        return false;
+    }
+
+    /* BEFORE the paint, and that ordering is load-bearing.
+     *
+     * Scheduled from NOW, not from the previous due time: a phone that spent
+     * 400 ms inside a dialog must not then race through ten frames catching
+     * up. Dropping frames is the right failure for a background.
+     *
+     * And it moves even if the paint below fails, which is the part worth
+     * being careful about. A caller that asked because nd_ui_frame_timeout()
+     * said zero will ask again the instant this returns; if a failed paint
+     * left the deadline in the past, that is a 100% CPU spin -- and the way
+     * the paint fails is an allocation failure on the non-panel-sized path,
+     * so the spin would arrive exactly when the phone was already short of
+     * memory. Moving the deadline first costs one dropped frame instead. */
+    ui->home_.wallpaper_due = now + (double)delay_ms / 1000.0;
+
+    /* IN PLACE -- see wallpaper_paint_frame(). The pointer every consumer
+     * holds never changes for the life of the wallpaper, and a panel-sized
+     * GIF allocates nothing at all per frame. */
+    if (!wallpaper_paint_frame(ui->home_.wallpaper, frame))
+        return false;
+    ui->home_.wallpaper_gen++;
+    return true;
+}
+
+double nd_ui_frame_timeout(nd_ui *ui, double dflt)
+{
+    double left;
+
+    if (ui == NULL || !has_animation(ui))
+        return dflt;
+
+    left = ui->home_.wallpaper_due - nd_time_now();
+    if (left < 0.0)
+        left = 0.0;
+    return left < dflt ? left : dflt;
+}
+
+/* ------------------------------------------------------------------ *
+ * The background under the framework's own chrome
+ * ------------------------------------------------------------------ */
+
+/* Both settings, read once per process and again after every app exit.
+ * Deliberately NOT read per frame: nd_settings_get() carries the R-24
+ * write-on-read quirk (nd_settings.h), so a widget that consulted it while
+ * clearing its background would turn every repaint into a flash write. */
+static void chrome_settings_load(nd_ui *ui)
+{
+    const char *raw;
+    char *end = NULL;
+    double v;
+
+    ui->home_.chrome_ready = true;
+    ui->home_.chrome_enabled = nd_setting_is_enabled(
+        nd_settings_get(ND_SET_UI_WP_EVERYWHERE, ND_SET_UI_WP_EVERYWHERE_DFLT), true);
+
+    raw = nd_settings_get(ND_SET_UI_WP_APP_DIM, ND_SET_UI_WP_APP_DIM_DFLT);
+    if (raw == NULL)
+        raw = ND_SET_UI_WP_APP_DIM_DFLT;
+    v = strtod(raw, &end);
+    /* strtod says "nothing consumed" by leaving end where it started. A value
+     * outside [0,1] is a typo rather than a preference -- 0 is a black screen
+     * and above 1 brightens a picture that was dimmed for contrast -- so both
+     * fall back to the default instead of being clamped to an extreme nobody
+     * can then explain. */
+    if (end == raw || !(v >= 0.0) || v > 1.0)
+        v = strtod(ND_SET_UI_WP_APP_DIM_DFLT, NULL);
+    ui->home_.chrome_dim = v;
+
+    /* Three words rather than a boolean, and compared here rather than
+     * through one of nd_settings.h's three boolean parsers, because it is not
+     * a boolean: see the setting's comment. Anything unrecognised is the
+     * default, which is the prettiest of the three -- a typo must not quietly
+     * turn the feature off. */
+    raw = nd_settings_get(ND_SET_UI_WP_ANIMATE, ND_SET_UI_WP_ANIMATE_DFLT);
+    if (raw != NULL && eq_ci(raw, "HOME"))
+        ui->home_.anim_mode = ND_UI_ANIM_HOME;
+    else if (raw != NULL && (eq_ci(raw, "OFF") || eq_ci(raw, "NEVER")))
+        ui->home_.anim_mode = ND_UI_ANIM_OFF;
+    else
+        ui->home_.anim_mode = ND_UI_ANIM_ALWAYS;
+}
+
+nd_ui_anim_mode nd_ui_anim_mode_of(nd_ui *ui)
+{
+    if (ui == NULL)
+        return ND_UI_ANIM_ALWAYS;
+    if (!ui->home_.chrome_ready)
+        chrome_settings_load(ui);
+    return ui->home_.anim_mode;
+}
+
+void nd_ui_invalidate_chrome(nd_ui *ui)
+{
+    if (ui == NULL)
+        return;
+    nd_image_free(ui->home_.chrome);
+    ui->home_.chrome = NULL;
+    ui->home_.chrome_ready = false;
+    ui->home_.chrome_gen = 0u;
+}
+
+const nd_image *nd_ui_chrome_wallpaper(nd_ui *ui)
+{
+    nd_image *paper;
+
+    if (ui == NULL)
+        return NULL;
+    /* An app that opted out never asks whether a wallpaper exists, so it
+     * never pays the lazy load. That is the 154 ms nd_ui.h's "Lazy home
+     * state" section is about, and this feature must not spend it. */
+    if (!ui->app_use_wallpaper)
+        return NULL;
+
+    if (!ui->home_.chrome_ready)
+        chrome_settings_load(ui);
+    if (!ui->home_.chrome_enabled)
+        return NULL;
+
+    paper = nd_ui_wallpaper(ui);
+    if (paper == NULL)
+        return NULL;
+
+    /* chrome_gen is the wallpaper generation it was built from, plus one, so
+     * that zero can keep meaning "never built". */
+    if (ui->home_.chrome != NULL && ui->home_.chrome_gen == ui->home_.wallpaper_gen + 1u)
+        return ui->home_.chrome;
+
+    nd_image_free(ui->home_.chrome);
+    /* 240x175 RGB888 = 126,000 bytes, one per process that draws chrome. */
+    ui->home_.chrome = nd_image_copy(paper);
+    if (ui->home_.chrome == NULL)
+        return NULL;
+    if (nd_image_brightness(ui->home_.chrome, ui->home_.chrome_dim) != ND_OK) {
+        nd_image_free(ui->home_.chrome);
+        ui->home_.chrome = NULL;
+        return NULL;
+    }
+    ui->home_.chrome_gen = ui->home_.wallpaper_gen + 1u;
+    return ui->home_.chrome;
+}
+
+void nd_ui_paint_chrome(nd_ui *ui, nd_rect r)
+{
+    const nd_image *paper;
+
+    /* Both, because the two branches below use different ones: the black
+     * fill goes through the draw context and the wallpaper goes straight at
+     * the canvas the draw context is bound to. */
+    if (ui == NULL || ui->draw == NULL || ui->canvas == NULL)
+        return;
+
+    paper = nd_ui_chrome_wallpaper(ui);
+    if (paper == NULL) {
+        (void)nd_draw_rect_fill(ui->draw, r, ND_BLACK);
+        return;
+    }
+
+    /* The REGION, not the whole picture. A widget clearing rows 0..144 gets
+     * the wallpaper's rows 0..144, so the softkey strip below it still lines
+     * up with the photograph above it. */
+    (void)nd_image_blit_region(ui->canvas, paper, r, r.x0, r.y0);
+}
+
+/* The two rectangles the call sites actually pass, spelled the way they spell
+ * them: x1 and y1 are ONE PAST the edge here, not the last pixel. That is
+ * wrong for an inclusive rectangle and it is what every widget in the project
+ * has always written, so the fill has always been clipped by one row and one
+ * column. Reproducing the off-by-one rather than fixing it keeps the painted
+ * area identical to the black fill it replaces; both are clipped to the same
+ * place. See rule 1 in nd_widgets.h -- partial clears are load-bearing. */
+void nd_ui_paint_chrome_full(nd_ui *ui)
+{
+    if (ui != NULL)
+        nd_ui_paint_chrome(ui, ND_RECT(0, 0, nd_ui_width(ui), nd_ui_height(ui)));
+}
+
+void nd_ui_paint_chrome_content(nd_ui *ui)
+{
+    if (ui != NULL)
+        nd_ui_paint_chrome(ui, ND_RECT(0, 0, nd_ui_width(ui), nd_ui_content_bottom(ui)));
 }
 
 /* ------------------------------------------------------------------ *
@@ -923,6 +1330,10 @@ nd_err nd_ui_init(nd_ui *ui, nd_fb *fb)
         return ND_ERR_INVAL;
     memset(ui, 0, sizeof *ui);
     ui->keypad_fd = -1;
+    /* The core is not an app and has no manifest to opt out in, and it is
+     * the only process that runs the frame loop the animation needs. */
+    ui->app_use_wallpaper = true;
+    ui->drives_wallpaper = true;
     g_ring_seen_at = 0.0;
 
     (void)nd_settings_init();
@@ -987,6 +1398,18 @@ nd_err nd_ui_init_app(nd_ui *ui, nd_fb *fb, int keypad_fd)
         return ND_ERR_INVAL;
     memset(ui, 0, sizeof *ui);
     ui->keypad_fd = keypad_fd;
+    /* manifest.json's "useWallpaper", read ONCE here rather than per draw --
+     * see nd_app.h. Absent, unparseable and non-boolean all mean true, so an
+     * app written before the key existed keeps the wallpaper. nd_app_dir()
+     * has already been set by nd-apprun; a hand-built app context with no
+     * directory also gets true. */
+    ui->app_use_wallpaper = nd_app_manifest_use_wallpaper(nd_app_dir());
+    /* An app animates too. It has no frame loop of its own, but every widget
+     * it opens blocks in nd_ui_wait_for_key(), and that is where the
+     * wallpaper is advanced and the widget repainted -- see
+     * nd_ui_set_repaint(). An app that opted out never loads a wallpaper at
+     * all, so it still opens no decoder and this costs it nothing. */
+    ui->drives_wallpaper = true;
     g_ring_seen_at = 0.0;
 
     (void)nd_settings_init();
@@ -1050,8 +1473,13 @@ void nd_ui_teardown(nd_ui *ui)
     ui->image_cache = NULL;
     nd_layout_free(ui->home_.home_layout);
     ui->home_.home_layout = NULL;
+    if (ui->home_.wallpaper_gif != NULL)
+        nd_gif_close(ui->home_.wallpaper_gif);
+    ui->home_.wallpaper_gif = NULL;
     nd_image_free(ui->home_.wallpaper);
     ui->home_.wallpaper = NULL;
+    nd_image_free(ui->home_.chrome);
+    ui->home_.chrome = NULL;
 
     nd_font_free(ui->font_s);
     nd_font_free(ui->font_md);
@@ -1163,10 +1591,66 @@ static bool ring_tick(nd_ui *ui)
     return true;
 }
 
+nd_ui_repaint nd_ui_set_repaint(nd_ui *ui, void (*fn)(void *ctx), void *ctx)
+{
+    nd_ui_repaint saved;
+
+    saved.fn = NULL;
+    saved.ctx = NULL;
+    if (ui == NULL)
+        return saved;
+
+    saved.fn = ui->repaint_.fn;
+    saved.ctx = ui->repaint_.ctx;
+    ui->repaint_.fn = fn;
+    ui->repaint_.ctx = ctx;
+    return saved;
+}
+
+void nd_ui_restore_repaint(nd_ui *ui, nd_ui_repaint saved)
+{
+    if (ui == NULL)
+        return;
+    ui->repaint_.fn = saved.fn;
+    ui->repaint_.ctx = saved.ctx;
+}
+
+/* Advance the wallpaper and let a blocked widget put itself back on top.
+ *
+ * Only when a widget has registered a repainter: the core loop draws its own
+ * frame straight after this returns, so ticking for it here would change
+ * nothing and the old behaviour is worth leaving exactly as it was. */
+static void repaint_if_wallpaper_moved(nd_ui *ui)
+{
+    if (ui->repaint_.fn == NULL || ui->repaint_.running)
+        return;
+    /* Before the mode, for the same reason nd_ui_widget_timeout() does it in
+     * this order: this is a key poll and it must stay free. */
+    if (!has_animation(ui))
+        return;
+    /* HOME and OFF both mean "not from a widget": under HOME the home screen
+     * still animates, because that is nd_ui_update()'s tick and not this one.
+     * Checked before the tick so that neither mode advances the decoder the
+     * core is holding -- a widget must not consume frames the home screen is
+     * going to want. */
+    if (nd_ui_anim_mode_of(ui) != ND_UI_ANIM_ALWAYS)
+        return;
+    if (!nd_ui_tick_wallpaper(ui))
+        return;
+
+    /* The callback draws, and drawing can reach code that waits for a key --
+     * a dialog inside a repaint would recurse until the stack ran out. */
+    ui->repaint_.running = true;
+    ui->repaint_.fn(ui->repaint_.ctx);
+    ui->repaint_.running = false;
+}
+
 int32_t nd_ui_read_keypress(nd_ui *ui, double timeout_s)
 {
     if (ui == NULL)
         return ND_KEY_NONE;
+
+    repaint_if_wallpaper_moved(ui);
 
     /* In the CORE these run first, every call. In an APP all three services
      * are NULL and every one is a no-op, which is the plain read nd_ui.h
@@ -1191,10 +1675,27 @@ int32_t nd_ui_read_keypress(nd_ui *ui, double timeout_s)
     return nd_input_read_key(ui->input, timeout_s);
 }
 
+double nd_ui_widget_timeout(nd_ui *ui, double dflt)
+{
+    if (ui == NULL || ui->repaint_.fn == NULL)
+        return dflt;
+    /* Before the mode, because asking the mode reads two settings and this
+     * answers the question for free -- see has_animation(). */
+    if (!has_animation(ui))
+        return dflt;
+    if (nd_ui_anim_mode_of(ui) != ND_UI_ANIM_ALWAYS)
+        return dflt;
+    return nd_ui_frame_timeout(ui, dflt);
+}
+
 int32_t nd_ui_wait_for_key(nd_ui *ui)
 {
     for (;;) {
-        int32_t key = nd_ui_read_keypress(ui, 0.1);
+        /* 0.1 s unless THIS WAIT is one that advances the wallpaper, in which
+         * case it wakes when the next frame is due and a menu animates at the
+         * GIF's own rate. nd_ui_widget_timeout(), not nd_ui_frame_timeout():
+         * the difference is a busy-spin, and its comment says why. */
+        int32_t key = nd_ui_read_keypress(ui, nd_ui_widget_timeout(ui, 0.1));
 
         if (key != ND_KEY_NONE)
             return key;
@@ -1355,6 +1856,11 @@ void nd_ui_update(nd_ui *ui)
 {
     if (ui == NULL)
         return;
+
+    /* The only caller. See nd_ui.h: the home screen, the softkey bar and the
+     * app selector all read the wallpaper on the same frame, so advancing it
+     * from inside nd_ui_wallpaper() would play a 25 fps GIF at 75. */
+    (void)nd_ui_tick_wallpaper(ui);
 
     switch (ui->state) {
     case ND_UI_STATE_HOME:
@@ -1637,11 +2143,18 @@ void nd_ui_refresh_after_app(nd_ui *ui)
     if (ui == NULL)
         return;
 
+    if (ui->home_.wallpaper_gif != NULL)
+        nd_gif_close(ui->home_.wallpaper_gif);
+    ui->home_.wallpaper_gif = NULL;
     nd_image_free(ui->home_.wallpaper);
     ui->home_.wallpaper = NULL;
     ui->home_.wallpaper_ready = false;
     ui->home_.eng_mode_ready = false;
     ui->home_.apps_ready = false;
+
+    /* Settings is an app. Turning wallpaper-everywhere off, or moving the
+     * dim, must show on the very next screen the core draws. */
+    nd_ui_invalidate_chrome(ui);
 
     /* Messages may have been read (or arrived) inside the app. */
     ui->home_.unread_sms_ready = false;

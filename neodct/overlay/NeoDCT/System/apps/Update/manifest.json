@@ -1,5 +1,6 @@
 {
     "name": "Update",
+    "useWallpaper": false,
     "id": "12",
     "icon": "icon.png",
     "exec": "main.py"

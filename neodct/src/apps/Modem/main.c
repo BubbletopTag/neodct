@@ -404,7 +404,7 @@ void nd_modemapp_draw_page(nd_ui *ui, const nd_modem_status *st, bool linked, in
     bottom = nd_ui_content_bottom(ui);
     page_name = nd_modemapp_pages[page];
 
-    (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, screen_w, bottom), ND_BLACK);
+    nd_ui_paint_chrome_content(ui);
     (void)nd_draw_text(ui->draw, 5, 0, "Modem", ui->font_xl, ND_WHITE);
     nd_ui_text_size(ui, page_name, ui->font_s, &tw, &th);
     /* y = 8, not 0: the page tag is small type sitting on the title's

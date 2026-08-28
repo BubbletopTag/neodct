@@ -1,5 +1,6 @@
 {
 	"name": "Cube Bench",
+	"useWallpaper": false,
 	"id": "9998",
 	"icon": "icon.png",
 	"exec": "main.py"

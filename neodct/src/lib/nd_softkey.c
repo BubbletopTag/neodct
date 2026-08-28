@@ -106,19 +106,25 @@ void nd_softkey_update(nd_softkey *bar, const char *text, bool present)
          * skips the temporary the Python allocates thirty times a second. */
         nd_rect src = ND_RECT(0, bar->y_start, screen_w - 1, screen_h - 1);
 
-        painted_slice =
-            nd_image_blit_region(ui->canvas, paper, src, 0, bar->y_start) == ND_OK;
+        painted_slice = nd_image_blit_region(ui->canvas, paper, src, 0, bar->y_start) == ND_OK;
         if (!painted_slice) {
             /* The Python's bare `except: rectangle(..., fill="black")`. */
             (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, bar->y_start, screen_w, screen_h),
                                     ND_BLACK);
         }
     } else {
-        /* OPAQUE: always black, so a scrolling list or a game's graphics
-         * cannot show through. The literal (0, y_start, w, h) is
+        /* OPAQUE. Still opaque: nd_ui_paint_chrome() either blits the
+         * wallpaper's own rows 145..175 or fills black, and both cover
+         * whatever the widget above left in the strip -- a scrolling list or
+         * a game's graphics still cannot show through.
+         *
+         * It has to be the chrome background rather than black, because the
+         * widget that just cleared rows 0..145 used the chrome background
+         * too, and a black band under a wallpapered list is a seam a third of
+         * the way up the phone. The literal (0, y_start, w, h) is
          * Pillow-inclusive and therefore one row and one column past the
          * canvas; both are clipped, which is what Pillow does too. */
-        (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, bar->y_start, screen_w, screen_h), ND_BLACK);
+        nd_ui_paint_chrome(ui, ND_RECT(0, bar->y_start, screen_w, screen_h));
     }
 
     if (text != NULL && text[0] != '\0' && ui->font_n != NULL) {

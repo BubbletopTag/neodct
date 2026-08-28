@@ -159,6 +159,27 @@ Browser 11, Update 12, Music 970, Power 971 — then the engineering apps
 whitespace (some tab-indented, some 4-space, some with a trailing newline and
 some without) — irrelevant, they are parsed not compared.
 
+#### `useWallpaper` — added by the C build
+
+A fifth, optional key. `false` means the framework draws this app's chrome on
+flat black instead of on the wallpaper; see `nd_app.h`. **Absent means true**,
+which is the direction that matters: every manifest above was written before
+the key existed and none of them needs editing, and a third-party app opts
+*out* rather than having to know to opt *in*. A value that is present but not
+a JSON boolean is also true — a background is a preference, and refusing to
+draw one over a typo is worse than ignoring the typo. (`nd_manifest.h`'s rules
+are stricter, deliberately: that file decides whether to overwrite the root
+filesystem.)
+
+Set to `false` in: `Games`, `Koki`, `Update`, `Browser`, and **every**
+engineering app. Games and Koki paint their own full screen; Update and the
+engineering apps are diagnostics, and a photograph behind a dm-verity root
+hash helps nobody. Everything else is left without the key and therefore gets
+the wallpaper.
+
+It is read once per app process, by `nd_ui_init_app()`, into
+`ui->app_use_wallpaper`. Nothing reads it per frame.
+
 ### C destinations
 
 Per `ARCHITECTURE.md`, every app becomes `apps/<Name>/app.so` sitting next to its

@@ -82,7 +82,7 @@
  * The strings
  * ------------------------------------------------------------------ */
 
-const char *const nd_setapp_exts[ND_SETAPP_EXT_COUNT] = {".jpg", ".jpeg"};
+const char *const nd_setapp_exts[ND_SETAPP_EXT_COUNT] = {".jpg", ".jpeg", ".gif"};
 
 const char *const nd_setapp_get_more_label = "Get more...";
 
@@ -90,16 +90,18 @@ const char *const nd_setapp_get_more_help =
     "Get more wallpapers by adding an SD card!\n"
     "\n"
     "Format a card as FAT32, make a folder called \"wallpapers\" on it, and "
-    "copy your .jpg files into it.\n"
+    "copy your .jpg or .gif files into it.\n"
     "\n"
-    "240x240 pictures look best. Put the card in the phone and they appear in "
-    "this list. The phone can set a blank card up for you.";
+    "240x175 pictures look best, and a .gif that size animates. Put the card "
+    "in the phone and they appear in this list. The phone can set a blank "
+    "card up for you.";
 
 const char *const nd_setapp_get_more_help_with_card =
     "Get more wallpapers from your SD card!\n"
     "\n"
-    "Copy .jpg files into the \"wallpapers\" folder on the card that is in "
-    "the phone and they appear in this list. 240x240 looks best.";
+    "Copy .jpg or .gif files into the \"wallpapers\" folder on the card that "
+    "is in the phone and they appear in this list. 240x175 looks best, and a "
+    ".gif that size animates.";
 
 /* SDCARD_HELP is declared two thirds of the way down main.py, between
  * _show_about() and _show_memory_card(), which is why it reads as an
@@ -108,7 +110,7 @@ const char *const nd_setapp_get_more_help_with_card =
 const char *const nd_setapp_sdcard_help =
     "A NeoDCT memory card is a FAT32 card with these folders on it:\n"
     "\n"
-    "  wallpapers   .jpg pictures\n"
+    "  wallpapers   .jpg and .gif pictures\n"
     "  tones        .mp3 ringtones\n"
     "  music        your music\n"
     "  backup_db    copies of your contacts\n"
@@ -971,8 +973,7 @@ static void show_messages_style(nd_ui *ui)
     /* Only the literal "CHAT" preselects Chat, which is the same one-sided
      * tolerance nd_msg_style_parse() applies: anything unrecognised is
      * CLASSIC, so an upgraded phone opens on the app it had before. */
-    chat = (stored[0] == 'C' || stored[0] == 'c') &&
-           (stored[1] == 'H' || stored[1] == 'h');
+    chat = (stored[0] == 'C' || stored[0] == 'c') && (stored[1] == 'H' || stored[1] == 'h');
 
     nd_vlist_init(&menu, ui, "Msg. Style", nd_setapp_msgstyle_options, ND_SETAPP_MSGSTYLE_ITEMS,
                   ND_SETAPP_ROOT_ID);
@@ -1011,7 +1012,6 @@ void nd_setapp_draw_about(nd_ui *ui)
     nd_softkey softkey;
     nd_draw *d;
     int32_t screen_w;
-    int32_t screen_h;
     int32_t content_bottom;
     int32_t header_y;
     int32_t line_pad;
@@ -1025,7 +1025,6 @@ void nd_setapp_draw_about(nd_ui *ui)
 
     d = ui->draw;
     screen_w = nd_ui_width(ui);
-    screen_h = nd_ui_height(ui);
     content_bottom = nd_ui_content_bottom(ui);
     /* max(30, int(screen_h * 0.11)) -- 30 on this panel only because the
      * floor wins; nd_ui.h says not to hard-code it. */
@@ -1054,7 +1053,7 @@ void nd_setapp_draw_about(nd_ui *ui)
             (void)nd_strlcpy(build_time, "Unknown", sizeof build_time);
     }
 
-    (void)nd_draw_rect_fill(d, ND_RECT(0, 0, screen_w, screen_h), ND_BLACK);
+    nd_ui_paint_chrome_full(ui);
 
     nd_ui_text_size(ui, TITLE, ui->font_n, &w, &h);
     (void)nd_draw_text(d, floordiv2(screen_w - w), 12, TITLE, ui->font_n, ND_WHITE);

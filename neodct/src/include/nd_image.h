@@ -129,6 +129,12 @@ nd_image *nd_image_open(const char *path);
 nd_image *nd_image_load_png(const char *path);
 nd_image *nd_image_load_jpeg(const char *path);
 
+/* A GIF decodes to its FIRST FRAME. Anything that wants the animation goes
+ * through nd_gif.h instead; a picture is a picture, and every caller of
+ * nd_image_open() -- icons, the image cache, Koki costumes -- wants one
+ * surface it owns. */
+nd_image *nd_image_load_gif(const char *path);
+
 /* Decode from memory, for assets already read (update packages, Koki bundles).
  * The buffer is not retained. */
 nd_image *nd_image_open_mem(const uint8_t *data, size_t len);

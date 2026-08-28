@@ -448,6 +448,7 @@ void nd_crash_draw_engineering(nd_ui *ui, const char *summary)
     nd_image *crash_img;
     bool painted = false;
     nd_softkey bar;
+    bool saved_use_wallpaper;
 
     if (ui == NULL || ui->draw == NULL || ui->canvas == NULL)
         return;
@@ -455,6 +456,23 @@ void nd_crash_draw_engineering(nd_ui *ui, const char *summary)
     screen_w = nd_ui_width(ui);
     screen_h = nd_ui_height(ui);
     content_bottom = nd_ui_content_bottom(ui);
+
+    /* ============ THE CRASH SCREEN IS NOT WALLPAPERED ============
+     *
+     * Everything else the framework draws sits on the wallpaper now. This
+     * does not: it is the screen that says the phone broke, it carries a
+     * stack summary in 14 px type, and a photograph behind that is a
+     * legibility problem on the one screen where legibility is the entire
+     * point. Same instinct as Update and the engineering apps.
+     *
+     * Saying so with app_use_wallpaper rather than by filling black is what
+     * makes it hold: the SOFTKEY BAR this function builds thirty lines below
+     * is shared code, and it paints the chrome background like every other
+     * opaque bar. A black frame with a wallpapered strip across the bottom is
+     * worse than either answer. Restored before returning -- this runs inside
+     * the core, which has a home screen to draw afterwards. */
+    saved_use_wallpaper = ui->app_use_wallpaper;
+    ui->app_use_wallpaper = false;
 
     (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, screen_w, screen_h), ND_BLACK);
 
@@ -502,6 +520,8 @@ void nd_crash_draw_engineering(nd_ui *ui, const char *summary)
     nd_softkey_init(&bar, ui, false);
     nd_softkey_update(&bar, "Continue", false);
     (void)nd_ui_present(ui);
+
+    ui->app_use_wallpaper = saved_use_wallpaper;
 }
 
 static void wait_for_continue(nd_ui *ui)

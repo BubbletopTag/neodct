@@ -1,5 +1,6 @@
 {
   "name": "Remote Shell",
+  "useWallpaper": false,
   "id": "9990",
   "icon": "icon.png",
   "exec": "main.py"

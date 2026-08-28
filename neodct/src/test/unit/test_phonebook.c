@@ -53,6 +53,7 @@
 
 #include <linux/input.h>
 
+#include "nd_app.h"
 #include "nd_capture.h"
 #include "nd_contacts.h"
 #include "nd_db.h"
@@ -258,6 +259,49 @@ typedef struct {
     int write_fd;
 } fixture;
 
+/* ============ WHY THE FIXTURE HAS A WALLPAPER ============
+ *
+ * The reference frames this test compares against come out of nd-shoot, whose
+ * app group runs every stock app with Palestine.jpg set. Since the framework
+ * started drawing the wallpaper behind app chrome, that is what those frames
+ * contain, and a fixture that rendered on black would differ from them in
+ * three quarters of its pixels -- in the background, not in anything PhoneBook
+ * did.
+ *
+ * So the fixture establishes the same two facts nd_ui_init_app() does for a
+ * real app process: manifest.json's "useWallpaper", read from the app's OWN
+ * manifest rather than assumed here, and the wallpaper itself. ND_ROOT points
+ * at the overlay for the two reads and is put back afterwards.
+ *
+ * `font_path` is <overlay>/NeoDCT/System/ui/resources/fonts/font.ttf, which is
+ * where the overlay root is recovered from -- resolve_font() has already done
+ * the searching. */
+static void fx_apply_reference_wallpaper(fixture *fx, const char *font_path)
+{
+    static const char *const FONT_TAIL = "/NeoDCT/System/ui/resources/fonts/font.ttf";
+    char overlay[1024];
+    char saved[ND_PATH_MAX];
+    size_t flen = strlen(font_path);
+    size_t tlen = strlen(FONT_TAIL);
+
+    fx->ui.app_use_wallpaper = false;
+    if (flen <= tlen || strcmp(font_path + (flen - tlen), FONT_TAIL) != 0)
+        return;
+    if (flen - tlen >= sizeof overlay)
+        return;
+    memcpy(overlay, font_path, flen - tlen);
+    overlay[flen - tlen] = '\0';
+
+    (void)nd_strlcpy(saved, nd_path_root(), sizeof saved);
+    if (nd_path_set_root(overlay) != ND_OK)
+        return;
+    fx->ui.app_use_wallpaper = nd_app_manifest_use_wallpaper("/NeoDCT/System/apps/PhoneBook");
+    if (fx->ui.app_use_wallpaper)
+        nd_ui_set_wallpaper(&fx->ui,
+                            nd_ui_load_wallpaper("/NeoDCT/System/wallpapers/Palestine.jpg"));
+    (void)nd_path_set_root(saved[0] != '\0' ? saved : NULL);
+}
+
 static bool fx_init(fixture *fx)
 {
     char path[1024];
@@ -298,11 +342,17 @@ static bool fx_init(fixture *fx)
     fx->ui.keypad_fd = -1;
     /* Only the core's own bar is transparent, and this context is not it. */
     fx->ui.softkey_exists = true;
+    fx_apply_reference_wallpaper(fx, path);
     return true;
 }
 
 static void fx_free(fixture *fx)
 {
+    /* The wallpaper and the chrome copy the fixture caused to be loaded. A
+     * real app process ends and the kernel takes them back; a test process
+     * runs sixty fixtures and LeakSanitizer counts every one. */
+    nd_ui_invalidate_chrome(&fx->ui);
+    nd_ui_set_wallpaper(&fx->ui, NULL);
     if (fx->write_fd >= 0)
         (void)close(fx->write_fd);
     if (fx->input != NULL)
@@ -578,6 +628,21 @@ static void test_picker_back(void)
 /* The empty state: two different words, chosen by whether a query was PASSED
  * and not by whether it matched anything. Both are centred with font_n, and
  * both leave rows 146..174 alone. */
+/* What the framework paints where a widget clears rows 0..content_bottom.
+ * It used to be a flat black fill; with the wallpaper drawn behind app chrome
+ * it is the wallpaper's own rows 0..content_bottom, and a hand-built
+ * expectation has to say the same thing or it is testing the old design. */
+static void expect_content_background(fixture *fx, nd_image *expect, nd_draw *d)
+{
+    const nd_image *bg = nd_ui_chrome_wallpaper(&fx->ui);
+
+    if (bg != NULL)
+        (void)nd_image_blit_region(expect, bg, ND_RECT(0, 0, ND_UI_W, ND_UI_H - ND_SOFTKEY_H), 0,
+                                   0);
+    else
+        (void)nd_draw_rect_fill(d, ND_RECT(0, 0, ND_UI_W, ND_UI_H - ND_SOFTKEY_H), ND_BLACK);
+}
+
 static void check_empty_screen(fixture *fx, const char *msg)
 {
     nd_image *expect;
@@ -593,7 +658,7 @@ static void check_empty_screen(fixture *fx, const char *msg)
         nd_image_free(expect);
         return;
     }
-    (void)nd_draw_rect_fill(&d, ND_RECT(0, 0, ND_UI_W, ND_UI_H - ND_SOFTKEY_H), ND_BLACK);
+    expect_content_background(fx, expect, &d);
     nd_text_size(fx->ui.font_n, msg, &w, &h);
     (void)nd_draw_text(&d, (ND_UI_W - w) / 2, nd_max32(10, (ND_UI_H - ND_SOFTKEY_H - h) / 2), msg,
                        fx->ui.font_n, ND_WHITE);
@@ -843,7 +908,7 @@ static void test_center_message(void)
     (void)nd_draw_rect_fill(&fx.draw, ND_RECT(0, 0, ND_UI_W, ND_UI_H), ND_GRAY);
     g_api.center_message(&fx.ui, "Saved!", 0.0, NULL, ND_WHITE);
 
-    (void)nd_draw_rect_fill(&d, ND_RECT(0, 0, ND_UI_W, ND_UI_H - ND_SOFTKEY_H), ND_BLACK);
+    expect_content_background(&fx, expect, &d);
     nd_text_size(fx.ui.font_xl, "Saved!", &w, &h);
     (void)nd_draw_text(&d, (ND_UI_W - w) / 2, nd_max32(10, (ND_UI_H - ND_SOFTKEY_H - h) / 2),
                        "Saved!", fx.ui.font_xl, ND_WHITE);
@@ -897,7 +962,7 @@ static void test_calling_screen_does_not_dial(void)
     g_api.calling_screen(&fx.ui, &c);
     CHECK(fx.ui.modem == NULL);
 
-    (void)nd_draw_rect_fill(&d, ND_RECT(0, 0, ND_UI_W, ND_UI_H - ND_SOFTKEY_H), ND_BLACK);
+    expect_content_background(&fx, expect, &d);
     (void)nd_draw_text(&d, 10, y, "Calling...", fx.ui.font_xl, ND_WHITE);
     (void)nd_draw_text(&d, 10, y + 35, "Mum", fx.ui.font_n, ND_WHITE);
     (void)nd_draw_text(&d, 10, y + 60, "0741234567", fx.ui.font_s, ND_WHITE);

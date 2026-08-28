@@ -1,5 +1,6 @@
 {
     "name": "Crash",
+    "useWallpaper": false,
     "id": "9997",
     "icon": "icon.png",
     "exec": "main.py"

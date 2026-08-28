@@ -68,6 +68,21 @@ are fast enough that there is no excuse not to.
 PIL images instead of writing to the framebuffer. Docs screenshots come from
 `shoot_docs.py` on top of it — genuine output, not mockups.
 
+The C equivalent is `nd-shoot`, which renders all 48 reference screens in
+about two seconds:
+
+```sh
+./build/default/bin/nd-shoot --out DIR
+./build/default/bin/nd-shoot --out DIR --wallpaper Classroom.gif   # every group
+./build/default/bin/nd-shoot --out DIR --anim 125                  # a sequence
+python3 neodct/tools/goldenframe.py --compare neodct/tests/golden DIR
+```
+
+`--wallpaper` forces one into the six groups whose recipe deliberately has
+none, which is the only way to review a change to the shared background;
+`--anim N` writes N consecutive home frames into `DIR/anim`, which is the only
+way to look at an animated wallpaper rather than guess.
+
 T9 — multi-tap, predictive, the `#` mode cycle and the mode indicator in the
 composer's top right — runs only on the i2c matrix keypad, because a QWERTY
 dev keyboard takes a different input path and genuinely has no modes. So on
@@ -117,6 +132,12 @@ path on purpose.
 
 ## Conventions
 
+- **Framework elements never fill their own background.** A widget or an app
+  screen that wants a blank background calls `nd_ui_paint_chrome_full()` or
+  `nd_ui_paint_chrome_content()`, which paints the wallpaper or black
+  depending on `system.ui.wpeverywhere` and the app's `manifest.json`
+  `useWallpaper`. A literal `ND_BLACK` fill is right only for a surface that
+  is not chrome — a game's play field, Koki's own canvas, the LCD test.
 - Python: 4-space indent, `snake_case`, `PascalCase` classes, `UPPER_SNAKE`
   constants. Beyond the standard library the target has only what the defconfig
   builds — currently Pillow, mutagen, miniaudio, plus `sqlite3`/`ssl`/`lzma`.

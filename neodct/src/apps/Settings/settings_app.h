@@ -78,8 +78,12 @@ extern "C" {
 
 /* SUPPORTED_WALLPAPERS. A real two-element tuple here, unlike the Tones
  * app's `(".mp3")`, which is a string (OPEN-QUESTIONS.md TN-2). */
-#define ND_SETAPP_EXT_COUNT 2
-extern const char *const nd_setapp_exts[ND_SETAPP_EXT_COUNT]; /* ".jpg", ".jpeg" */
+/* .gif joined the two the Python shipped when animated wallpapers landed. It
+ * goes LAST so the two that were always here keep their indices -- the order
+ * is what test_settings_app.c pins, and a wallpaper list is sorted by name
+ * anyway, so nothing on screen depends on it. */
+#define ND_SETAPP_EXT_COUNT 3
+extern const char *const nd_setapp_exts[ND_SETAPP_EXT_COUNT]; /* ".jpg", ".jpeg", ".gif" */
 
 /* The magic value system.ui.wallpaper takes for "no wallpaper". It is stored
  * as the literal four characters, not as an empty value: nd_ui.h's reader
@@ -143,7 +147,7 @@ extern const char *const nd_setapp_eng_options[ND_SETAPP_ENG_ITEMS];
  * so they are spelled here only as the string Settings writes, and
  * test_settings_app.c asserts the two spellings match. Settings cannot
  * include messages.h: they are two separate .so files. */
-#define ND_SETAPP_MSGSTYLE_KEY "system.ui.messages_style"
+#define ND_SETAPP_MSGSTYLE_KEY   "system.ui.messages_style"
 #define ND_SETAPP_MSGSTYLE_ITEMS 2
 extern const char *const nd_setapp_msgstyle_options[ND_SETAPP_MSGSTYLE_ITEMS];
 

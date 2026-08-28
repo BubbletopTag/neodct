@@ -296,7 +296,6 @@ void nd_msg_show_empty_state(nd_ui *ui, const char *title, const char *root_id, 
     nd_header header;
     nd_softkey softkey;
     int32_t screen_w;
-    int32_t screen_h;
     int32_t content_bottom;
     int32_t header_y;
     int32_t w = 0;
@@ -307,13 +306,12 @@ void nd_msg_show_empty_state(nd_ui *ui, const char *title, const char *root_id, 
         return;
 
     screen_w = nd_ui_width(ui);
-    screen_h = nd_ui_height(ui);
     content_bottom = nd_ui_content_bottom(ui);
     header_y = nd_ui_header_divider_y(ui);
 
     /* The FULL screen, rows 0..175 -- not the 0..145 most widgets clear. The
      * softkey below is what puts "Back" back. */
-    (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, screen_w, screen_h), ND_BLACK);
+    nd_ui_paint_chrome_full(ui);
     (void)nd_draw_text(ui->draw, 5, 5, nz(title), ui->font_xl, ND_WHITE);
     (void)nd_draw_line(ui->draw, 0, header_y, screen_w, header_y, ND_WHITE, 1);
 
@@ -359,7 +357,7 @@ void nd_msg_draw_sending(nd_ui *ui, const char *number)
     screen_w = nd_ui_width(ui);
     content_bottom = nd_ui_content_bottom(ui);
 
-    (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, screen_w, content_bottom), ND_BLACK);
+    nd_ui_paint_chrome_content(ui);
     nd_ui_text_size(ui, "Sending...", ui->font_n, &w, &h);
     y = nd_max32(10, floordiv(content_bottom - h, 2) - 12);
     (void)nd_draw_text(ui->draw, floordiv(screen_w - w, 2), y, "Sending...", ui->font_n, ND_WHITE);
@@ -608,7 +606,6 @@ nd_msg_detail_result nd_msg_show_detail(nd_ui *ui, const char *title, const char
     nd_softkey softkey;
     size_t n_meta = 0u;
     int32_t screen_w;
-    int32_t screen_h;
     int32_t content_bottom;
     int32_t header_y;
     bool is_inbox;
@@ -617,7 +614,6 @@ nd_msg_detail_result nd_msg_show_detail(nd_ui *ui, const char *title, const char
         return ND_MSG_DETAIL_BACK;
 
     screen_w = nd_ui_width(ui);
-    screen_h = nd_ui_height(ui);
     content_bottom = nd_ui_content_bottom(ui);
     header_y = nd_ui_header_divider_y(ui);
 
@@ -642,7 +638,7 @@ nd_msg_detail_result nd_msg_show_detail(nd_ui *ui, const char *title, const char
         int32_t y;
         size_t i;
 
-        (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, screen_w, screen_h), ND_BLACK);
+        nd_ui_paint_chrome_full(ui);
         (void)nd_draw_text(ui->draw, 5, 5, nz(title), ui->font_xl, ND_WHITE);
         (void)nd_draw_line(ui->draw, 0, header_y, screen_w, header_y, ND_WHITE, 1);
         nd_header_draw(&header, sub_index);
@@ -972,8 +968,8 @@ bool nd_msg_show_write_prefill(nd_ui *ui, int32_t root_id, int32_t sub_index, co
             selection = nd_vlist_show(&options);
 
             if (selection == 0) {
-                if (nd_msg_send_flow_to(ui, nd_textlong_get_text(&input_widget), root_id,
-                                        sub_index, to))
+                if (nd_msg_send_flow_to(ui, nd_textlong_get_text(&input_widget), root_id, sub_index,
+                                        to))
                     return true; /* sent -- leave the composer */
                 /* failed or cancelled: fall through, keep the draft on screen */
             } else if (selection == 1) {

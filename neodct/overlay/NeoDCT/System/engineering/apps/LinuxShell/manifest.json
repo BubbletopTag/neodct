@@ -1,5 +1,6 @@
 {
   "name": "Linux Shell",
+  "useWallpaper": false,
   "id": "999",
   "icon": "icon.png",
   "exec": "main.py"

@@ -121,6 +121,10 @@ extern "C" {
 #define ND_APP_ENTRY_OPEN_MESSAGE "open_message"
 #define ND_APP_ENTRY_OPEN_INBOX   "open_inbox"
 
+/* manifest.json's key, spelled camelCase because that is how it is written in
+ * the manifests and JSON keys are not C identifiers. */
+#define ND_APP_KEY_USE_WALLPAPER "useWallpaper"
+
 #define ND_APP_SYM_RUN          "app_run"
 #define ND_APP_SYM_SHUTDOWN     "app_shutdown"
 #define ND_APP_SYM_OPEN_MESSAGE "app_open_message"
@@ -190,6 +194,32 @@ nd_err nd_app_install_signal_handlers(void);
 /* The app's own directory, absolute, as passed in argv[1]. Owned by
  * libneodct; never NULL inside an app process, always "" inside the core. */
 const char *nd_app_dir(void);
+
+/* ============ manifest.json's "useWallpaper" ============
+ *
+ * The framework draws the wallpaper behind its own chrome -- see
+ * nd_ui_paint_chrome() -- and some apps must not have it. Three kinds:
+ *
+ *   an app that fills the screen with its own art       Koki, Games
+ *   an app whose screens are a diagnostic, not decor    every engineering
+ *                                                        app, Update
+ *   an app that hands the panel to something else       Browser
+ *
+ * So the manifest carries a boolean and the app decides:
+ *
+ *     { "name": "Games", "id": "6", "useWallpaper": false }
+ *
+ * ABSENT MEANS TRUE. That is the direction that matters: a manifest written
+ * before this key existed -- every one shipped so far, and every third-party
+ * one -- gets the wallpaper, and an app opts OUT rather than having to know
+ * to opt in. A value that is present but not a JSON boolean is also true; the
+ * key is a preference, and refusing to draw a background over a typo is worse
+ * than ignoring it. (nd_manifest.h's rules are stricter, and deliberately so:
+ * that file decides whether to overwrite the root filesystem.)
+ *
+ * The flag reaches library code as ui->app_use_wallpaper, set once by
+ * nd_ui_init_app() and read by nothing else. */
+bool nd_app_manifest_use_wallpaper(const char *app_dir);
 
 /* "<app dir>/<name>", the correct way to open an asset that ships with the
  * app. Honours ND_ROOT like everything else. */

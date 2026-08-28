@@ -78,7 +78,7 @@ static void draw_empty(nd_ui *ui, const char *search_query)
     int32_t h = 0;
     int32_t y;
 
-    (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, screen_w, content_bottom), ND_BLACK);
+    nd_ui_paint_chrome_content(ui);
     nd_ui_text_size(ui, msg, ui->font_n, &w, &h);
     y = nd_max32(10, floordiv(content_bottom - h, 2));
     (void)nd_draw_text(ui->draw, floordiv(screen_w - w, 2), y, msg, ui->font_n, ND_WHITE);

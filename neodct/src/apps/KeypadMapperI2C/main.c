@@ -887,7 +887,6 @@ static void draw_capture_prompt(nd_ui *ui, nd_softkey *bar, const nd_kmi2c_confi
     nd_lines lines;
     nd_draw *d = ui->draw;
     int32_t screen_w = nd_ui_width(ui);
-    int32_t screen_h = nd_ui_height(ui);
     int32_t bottom = nd_ui_content_bottom(ui);
     int32_t tw = 0;
     int32_t th = 0;
@@ -899,7 +898,7 @@ static void draw_capture_prompt(nd_ui *ui, nd_softkey *bar, const nd_kmi2c_confi
 
     /* rectangle((0, 0, W, H)) -- the FULL height, softkey strip included, and
      * the bar is repainted over it a few lines below. */
-    (void)nd_draw_rect_fill(d, ND_RECT(0, 0, screen_w, screen_h), ND_BLACK);
+    nd_ui_paint_chrome_full(ui);
 
     nd_ui_text_size(ui, nd_kmi2c_title, ui->font_n, &tw, &th);
     (void)nd_draw_text(d, floordiv2(screen_w - tw), 8, nd_kmi2c_title, ui->font_n, ND_WHITE);

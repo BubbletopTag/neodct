@@ -49,6 +49,8 @@ extern "C" {
 #define ND_SET_AUDIO_RINGTOME_DFLT   "/NeoDCT/System/tones/Low.mp3"
 #define ND_SET_UI_WALLPAPER_DFLT     "NONE"
 #define ND_SET_UI_ENG_MODE_DFLT      "ON"
+#define ND_SET_UI_WP_EVERYWHERE_DFLT "ON"
+#define ND_SET_UI_WP_APP_DIM_DFLT    "0.75"
 #define ND_SET_OS_VERSIONNUMBER_DFLT "0.3.1a"
 #define ND_SET_OS_VERSIONNAME_DFLT   "NeoDCT System v0.3.1a"
 #define ND_SET_OS_PLATFORM_DFLT      "unknown"
@@ -77,6 +79,57 @@ extern "C" {
 #define ND_SET_HW_MODEM_PCM_PORT "system.hw.modem_pcm_port"   /* "AUTO"    */
 #define ND_SET_HW_MODEM_MIC_DEV  "system.hw.modem_mic_device" /* "AUTO"    */
 #define ND_SET_MODEM_ALLOW_CALLS "system.modem.allow_calls"   /* "ON"      */
+
+/* Wallpaper behind the framework's own chrome -- lists, dialogs, text boxes,
+ * every screen that used to be flat black. ON by default, because that is the
+ * point of the feature; a phone whose owner wants the old look turns it off
+ * here and nothing else changes.
+ *
+ * NOT in DEFAULTS, deliberately -- but NOT because reading them is free.
+ * R-24 above is worse than it first looks: nd_settings_get() rewrites
+ * settings.prop on EVERY call whatever key it was asked for, because the
+ * "missing keys" test walks the DEFAULTS table rather than the key. So what
+ * protects the render path is not the table, it is the CALLER: lib/nd_ui.c
+ * reads both of these exactly once per process, and once more after each app
+ * exit, in chrome_settings_load(), and never from a draw. Keeping them out of
+ * DEFAULTS only avoids adding two more keys to what every such rewrite has to
+ * carry.
+ *
+ * There is also deliberately no Settings screen for either. They are taste,
+ * not policy, and the wallpaper picker is already where a person goes to
+ * change how the phone looks.
+ *
+ * ND_SET_UI_WP_APP_DIM is a SECOND brightness multiplier applied on top of
+ * the 0.3 the home screen already uses, so the default 0.75 puts chrome at
+ * 0.3 * 0.75 = 0.225 of the original picture. Chrome carries text at every
+ * size the phone has; the home screen carries a clock. Parsed with strtod;
+ * unparseable, negative and above-1 values all fall back to the default
+ * rather than being clamped to an extreme nobody can then explain. */
+#define ND_SET_UI_WP_EVERYWHERE "system.ui.wpeverywhere"     /* "ON"     */
+#define ND_SET_UI_WP_APP_DIM    "system.ui.wpeverywhere_dim" /* "0.75"   */
+
+/* WHERE AN ANIMATED WALLPAPER IS ALLOWED TO RUN. Three values, because they
+ * are three different costs, not three degrees of one:
+ *
+ *   ALWAYS  home screen, menus and apps. A widget is a blocking wait, so
+ *           this is the one that keeps a decoder open in every app process
+ *           and redraws the screen at the GIF's rate for as long as a menu
+ *           is on it. The prettiest and the most expensive.
+ *   HOME    the home screen only, which is what the phone did before menus
+ *           learned to repaint themselves. An app opens no decoder at all
+ *           under this, so it is 226 KB and a file descriptor cheaper as
+ *           well as quieter.
+ *   OFF     nowhere. A .gif wallpaper is its first frame and nothing else,
+ *           which costs exactly what a .jpg costs.
+ *
+ * This exists because the honest answer to "what does the animation do to
+ * the battery" is that nobody has measured it on the real hardware yet. It
+ * is a way out that does not require picking a different wallpaper.
+ *
+ * Compared case-insensitively against those three words; anything else is
+ * the default. Read once per process, like the two above. */
+#define ND_SET_UI_WP_ANIMATE      "system.ui.wpanimate" /* "ALWAYS" */
+#define ND_SET_UI_WP_ANIMATE_DFLT "ALWAYS"
 
 /* NTP sync, owned by the Clock app and read by the clock service at boot.
  * Defaults to ON: a phone whose clock is wrong fails every TLS "not valid

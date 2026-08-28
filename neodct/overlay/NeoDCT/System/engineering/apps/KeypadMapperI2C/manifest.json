@@ -1,5 +1,6 @@
 {
     "name": "KeyMapI2C",
+    "useWallpaper": false,
     "id": "9003",
     "icon": "icon.png",
     "exec": "main.py"
