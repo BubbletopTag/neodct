@@ -78,6 +78,17 @@ extern "C" {
 #define ND_SET_HW_MODEM_MIC_DEV  "system.hw.modem_mic_device" /* "AUTO"    */
 #define ND_SET_MODEM_ALLOW_CALLS "system.modem.allow_calls"   /* "ON"      */
 
+/* NTP sync, owned by the Clock app and read by the clock service at boot.
+ * Defaults to ON: a phone whose clock is wrong fails every TLS "not valid
+ * before" check, so the useful default is the one that fixes itself.
+ *
+ * Turning it OFF stops the BACKGROUND SYNC ONLY. The boot floor still
+ * applies -- see nd_clock.h -- because a clock stuck in 1970 breaks the
+ * update system's signature check, and "I set my own time" is not a request
+ * to let that happen. */
+#define ND_SET_CLOCK_NTP      "system.clock.ntp_sync" /* "ON"      */
+#define ND_SET_CLOCK_NTP_DFLT "ON"
+
 /* App-owned */
 #define ND_SET_CALLLOG_DUR_LAST      "calllog.duration.last"
 #define ND_SET_CALLLOG_DUR_RECEIVED  "calllog.duration.received"

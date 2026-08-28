@@ -48,6 +48,7 @@
 #include "nd_predictive_priv.h"
 #include "nd_t9.h"
 #include "nd_text.h"
+#include "nd_timeset.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
@@ -121,6 +122,13 @@ nd_err nd_textinput_init(nd_textinput *t, nd_ui *ui, const char *title, const ch
     return ND_OK;
 }
 
+void nd_textinput_set_mask(nd_textinput *t, const char *mask)
+{
+    if (t == NULL)
+        return;
+    t->mask = (mask != NULL && mask[0] != '\0') ? mask : NULL;
+}
+
 void nd_textinput_draw(nd_textinput *t, bool blink_state)
 {
     char display[ND_TEXTINPUT_CAP + 2];
@@ -157,7 +165,11 @@ void nd_textinput_draw(nd_textinput *t, bool blink_state)
 
     prompt_y = header_y + 20;
     (void)nd_draw_text(d, 10, prompt_y, nz(t->prompt), ui->font_n, ND_WHITE);
-    (void)nd_t9ind_draw(ui, screen_w - 12, prompt_y, &t->t9);
+    /* No mode indicator on a masked field: a field where every slot takes one
+     * digit has no modes, and a pencil in the corner claiming otherwise is a
+     * control the user will look for and not find. */
+    if (t->mask == NULL)
+        (void)nd_t9ind_draw(ui, screen_w - 12, prompt_y, &t->t9);
 
     box_y = prompt_y + 30;
     box_h = nd_max32(24, nd_min32(40, content_bottom - box_y - 10));
@@ -197,6 +209,31 @@ nd_widget_result nd_textinput_handle_key(nd_textinput *t, int32_t key)
 
     if (t == NULL || t->text == NULL)
         return ND_WIDGET_RESULT_NONE;
+
+    /* A masked field is its own input method and shares nothing with the T9
+     * path below -- see nd_textinput_set_mask(). Taken first so that not one
+     * keypress reaches the engine and leaves it holding digits the field
+     * never showed. */
+    if (t->mask != NULL) {
+        char digit;
+
+        if (key == ND_KEY_ENTER || key == ND_KEY_KPENTER)
+            return ND_WIDGET_RESULT_CONFIRM;
+        if (key == ND_KEY_CLEAR) {
+            /* Empty means leave, exactly as an ordinary field does -- Clear is
+             * the only way back out of either. */
+            if (nd_mask_backspace(t->mask, t->text))
+                return ND_WIDGET_RESULT_BACKSPACE;
+            return ND_WIDGET_RESULT_CANCEL;
+        }
+        digit = nd_key_digit_char(key);
+        if (digit == '\0')
+            return ND_WIDGET_RESULT_NONE;
+        if (!nd_mask_type(t->mask, t->text, t->cap, digit))
+            return ND_WIDGET_RESULT_NONE;
+        return ND_WIDGET_RESULT_TYPED;
+    }
+
     fld = field_of(t);
 
     /* ENTER / KPENTER. The Python's comment notes that legacy 50 was removed;
