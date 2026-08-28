@@ -655,12 +655,13 @@ static void test_scrollbar_every_index(nd_capture *cap, nd_ui *ui)
         measure_notch(frame, bar_x, &top, &bottom);
         /* The notch's step is (track_bottom - track_top) / (n_apps - 1), so
          * every app added or removed moves it. 89 with twenty-two apps, 87
-         * with the twenty-three MicTest made, and 84 with the twenty-four
-         * Bluetooth makes: 36 + 12 * 99/23 is 87.65 and the notch top is
-         * three rows above it. Re-cut the menu-* frames whenever this number
-         * changes -- they are a regression net for the screens that did NOT
-         * move, not a reason to leave the app list alone. */
-        CHECK_INT(top, 84, "index 12 keeps the notch clear of both ends");
+         * with the twenty-three MicTest made, 84 with the twenty-four
+         * Bluetooth makes, and 82 with the twenty-five Sleepy makes:
+         * 36 + 12 * 99/24 is 85.5 and the notch top is three rows above it.
+         * Re-cut the menu-* frames whenever this number changes -- they are a
+         * regression net for the screens that did NOT move, not a reason to
+         * leave the app list alone. */
+        CHECK_INT(top, 82, "index 12 keeps the notch clear of both ends");
         CHECK(nd_image_get_px(frame, bar_x, track_bottom).r == 255u, "track reaches row 135");
         CHECK(nd_image_get_px(frame, bar_x + 1, track_bottom).r == 255u, "and column 233");
         CHECK(nd_image_get_px(frame, bar_x + 2, track_bottom).r == 0u, "but not column 234");
@@ -760,7 +761,7 @@ static void run_overlay_half(void)
     }
 
     CHECK(nd_ui_engineering_mode(&ui), "engineering mode came from settings.prop");
-    CHECK_INT(nd_ui_app_count(&ui), 24, "twenty-four apps with engineering mode on");
+    CHECK_INT(nd_ui_app_count(&ui), 25, "twenty-five apps with engineering mode on");
     CHECK(nd_ui_wallpaper(&ui) == NULL, "no wallpaper configured, so the background is black");
 
     test_icon_geometry(&ui);

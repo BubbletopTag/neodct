@@ -372,7 +372,7 @@ STUB_STOCK_APPS := \
 	PhoneBook Power Settings Tones Update
 STUB_ENG_APPS := \
 	Bluetooth Crash CubeBench Downgrade FuelGauge KeypadMapperI2C \
-	LCDTest LinuxShell MicTest Modem RemoteShell
+	LCDTest LinuxShell MicTest Modem RemoteShell Sleepy
 
 STUB_SO := $(BUILD)/apps/Stub/app.so
 
