@@ -5,10 +5,10 @@
  *
  * ============ WHAT THIS REPLACED ============
  *
- * Until 0.4.5a this file pinned an eighteen-line stub whose whole behaviour
- * was a MessageDialog reading "This application has not been implemented
- * yet." -- and, because app-clock.png and widget-messagedialog.png were
- * byte-identical, pinned a golden frame to it as well. The app is real now,
+ * Until the app was rewritten this file pinned an eighteen-line stub whose
+ * whole behaviour was a MessageDialog reading "This application has not been
+ * implemented yet." -- and, because app-clock.png and widget-messagedialog.png
+ * were byte-identical, pinned a golden frame to it as well. The app is real now,
  * so the stub's string, its (46, 28, 50) exit set and its two-presses-to-leave
  * loop are all gone, and app-clock.png has been re-cut from the menu that
  * replaced them. AGENTS.md: a frame that stops matching because the screen was

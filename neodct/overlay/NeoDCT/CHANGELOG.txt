@@ -1,39 +1,12 @@
 # NeoDCT OS Changelog
 
-0.4.5a
-The Clock app tells the time now, and can be told it.
+Unreleased
+Not cut yet. Rename this heading to the version being released and
+set VERSION_ID in etc/os-release to match -- release.sh requires a
+section headed exactly the version it is tagging.
 
-It has been a "This application has not been implemented yet." dialog since
-the beginning, on a phone that has run a clock service since boot. Three
-rows now, one per screen, each showing what it is currently set to:
+--- The first two pieces of sleep ---
 
-Added
-- Clock settings. Enter the time in 24-hour form and the date day-first,
-  each in its own field. A keypad has ten digits and no colon, so the
-  separators are the field's job: type 2 and 3 and the colon appears by
-  itself, and one press of Clear takes it back off along with the digit
-  that pulled it in. A day the month does not have, a 29th of February in
-  a common year, or a year the clock service would refuse anyway are all
-  refused while the keypad is still in your hand rather than accepted and
-  quietly overridden later.
-- NTP time sync, on or off. Off stops the phone asking the network what
-  time it is, which is what makes setting it by hand stick. It does NOT
-  stop the boot-time floor: a clock reading 1970 fails every TLS check
-  and cannot verify an update, and "I set my own time" is not a request to
-  be allowed to boot into 1970.
-- Alarm clock is a row and nothing else yet. It says so.
-
-Changed
-- Menu rows can carry the value they are set to. "Alarm clock" with "Off"
-  under it, "Clock settings" with the time under it -- readable by paging
-  through three screens instead of opening three. Every list that does not
-  ask for values is unchanged to the pixel.
-- Setting the clock by hand while NTP is on is refused up front, naming the
-  row that has to change. The alternative is the clock accepting what was
-  typed and the sync thread moving it back within the minute, with nothing
-  on screen admitting it happened.
-
-0.4.4a
 The first two pieces of sleep, on a phone that has never slept.
 
 Sleep on this phone is going to be a fake one. The RV1103 has no suspend
@@ -72,6 +45,40 @@ Fixed
   selection anywhere. It looked like a menu that had lost its place.
   Nothing shipped had hit it, because until now every screen that preselects
   a row happened to preselect one of the first three.
+
+--- The Clock app tells the time, and can be told it ---
+
+The Clock app tells the time now, and can be told it.
+
+It has been a "This application has not been implemented yet." dialog since
+the beginning, on a phone that has run a clock service since boot. Three
+rows now, one per screen, each showing what it is currently set to:
+
+Added
+- Clock settings. Enter the time in 24-hour form and the date day-first,
+  each in its own field. A keypad has ten digits and no colon, so the
+  separators are the field's job: type 2 and 3 and the colon appears by
+  itself, and one press of Clear takes it back off along with the digit
+  that pulled it in. A day the month does not have, a 29th of February in
+  a common year, or a year the clock service would refuse anyway are all
+  refused while the keypad is still in your hand rather than accepted and
+  quietly overridden later.
+- NTP time sync, on or off. Off stops the phone asking the network what
+  time it is, which is what makes setting it by hand stick. It does NOT
+  stop the boot-time floor: a clock reading 1970 fails every TLS check
+  and cannot verify an update, and "I set my own time" is not a request to
+  be allowed to boot into 1970.
+- Alarm clock is a row and nothing else yet. It says so.
+
+Changed
+- Menu rows can carry the value they are set to. "Alarm clock" with "Off"
+  under it, "Clock settings" with the time under it -- readable by paging
+  through three screens instead of opening three. Every list that does not
+  ask for values is unchanged to the pixel.
+- Setting the clock by hand while NTP is on is refused up front, naming the
+  row that has to change. The alternative is the clock accepting what was
+  typed and the sync thread moving it back within the minute, with nothing
+  on screen admitting it happened.
 
 0.4.3a
 Two engineering apps for hardware you can plug in.

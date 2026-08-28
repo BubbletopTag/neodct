@@ -26,7 +26,7 @@ So "sleep" here means the phone does less, not that it stops:
    a keypress and a `RING` without missing them.
 
 Steps 3 and 4 are the core's business and are not designed yet. Steps 1 and 2
-are hardware pokes, and until 0.4.4a nobody had ever made either of them on
+are hardware pokes, and until Sleepy nobody had ever made either of them on
 this board.
 
 ## What exists today

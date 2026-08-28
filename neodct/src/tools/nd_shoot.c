@@ -1084,7 +1084,7 @@ static void shoot_telephony(nd_capture *cap)
  *   app-clock       the Clock app's three-row PagedList. It WAS byte-identical
  *                   to widget-messagedialog -- section 3.6 records that, and
  *                   it was true for as long as the Clock app was a "not
- *                   implemented yet" dialog. Since 0.4.5a the app is real and
+ *                   implemented yet" dialog. The app is real now and
  *                   the frame is its root menu; the two are no longer the
  *                   same picture and section 3.6 is history rather than a
  *                   rule.
@@ -1327,7 +1327,7 @@ static const struct {
      ND_APP_SYM_RUN},
     {"Calculator", CALC_OPT_FRAMES, "app-calculator-options", CALC_OPT_KEYS,
      ND_ARRAY_LEN(CALC_OPT_KEYS), ND_KEY_NONE, ND_APP_SYM_RUN},
-    /* CLEAR, not ENTER, since 0.4.5a. The Clock app is a three-row PagedList
+    /* CLEAR, not ENTER. The Clock app is a three-row PagedList
      * now rather than a dialog, so it behaves like Tones directly below:
      * ENTER would open the Alarm row's dialog, dismiss it, come back to the
      * menu and do it again for ever. Back on the first screen returns from
