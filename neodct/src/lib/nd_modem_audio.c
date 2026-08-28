@@ -144,6 +144,50 @@ static bool all_digits(const char *s, size_t len)
     return true;
 }
 
+/* The first "pcmNc" node in one card's directory, as "plughw:CARD,DEVICE". */
+static bool capture_node_in(const char *card, char *out, size_t out_sz)
+{
+    char dir[ND_PATH_MAX];
+    char nodes[ND_MODEM_CAND_MAX][ND_MODEM_PORT_MAX];
+    size_t n_nodes;
+    size_t j;
+
+    if (nd_snprintf(dir, sizeof dir, "%s/%s", ND_MODEM_ASOUND_DIR, card) != ND_OK)
+        return false;
+    n_nodes = sorted_listdir(dir, nodes, ND_ARRAY_LEN(nodes));
+    for (j = 0u; j < n_nodes; j++) {
+        size_t len = strlen(nodes[j]);
+
+        if (len < 5u || strncmp(nodes[j], "pcm", 3u) != 0 || nodes[j][len - 1u] != 'c')
+            continue;
+        if (!all_digits(&nodes[j][3], len - 4u))
+            continue;
+        nodes[j][len - 1u] = '\0';
+        (void)snprintf(out, out_sz, "plughw:%s,%s", &card[4], &nodes[j][3]);
+        return true;
+    }
+    return false;
+}
+
+/* A USB sound card announces itself with a usbid; the SoC's own codec does
+ * not. This is the same test S17audio uses to choose the PLAYBACK card, and
+ * using it here is what keeps both ends of a call on one piece of hardware. */
+static bool card_is_usb(const char *card)
+{
+    char path[ND_PATH_MAX];
+
+    if (nd_snprintf(path, sizeof path, "%s/%s/usbid", ND_MODEM_ASOUND_DIR, card) != ND_OK)
+        return false;
+    return nd_path_exists(path);
+}
+
+static bool card_name_is_valid(const char *name)
+{
+    if (strncmp(name, "card", 4u) != 0)
+        return false;
+    return all_digits(&name[4], strlen(name) - 4u);
+}
+
 bool nd_modem__find_capture_device(char *out, size_t out_sz)
 {
     char cards[ND_MODEM_CAND_MAX][ND_MODEM_PORT_MAX];
@@ -151,30 +195,34 @@ bool nd_modem__find_capture_device(char *out, size_t out_sz)
     size_t i;
 
     n_cards = sorted_listdir(ND_MODEM_ASOUND_DIR, cards, ND_ARRAY_LEN(cards));
+
+    /* THE USB CARD FIRST, and the reason is the difference between this phone
+     * and the emulator it was written on. In QEMU card 0 is USB Audio with no
+     * capture node at all, so "the first card with a pcm*c" was the microphone
+     * by luck. On the real board card 0 is the RV1103's own rv-acodec: it has
+     * a capture node, arecord opens it without complaint, and it is wired to
+     * nothing. Taking the first match there sends a call's uplink to a codec
+     * with no microphone on it, and the far end hears silence with no error
+     * raised anywhere -- which is the hardest kind of fault to find, because
+     * every part reports success.
+     *
+     * The microphone is on the USB sound card, which is also where the
+     * earpiece is, and both ends of a call belong on one card. */
     for (i = 0u; i < n_cards; i++) {
-        char dir[ND_PATH_MAX];
-        char nodes[ND_MODEM_CAND_MAX][ND_MODEM_PORT_MAX];
-        size_t n_nodes;
-        size_t j;
-
-        if (strncmp(cards[i], "card", 4u) != 0)
+        if (!card_name_is_valid(cards[i]) || !card_is_usb(cards[i]))
             continue;
-        if (!all_digits(&cards[i][4], strlen(cards[i]) - 4u))
-            continue;
-        if (nd_snprintf(dir, sizeof dir, "%s/%s", ND_MODEM_ASOUND_DIR, cards[i]) != ND_OK)
-            continue;
-        n_nodes = sorted_listdir(dir, nodes, ND_ARRAY_LEN(nodes));
-        for (j = 0u; j < n_nodes; j++) {
-            size_t len = strlen(nodes[j]);
-
-            if (len < 5u || strncmp(nodes[j], "pcm", 3u) != 0 || nodes[j][len - 1u] != 'c')
-                continue;
-            if (!all_digits(&nodes[j][3], len - 4u))
-                continue;
-            nodes[j][len - 1u] = '\0';
-            (void)snprintf(out, out_sz, "plughw:%s,%s", &cards[i][4], &nodes[j][3]);
+        if (capture_node_in(cards[i], out, out_sz))
             return true;
-        }
+    }
+
+    /* Then anything that can capture. A board with a wired-up on-chip
+     * microphone and no dongle is a perfectly good phone, and this is also
+     * the path every host test that does not create a usbid takes. */
+    for (i = 0u; i < n_cards; i++) {
+        if (!card_name_is_valid(cards[i]))
+            continue;
+        if (capture_node_in(cards[i], out, out_sz))
+            return true;
     }
     return false;
 }

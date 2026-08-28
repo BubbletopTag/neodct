@@ -867,6 +867,65 @@ static void test_capture_scan_is_byte_sorted(void)
     CHECK_STR(dev, "plughw:10,0");
 }
 
+/* THE PHONE IS NOT QEMU. Card 0 there is QEMU's USB Audio, playback-only, so
+ * the first card carrying a pcm*c node was always the microphone. On the real
+ * board card 0 is the RV1103's own rv-acodec: it has a capture node, it is
+ * capture-capable, and it is wired to nothing at all. The byte-sorted scan
+ * picks it, arecord opens it happily, and the far end of the call hears
+ * silence -- with no error anywhere, because nothing failed.
+ *
+ * The USB sound card is the one with a microphone on it, and a usbid file is
+ * what tells them apart. S17audio already picks the playback card that way;
+ * this is the same test applied to capture, so both ends of a call land on
+ * the same piece of hardware. */
+static void test_capture_scan_prefers_the_usb_card(void)
+{
+    char dev[64];
+
+    /* card0: the SoC's own codec -- capture-capable, connected to nothing. */
+    pt_mkdir("/proc/asound/card0");
+    pt_write_text("/proc/asound/card0/pcm0c", "");
+
+    /* card1: the C-Media adapter the microphone is soldered to. */
+    pt_mkdir("/proc/asound/card1");
+    pt_write_text("/proc/asound/card1/pcm0c", "");
+    pt_write_text("/proc/asound/card1/usbid", "0d8c:0014\n");
+
+    CHECK(nd_modem__find_capture_device(dev, sizeof dev));
+    CHECK_STR(dev, "plughw:1,0");
+}
+
+/* A USB card with no capture node is not the microphone either. QEMU's own
+ * USB Audio is exactly this, so the fallback still has to skip it. */
+static void test_capture_scan_skips_a_playback_only_usb_card(void)
+{
+    char dev[64];
+
+    pt_mkdir("/proc/asound/card0");
+    pt_write_text("/proc/asound/card0/pcm0p", "");
+    pt_write_text("/proc/asound/card0/usbid", "46f4:0002\n");
+    pt_mkdir("/proc/asound/card1");
+    pt_write_text("/proc/asound/card1/pcm0c", "");
+    pt_write_text("/proc/asound/card1/usbid", "2034:0105\n");
+
+    CHECK(nd_modem__find_capture_device(dev, sizeof dev));
+    CHECK_STR(dev, "plughw:1,0");
+}
+
+/* With no USB card at all, the first capture node is still the right answer.
+ * A board that grows a wired-up on-chip microphone must not stop working
+ * because it has no dongle. */
+static void test_capture_scan_falls_back_when_nothing_is_usb(void)
+{
+    char dev[64];
+
+    pt_mkdir("/proc/asound/card0");
+    pt_write_text("/proc/asound/card0/pcm0c", "");
+
+    CHECK(nd_modem__find_capture_device(dev, sizeof dev));
+    CHECK_STR(dev, "plughw:0,0");
+}
+
 /* ------------------------------------------------------------------ *
  * 6. The flock
  * ------------------------------------------------------------------ */
@@ -1986,6 +2045,9 @@ int main(void)
     RUN(test_hex_interface_16_is_not_interface_10);
     RUN(test_capture_device_scan);
     RUN(test_capture_scan_is_byte_sorted);
+    RUN(test_capture_scan_prefers_the_usb_card);
+    RUN(test_capture_scan_skips_a_playback_only_usb_card);
+    RUN(test_capture_scan_falls_back_when_nothing_is_usb);
     RUN(test_the_lock_keeps_two_holders_apart);
 
     RUN(test_probe_adopts_the_port_and_runs_the_init_sequence);

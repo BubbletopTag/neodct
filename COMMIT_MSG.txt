@@ -2018,3 +2018,41 @@ Cut as 0.4.7a to be the first update installed over the air, now that the
 three faults that stopped that ever working are fixed.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+================================================================================
+
+modem: a call's uplink went to the codec with nothing attached to it
+
+Calls played the far end's voice perfectly and sent silence back, with no
+error anywhere. Both halves worked exactly as written; they were written for
+a machine this phone is not.
+
+Downlink uses ALSA's "default", which S17audio points at the USB sound card.
+Uplink did not: it scanned /proc/asound and took the first card carrying a
+pcm*c node, byte-sorted. The comment above it explains why -- on QEMU
+"default" is a playback-only USB Audio device that arecord cannot open, so
+the scan exists to route around it.
+
+On QEMU that scan lands on the microphone by luck: card 0 has no capture node
+at all, so the first match is the real one. On the phone card 0 is the
+RV1103's own rv-acodec. It HAS a capture node, arecord opens it without
+complaint, and on this board it is connected to nothing. So the two ends of a
+call ran on two different cards, and the one with the microphone on it was
+not the one being recorded.
+
+The fix is the test S17audio already uses for the playback card: a USB sound
+card announces itself with a usbid and an on-chip codec does not. Prefer a
+USB card that can capture, fall back to the first card that can capture at
+all. Both ends of a call now land on the same hardware by construction rather
+than by luck, and a board that grows a wired-up on-chip microphone still
+works.
+
+Three tests, RED first at "got plughw:0,0 want plughw:1,0": the phone's
+layout, QEMU's playback-only USB card (which must still be skipped), and the
+no-USB fallback.
+
+Found from the hardware, not from the code: the phone's own /proc/asound
+listed capture nodes on both card0 and card1, which is the fact the QEMU
+comment could not have known.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
