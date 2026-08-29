@@ -3,6 +3,8 @@
 ############################
 buildroot/output/
 buildroot/dl/
+# A `make` run redirected to a file, which is how a headless agent watches one.
+buildroot/build.log
 
 # Out-of-tree build dirs
 build-*/
