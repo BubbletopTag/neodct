@@ -33,15 +33,44 @@
 #     Pay-as-you-go feature.                              ERR_NGROK_9009
 #
 # That is enforced at ngrok's end, so no amount of local configuration fixes
-# it. The three ways out, in the order worth trying:
+# it.
 #
-#   1. Tailscale. tailscaled in userspace mode honours HTTPS_PROXY and its
-#      DERP relay is ordinary HTTPS, so it is the one most likely to survive
-#      a policy proxy. Connect to the tailnet address on VNC_PORT; no inbound
-#      port and no public URL at all, which is also the safest of the three.
-#   2. An ngrok Pay-as-you-go plan, after which `proxy_url` is permitted and
+# ============ WHAT THE NETWORK ACTUALLY ALLOWS, MEASURED ============
+#
+# cloudflared's preflight is the quickest way to find out, and on a Claude
+# Code cloud session it reports:
+#
+#     DNS Resolution    region1.v2.argotunnel.com   PASS
+#     UDP Connectivity  region1.v2.argotunnel.com   FAIL  (QUIC)
+#     TCP Connectivity  region1.v2.argotunnel.com   FAIL  (port 7844)
+#     Cloudflare API    api.cloudflare.com:443      PASS
+#
+# So: DNS works, HTTPS on 443 THROUGH THE PROXY works, and nothing else gets
+# out at all. That rules cloudflared out completely -- its edge connection is
+# a raw dial to port 7844 and every --proxy-* flag it has is about the ORIGIN
+# side, not the edge, so there is no way to put it through the proxy.
+#
+# It does NOT rule ngrok out, and the difference is worth knowing before
+# anyone pays for anything. Ask the proxy directly:
+#
+#     curl -sv https://connect.ngrok-agent.com/
+#     > CONNECT connect.ngrok-agent.com:443 HTTP/1.1
+#     < HTTP/1.1 200 Connection Established
+#
+# The tunnel is established; the request that follows fails only because that
+# endpoint does not speak plain HTTP. The path is open and the plan is the
+# only thing in the way. (A bare `curl -o /dev/null -w %{http_code}` reports
+# 000 here and looks like a refusal, which is how this nearly got written off.)
+#
+# The two that work, then:
+#
+#   1. Tailscale, free. controlplane.tailscale.com and derp1.tailscale.com
+#      both answer through the proxy, userspace tailscaled honours
+#      HTTPS_PROXY, and DERP is ordinary HTTPS. `tailscale serve --tcp 5901
+#      tcp://localhost:5901` and connect to the tailnet address. No public
+#      URL and no inbound port, which also makes it the safest.
+#   2. An ngrok Pay-as-you-go plan, after which proxy_url is permitted and
 #      this script works unchanged.
-#   3. cloudflared, whose edge transport may or may not proxy.
 #
 # DO NOT "fix" this by unsetting HTTPS_PROXY. It is the host's egress policy,
 # not a misconfiguration, and working around it is out of bounds even when
