@@ -66,7 +66,11 @@ extern const char *const nd_calllog_duration_items[ND_CALLLOG_DURATION_ITEMS];
 
 /* The three `type` values the table stores, and the label each list screen
  * carries. Index 0/1/2 is the root menu's 0/1/2, so the two arrays are
- * indexed by the same number the PagedList returned. */
+ * indexed by the same number the PagedList returned.
+ *
+ * The titles are NOT the root rows that open them: one word each, because a
+ * 24 px title shares its row with the breadcrumb and "Received calls" is cut
+ * to "Received c..." to make room. See their definition in main.c. */
 extern const char *const nd_calllog_types[3];
 extern const char *const nd_calllog_titles[3];
 

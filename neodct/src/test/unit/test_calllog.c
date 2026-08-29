@@ -155,14 +155,21 @@ static void test_strings(void)
 
 static void test_index_maps(void)
 {
-    /* The ROOT menu: missed, received, dialed -- and each title is the row
-     * that opens it. */
+    /* The ROOT menu: missed, received, dialed. */
     CHECK_STR(api.types[0], "missed", "root 0 -> missed");
     CHECK_STR(api.types[1], "received", "root 1 -> received");
     CHECK_STR(api.types[2], "dialed", "root 2 -> dialed");
-    CHECK_STR(api.titles[0], api.root_items[0], "root 0's title is its row");
-    CHECK_STR(api.titles[1], api.root_items[1], "root 1's title is its row");
-    CHECK_STR(api.titles[2], api.root_items[2], "root 2's title is its row");
+
+    /* And the title each row opens, which is the row's first word and NOT the
+     * row. "Received calls" in 24 px type does not fit beside the breadcrumb
+     * and nd_text_fit() cuts it to "Received c...", so the qualifier is
+     * dropped on purpose rather than by the fitter. Pinned because a later
+     * "tidy-up" back to the row text would put the ellipsis back and look
+     * like the fitter had regressed. */
+    CHECK_STR(api.titles[0], "Missed", "root 0's title");
+    CHECK_STR(api.titles[1], "Received", "root 1's title");
+    CHECK_STR(api.titles[2], "Dialed", "root 2's title");
+    CHECK_STR(api.root_items[0], "Missed calls", "and the ROW it opens keeps the noun");
 
     /* The CLEAR menu, whose 2 and 3 are the other way round. */
     CHECK(api.clear_targets[0] == NULL, "clear 0 -> every row");

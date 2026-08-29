@@ -101,7 +101,14 @@ const char *const nd_calllog_duration_items[ND_CALLLOG_DURATION_ITEMS] = {
 };
 
 const char *const nd_calllog_types[3] = {"missed", "received", "dialed"};
-const char *const nd_calllog_titles[3] = {"Missed calls", "Received calls", "Dialed calls"};
+/* The list SCREENS' titles, and deliberately not the root rows that open them.
+ * A 24 px title and a right-aligned breadcrumb share one 240 px row, so
+ * "Received calls" does not fit beside "3-1" and nd_text_fit() cuts it to
+ * "Received c...". The word that was being thrown away is the only one that
+ * says which list you are in, so the noun goes instead of the qualifier: the
+ * row you pressed said "Received calls" a moment ago and the breadcrumb says
+ * 3-2 underneath it. Nothing else on the phone reads these three. */
+const char *const nd_calllog_titles[3] = {"Missed", "Received", "Dialed"};
 
 const char *const nd_calllog_unknown = "Unknown";
 
@@ -348,15 +355,15 @@ const char *nd_calllog_format_call_time(int64_t timestamp, char *out, size_t out
  * The screens
  * ------------------------------------------------------------------ */
 
-/* show_call_list(ui, title, call_type, root_id) -- one of "Missed calls",
- * "Received calls", "Dialed calls".
+/* show_call_list(ui, title, call_type, root_id) -- one of "Missed", "Received",
+ * "Dialed"; see nd_calllog_titles for why those are one word each.
  *
  * root_id is the PLAIN app id, "3", so the pages read "3-1" .. "3-10" -- which
  * is the breadcrumb the VerticalList drew here (nd_vlist_init took app_id and
  * nd_vlist_draw passed selected_index + 1), and is kept rather than made into
- * the composite "3-1-1" the duration menu's "3-5" would suggest. A 24 px title
- * and a breadcrumb share a 240 px row, so two more breadcrumb characters cost
- * three of "Received calls", and the title is the half worth reading.
+ * the composite "3-1-1" the duration menu's "3-5" would suggest. Two more
+ * breadcrumb characters would cost three of the title, on a row where the
+ * title is the half worth reading.
  *
  * fetch_calls() runs ONCE, outside the loop: viewing a detail and coming back
  * does not re-read the table, so a call arriving while the list is up is not

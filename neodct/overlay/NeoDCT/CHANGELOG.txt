@@ -107,6 +107,11 @@ Changed
   three-row VerticalLists over twenty calls; they show the last ten. One number
   to a page is worth reading and twenty of them is not, so the list is the
   length a list can end at.
+- Those three screens are headed "Missed", "Received" and "Dialed". A heading
+  in that type shares its row with the menu number, and "Received calls" did
+  not fit beside it -- so it was being shortened to "Received c...", losing the
+  one word that says which list you are looking at. The menu rows that open
+  them are unchanged.
 - The table keeps the last fifty of each kind. /NeoDCT/User is the only
   writable partition on the phone, and a log that only ever grows is a slow
   leak into it. Fifty is five times what a screen can reach, so nothing
