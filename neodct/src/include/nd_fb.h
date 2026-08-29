@@ -27,6 +27,31 @@
  * At open. That is what makes later partial-band writes safe: the letterbox
  * rows above and below the band are black from boot and are never written
  * again.
+ *
+ * ============ THE CHANNEL ORDER COMES FROM THE DRIVER ============
+ *
+ * A 32bpp framebuffer says a pixel is four bytes wide and NOTHING about where
+ * red sits inside them, and the two framebuffers NeoDCT runs on disagree:
+ *
+ *   QEMU     virtio-gpu through DRM's fbdev emulation: red.offset 16, so a
+ *            pixel is B G R x.
+ *   hardware the kernel's vfb, which neodct_displayd mirrors to the ST7789
+ *            over SPI: red.offset 0, so a pixel is R G B x. (drivers/video/
+ *            fbdev/vfb.c, the 32bpp case of vfb_check_var.)
+ *
+ * The Python packed B G R A unconditionally and the daemon unpacked B G R A
+ * unconditionally, so the UI came out right on both -- the two halves of one
+ * private convention agreeing with each other. Everything else on the phone
+ * believes the driver instead: mpv's fbdev output reads red.offset, netsurf's
+ * libnsfb reads it, and the framebuffer console behind the recovery menu is
+ * the driver. On the hardware all three therefore drew R G B x into a buffer
+ * the daemon read as B G R x, and video and web pages came out with red and
+ * blue swapped while the UI around them looked fine.
+ *
+ * So the order is read from fb_var_screeninfo, here and in neodct_displayd,
+ * and the private convention is gone. nd_fb_open_mem() and the capture sink
+ * have no driver to ask and keep the B G R A the reference frames were cut
+ * with.
  */
 
 #ifndef ND_FB_H_INCLUDED
@@ -42,11 +67,18 @@ extern "C" {
 /* Which packer nd_fb_update() will use, decided once at open and logged. The
  * log line is verbatim:
  *   "[FB] {xres}x{yres} @ {bpp}bpp, pixel path: {path}"
- * with path one of the three strings below. */
+ * with path one of the strings below.
+ *
+ * The bit depth does not decide the channel order -- see THE CHANNEL ORDER
+ * COMES FROM THE DRIVER above. The first three are what the Python had; the
+ * last two are the blue-first halves of the same two depths, reached only
+ * when a driver says that is what it wants. */
 typedef enum {
-    ND_FB_PATH_BGRA32 = 0, /* "BGRA 32bpp (C, fast)"                        */
-    ND_FB_PATH_RGB565,     /* "BGR;16 16bpp (C, fast)"                      */
-    ND_FB_PATH_RGB888      /* anything else: raw RGB bytes                  */
+    ND_FB_PATH_BGRA32 = 0, /* "BGRA 32bpp (C, fast)"    bytes B G R A       */
+    ND_FB_PATH_RGB565,     /* "BGR;16 16bpp (C, fast)"  red in the top bits */
+    ND_FB_PATH_RGB888,     /* anything else: raw RGB bytes                  */
+    ND_FB_PATH_RGBA32,     /* "RGBA 32bpp (C, fast)"    bytes R G B A       */
+    ND_FB_PATH_BGR565      /* "BGR565 16bpp (C, fast)"  blue in the top bits*/
 } nd_fb_path;
 
 typedef struct nd_fb nd_fb;

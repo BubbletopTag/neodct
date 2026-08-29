@@ -54,6 +54,17 @@ struct nd_fb {
 nd_err nd_fb_derive_geometry(struct nd_fb *fb, int32_t xres, int32_t yres, int32_t bpp,
                              size_t line_length);
 
+/* Re-pick the pixel path from the red and blue offsets fb_var_screeninfo
+ * reported, having already derived the geometry. Red BELOW blue means red
+ * comes first in memory; anything else, equal offsets included, keeps the
+ * blue-first order nd_fb_derive_geometry() chose -- a driver that left the
+ * masks zeroed has told us nothing, and the answer it used to get is the
+ * safer thing to give it. Only the two paths with a real driver to ask call
+ * this: nd_fb_open() and nd_fb_adopt_fd(). A memory framebuffer and the
+ * capture sink have no driver and keep B G R A. Depths other than 16 and 32
+ * have no order to choose and are left alone. */
+void nd_fb_set_channel_order(struct nd_fb *fb, int32_t red_offset, int32_t blue_offset);
+
 /* Allocate a bare nd_fb with a sink attached and no mapping. Owned by the
  * caller; release with nd_fb_close(). */
 nd_err nd_fb_open_sink(struct nd_fb **out, int32_t xres, int32_t yres, int32_t bpp,

@@ -107,6 +107,35 @@ Added
 0.4.6a
 Sleep groundwork, a working Clock, and the microphone finally records.
 
+--- Red and blue, the right way round ---
+
+The browser and the video player had red and blue swapped, and the fault
+was ours rather than theirs.
+
+A framebuffer's bit depth says how wide a pixel is and nothing at all about
+where red sits inside it, and the two framebuffers this OS runs on genuinely
+disagree: QEMU's is DRM's fbdev emulation, which puts red in the third byte,
+and the phone's is the kernel's vfb, which puts it in the first. The UI
+packed the third-byte order into both and neodct_displayd unpacked the same
+order back out, so the two halves of NeoDCT agreed with each other and the
+screen looked right -- but they agreed on something the driver contradicted.
+Everything else on the phone believes the driver: mpv reads the offsets,
+netsurf reads them, the framebuffer console behind the recovery menu IS the
+driver. On the hardware all three wrote red-first pixels into a buffer the
+daemon read as blue-first, so video and web pages reached the panel inverted
+while the UI around them was fine. Netsurf had a second, separate version of
+the same mistake -- libnsfb assumed one 32bpp order for every driver -- which
+is why html.duckduckgo.com came out wrong on QEMU too.
+
+Fixed
+- Web pages and video render in their real colours, on QEMU and on the
+  phone. The UI, the panel daemon and libnsfb all read the channel order
+  out of fb_var_screeninfo now instead of assuming one, so a program that
+  has never heard of NeoDCT gets its colours through intact.
+- neodct_displayd's --swap-rb inverts the detected order rather than being
+  the only way to express one. It stays for the driver that fills the
+  struct in wrongly, which is what it was always for.
+
 --- The first two pieces of sleep ---
 
 The first two pieces of sleep, on a phone that has never slept.
