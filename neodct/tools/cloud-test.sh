@@ -50,25 +50,86 @@
 # a raw dial to port 7844 and every --proxy-* flag it has is about the ORIGIN
 # side, not the edge, so there is no way to put it through the proxy.
 #
-# It does NOT rule ngrok out, and the difference is worth knowing before
-# anyone pays for anything. Ask the proxy directly:
+# ============ THE PROXY IS A TLS-ONLY MITM, AND THAT DECIDES EVERYTHING ====
 #
-#     curl -sv https://connect.ngrok-agent.com/
-#     > CONNECT connect.ngrok-agent.com:443 HTTP/1.1
-#     < HTTP/1.1 200 Connection Established
+# It is not a transparent CONNECT tunnel. /root/.ccr/README.md says "TLS is
+# re-terminated there", and the consequences are bigger than they sound. Four
+# things were measured against a VPS running wstunnel, watching BOTH ends:
 #
-# The tunnel is established; the request that follows fails only because that
-# endpoint does not speak plain HTTP. The path is open and the plan is the
-# only thing in the way. (A bare `curl -o /dev/null -w %{http_code}` reports
-# 000 here and looks like a refusal, which is how this nearly got written off.)
+#   1. "200 Connection Established" IS FABRICATED. The proxy returns it for
+#      any host:port, including ports with nothing behind them --
+#      67.205.190.49:9999 answers 200 exactly like :443 does. It proves
+#      nothing, and it is the single most misleading output in this whole
+#      exercise. Do not conclude reachability from it.
 #
-# The two that work, then:
+#   2. NON-TLS BYTES GET NOTHING. CONNECT to a host's port 22 and sshd's
+#      banner -- which a real sshd sends the instant it accepts -- never
+#      arrives. The proxy is waiting for a ClientHello and will not carry a
+#      protocol that does not start with one.
 #
-#   1. Tailscale, free. controlplane.tailscale.com and derp1.tailscale.com
-#      both answer through the proxy, userspace tailscaled honours
-#      HTTPS_PROXY, and DERP is ordinary HTTPS. `tailscale serve --tcp 5901
-#      tcp://localhost:5901` and connect to the tailnet address. No public
-#      URL and no inbound port, which also makes it the safest.
+#   3. ON 443 IT VALIDATES THE ORIGIN CERTIFICATE. wstunnel's auto-generated
+#      self-signed cert was rejected: the server logged connections arriving
+#      and then erroring, while the client saw a reset. Turning off
+#      verification CLIENT-side does not help -- it is the proxy doing the
+#      validating, and it is not ours to configure.
+#
+#   4. OFF 443 IT DOES NOT REALLY CONNECT. Same server, same self-signed
+#      cert, on 8080: the server logged NOTHING at all. And plain ws:// on
+#      8080 arrived as a forward-proxied GET with the WebSocket upgrade
+#      headers stripped, which the server correctly answered 400:
+#
+#          Invalid protocol version request, got HTTP/1.1 while expecting
+#          either websocket http1 upgrade or http2
+#
+# So exactly one shape of traffic crosses this proxy: TLS, on port 443, to a
+# host presenting a PUBLICLY TRUSTED certificate, addressed BY HOSTNAME (the
+# proxy needs a name to validate against, and TLS needs one for SNI).
+#
+# ============ WHAT THAT MEANS FOR EACH TUNNEL ============
+#
+#   cloudflared   Dead. Its edge is a raw dial to port 7844 and every
+#                 --proxy-* flag it has is origin-side. No way in.
+#
+#   ngrok         DOUBTFUL, AND DO NOT PAY TO FIND OUT. The plan gate is
+#                 real, but clearing it is not obviously enough: the agent
+#                 speaks TLS to connect.ngrok-agent.com, and an agent
+#                 protocol that validates or pins its server certificate
+#                 breaks against a MITM exactly as our self-signed cert did.
+#                 UNTESTED -- nobody has run a paid agent from here. An
+#                 earlier draft of this file said the path was open and the
+#                 plan was the only obstacle. That was written before the
+#                 MITM was understood and it should not be trusted.
+#
+#   Tailscale     Same doubt, same reason. controlplane.tailscale.com and
+#                 derp1.tailscale.com both answer through the proxy, which
+#                 is necessary but not sufficient; whether tailscaled's own
+#                 certificate checking survives interception is UNTESTED.
+#
+#   wstunnel      WORKS, because it is the only one where you own both ends.
+#                 The origin needs a real certificate -- see below -- and
+#                 after that it is ordinary HTTPS as far as the proxy can
+#                 tell.
+#
+# ============ THE wstunnel RECIPE, WHICH IS THE ONE THAT WORKS ============
+#
+# On a VPS, with sslip.io supplying a free hostname for a bare IP so that no
+# domain has to be bought:
+#
+#     sudo certbot certonly --standalone -d <a-b-c-d>.sslip.io
+#     sudo wstunnel server \
+#       --restrict-http-upgrade-path-prefix "$SECRET" \
+#       --tls-certificate /etc/letsencrypt/live/<a-b-c-d>.sslip.io/fullchain.pem \
+#       --tls-private-key /etc/letsencrypt/live/<a-b-c-d>.sslip.io/privkey.pem \
+#       wss://[::]:443
+#
+# and in the container, where --http-proxy is the flag the other two lacked:
+#
+#     wstunnel client -R 'tcp://[::]:6080:127.0.0.1:6080' \
+#       --http-upgrade-path-prefix "$SECRET" \
+#       --http-proxy "$HTTPS_PROXY" \
+#       wss://<a-b-c-d>.sslip.io:443
+#
+# Then the far end opens http://<vps>:6080/vnc.html in any browser.
 #   2. An ngrok Pay-as-you-go plan, after which proxy_url is permitted and
 #      this script works unchanged.
 #
