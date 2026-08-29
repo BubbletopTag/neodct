@@ -94,11 +94,11 @@ Before there was a Luckfox or a Nokia shell, there was a bare ST7789 panel on ju
 
 <img src="docs/img/hardware-prototype3.jpg" width="380">
 
-And then this one, which is the photo I'm proudest of in this whole repo: **the first time the UI ever came up on the target hardware.** Everything before it was NeoDCT running *somewhere*. This was NeoDCT running on the chip it ships on, a Luckfox Pico Mini B, driving the real panel off a real battery.
+And then this one: **the first time the UI ever came up on the target hardware.** Everything before it was NeoDCT running *somewhere*. This was NeoDCT running on the chip it ships on, a Luckfox Pico Mini B, driving the real panel off a bare 3000 mAh LiPo.
 
 <img src="docs/img/hardware-luckfox-firstboot.jpg" width="380">
 
-Every wire is in open air, the whole thing is clamped in a helping hands soldering rig, the alligator clips go straight onto an unprotected 3000 mAh LiPo, and the screen is calmly informing you that the software is extremely insecure and unstable. You could not bring this on an airplane.
+Every wire is in open air, the whole thing is held together by a helping hands soldering rig, and the screen is calmly informing you that the software is extremely insecure and unstable. You could not bring this on an airplane.
 
 Currently, this device and operating system is a **work-in-progress**, not a finished product.
 
