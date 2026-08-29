@@ -678,6 +678,145 @@ static void test_csq_and_cops_parsers(void)
     nd_modem__destroy(m);
 }
 
+/* +CFUN and +CPSI: the two readouts that make CSQ 99 diagnosable. */
+static void test_parse_cfun(void)
+{
+    nd_modem *m = NULL;
+    nd_lines lines;
+
+    if (nd_modem__create(&m) != ND_OK)
+        return;
+    if (m == NULL)
+        return;
+
+    /* -1 until something answers, like csq and reg_stat. */
+    CHECK_INT(m->cfun, -1);
+
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(&lines, "+CFUN: 1");
+    nd_modem__parse_cfun(m, &lines);
+    CHECK_INT(m->cfun, 1);
+
+    /* Flight mode. THE CASE THIS ROW EXISTS FOR: the modem reports CSQ 99 and
+     * CEREG 4 here with a perfectly good antenna on it. */
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(&lines, "+CFUN: 4");
+    nd_modem__parse_cfun(m, &lines);
+    CHECK_INT(m->cfun, 4);
+
+    /* Some firmwares answer "+CFUN: 1,0"; <fun> is the first field. */
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(&lines, "+CFUN: 0,0");
+    nd_modem__parse_cfun(m, &lines);
+    CHECK_INT(m->cfun, 0);
+
+    /* A parse failure leaves it alone. */
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(&lines, "+CFUN: ");
+    nd_modem__parse_cfun(m, &lines);
+    CHECK_INT(m->cfun, 0);
+
+    nd_modem__destroy(m);
+}
+
+static void test_parse_cpsi(void)
+{
+    nd_modem *m = NULL;
+    nd_lines lines;
+
+    if (nd_modem__create(&m) != ND_OK)
+        return;
+    if (m == NULL)
+        return;
+
+    CHECK_STR(m->cell_mode, "");
+    CHECK_INT(m->rsrp_dbm10, ND_MODEM_RSRP_NONE);
+
+    /* The full LTE reply. Field 11 (zero-based) is RSRP x10; 10 is RSRQ and
+     * 12 is RSSI, and picking the wrong one of the three is the whole risk. */
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(
+        &lines,
+        "+CPSI: LTE,Online,310-260,0x54,12345678,257,EUTRAN-BAND2,900,5,5,-185,-1134,-859,15");
+    nd_modem__parse_cpsi(m, &lines);
+    CHECK_STR(m->cell_mode, "LTE");
+    CHECK_INT(m->rsrp_dbm10, -1134);
+
+    /* The short reply. The mode is still worth having -- "NO SERVICE" is the
+     * modem saying it looked -- and there is no RSRP in it to invent. */
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(&lines, "+CPSI: NO SERVICE,Online");
+    nd_modem__parse_cpsi(m, &lines);
+    CHECK_STR(m->cell_mode, "NO SERVICE");
+    CHECK_INT(m->rsrp_dbm10, ND_MODEM_RSRP_NONE);
+
+    /* GSM has entirely different columns and NO RSRP. Reading field 11
+     * regardless would report this cell's "0-0" as an LTE measurement. */
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(&lines, "+CPSI: GSM,Online,310-260,0x1234,5678,45 EGSM 900,-60,0,0-0");
+    nd_modem__parse_cpsi(m, &lines);
+    CHECK_STR(m->cell_mode, "GSM");
+    CHECK_INT(m->rsrp_dbm10, ND_MODEM_RSRP_NONE);
+
+    /* NR is read like LTE. */
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(&lines, "+CPSI: NR5G_SA,Online,310-260,0x54,12345678,257,NR_BAND78,600,5,5,"
+                                "-110,-905,-700,20");
+    nd_modem__parse_cpsi(m, &lines);
+    CHECK_STR(m->cell_mode, "NR5G_SA");
+    CHECK_INT(m->rsrp_dbm10, -905);
+
+    nd_modem__destroy(m);
+}
+
+/* Losing the modem must clear these two with csq and reg_stat. A stale RSRP
+ * drawn beside "SIMULATION" reads as a measurement that was just taken. */
+static void test_drop_hardware_clears_radio_readouts(void)
+{
+    nd_modem *m = NULL;
+    nd_lines lines;
+
+    if (nd_modem__create(&m) != ND_OK)
+        return;
+    if (m == NULL)
+        return;
+
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(&lines, "+CFUN: 1");
+    nd_modem__parse_cfun(m, &lines);
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(
+        &lines,
+        "+CPSI: LTE,Online,310-260,0x54,12345678,257,EUTRAN-BAND2,900,5,5,-185,-902,-859,15");
+    nd_modem__parse_cpsi(m, &lines);
+    CHECK_INT(m->cfun, 1);
+    CHECK_INT(m->rsrp_dbm10, -902);
+
+    nd_modem__drop_hardware(m, "test");
+    CHECK_INT(m->cfun, -1);
+    CHECK_STR(m->cell_mode, "");
+    CHECK_INT(m->rsrp_dbm10, ND_MODEM_RSRP_NONE);
+
+    nd_modem__destroy(m);
+}
+
+/* The reset refuses without hardware -- there is nothing to reboot -- and a
+ * NULL modem is false rather than a crash, like every other entry point. */
+static void test_reset_refuses_without_hardware(void)
+{
+    nd_modem *m = NULL;
+
+    CHECK(!nd_modem_reset(NULL));
+
+    if (nd_modem__create(&m) != ND_OK)
+        return;
+    if (m == NULL)
+        return;
+    CHECK(!m->hardware);
+    CHECK(!nd_modem_reset(m));
+    nd_modem__destroy(m);
+}
+
 static void test_sms_record_parsers(void)
 {
     nd_lines lines;
@@ -920,6 +1059,10 @@ static const fake_rule SIM7600[] = {
     {"AT+CSQ", "\r\n+CSQ: 23,99\r\n\r\nOK\r\n"},
     {"AT+CEREG?", "\r\n+CEREG: 0,1\r\n\r\nOK\r\n"},
     {"AT+COPS?", "\r\n+COPS: 0,0,\"Tello\",7\r\n\r\nOK\r\n"},
+    {"AT+CPSI?", "\r\n+CPSI: LTE,Online,310-260,0x54,12345678,257,EUTRAN-BAND2,900,5,5,"
+                 "-185,-902,-859,15\r\n\r\nOK\r\n"},
+    {"AT+CFUN?", "\r\n+CFUN: 1\r\n\r\nOK\r\n"},
+    {"AT+CFUN=1,1", "\r\nOK\r\n"},
     {"AT+CLCC", "\r\n+CLCC: 1,0,0,0,0,\"+15551234\",129\r\n\r\nOK\r\n"},
     {"AT+CHUP", "\r\nOK\r\n"},
     {"AT+CPCMFRM=1", "\r\nOK\r\n"},
@@ -988,7 +1131,7 @@ static void test_probe_adopts_the_port_and_runs_the_init_sequence(void)
     fake_stop(&fm);
 }
 
-static void test_poll_staggers_csq_then_cereg_then_cops(void)
+static void test_poll_staggers_csq_then_cereg_then_cops_then_cpsi_then_cfun(void)
 {
     fake_modem fm;
     nd_modem *m = attach(&fm);
@@ -1016,11 +1159,124 @@ static void test_poll_staggers_csq_then_cereg_then_cops(void)
     CHECK_STR(fm.last_cmd, "AT+COPS?");
     CHECK_STR(nd_modem_operator_display(m), "Tello");
 
-    /* Nothing is due now, so a fourth tick sends nothing at all. */
+    /* The two additions ride at the BACK of the chain, so the CSQ that draws
+     * the home screen's bars is never the query a tick skipped. */
+    poll_now(m); /* tick 4: AT+CPSI? */
+    CHECK_STR(fm.last_cmd, "AT+CPSI?");
+    CHECK_STR(m->cell_mode, "LTE");
+    CHECK_INT(m->rsrp_dbm10, -902);
+
+    poll_now(m); /* tick 5: AT+CFUN? */
+    CHECK_STR(fm.last_cmd, "AT+CFUN?");
+    CHECK_INT(m->cfun, 1);
+
+    /* Nothing is due now, so a sixth tick sends nothing at all. */
     before = fake_commands(&fm);
     poll_now(m);
     CHECK_INT(fake_commands(&fm) - before, 0);
 
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
+/* The reset on real (well, pty) hardware: the command goes out, and the port
+ * is dropped rather than waited out -- the module is about to re-enumerate and
+ * may not come back on the same node. */
+static void test_reset_sends_cfun_1_1_and_drops_the_port(void)
+{
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+    nd_modem_status st;
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+
+    CHECK(m->hardware);
+    CHECK(nd_modem_reset(m));
+    CHECK_STR(fm.last_cmd, "AT+CFUN=1,1");
+
+    /* Back to Simulation Mode at once, with the radio readouts cleared. */
+    CHECK(!m->hardware);
+    nd_modem_status_snapshot(m, &st);
+    CHECK(!st.hardware);
+    CHECK_STR(st.port, "");
+    CHECK_INT(st.cfun, -1);
+    CHECK_INT(st.rsrp_dbm10, ND_MODEM_RSRP_NONE);
+
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
+/* THE REFUSAL THAT MATTERS. A module reboot takes the call with it, so a
+ * keypress on a diagnostics page must not be able to end one. */
+static void test_reset_is_refused_during_a_call(void)
+{
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+    int before;
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+
+    CHECK(nd_modem_dial(m, "5551234"));
+    CHECK_INT(nd_modem_state(m), ND_CALL_CALLING);
+
+    before = fake_commands(&fm);
+    CHECK(!nd_modem_reset(m));
+    /* Refused means NOTHING WAS SENT, not "sent and then regretted". */
+    CHECK_INT(fake_commands(&fm) - before, 0);
+    CHECK(m->hardware);
+    CHECK_INT(nd_modem_state(m), ND_CALL_CALLING);
+
+    (void)nd_modem_hangup(m);
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
+/* THE LOCK DECIDES. A port held by S45modem's redial or an atcmd session means
+ * AT+CFUN=1,1 was never written -- so the reset must report false and must NOT
+ * drop a working port on the strength of a command it did not send. */
+static void test_reset_refuses_when_the_port_lock_is_held(void)
+{
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+    nd_modem *other;
+    int before;
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+    other = make_modem();
+    if (other == NULL || other->lock_fd < 0 || m->lock_fd < 0) {
+        /* No lock file on this host: the reset serialises with nobody. */
+        nd_modem__destroy(other);
+        nd_modem__destroy(m);
+        fake_stop(&fm);
+        return;
+    }
+
+    CHECK(nd_modem__acquire(other));
+    before = fake_commands(&fm);
+    CHECK(!nd_modem_reset(m));
+    CHECK_INT(fake_commands(&fm) - before, 0);
+    /* Still ours. Dropping it here would have been the bug. */
+    CHECK(m->hardware);
+    nd_modem__release(other);
+
+    /* And with the lock free again it goes through. */
+    CHECK(nd_modem_reset(m));
+    CHECK_STR(fm.last_cmd, "AT+CFUN=1,1");
+    CHECK(!m->hardware);
+
+    nd_modem__destroy(other);
     nd_modem__destroy(m);
     fake_stop(&fm);
 }
@@ -1989,7 +2245,10 @@ int main(void)
     RUN(test_the_lock_keeps_two_holders_apart);
 
     RUN(test_probe_adopts_the_port_and_runs_the_init_sequence);
-    RUN(test_poll_staggers_csq_then_cereg_then_cops);
+    RUN(test_poll_staggers_csq_then_cereg_then_cops_then_cpsi_then_cfun);
+    RUN(test_reset_sends_cfun_1_1_and_drops_the_port);
+    RUN(test_reset_is_refused_during_a_call);
+    RUN(test_reset_refuses_when_the_port_lock_is_held);
     RUN(test_poll_routes_an_unsolicited_ring);
     RUN(test_transact_times_out_on_a_silent_modem);
     RUN(test_a_mid_command_urc_is_handled_and_still_collected);
@@ -2005,6 +2264,10 @@ int main(void)
     RUN(test_a_junk_number_logs_an_empty_dial_and_fails);
     RUN(test_clcc_ends_a_call_the_modem_forgot);
     RUN(test_a_dead_port_drops_back_to_simulation);
+    RUN(test_parse_cfun);
+    RUN(test_parse_cpsi);
+    RUN(test_drop_hardware_clears_radio_readouts);
+    RUN(test_reset_refuses_without_hardware);
 
     RUN(test_sim_signal_and_operator_hooks);
     RUN(test_sim_ring_hook_is_edge_triggered);

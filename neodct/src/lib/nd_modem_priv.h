@@ -147,7 +147,8 @@ typedef enum {
     ND_REQ_SEND_SMS,
     ND_REQ_FETCH_SMS,
     ND_REQ_READ_STORED,
-    ND_REQ_SEND_AT
+    ND_REQ_SEND_AT,
+    ND_REQ_RESET
 } nd_req_kind;
 
 typedef struct nd_modem_req {
@@ -189,6 +190,10 @@ struct nd_modem {
     bool caller_id_known;
     int32_t csq;      /* -1 is Python's None, 99 is the modem's "unknown" */
     int32_t reg_stat; /* -1 is Python's None                              */
+    /* The two readouts CSQ cannot give; see nd_modem.h's nd_modem_status. */
+    int32_t cfun;                           /* -1 until +CFUN answers   */
+    char cell_mode[ND_MODEM_CELL_MODE_MAX]; /* "" until +CPSI answers   */
+    int32_t rsrp_dbm10;                     /* ND_MODEM_RSRP_NONE = none */
 
     nd_mev ev[ND_MODEM_EVENT_QUEUE_MAX];
     size_t ev_head;
@@ -217,6 +222,8 @@ struct nd_modem {
     double next_csq;
     double next_net;
     double next_cops;
+    double next_cpsi;
+    double next_cfun;
     double next_probe;
     /* The last reason the probe gave, so a failure that repeats every
      * PROBE_RETRY_S is printed ONCE and not forever. Cleared on success, so a
@@ -310,6 +317,8 @@ void nd_modem__handle_urc(nd_modem *m, const char *line);
 void nd_modem__parse_reg(nd_modem *m, const char *line);
 void nd_modem__parse_csq(nd_modem *m, const nd_lines *lines);
 void nd_modem__parse_cops(nd_modem *m, const nd_lines *lines);
+void nd_modem__parse_cfun(nd_modem *m, const nd_lines *lines);
+void nd_modem__parse_cpsi(nd_modem *m, const nd_lines *lines);
 void nd_modem__poll_clcc(nd_modem *m);
 int32_t nd_modem__bars(int32_t csq);
 void nd_modem__queue(nd_modem *m, const nd_mev *e);

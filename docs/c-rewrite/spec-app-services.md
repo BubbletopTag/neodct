@@ -187,7 +187,7 @@ is written down and implemented rather than assumed away.
 
 ---
 
-## 4. Scope of the API: four operations, and no more
+## 4. Scope of the API: five operations, and no more
 
 The channel exposes **exactly what the three broken call sites need** and nothing else.
 This is the whole point of the exercise. `nd_modem.h` also offers `nd_modem_dial()`,
@@ -200,10 +200,11 @@ AT command at a modem that would happily accept `ATH`.
 | --- | --- | --- | --- |
 | `ND_SVC_OP_SEND_SMS` | number, text | sent?, `detail` | `Messages/main.c` |
 | `ND_SVC_OP_MODEM_STATUS` | — | `present?`, `nd_modem_status` | `Modem/main.c` |
+| `ND_SVC_OP_MODEM_RESET` | — | ok? | `Modem/main.c` |
 | `ND_SVC_OP_BATTERY` | — | `present?`, `nd_battery_snap`, `hardware`, `level`, smoothed volts, `errno` | `FuelGauge/main.c` |
 | `ND_SVC_OP_BATTERY_QUICKSTART` | — | ok? | `FuelGauge/main.c` |
 
-### Two notes on the edges of that list
+### Three notes on the edges of that list
 
 **Battery quick-start is included, deliberately.** It is the fourth op and it is a *write*,
 so it deserves the argument. It is inside the cited call-site range (`FuelGauge/main.c:305`),
@@ -223,11 +224,39 @@ locked port" case the page was written to render. So it comes out `SIM "no reply
 comes from the status snapshot beside them. Every one of those strings already existed for
 a modem that would not answer, and that is exactly what happened: it was not asked.
 
-If that page is later wanted in full, the shape is a **fifth op that runs a fixed list of
+If that page is later wanted in full, the shape is a **further op that runs a fixed list of
 commands core-side and returns the parsed fields** — never a passthrough where the app
 chooses the string. That keeps the surface narrow. It is not done here because it means
 moving `sim_rows_present()`'s parser out of the app and into `lib/`, which is a different
 work package.
+
+**The module reset is the fifth op, and it is a write.** `ND_SVC_OP_MODEM_RESET` sends
+`AT+CFUN=1,1` — it reboots the module, not the phone — for the engineering Modem app's
+`*` key. It is on the wire under the same four conditions the quick-start met, and it is
+worth stating them because they are the test any sixth op has to pass:
+
+- **It carries no argument.** The app cannot choose a string; the AT command is a literal
+  in `lib/` and the request record has nowhere to put an alternative. That is exactly the
+  line this section draws, and it is still drawn — this is not a passthrough with one
+  command in it.
+- **The dangerous case is refused core-side.** A module reboot takes any live call with
+  it, so `nd_modem_reset()` refuses unless the call state is idle, and it checks on the
+  modem thread where that state cannot change under the check. An app cannot end a call
+  through this op by accident or on purpose.
+- **It adds no capability to the system.** `/etc/init.d/S45modem` already runs the
+  identical command unprompted when a dial cycle fails (`MODEM_RESET_ON_FAIL`). What
+  changes is who can ask for it: today a developer with a serial cable, and this is the
+  engineering menu reaching the same recovery.
+- **It is confirmed, in the engineering menu, on one page.** The same shape `Power` uses
+  for a reboot.
+
+What it *can* do is interrupt data — the module is gone for ~20 s and `wwan0` with it —
+which is the cost the confirmation is asking about, and the reason it is not on a softkey.
+
+The status snapshot also grew `cfun`, `cell_mode` and `rsrp_dbm10` for the same page. Both
+readings are polled core-side and ride the existing `ND_SVC_OP_MODEM_STATUS` response
+rather than becoming ops of their own, which is what this section asks for; see
+OPEN-QUESTIONS.md M-18.
 
 ---
 
@@ -327,7 +356,8 @@ dialogs are untouched, and so is every string:
 
 **Modem** (engineering). `ui->modem == NULL` becomes `!nd_svc_modem_present(ui)`, and
 `nd_modem_status_snapshot()` becomes `nd_svc_modem_status()`. RADIO and DATA are fully
-live; SIM is as §4 describes.
+live; SIM is as §4 describes. RADIO's `*` key calls `nd_svc_modem_reset()`, the fifth op,
+and is the only action any of the three apps has besides FuelGauge's quick-start.
 
 **FuelGauge** (engineering). The guard becomes
 `!nd_svc_battery_present(ui) || !nd_ui_status_battery_hardware(ui)` — the second half is

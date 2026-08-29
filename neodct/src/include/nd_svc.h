@@ -30,14 +30,38 @@
  * Only an app process -- handle NULL, NEODCT_SERVICE_FD present -- goes to
  * the wire.
  *
- * ============ FOUR OPERATIONS, AND DELIBERATELY NO MORE ============
+ * ============ FIVE OPERATIONS, AND DELIBERATELY NO MORE ============
  *
  * Send an SMS, snapshot the modem, snapshot the battery, quick-start the
- * gauge. nd_modem.h's dial, answer, HANGUP, fetch_sms, read_stored_sms and
- * raw send_at are NOT on this wire and must not be added to it without the
- * same argument being made again: an app must not be able to hang up a live
- * call by accident, and must not be able to type ATH at the modem on
- * purpose. See spec-app-services.md section 4.
+ * gauge, reboot the module. nd_modem.h's dial, answer, HANGUP, fetch_sms,
+ * read_stored_sms and raw send_at are NOT on this wire and must not be added
+ * to it without the same argument being made again: an app must not be able
+ * to hang up a live call by accident, and must not be able to type ATH at
+ * the modem on purpose. See spec-app-services.md section 4.
+ *
+ * ============ WHY THE FIFTH ONE IS ALLOWED ============
+ *
+ * nd_svc_modem_reset() is a WRITE, and the fifth op, so it owes the same
+ * argument the battery quick-start owed as the fourth:
+ *
+ *   - it carries NO ARGUMENT. The app cannot choose a string, so this is not
+ *     a passthrough in disguise -- the AT command is a literal in lib/ and
+ *     the wire record has nowhere to put an alternative. That is the line
+ *     section 4 draws, and it is still drawn;
+ *   - the core refuses it mid-call, on the modem thread, so the accident the
+ *     section is written against -- an app dropping a live call -- cannot
+ *     happen through it;
+ *   - it is already what the phone does to itself. /etc/init.d/S45modem runs
+ *     AT+CFUN=1,1 unprompted when a dial cycle fails, so this adds no
+ *     capability to the system; it moves an existing recovery within reach of
+ *     somebody holding the phone instead of a serial console;
+ *   - it is reachable only from the engineering menu's Modem app, behind a
+ *     confirmation, which is the same shape Power uses for a reboot.
+ *
+ * What it can do is interrupt data: the module goes away for twenty seconds
+ * or so and wwan0 with it. That is the cost of the recovery it performs, it
+ * is what the confirmation is asking about, and it is why this is not on a
+ * softkey.
  *
  * ============ EVERY CALL CAN FAIL, INCLUDING THE TRANSPORT ============
  *
@@ -89,6 +113,12 @@ extern "C" {
  * It must also be finite, so a wedged core cannot wedge the app. */
 #define ND_SVC_SMS_TIMEOUT_S 45.0
 
+/* An app waiting for a module reboot. Must sit above the core's own
+ * ND_MODEM_RESET_TIMEOUT_S (10) with room for the request to queue behind an
+ * AT transaction already on the port, or the app would give up on a reset
+ * that is happening and report it as failed. */
+#define ND_SVC_RESET_TIMEOUT_S 15.0
+
 /* How long the core waits for its service thread after the app has gone.
  * Past this the thread is detached to finish its in-flight request and free
  * itself: there is no way to abort a CMGS already on the wire, and freezing
@@ -127,6 +157,20 @@ bool nd_svc_send_sms(const nd_ui *ui, const char *number, const char *text, char
  * a NULL modem, so a caller that ignores the return still renders "--"
  * rather than uninitialised memory. */
 bool nd_svc_modem_status(const nd_ui *ui, nd_modem_status *out);
+
+/* modem.reset() -- AT+CFUN=1,1, the module reboot.
+ *
+ * True when the command went to the modem. False when there is no modem,
+ * when the core has no ModemService, when the request never got an answer --
+ * and, deliberately, WHEN A CALL IS UP: see nd_modem_reset(), which is where
+ * that refusal is decided and where the call state cannot change under the
+ * check. A caller cannot distinguish the refusals from each other and does
+ * not need to; all of them mean the module was not rebooted.
+ *
+ * After a true the modem is GONE for twenty seconds or so and the next status
+ * snapshots say SIMULATION until the core's probe re-adopts it -- possibly on
+ * a different ttyUSB node. That is the modem re-enumerating, not a fault. */
+bool nd_svc_modem_reset(const nd_ui *ui);
 
 /* ------------------------------------------------------------------ *
  * The battery

@@ -217,11 +217,27 @@ probe-or-simulate pattern as BatteryService):
   QEMU sim hook: `echo 16165551234 > /tmp/neodct_sim_ring` rings once
   per write/touch; `rm` it to make the caller give up.
 * **Modem engineering app** (menu id 9005): RADIO / SIM / DATA status
-  pages, softkey walks Next→Next→Exit. Shows operator, CEREG, CSQ+dBm,
-  CPIN, phone number, IMEI, ICCID, IMSI, firmware, S45modem status, wwan
-  interface, IPv6, APN and DNS — troubleshooting without a serial
-  console. In Simulation Mode it lists which ttyUSB nodes exist instead
-  of bailing out.
+  pages, softkey walks Next→Next→Exit. Shows operator, CEREG, **RF
+  (CFUN)**, CSQ+dBm, **RSRP (CPSI)**, CPIN, phone number, IMEI, ICCID,
+  IMSI, firmware, S45modem status, wwan interface, IPv6, APN and DNS —
+  troubleshooting without a serial console. In Simulation Mode it lists
+  which ttyUSB nodes exist, and why the probe found none, instead of
+  bailing out.
+  * **RF** is `AT+CFUN?`, polled every 60 s. Anything but `ON (CFUN 1)`
+    and the radio is switched off — the antenna is not the story.
+  * **RSRP** is `AT+CPSI?`, polled every 20 s, in tenths of a dBm with
+    the system mode beside it (`-90.2 dBm LTE`). It is the measurement
+    CSQ 99 hides; `NO SERVICE` means the modem looked and found nothing,
+    which is what a dead RF path produces. Only LTE and NR carry an
+    RSRP — the GSM form of the reply has different columns, so the app
+    says `GSM` rather than inventing a number.
+  * **`*` reboots the module** (`AT+CFUN=1,1`), behind a confirmation, on
+    the RADIO page only. The same command S45modem runs after a failed
+    dial cycle, for the same wedged states: a stale QMI session, an
+    EMM-detached firmware reporting CEREG 4 forever. **Refused during a
+    call.** The module is gone for ~20 s, `wwan0` with it, and comes back
+    on its own — possibly on a different ttyUSB node, which the bottom
+    line will show.
 
 ## Stage 4 — proving the full stack (modem = the internet)
 
@@ -258,8 +274,10 @@ modem — unplug eth0 (or boot the modem-only QEMU command) to be sure.
 |---------|---------------|
 | no `/dev/ttyUSB*` | `lsusb` shows `1e0e:9001`? If yes: kernel missing `option` driver (needs the 0.3.0a image). If no: passthrough/cable/power. |
 | interface isn't called `wwan0` | Normal — eudev predictable naming renames it (QEMU: `wwp0s5u3i5`). S45modem and the Modem app find it by the `qmi_wwan` driver, not the name; substitute your name in any manual command here. |
-| `+CSQ: 99,99` forever | No RF: antenna, or modem brownout-rebooted (cap bodge). |
+| `+CSQ: 99,99` forever | **CSQ 99 is "the modem declined to measure", not "no signal"** — do not read it as a verdict on the antenna. Ask two more questions before touching hardware: `AT+CFUN?` (anything but 1 means the radio is OFF and the RF path is irrelevant) and `AT+CPSI?` (a real RSRP where CSQ has none). Then: RSRP around −90 to −105 = the antenna is fine, look at registration/SIM/plan; `NO SERVICE` or RSRP below ≈−120 with `CFUN: 1` = suspect the RF path; nothing answering at all = the module brownout-rebooted (cap bodge). The Modem app draws all three as its RF and RSRP rows, so none of this needs a serial console. |
+| `+CEREG: 0,4` (UNKNOWN) | Not the same as `0,2`. The modem is not reporting a search at all — radio off (`AT+CFUN?`), SIM not ready (`AT+CPIN?`), or the module is part-way through a reboot, including the `AT+CFUN=1,1` S45modem runs by itself after a failed dial cycle. Give it 60 s and re-read before concluding anything. |
 | `+CEREG: 0,2` stuck | Searching. Check antenna + `AT+CPIN?`; give it 1–2 min. |
+| the Modem app shows `/dev/ttyUSB3`, not `ttyUSB2` | The AT port is interface 2 and ModemService prefers it, so this means either interface 2 did not answer `AT`→`OK` or the nodes renumbered. Both mean the USB side re-enumerated since the stock 0–4 mapping — a module reboot or a brownout. **An antenna cannot change which USB interface answers**, so this is never an RF fault on its own. `dmesg` shows the disconnect/reconnect churn when it is power. |
 | `+CEREG: 0,3` | Registration denied — APN/SIM plan issue usually. |
 | `$QCRMCALL` OK but no SLAAC address | S45modem now flips raw-ip framing by itself; if hand-testing: `ip link set wwan0 down; echo Y > /sys/class/net/wwan0/qmi/raw_ip; ip link set wwan0 up` and re-dial. |
 | `$QCRMCALL` → `NO CARRIER` instantly | Read the `cause:` (AT+CEER) lines in `/tmp/modem-boot.log`. "ESM sync up with network" = dialed too soon / second-PDN collision — the ride-the-attach-bearer path and settle delay handle it. "EMM detached" while CEREG=1 and `cgact:` shows active bearers = stale firmware state (usually host ModemManager's leftover QMI session) — the automatic `AT+CFUN=1,1` reset clears it. Cause #33 "service option not subscribed" = APN/plan. RF causes clear on retry — the worker keeps redialing every 2 min on its own. Check `cell:` (CPSI): field 12 is RSRP×10 (−1134 = −113.4 dBm; below ≈ −115 is cell-edge), field 11 RSRQ×10 (−185 = −18.5 dB, poor). |

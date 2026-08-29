@@ -76,7 +76,8 @@ typedef enum {
     SVC_OP_SEND_SMS = 1,
     SVC_OP_MODEM_STATUS = 2,
     SVC_OP_BATTERY = 3,
-    SVC_OP_BATTERY_QUICKSTART = 4
+    SVC_OP_BATTERY_QUICKSTART = 4,
+    SVC_OP_MODEM_RESET = 5
 } svc_op;
 
 /* Outcome of the exchange, as opposed to the outcome of the operation. */
@@ -366,6 +367,10 @@ static bool valid_request(const svc_req *r)
     case SVC_OP_MODEM_STATUS:
     case SVC_OP_BATTERY:
     case SVC_OP_BATTERY_QUICKSTART:
+    case SVC_OP_MODEM_RESET:
+        /* All four are argument-less. That is the point: the reset carries no
+         * string the app chose, so there is nothing here to validate and
+         * nothing an app can smuggle into an AT command. */
         return true;
     default:
         return false;
@@ -389,6 +394,8 @@ static void resp_init(svc_resp *out, uint32_t op)
     out->modem.signal_level = -1;
     out->modem.csq_rssi = -1;
     out->modem.reg_stat = -1;
+    out->modem.cfun = -1;
+    out->modem.rsrp_dbm10 = ND_MODEM_RSRP_NONE;
     out->modem.call_secs = -1;
     out->battery.crate = NAN;
 }
@@ -443,6 +450,19 @@ static void serve(nd_ui *ui, const svc_req *req, svc_resp *out)
         out->hardware = nd_battery_has_hardware(ui->battery) ? 1u : 0u;
         out->have_vcell = nd_battery_vcell(ui->battery, &out->vcell) ? 1u : 0u;
         out->level = nd_battery_level(ui->battery);
+        return;
+
+    case SVC_OP_MODEM_RESET:
+        if (ui->modem == NULL) {
+            out->status = SVC_ST_NO_SERVICE;
+            return;
+        }
+        out->present = 1u;
+        /* nd_modem_reset() is the one that refuses mid-call, and it refuses
+         * on the modem thread where the call state cannot change underneath
+         * the check. Nothing is re-decided here. */
+        out->ok = nd_modem_reset(ui->modem) ? 1u : 0u;
+        nd_log(ND_LOG_MODEM, "App service: module reset %s", out->ok ? "sent" : "REFUSED");
         return;
 
     case SVC_OP_BATTERY_QUICKSTART:
@@ -905,6 +925,17 @@ bool nd_svc_modem_status(const nd_ui *ui, nd_modem_status *out)
         return false;
     *out = resp.modem;
     return true;
+}
+
+bool nd_svc_modem_reset(const nd_ui *ui)
+{
+    svc_resp resp;
+
+    if (ui != NULL && ui->modem != NULL)
+        return nd_modem_reset(ui->modem);
+    if (svc_call(SVC_OP_MODEM_RESET, NULL, NULL, &resp, ND_SVC_RESET_TIMEOUT_S) != SVC_ST_OK)
+        return false;
+    return resp.present != 0u && resp.ok != 0u;
 }
 
 bool nd_svc_battery_present(const nd_ui *ui)

@@ -4,11 +4,34 @@
  * engineering menu, manifest name "ModemInfo". Three pages walked with the
  * softkey (Next, Next, then Exit); Back leaves from anywhere.
  *
- *   RADIO  operator / registration / CSQ+dBm / bars / call state, 1 Hz
+ *   RADIO  operator / registration / RF / CSQ+dBm / RSRP / bars / call
+ *          state, 1 Hz, and the only page with an action on it
  *   SIM    CPIN, +CNUM, IMEI, ICCID, IMSI, firmware -- queried ONCE, on the
  *          first visit, because identity does not change mid-session
  *   DATA   S45modem's status file, the wwan interface, its global IPv6, the
  *          configured APN and the resolver, 1 Hz
+ *
+ * ============ WHAT THE RADIO PAGE GAINED, AND WHY ============
+ *
+ * The Python drew CSQ and stopped, and CSQ 99 means "I cannot measure" -- so
+ * a disconnected antenna, a radio switched off with AT+CFUN=0 and a module
+ * thirty seconds into its own reboot were one screen, saying "99 (no
+ * signal)" for all three. Two rows separate them, both from the status
+ * snapshot rather than from AT here (see the SIM page's comment for why an
+ * app cannot ask):
+ *
+ *   RF    +CFUN. Anything but 1 and the radio is OFF; the antenna is not the
+ *         story and no amount of re-seating it will help. Drawn ABOVE CSQ
+ *         because it decides what CSQ means.
+ *   RSRP  +CPSI's real measurement, in tenths of a dBm, which is the number
+ *         CSQ 99 is hiding. -90ish is a working cell; -120 or "NO SERVICE"
+ *         with the radio on is an RF path worth suspecting.
+ *
+ * And one action, '*': AT+CFUN=1,1, the module reboot. It is here because
+ * S45modem already does it unprompted when a dial cycle fails, and the phone
+ * had no way to ask for the same recovery without a serial console. It is
+ * refused mid-call in lib/, confirmed here, and it is the reason
+ * nd_modemapp_draw_page() takes a `note`.
  *
  * ============ IT DELIBERATELY RUNS WITH NO MODEM ============
  *
@@ -18,7 +41,10 @@
  * the whole point -- serial consoling the real hardware is annoying." That is
  * also what golden/eng-modem.png is a picture of: a phone with no modem,
  * showing OPER/REG/CSQ as "--", the PORTS row that only appears when there is
- * no hardware, and SIMULATION along the bottom.
+ * no hardware, and SIMULATION along the bottom. That frame now also carries
+ * the WHY row, which the old six-row cap made unreachable -- see
+ * ND_MODEMAPP_MAX_ROWS -- and neither RF nor RSRP, which are questions for a
+ * module that is not there.
  *
  * ============ WHICH READOUT EACH ROW COMES FROM ============
  *
@@ -68,6 +94,13 @@
 #define MODEM_KEY_NAV  ND_KEY_ENTER
 #define MODEM_KEY_BACK ND_KEY_BACK
 
+/* '*'. Not a softkey (that is the page walk) and not Enter (that is Next), so
+ * it had to be a keypad key, and it wants to be one that cannot be hit while
+ * paging: '*' is at the far corner from the navigation cluster on a
+ * 5190-style keypad. The confirmation is what actually makes it safe; this
+ * only keeps it from being reached by accident on the way to page 2. */
+#define MODEM_KEY_RESET ND_KEY_STAR
+
 /* main.py: send_at(..., timeout=3.0) on every identity query. */
 #define MODEM_AT_TIMEOUT 3.0
 
@@ -78,6 +111,15 @@ const char *const nd_modemapp_reg_names[ND_MODEMAPP_N_REG_NAMES] = {
 };
 
 const char *const nd_modemapp_no_service_msg = "ModemService is not running.";
+
+const char *const nd_modemapp_reset_hint = "* = reset";
+const char *const nd_modemapp_reset_sent = "reset sent";
+const char *const nd_modemapp_reset_refused = "reset REFUSED";
+
+/* Says what it costs, because that is the question being asked. The module
+ * comes back by itself -- the core re-probes every ND_PROBE_RETRY_S -- so the
+ * honest warning is about the twenty seconds, not about bricking anything. */
+const char *const nd_modemapp_ask_reset = "Reboot the modem?\nCalls and data drop\nfor ~20 s.";
 
 /* ------------------------------------------------------------------ *
  * Rows
@@ -104,10 +146,58 @@ const char *nd_modemapp_state_name(nd_call_state st)
     }
 }
 
+const char *nd_modemapp_rf_text(int32_t cfun, char *out, size_t out_sz)
+{
+    if (out == NULL || out_sz == 0u)
+        return "";
+    if (cfun < 0)
+        (void)nd_strlcpy(out, "--", out_sz);
+    else if (cfun == 0)
+        (void)nd_strlcpy(out, "OFF (CFUN 0)", out_sz);
+    else if (cfun == 1)
+        (void)nd_strlcpy(out, "ON (CFUN 1)", out_sz);
+    else if (cfun == 4)
+        (void)nd_strlcpy(out, "FLIGHT (CFUN 4)", out_sz);
+    else
+        (void)nd_snprintf(out, out_sz, "CFUN %d", cfun);
+    return out;
+}
+
+const char *nd_modemapp_rsrp_text(const nd_modem_status *st, char *out, size_t out_sz)
+{
+    int32_t whole;
+    int32_t frac;
+    const char *sign;
+
+    if (out == NULL || out_sz == 0u)
+        return "";
+    if (st == NULL || st->cell_mode[0] == '\0') {
+        (void)nd_strlcpy(out, "--", out_sz);
+        return out;
+    }
+    /* A mode with no RSRP in it -- "NO SERVICE", "GSM" -- is its own answer,
+     * and a far more useful one than "--": it is the modem saying it looked. */
+    if (st->rsrp_dbm10 == ND_MODEM_RSRP_NONE) {
+        (void)nd_strlcpy(out, st->cell_mode, out_sz);
+        return out;
+    }
+
+    whole = st->rsrp_dbm10 / 10;
+    frac = st->rsrp_dbm10 % 10;
+    if (frac < 0)
+        frac = -frac;
+    /* -0.4 dBm truncates to a whole part of 0, which "%d.%d" would print as
+     * "0.4". See the header. */
+    sign = (st->rsrp_dbm10 < 0 && whole == 0) ? "-" : "";
+    (void)nd_snprintf(out, out_sz, "%s%d.%d dBm %s", sign, whole, frac, st->cell_mode);
+    return out;
+}
+
 size_t nd_modemapp_radio_rows(const nd_modem_status *st, int32_t bars, nd_modemapp_row *out,
                               size_t max)
 {
     char buf[ND_MODEMAPP_VALUE_MAX];
+    char shortened[ND_MODEMAPP_VALUE_MAX];
     size_t n = 0u;
 
     if (st == NULL || out == NULL || max == 0u)
@@ -134,6 +224,18 @@ size_t nd_modemapp_radio_rows(const nd_modem_status *st, int32_t bars, nd_modema
     if (n >= max)
         return n;
 
+    /* RF ABOVE CSQ, and only with hardware. It is the row that decides what
+     * the one below it means: CSQ 99 under "RF OFF (CFUN 4)" is a radio that
+     * was switched off, and reading them in that order is the difference
+     * between that and an antenna to go and re-seat. Without a module there is
+     * nothing to have asked, and a "--" here would cost a row that says
+     * something. */
+    if (st->hardware) {
+        row_set(&out[n++], "RF", nd_modemapp_rf_text(st->cfun, buf, sizeof buf));
+        if (n >= max)
+            return n;
+    }
+
     /* csq None -> "--", 99 -> "99 (no signal)", else the raw value and the
      * dBm it maps to. -113 + 2 * rssi is the 3GPP 27.007 table. */
     if (st->csq_rssi < 0)
@@ -146,6 +248,25 @@ size_t nd_modemapp_radio_rows(const nd_modem_status *st, int32_t bars, nd_modema
     if (n >= max)
         return n;
 
+    if (st->hardware) {
+        /* Directly under CSQ, because it is the answer to it: CSQ 99 is "I
+         * cannot measure", and this is the measurement. */
+        row_set(&out[n++], "RSRP", nd_modemapp_rsrp_text(st, buf, sizeof buf));
+        if (n >= max)
+            return n;
+
+        /* AND THAT IS WHERE BARS WENT. Six rows is the hard ceiling (see
+         * ND_MODEMAPP_MAX_ROWS) and something had to give, so the row that
+         * gave is nd_modem__bars(csq) -- a four-level rounding of the CSQ two
+         * rows above it, drawn on the home screen anyway, and the only row
+         * here that says nothing the page does not already say. RF and RSRP
+         * each say something no other row does. */
+        row_set(&out[n++], "CALL", nd_modemapp_state_name(st->state));
+        return n;
+    }
+
+    /* ---- and with no modem, a different six ---- */
+
     if (bars < 0)
         (void)nd_strlcpy(buf, "--", sizeof buf);
     else
@@ -154,29 +275,29 @@ size_t nd_modemapp_radio_rows(const nd_modem_status *st, int32_t bars, nd_modema
     if (n >= max)
         return n;
 
-    row_set(&out[n++], "CALL", nd_modemapp_state_name(st->state));
+    /* BARS SURVIVES HERE and CALL does not, which is the same argument the
+     * other way round: with no modem there can be no call and CALL IDLE is a
+     * fact about nothing, while signal_level() is the sim override and the
+     * only signal readout the page has left (it is what golden/eng-modem.png
+     * shows as 4/4 beside "OPER --").
+     *
+     * That is what makes room for WHY. The row has always been written and
+     * was never reachable: PORTS took the sixth slot, the `n >= max` below it
+     * returned, and the one row whose whole purpose is that "a phone in a
+     * pocket has no console" could not be reached on a phone in a pocket. */
+    if (nd_modemapp_ttyusb_list(buf, sizeof buf) == 0u)
+        (void)nd_strlcpy(buf, "no ttyUSB nodes!", sizeof buf);
+    row_set(&out[n++], "PORTS", buf);
     if (n >= max)
         return n;
 
-    /* The PORTS row exists ONLY without hardware: with a modem attached the
-     * port is already on the bottom line, and with none the question is which
-     * nodes the kernel did enumerate. */
-    if (!st->hardware) {
-        char ttys[ND_MODEMAPP_VALUE_MAX];
-
-        if (nd_modemapp_ttyusb_list(ttys, sizeof ttys) == 0u)
-            (void)nd_strlcpy(ttys, "no ttyUSB nodes!", sizeof ttys);
-        row_set(&out[n++], "PORTS", ttys);
-        if (n >= max)
-            return n;
-
-        /* WHY, not just what. The nodes existing and the modem answering are
-         * different questions, and this app exists to be read on a phone that
-         * has no serial console attached -- so the probe's own reason comes
-         * across the wire and is drawn here rather than only being printed
-         * where nobody can see it. */
-        if (st->probe_why[0] != '\0')
-            row_set(&out[n++], "WHY", st->probe_why);
+    if (st->probe_why[0] != '\0') {
+        /* Shortened like the DATA page's rows, and for the reason this frame
+         * showed the moment the row became reachable: a probe reason runs to
+         * ND_MODEM_PROBE_WHY_MAX and ran off the right edge of the screen. */
+        row_set(
+            &out[n++], "WHY",
+            nd_modemapp_shorten(st->probe_why, ND_MODEMAPP_WHY_LIMIT, shortened, sizeof shortened));
     }
     return n;
 }
@@ -385,7 +506,7 @@ int32_t nd_modemapp_line_h(int32_t bottom, int32_t y, size_t n_rows)
 }
 
 void nd_modemapp_draw_page(nd_ui *ui, const nd_modem_status *st, bool linked, int32_t page,
-                           const nd_modemapp_row *rows, size_t n_rows)
+                           const nd_modemapp_row *rows, size_t n_rows, const char *note)
 {
     int32_t screen_w;
     int32_t bottom;
@@ -431,6 +552,33 @@ void nd_modemapp_draw_page(nd_ui *ui, const nd_modem_status *st, bool linked, in
     (void)nd_snprintf(pos, sizeof pos, "%d/%d", page + 1, ND_MODEMAPP_N_PAGES);
     nd_ui_text_size(ui, pos, ui->font_s, &tw, &th);
     (void)nd_draw_text(ui->draw, screen_w - 5 - tw, bottom - 14, pos, ui->font_s, ND_GRAY);
+
+    /* The note goes in the gap those two leave. There was nowhere else for it:
+     * the softkey spells Next/Next/Exit and that is the navigation, and an
+     * eighth row would not fit (ND_MODEMAPP_MAX_ROWS). Centred on the screen
+     * rather than on the gap, which is what keeps it clear of both -- the port
+     * is at most "/dev/ttyUSB10" and "1/3" is three characters. */
+    if (note != NULL && note[0] != '\0') {
+        nd_ui_text_size(ui, note, ui->font_s, &tw, &th);
+        (void)nd_draw_text(ui->draw, (screen_w - tw) / 2, bottom - 14, note, ui->font_s, ND_GRAY);
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * The reset
+ * ------------------------------------------------------------------ */
+
+/* nd_power_confirm()'s shape, deliberately: this is a reboot with a cost, and
+ * the phone already has one way of asking that question. ND_KEY_ENTER is the
+ * accept because that is what nd_msgdialog_show() returns for the button. */
+static bool confirm_reset(nd_ui *ui)
+{
+    nd_msgdialog dlg;
+
+    nd_msgdialog_init(&dlg, ui, nd_modemapp_ask_reset);
+    nd_msgdialog_set_title(&dlg, "Modem");
+    nd_msgdialog_set_button(&dlg, "Reset");
+    return nd_msgdialog_show(&dlg) == ND_KEY_ENTER;
 }
 
 /* ------------------------------------------------------------------ *
@@ -446,6 +594,12 @@ int app_run(nd_ui *ui)
     bool have_sim_cache = false;
     int32_t page = 0;
     double last_draw = 0.0;
+    /* The last snapshot, hoisted out of the refresh block: the reset key needs
+     * to know whether there is a modem to reset before it asks. */
+    nd_modem_status st;
+    bool st_known = false;
+    const char *flash = "";
+    double flash_until = 0.0;
 
     if (ui == NULL || ui->draw == NULL || ui->canvas == NULL)
         return 1;
@@ -469,8 +623,11 @@ int app_run(nd_ui *ui)
         double now = nd_time_monotonic();
         int32_t key;
 
+        if (flash[0] != '\0' && now >= flash_until) {
+            flash = "";
+            last_draw = 0.0;
+        }
         if (now - last_draw >= ND_MODEMAPP_REFRESH_S) {
-            nd_modem_status st;
             size_t n_rows;
             bool linked;
 
@@ -478,6 +635,7 @@ int app_run(nd_ui *ui)
              * between "the core says there is no modem" and "the core did not
              * answer", and the second was being drawn as the first. */
             linked = nd_svc_modem_status(ui, &st);
+            st_known = true;
             if (page == ND_MODEMAPP_PAGE_RADIO) {
                 /* BARS is the PATCHED signal_level(); see the header. */
                 n_rows = nd_modemapp_radio_rows(&st, nd_ui_status_signal_level(ui), rows,
@@ -510,7 +668,15 @@ int app_run(nd_ui *ui)
                 n_rows = nd_modemapp_data_rows(rows, ND_ARRAY_LEN(rows));
             }
 
-            nd_modemapp_draw_page(ui, &st, linked, page, rows, n_rows);
+            /* The hint is offered only where the key does something: on the
+             * RADIO page, with a modem to reboot. A flash outranks it, and is
+             * NOT gated on hardware -- a successful reset takes the hardware
+             * away, and "reset sent" has to survive that to be read at all. */
+            nd_modemapp_draw_page(ui, &st, linked, page, rows, n_rows,
+                                  flash[0] != '\0' ? flash
+                                  : (page == ND_MODEMAPP_PAGE_RADIO && st.hardware)
+                                      ? nd_modemapp_reset_hint
+                                      : NULL);
             nd_softkey_update(&softkey, page < ND_MODEMAPP_N_PAGES - 1 ? "Next" : "Exit", false);
             if (nd_ui_present(ui) != ND_OK)
                 return 0;
@@ -524,6 +690,23 @@ int app_run(nd_ui *ui)
             page++;
             if (page >= ND_MODEMAPP_N_PAGES)
                 return 0;
+            last_draw = 0.0;
+        }
+        /* Ignored outright on the other two pages and with no modem, rather
+         * than asked-then-refused: a confirmation for something that cannot
+         * happen teaches the wrong thing about the key. */
+        if (key == MODEM_KEY_RESET && page == ND_MODEMAPP_PAGE_RADIO && st_known && st.hardware) {
+            if (confirm_reset(ui)) {
+                bool ok = nd_svc_modem_reset(ui);
+
+                flash = ok ? nd_modemapp_reset_sent : nd_modemapp_reset_refused;
+                /* Read the clock AFTER the reset, not before: the call can sit
+                 * on the port for ND_MODEM_RESET_TIMEOUT_S, and starting the
+                 * dwell before it would spend the whole flash inside the
+                 * command. FuelGauge's quick-start does the same. */
+                flash_until = nd_time_monotonic() + ND_MODEMAPP_FLASH_S;
+            }
+            /* Either way the dialog painted over the page. */
             last_draw = 0.0;
         }
         if (nd_app_should_exit())

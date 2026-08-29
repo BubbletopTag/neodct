@@ -80,6 +80,51 @@ Changed
   typed and the sync thread moving it back within the minute, with nothing
   on screen admitting it happened.
 
+--- CSQ 99 was three different faults ---
+
+The Modem app can tell you which one, and reboot the modem when that is
+the answer.
+
+A phone that stops getting service shows "CSQ 99 (no signal)" and a
+registration state of UNKNOWN, and that screen has been telling you
+nothing. CSQ 99 does not mean there is no signal. It means the modem
+declined to measure, and at least three unrelated things produce it: the
+antenna is off or badly seated, or the radio has been switched off
+entirely and the antenna is perfect, or the module is thirty seconds into
+a reboot it decided to take by itself. One row, three faults, and the only
+way to tell them apart was a serial cable -- which is precisely what this
+app exists so you do not need.
+
+Added
+- RF, on the RADIO page. What the radio is actually set to. ON (CFUN 1) or
+  it is off, and if it is off then the antenna is not the story and no
+  amount of re-seating it will help. It sits above CSQ because it decides
+  what CSQ means.
+- RSRP, under CSQ. The real measurement, in tenths of a dBm with the
+  network mode beside it -- "-90.2 dBm LTE" is a working cell, "NO SERVICE"
+  is the modem saying it looked and found nothing. This is the number CSQ
+  99 was hiding. Only LTE and 5G report one; on GSM the app says GSM
+  rather than inventing a figure out of a column that means something else.
+- Press * on the RADIO page to reboot the modem -- the module, not the
+  phone. It is the escape hatch for a modem wedged in a state no amount of
+  waiting clears, and it is the same thing the boot script already does on
+  its own after a failed dial cycle; there was just no way to ask for it by
+  hand without a serial console. It asks first, because it drops your data
+  connection for about twenty seconds, and it REFUSES while a call is up: a
+  reboot takes the call with it, and no keypress on a diagnostics page
+  should be able to end a call. The modem comes back by itself, possibly on
+  a different port than it left on, which the bottom line will show you.
+
+Fixed
+- The WHY row on the Modem app could not be reached. When there is no
+  modem the page lists which USB serial ports exist and then, underneath,
+  why the phone could not use any of them -- and that second row has never
+  once been drawn, because the page ran out of room one line above it. The
+  row was added for exactly the case where somebody is holding a phone with
+  no serial cable attached, and that is the case where it was missing. The
+  page had one row spare all along: with no modem there can be no call, so
+  CALL IDLE was a fact about nothing.
+
 0.4.3a
 Two engineering apps for hardware you can plug in.
 

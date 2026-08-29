@@ -602,6 +602,95 @@ void nd_modem__parse_cops(nd_modem *m, const nd_lines *lines)
     }
 }
 
+/* +CFUN: 1 -- one integer, and the whole point of asking.
+ *
+ * A modem with CFUN 0 or 4 reports CSQ 99 and CEREG 4 with a perfectly good
+ * antenna bolted to it, which is the single most misleading screen this app
+ * can draw. A parse failure leaves the previous value alone, like parse_csq. */
+void nd_modem__parse_cfun(nd_modem *m, const nd_lines *lines)
+{
+    size_t i;
+
+    for (i = 0u; i < lines->n; i++) {
+        const char *line = nd_modem__lines_get(lines, i);
+        const char *rest;
+        char field[32];
+        int32_t v;
+
+        if (!starts_with(line, "+CFUN:"))
+            continue;
+        rest = after_colon(line);
+        if (rest == NULL)
+            continue;
+        /* "+CFUN: 1,0" exists on some firmwares; the first field is <fun>. */
+        if (!comma_field(rest, 0u, field, sizeof field))
+            continue;
+        py_strip(field);
+        if (!nd_modem__parse_int(field, &v))
+            continue;
+        lock_state(m);
+        m->cfun = v;
+        unlock_state(m);
+    }
+}
+
+/* +CPSI: the serving cell, and the only place a real RSRP is available.
+ *
+ * Two shapes matter and they are not the same length:
+ *
+ *   +CPSI: NO SERVICE,Online
+ *   +CPSI: LTE,Online,310-260,0x54,12345678,257,EUTRAN-BAND2,900,5,5,-185,-1134,-859,15
+ *
+ * and a third, GSM, which has entirely different columns. So the system mode
+ * is always taken and RSRP is taken ONLY for the modes that have one, at the
+ * index those modes put it at (field 11, zero-based: RSRQ is 10, RSSI 12).
+ * Reading field 11 unconditionally would report a GSM cell's rxlev as an LTE
+ * RSRP, which is worse than reporting nothing.
+ *
+ * A reply that has the mode but not the columns -- "NO SERVICE,Online" --
+ * leaves rsrp_dbm10 at ND_MODEM_RSRP_NONE, which is the honest answer and is
+ * exactly the case a dead antenna produces. */
+void nd_modem__parse_cpsi(nd_modem *m, const nd_lines *lines)
+{
+    size_t i;
+
+    for (i = 0u; i < lines->n; i++) {
+        const char *line = nd_modem__lines_get(lines, i);
+        const char *rest;
+        char mode[ND_MODEM_CELL_MODE_MAX];
+        char field[32];
+        int32_t rsrp = ND_MODEM_RSRP_NONE;
+        bool lte;
+
+        if (!starts_with(line, "+CPSI:"))
+            continue;
+        rest = after_colon(line);
+        if (rest == NULL)
+            continue;
+        if (!comma_field(rest, 0u, mode, sizeof mode))
+            continue;
+        py_strip(mode);
+        if (mode[0] == '\0')
+            continue;
+
+        /* LTE, LTE-CA and NR (5G) all report RSRP in field 11. GSM, WCDMA and
+         * NO SERVICE do not, and must not be read as if they did. */
+        lte = starts_with(mode, "LTE") || starts_with(mode, "NR");
+        if (lte && comma_field(rest, 11u, field, sizeof field)) {
+            int32_t v;
+
+            py_strip(field);
+            if (nd_modem__parse_int(field, &v))
+                rsrp = v;
+        }
+
+        lock_state(m);
+        (void)nd_strlcpy(m->cell_mode, mode, sizeof m->cell_mode);
+        m->rsrp_dbm10 = rsrp;
+        unlock_state(m);
+    }
+}
+
 int32_t nd_modem__bars(int32_t csq)
 {
     int32_t bars = 0;
@@ -1045,6 +1134,12 @@ void nd_modem__drop_hardware(nd_modem *m, const char *why)
     m->state = ND_CALL_IDLE;
     m->csq = -1;
     m->reg_stat = -1;
+    /* Same reasoning as csq and reg_stat: these describe a radio that is no
+     * longer there, and leaving them would draw a stale RSRP beside
+     * SIMULATION as though it had just been measured. */
+    m->cfun = -1;
+    m->cell_mode[0] = '\0';
+    m->rsrp_dbm10 = ND_MODEM_RSRP_NONE;
     m->operator_name[0] = '\0';
     m->operator_known = false;
     unlock_state(m);
@@ -1121,8 +1216,11 @@ void nd_modem_poll(nd_modem *m)
     }
 
     /* if / elif / elif: at most ONE query per tick, deliberately staggered.
-     * All three timers start at 0.0, so the first three ticks fire CSQ, then
-     * CEREG?, then COPS?. */
+     * All five timers start at 0.0, so the first five ticks fire CSQ, then
+     * CEREG?, COPS?, CPSI? and CFUN? -- in that order, because the chain is
+     * what breaks the tie and the cheap ones come first. The two additions
+     * ride at the back for the same reason: neither is on the home screen's
+     * path, and neither may delay the CSQ that draws the signal bars. */
     if (now >= m->next_csq) {
         char final[64];
 
@@ -1142,6 +1240,23 @@ void nd_modem_poll(nd_modem *m)
         if (nd_modem__transact(m, "AT+COPS?", 3.0, final, sizeof final, &m->collected) &&
             strcmp(final, "OK") == 0)
             nd_modem__parse_cops(m, &m->collected);
+    } else if (now >= m->next_cpsi) {
+        char final[64];
+
+        /* 3.0, not 1.5: CPSI is a heavier query than CSQ and the SIM7600
+         * takes its time over it while the module is scanning -- which is
+         * precisely when its answer is worth having. */
+        m->next_cpsi = now + ND_POLL_CPSI_S;
+        if (nd_modem__transact(m, "AT+CPSI?", 3.0, final, sizeof final, &m->collected) &&
+            strcmp(final, "OK") == 0)
+            nd_modem__parse_cpsi(m, &m->collected);
+    } else if (now >= m->next_cfun) {
+        char final[64];
+
+        m->next_cfun = now + ND_POLL_CFUN_S;
+        if (nd_modem__transact(m, "AT+CFUN?", 1.5, final, sizeof final, &m->collected) &&
+            strcmp(final, "OK") == 0)
+            nd_modem__parse_cfun(m, &m->collected);
     }
 
     nd_modem__release(m);
@@ -1542,6 +1657,61 @@ done:
     return st;
 }
 
+/* AT+CFUN=1,1 -- reboot the module. See nd_modem.h for why this exists.
+ *
+ * The two refusals are the whole safety story and they are checked HERE, on
+ * the modem thread, rather than at the public entry point: `state` is st_mu
+ * state and a call can come up between a caller's check and this one.
+ *
+ * The module answers OK and then goes away, so the reply is read with the
+ * generous timeout S45modem uses for the same command and a failure to answer
+ * is NOT treated as a failure to reset -- a firmware that reboots before it
+ * finishes writing "OK" has still done what was asked. What decides the
+ * return value is whether the command was written at all.
+ *
+ * Then the port is dropped deliberately. Waiting for the reads to start
+ * failing would leave the UI drawing a live port number for a module that is
+ * mid-reboot, and the re-enumerated module may not come back on the same
+ * ttyUSB node anyway -- so the honest thing is to go to Simulation Mode at
+ * once and let nd_modem__probe_hardware() find whatever comes back. */
+static bool do_reset(nd_modem *m)
+{
+    char final[64];
+    bool wrote;
+
+    if (!m->hardware)
+        return false;
+    if (get_state(m) != ND_CALL_IDLE)
+        return false;
+
+    /* acquire/transact/release BY HAND rather than through nd_modem__command(),
+     * which folds "the port lock is held" and "the modem did not answer" into
+     * one false. Those two must not be one answer here:
+     *
+     *   lock not acquired -- S45modem's redial or an atcmd session has the
+     *       port. The command was NEVER WRITTEN, so nothing was reset, and
+     *       reporting success would drop a working port and claim a reboot
+     *       that did not happen.
+     *   no reply to a command that DID go out -- the expected case, not a
+     *       failure. The module answers OK and reboots, and a firmware that
+     *       reboots before it finishes writing has still done what was asked.
+     *
+     * So the LOCK decides the return value; the reply only decides the log. */
+    if (!nd_modem__acquire(m)) {
+        nd_log(ND_LOG_MODEM, "Reset refused: the AT port lock is held.");
+        return false;
+    }
+    nd_log(ND_LOG_MODEM, "Rebooting the module on request (AT+CFUN=1,1).");
+    nd_modem__lines_reset(&m->collected);
+    wrote = nd_modem__transact(m, "AT+CFUN=1,1", ND_MODEM_RESET_TIMEOUT_S, final, sizeof final,
+                               NULL);
+    nd_modem__release(m);
+
+    nd_log(ND_LOG_MODEM, "AT+CFUN=1,1 -> %s", wrote ? final : "no reply (rebooting)");
+    nd_modem__drop_hardware(m, "reset requested");
+    return true;
+}
+
 /* ------------------------------------------------------------------ *
  * The request slot
  * ------------------------------------------------------------------ */
@@ -1566,6 +1736,9 @@ static void run_request(nd_modem *m, nd_modem_req *r)
         break;
     case ND_REQ_READ_STORED:
         r->sms_st = do_read_stored(m, r->rec_out, r->rec_max, &r->rec_n);
+        break;
+    case ND_REQ_RESET:
+        r->ok = do_reset(m);
         break;
     case ND_REQ_SEND_AT:
     default:
@@ -1728,10 +1901,12 @@ nd_err nd_modem__create(nd_modem **out)
     m->state = ND_CALL_IDLE;
     m->csq = -1;
     m->reg_stat = -1;
+    m->cfun = -1;
+    m->rsrp_dbm10 = ND_MODEM_RSRP_NONE;
     m->call_stat = -1;
     m->audio_pid = -1;
     m->mic_pid = -1;
-    /* All six timers start at 0.0, so the first poll() fires CSQ at once. */
+    /* All eight timers start at 0.0, so the first poll() fires CSQ at once. */
 
     if (pthread_mutex_init(&m->st_mu, NULL) != 0) {
         free(m);
@@ -1863,6 +2038,18 @@ bool nd_modem_hangup(nd_modem *m)
         return false;
     memset(&r, 0, sizeof r);
     r.kind = ND_REQ_HANGUP;
+    submit(m, &r);
+    return r.ok;
+}
+
+bool nd_modem_reset(nd_modem *m)
+{
+    nd_modem_req r;
+
+    if (m == NULL)
+        return false;
+    memset(&r, 0, sizeof r);
+    r.kind = ND_REQ_RESET;
     submit(m, &r);
     return r.ok;
 }
@@ -2209,6 +2396,10 @@ void nd_modem_status_snapshot(nd_modem *m, nd_modem_status *out)
     out->signal_level = -1;
     out->csq_rssi = -1;
     out->reg_stat = -1; /* Python's None; REG_NAMES[None] is "--" */
+    out->cfun = -1;
+    /* memset() left this 0, which is a legal RSRP reading of -0.0 dBm rather
+     * than "no reading". The "nothing is known" snapshot must say so. */
+    out->rsrp_dbm10 = ND_MODEM_RSRP_NONE;
     out->call_secs = -1;
     out->state = ND_CALL_IDLE;
     if (m == NULL)
@@ -2227,6 +2418,9 @@ void nd_modem_status_snapshot(nd_modem *m, nd_modem_status *out)
     (void)nd_strlcpy(out->imei, m->imei_known ? m->imei : "", sizeof out->imei);
     out->csq_rssi = m->csq;
     out->reg_stat = m->reg_stat;
+    out->cfun = m->cfun;
+    (void)nd_strlcpy(out->cell_mode, m->cell_mode, sizeof out->cell_mode);
+    out->rsrp_dbm10 = m->rsrp_dbm10;
     out->state = m->state;
     (void)nd_strlcpy(out->probe_why, m->last_probe_why, sizeof out->probe_why);
     (void)nd_strlcpy(out->caller_id, m->caller_id_known ? m->caller_id : "", sizeof out->caller_id);

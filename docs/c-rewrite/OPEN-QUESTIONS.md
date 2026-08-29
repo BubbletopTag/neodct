@@ -1758,6 +1758,92 @@ two `tcgetattr`/`tcsetattr` failure paths, because the caller now prints it.
 
 ---
 
+### M-18. `+CSQ: 99` is three different faults and the RADIO page drew one row for all of them
+
+Two more appended fields — `int32_t cfun`, `char cell_mode[16]`, `int32_t rsrp_dbm10` —
+polled by `ModemService` and rendered by the engineering Modem app as RF and RSRP.
+
+`AT+CSQ` answering `99` does not mean "no signal". It means **the modem declined to
+measure**, and at least three unrelated situations produce it alongside `+CEREG: 4`:
+
+- the antenna is off, badly seated, or on the wrong pad (the SIM7600G-H has MAIN, DIV
+  and GNSS, and only MAIN transmits);
+- the radio is switched off — `AT+CFUN=0` or `4` — where the RF path is perfect and
+  nothing about it is worth touching;
+- the module is part-way through its own reboot, which on this hardware happens by
+  itself: `docs/MODEM_BRINGUP.md` records an un-bodged CapXon cap that browns the
+  module out during LTE TX, and `S45modem` reboots it deliberately with `AT+CFUN=1,1`
+  when a dial cycle fails.
+
+The Python drew `CSQ 99 (no signal)` and stopped, so all three were the same screen, and
+the phone had no way to tell them apart without a serial console — which is the one
+thing this app exists to make unnecessary. `AT+CFUN?` separates the second from the
+other two outright. `AT+CPSI?` separates the first from the third, because it reports a
+real RSRP where CSQ reports nothing at all.
+
+**Why the poll and not the app.** Raw AT is deliberately not on the app service wire
+(`spec-app-services.md` section 4) and must not be put there, so neither reading can be
+taken by the app that draws it. Both are polled core-side and ride the status snapshot,
+which is the shape section 4 asks for. They sit at the **back** of `poll()`'s
+if/elif chain: at most one query per tick, and the CSQ that draws the home screen's
+signal bars must never be the one a tick skipped.
+
+**Two parsing traps, both live.** `+CPSI:`'s columns depend on the system mode — the
+GSM form has entirely different fields, so RSRP is read only for `LTE*` and `NR*`, and
+the short `+CPSI: NO SERVICE,Online` form has no measurement to read at all. And
+`ND_MODEM_RSRP_NONE` is a positive sentinel rather than the `-1` this struct spells
+"unknown" with everywhere else, because `-1` is a legal RSRP of −0.1 dBm.
+
+### M-19. The Modem app's RADIO page can reboot the module, and that is a fifth service op
+
+`nd_svc_modem_reset()` → `nd_modem_reset()` → `AT+CFUN=1,1`, on `*`, behind a
+confirmation.
+
+It is a **write** on a wire whose whole design is that it carries four operations and no
+more, so it owes the argument the battery quick-start owed as the fourth. It carries no
+argument, so an app cannot choose the string and this is not a passthrough; the core
+refuses it while a call is up, on the modem thread where the state cannot change under
+the check; and it adds no capability to the system, because `S45modem` already runs the
+identical command unprompted. What it moves is *who can ask* — from a developer with a
+serial cable to somebody holding the phone. The full argument is in `nd_svc.h`.
+
+The refusal is the load-bearing part and is tested directly: a module reboot takes any
+call with it, and a keypress on a diagnostics page must not be able to end one.
+
+**The port is dropped rather than waited out.** The module stops answering for ~20 s and
+its USB interfaces re-enumerate, so the honest thing is to go to Simulation Mode at once
+and let the existing `PROBE_RETRY_S` probe adopt whatever comes back — *possibly on a
+different `ttyUSB` node than it left on*, which is itself a thing worth knowing when
+reading the port on the bottom line.
+
+### M-20. The WHY row existed for two releases and could not be reached
+
+`nd_modemapp_radio_rows()` has always written `PORTS` and then `WHY` on the no-hardware
+path, and `ND_MODEMAPP_MAX_ROWS` was 6. `PORTS` took the sixth slot, the `n >= max`
+under it returned, and `WHY` — the row M-17 added *because a phone in a pocket has no
+console* — could not be produced by any input. Nothing caught it: there was no unit test
+for this app's row builders at all, and `golden/eng-modem.png` is a picture of the
+buggy output, so it agreed with itself.
+
+Six is a hard ceiling and the geometry says so, which is the other half of what went
+wrong here: `nd_ui_content_bottom()` is `ND_UI_H - ND_SOFTKEY_H` = **145, not 175** —
+the softkey strip is inside the 240x175 frame, not below it. Rows start at y=36 with a
+15 px floor on the pitch and the port/page line is drawn at `bottom-14`, so a seventh
+row lands at y=126 and draws straight through it. A seven-row layout was tried first and
+the re-cut frame is what showed it.
+
+So each RADIO page now spends its six on what it can answer, and each drops the row that
+is dead in its own case: with a modem, `BARS` (a four-level rounding of the `CSQ` two
+rows above it, and on the home screen anyway); with none, `CALL` (there can be no call
+without a modem). `WHY` also had to be shortened to 18 characters rather than the DATA
+page's 24 — the value column is 170 px, about twenty characters, and a probe reason runs
+to 200.
+
+`test_modem_app.c` is new and covers the row builders the header always claimed were
+"kept drawing-free so they can be bench-tested".
+
+---
+
 ## nd-core, nd-apprun, the launcher and the stub app (WP core-loop)
 
 Recorded while porting `launcher.py:main()`, `main.py:run()` and `launch_app()`, and

@@ -45,21 +45,34 @@ extern "C" {
 #define ND_MODEM_PROBE_WHY_MAX 200
 
 /* Timings, all load-bearing for a 1:1 port of the poll cadence. */
-#define ND_POLL_URC_S              0.5
-#define ND_SMS_PROMPT_TIMEOUT_S    5.0
-#define ND_SMS_SEND_TIMEOUT_S      30.0
-#define ND_POLL_SIGNAL_S           5.0
-#define ND_POLL_NET_S              20.0
-#define ND_POLL_OPERATOR_S         60.0
+#define ND_POLL_URC_S           0.5
+#define ND_SMS_PROMPT_TIMEOUT_S 5.0
+#define ND_SMS_SEND_TIMEOUT_S   30.0
+#define ND_POLL_SIGNAL_S        5.0
+#define ND_POLL_NET_S           20.0
+#define ND_POLL_OPERATOR_S      60.0
+/* CPSI carries the real RSRP and CFUN says whether the radio is even on.
+ * Neither existed in the Python, which had no screen to put them on; both are
+ * here because CSQ 99 is "cannot measure" and is indistinguishable, on the
+ * one row the Python drew, from a disconnected antenna, an RF-off module and
+ * a module that has just rebooted. CPSI shares CEREG's cadence because it
+ * answers the same question at a finer grain; CFUN shares COPS's because a
+ * radio does not switch itself off often. */
+#define ND_POLL_CPSI_S             20.0
+#define ND_POLL_CFUN_S             60.0
 #define ND_PROBE_RETRY_S           10.0
 #define ND_CLCC_POLL_S             2.0
 #define ND_AUDIO_RESTART_HOLDOFF_S 3.0
-#define ND_TRANSACT_SLEEP_S        0.02
-#define ND_SMS_WAIT_SLEEP_S        0.05
-#define ND_PROMPT_SLEEP_S          0.02
-#define ND_MODEM_READ_CHUNK        512
-#define ND_MODEM_PROMPT_CHUNK      64
-#define ND_MODEM_EVENT_QUEUE_MAX   8 /* deque(maxlen=8) -- oldest is dropped */
+/* AT+CFUN=1,1's reply window. The same 10 s /etc/init.d/S45modem gives the
+ * identical command, and generous on purpose: the module is rebooting as it
+ * answers and a short timeout would call a successful reset a failure. */
+#define ND_MODEM_RESET_TIMEOUT_S 10.0
+#define ND_TRANSACT_SLEEP_S      0.02
+#define ND_SMS_WAIT_SLEEP_S      0.05
+#define ND_PROMPT_SLEEP_S        0.02
+#define ND_MODEM_READ_CHUNK      512
+#define ND_MODEM_PROMPT_CHUNK    64
+#define ND_MODEM_EVENT_QUEUE_MAX 8 /* deque(maxlen=8) -- oldest is dropped */
 
 /* CSQ rssi 0..31 (99 = unknown) mapped to 0..4 bars at roughly
  * -105/-93/-81/-73 dBm. */
@@ -100,6 +113,15 @@ typedef struct {
     int32_t index;
 } nd_modem_event;
 
+/* +CPSI's system-mode field ("LTE", "NO SERVICE", "GSM", "WCDMA", ...). */
+#define ND_MODEM_CELL_MODE_MAX 16
+
+/* "the reply carried no RSRP". A real RSRP is always negative -- the LTE
+ * range is about -44 to -140 dBm -- so a positive sentinel cannot collide
+ * with a reading, and -1 (which would read as -0.1 dBm) is not used for it
+ * even though the rest of this struct spells unknown that way. */
+#define ND_MODEM_RSRP_NONE 1
+
 /* One consistent read of everything the UI paints. */
 typedef struct {
     bool hardware;
@@ -131,6 +153,31 @@ typedef struct {
      * it is not a diagnosis -- so the reason rides along and the engineering
      * Modem app draws it. Appended, so no existing field moves. */
     char probe_why[ND_MODEM_PROBE_WHY_MAX];
+
+    /* ---- APPENDED, see OPEN-QUESTIONS.md M-18 ----
+     *
+     * What CSQ cannot say. `csq_rssi == 99` is the modem answering "I cannot
+     * measure", and the Python's RADIO page drew that one row and stopped --
+     * so a disconnected antenna, a radio switched off with AT+CFUN=0, and a
+     * module thirty seconds into its own reboot all rendered as the same
+     * screen. These two separate them:
+     *
+     *   cfun        +CFUN <fun>. 0 minimum, 1 full, 4 flight mode -- anything
+     *               but 1 means the radio is off and the antenna is not the
+     *               story. -1 until it answers.
+     *   cell_mode   +CPSI's first field: "LTE", "NO SERVICE", "GSM", "" when
+     *               nothing has answered. It also decides whether rsrp_dbm10
+     *               means anything -- RSRP is an E-UTRAN measurement and the
+     *               GSM form of the reply has different fields in those
+     *               columns.
+     *   rsrp_dbm10  RSRP in tenths of a dBm (-1134 is -113.4), which is the
+     *               reading CSQ 99 hides. ND_MODEM_RSRP_NONE when the reply
+     *               carried none.
+     *
+     * Appended, so no existing field moves. */
+    int32_t cfun;
+    char cell_mode[ND_MODEM_CELL_MODE_MAX];
+    int32_t rsrp_dbm10;
 } nd_modem_status;
 
 typedef struct nd_modem nd_modem;
@@ -144,6 +191,29 @@ void nd_modem_close(nd_modem *m);
 bool nd_modem_dial(nd_modem *m, const char *number);
 bool nd_modem_answer(nd_modem *m);
 bool nd_modem_hangup(nd_modem *m);
+
+/* AT+CFUN=1,1 -- reboot the module itself, not the phone.
+ *
+ * The escape hatch for a modem wedged in a state no poll can clear: a stale
+ * QMI session left behind by a host's ModemManager, an EMM-detached firmware
+ * that reports CEREG 4 forever, a module that brownout-rebooted into
+ * something unhelpful. /etc/init.d/S45modem already does exactly this by
+ * itself when a whole dial cycle fails (MODEM_RESET_ON_FAIL), so this puts
+ * the same recovery within reach of somebody holding the phone, with no
+ * serial console.
+ *
+ * REFUSED, returning false, while a call is up: the module going away takes
+ * the call with it, and that is not a thing to do to somebody mid-sentence
+ * because they pressed a key on a diagnostics page. Also refused with no
+ * hardware, where there is nothing to reboot.
+ *
+ * On success the port is dropped immediately rather than waited out. The
+ * module is about to stop answering for twenty seconds or so and its USB
+ * interfaces re-enumerate, which the existing ND_PROBE_RETRY_S probe adopts
+ * on its own -- so the caller's next status snapshot says SIMULATION, and a
+ * later one says the port it came back on, WHICH MAY NOT BE THE ONE IT
+ * LEFT. */
+bool nd_modem_reset(nd_modem *m);
 
 /* (ok, detail). detail is rendered verbatim by Messages as
  * "Send failed: <detail>", so its wording is user-visible. */
