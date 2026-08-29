@@ -88,7 +88,9 @@ Animated wallpapers, captured straight off the phone's framebuffer at its native
   <img src="docs/img/hardware-wallpaper-anim.gif" width="260">
 </p>
 
-**Early bring-up**, for the record. Long before there was a Luckfox, a Nokia shell or an OS worth the name, this was a bare ST7789 panel on jumper wires straight into a Raspberry Pi's GPIO header, just to prove the display could be driven and that something recognisable as a UI could be pushed onto it:
+**Early bring-up**, for the record.
+
+Before there was a Luckfox or a Nokia shell, there was a bare ST7789 panel on jumper wires into a Raspberry Pi's GPIO header, running the actual NeoDCT UI. Not a test pattern and not a mockup: that is the real Music Player, album art and progress bar and all, on the panel the finished phone would eventually use.
 
 <img src="docs/img/hardware-prototype3.jpg" width="380">
 
