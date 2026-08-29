@@ -78,6 +78,7 @@ extern "C" {
 #define ND_LOG_GAMES      "Games"
 #define ND_LOG_MESSAGES   "Messages"
 #define ND_LOG_CLOCK_APP  "Clock"
+#define ND_LOG_CALENDAR   "Calendar"
 #define ND_LOG_CALCULATOR "Calculator"
 #define ND_LOG_POWER      "Power"
 

@@ -368,8 +368,8 @@ test: all $(TEST_BINS) $(TEST_APP_SOS)
 # overlay puts them: engineering apps live under engineering/apps and only
 # appear in the menu when engineering mode is on.
 STUB_STOCK_APPS := \
-	Browser Calculator CallLog Clock Games Koki Messages MusicPlayer \
-	PhoneBook Power Settings Tones Update
+	Browser Calculator Calendar CallLog Clock Games Koki Messages \
+	MusicPlayer PhoneBook Power Settings Tones Update
 STUB_ENG_APPS := \
 	Bluetooth Crash CubeBench Downgrade FuelGauge KeypadMapperI2C \
 	LCDTest LinuxShell MicTest Modem RemoteShell Sleepy

@@ -384,6 +384,171 @@ static void test_the_banner_buffers_are_cleared_even_when_there_is_no_banner(voi
 }
 
 /* ------------------------------------------------------------------ *
+ * The second kind
+ * ------------------------------------------------------------------ *
+ *
+ * NotifyService had exactly one kind of banner and the string "sms" was the
+ * only value `kind` ever held. A calendar reminder is the second, and it uses
+ * the same banner on purpose -- same two lines, same position, same Read-or-
+ * Clear on the home screen -- because that is the one "something happened"
+ * idiom this phone has.
+ *
+ * These cases fix the shape of that reuse, and in particular the one decision
+ * that could reasonably have gone the other way: what happens when both kinds
+ * are live at once.
+ */
+
+/* A reminder alone: its name, and the clock reading of the occurrence. That
+ * second line is the OCCURRENCE's time and not the alarm's -- an alarm set
+ * fifteen minutes early still says half past ten, because half past ten is
+ * when the appointment is. */
+static void test_one_reminder_names_itself_and_its_time(void)
+{
+    nd_notify *n = NULL;
+    char l1[ND_NOTIFY_LINE_MAX];
+    char l2[ND_NOTIFY_LINE_MAX];
+    struct tm tm_in;
+    time_t when;
+
+    /* Composed as local wall clock, which is what the calendar stores and
+     * what nd_timeset_format_clock() reads back. */
+    memset(&tm_in, 0, sizeof tm_in);
+    tm_in.tm_year = 2026 - 1900;
+    tm_in.tm_mon = 7;
+    tm_in.tm_mday = 29;
+    tm_in.tm_hour = 10;
+    tm_in.tm_min = 30;
+    tm_in.tm_isdst = -1;
+    when = mktime(&tm_in);
+
+    CHECK_INT(nd_notify_open(&n), ND_OK);
+    nd_notify_post_event(n, 7, "Dentist", (int64_t)when, false);
+
+    CHECK(nd_notify_active(n));
+    CHECK_STR(nd_notify_kind(n), ND_NOTIFY_KIND_EVENT);
+    CHECK_INT(nd_notify_count(n), 1);
+    /* latest_data is the EVENT's rowid, which is what the "View" softkey
+     * hands to app_open_event(). */
+    CHECK_INT(nd_notify_latest_data(n), 7);
+    CHECK_INT(nd_notify_banner_lines(n, l1, l2), 2);
+    CHECK_STR(l1, "Dentist");
+    CHECK_STR(l2, "10:30 am");
+    nd_notify_close(n);
+}
+
+/* A banner is never blank. An event saved with no name still has to say
+ * something, and "Reminder" is what it says. */
+static void test_an_untitled_reminder_still_says_something(void)
+{
+    nd_notify *n = NULL;
+    char l1[ND_NOTIFY_LINE_MAX];
+    char l2[ND_NOTIFY_LINE_MAX];
+
+    CHECK_INT(nd_notify_open(&n), ND_OK);
+    nd_notify_post_event(n, 1, "", 0, false);
+    CHECK_INT(nd_notify_banner_lines(n, l1, l2), 2);
+    CHECK_STR(l1, "Reminder");
+
+    nd_notify_dismiss(n);
+    nd_notify_post_event(n, 2, NULL, 0, false);
+    CHECK_INT(nd_notify_banner_lines(n, l1, l2), 2);
+    CHECK_STR(l1, "Reminder");
+    nd_notify_close(n);
+}
+
+/* Several at once count, exactly as several messages do -- the banner has two
+ * lines and cannot name three things, so it says how many there are and the
+ * app shows the list. */
+static void test_more_than_one_reminder_is_counted(void)
+{
+    nd_notify *n = NULL;
+    char l1[ND_NOTIFY_LINE_MAX];
+    char l2[ND_NOTIFY_LINE_MAX];
+
+    CHECK_INT(nd_notify_open(&n), ND_OK);
+    nd_notify_post_event(n, 1, "Dentist", 0, false);
+    nd_notify_post_event(n, 2, "Team call", 0, false);
+    nd_notify_post_event(n, 3, "Bins out", 0, false);
+
+    CHECK_INT(nd_notify_count(n), 3);
+    CHECK_INT(nd_notify_latest_data(n), 3); /* the newest, as with texts */
+    CHECK_INT(nd_notify_banner_lines(n, l1, l2), 2);
+    CHECK_STR(l1, "3 reminders");
+    CHECK_STR(l2, "due");
+    nd_notify_close(n);
+}
+
+/* THE DECISION THAT COULD HAVE GONE THE OTHER WAY. One banner, the newest
+ * news, and the count starts again -- rather than two counters and a home
+ * screen that has to say two things in two lines.
+ *
+ * Nothing is lost by it: the text is still unread in the inbox with the
+ * envelope flashing over it, and the appointment is still in the calendar. */
+static void test_a_second_kind_takes_the_banner_over(void)
+{
+    nd_notify *n = NULL;
+    char l1[ND_NOTIFY_LINE_MAX];
+    char l2[ND_NOTIFY_LINE_MAX];
+
+    CHECK_INT(nd_notify_open(&n), ND_OK);
+    nd_notify_post_sms(n, 41, false);
+    nd_notify_post_sms(n, 42, false);
+    CHECK_INT(nd_notify_count(n), 2);
+
+    nd_notify_post_event(n, 7, "Dentist", 0, false);
+    CHECK_STR(nd_notify_kind(n), ND_NOTIFY_KIND_EVENT);
+    CHECK_INT(nd_notify_count(n), 1); /* NOT three */
+    CHECK_INT(nd_notify_latest_data(n), 7);
+    CHECK_INT(nd_notify_banner_lines(n, l1, l2), 2);
+    CHECK_STR(l1, "Dentist");
+
+    /* And the same the other way. */
+    nd_notify_post_sms(n, 43, false);
+    CHECK_STR(nd_notify_kind(n), ND_NOTIFY_KIND_SMS);
+    CHECK_INT(nd_notify_count(n), 1);
+    CHECK_INT(nd_notify_banner_lines(n, l1, l2), 2);
+    CHECK_STR(l1, "1 message");
+    CHECK_STR(l2, "received");
+    nd_notify_close(n);
+}
+
+/* Two reminders in a row keep counting: take_over() must fire on a CHANGE of
+ * kind and not on every post, or a second reminder would reset to one. */
+static void test_the_same_kind_twice_does_not_reset(void)
+{
+    nd_notify *n = NULL;
+
+    CHECK_INT(nd_notify_open(&n), ND_OK);
+    nd_notify_post_event(n, 1, "A", 0, false);
+    nd_notify_post_event(n, 2, "B", 0, false);
+    CHECK_INT(nd_notify_count(n), 2);
+    nd_notify_close(n);
+}
+
+/* Dismiss clears the event's own two fields too, so a later reminder cannot
+ * inherit a stale name -- the same reason the two line buffers are cleared
+ * even when there is no banner. */
+static void test_dismiss_clears_the_reminder_as_well(void)
+{
+    nd_notify *n = NULL;
+    char l1[ND_NOTIFY_LINE_MAX];
+    char l2[ND_NOTIFY_LINE_MAX];
+
+    CHECK_INT(nd_notify_open(&n), ND_OK);
+    nd_notify_post_event(n, 7, "Dentist", 0, false);
+    nd_notify_dismiss(n);
+
+    CHECK(!nd_notify_active(n));
+    CHECK(nd_notify_kind(n) == NULL);
+    CHECK_INT(nd_notify_banner_lines(n, l1, l2), 0);
+
+    nd_notify_post_event(n, 8, "", 0, false);
+    CHECK_INT(nd_notify_banner_lines(n, l1, l2), 2);
+    CHECK_STR(l1, "Reminder"); /* not "Dentist" */
+    nd_notify_close(n);
+}
+
+/* ------------------------------------------------------------------ *
  * Beeps
  * ------------------------------------------------------------------ */
 
@@ -1163,6 +1328,7 @@ static void test_every_entry_point_tolerates_a_null_service(void)
     /* nd_ui.c reaches this module through a weak symbol and a possibly-NULL
      * handle, so NULL is a value that genuinely arrives here. */
     nd_notify_post_sms(NULL, 1, false);
+    nd_notify_post_event(NULL, 1, "Dentist", 0, false);
     nd_notify_dismiss(NULL);
     nd_notify_stop_ring(NULL);
     nd_notify_close(NULL);
@@ -1194,6 +1360,13 @@ int main(void)
     RUN(test_more_than_one_message_is_plural_and_keeps_the_newest_row);
     RUN(test_dismiss_clears_the_banner_and_only_the_banner);
     RUN(test_the_banner_buffers_are_cleared_even_when_there_is_no_banner);
+
+    RUN(test_one_reminder_names_itself_and_its_time);
+    RUN(test_an_untitled_reminder_still_says_something);
+    RUN(test_more_than_one_reminder_is_counted);
+    RUN(test_a_second_kind_takes_the_banner_over);
+    RUN(test_the_same_kind_twice_does_not_reset);
+    RUN(test_dismiss_clears_the_reminder_as_well);
 
     RUN(test_a_missing_tone_is_reported_and_not_played);
     RUN(test_an_existing_tone_is_handed_to_aplay_and_not_waited_for);
