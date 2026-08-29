@@ -2083,3 +2083,38 @@ sleepy/clock merge earlier today. Pushing main is the fix; not doing it in
 this commit because that is the user's call to make.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+================================================================================
+
+0.4.10a: red and blue, the right way round
+
+Merges PR #14. A framebuffer's bit depth says how wide a pixel is and nothing
+about where red sits inside it, and the two framebuffers this OS runs on
+disagree: QEMU's fbdev emulation puts red in the third byte, the phone's vfb
+puts it in the first. nd_fb packed one order and neodct_displayd unpacked the
+same one, so the two halves of NeoDCT agreed with each other and the UI looked
+right on both -- while everything that reads the driver instead of us, which
+is mpv and netsurf and the framebuffer console, got inverted colour. All three
+read fb_var_screeninfo now. 257 checks in test_nd_fb, suite green.
+
+## the changelog moved, for the third release running
+
+PR #14 branched from origin/main and put its notes under the heading that was
+"Unreleased" there. That heading is 0.4.6a now -- tagged, pushed, published --
+so git merged a feature written after it INTO it, cleanly and wrongly. Moved
+to 0.4.10a; 0.4.6a is back to what it shipped.
+
+This has now happened to sleepy/clock, to the GIF wallpapers, and to this.
+The cause is not the branches: release.sh pushes tags and never commits, so
+origin/main has sat at 0.4.3a while nine releases were cut from it, and every
+branch starts from a phone that is nine versions out of date. Pushing main
+fixes it for good and nothing else will.
+
+## 0.4.10a and not 0.5.0a
+
+Checked rather than assumed, because a version that sorts wrong is an update
+the phone will not offer. nd_verkey parses numeric components, so 0.4.10a is
+newer than 0.4.9a and 0.4.9a is not newer than 0.4.10a -- verified by linking
+against the built library, not by reading it.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
