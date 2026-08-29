@@ -634,3 +634,113 @@ obscurity holds" or "assume it does not", but: **fix the amplifiers**, because
 they convert any single bug into a permanent one, and **fuzz the code only you
 have read**, because that is the part the outside world's attention has never
 covered.
+
+---
+
+## 11. User data encryption — feasibility, and the shape it has to take
+
+**Status: not being implemented now.** Recorded here because one part of it —
+four kernel config flags — has to be decided *before* the next reflash, and the
+rest can follow whenever.
+
+Short answer: **yes, and the right design is Android's, though not the Android
+design most people picture.**
+
+### dm-crypt is not available on the real hardware
+
+The obvious approach — LUKS the user partition — does not work on the Luckfox.
+`PARTITIONS.md` section 2: `mtd4` is an **8 MiB UBI volume holding UBIFS**.
+dm-crypt is a device-mapper target and needs a block device; UBIFS is a raw-flash
+filesystem that sits on UBI directly, and `ubiblock` is read-only. There is no
+block layer to put a crypt target on.
+
+QEMU's ext4 user partition *could* take dm-crypt, which makes this an easy trap:
+it would work on the development target and be unimplementable on the phone.
+
+### fscrypt is the answer, and it is what Android actually does
+
+`fscrypt` — file-based encryption, per-directory, in the filesystem rather than
+under it — is supported by **both** ext4 (QEMU) and UBIFS (Luckfox). It is also
+precisely the road Android took: full-disk dm-crypt in Android 5, replaced by
+File-Based Encryption from 7 and mandatory from 10, for the same reasons that
+apply here.
+
+**Cipher: Adiantum, not AES.** The RV1103 is a Cortex-A7 — **ARMv7-A, with NEON
+but no AES instructions**; the crypto extensions that make AES-XTS cheap are
+ARMv8-A. Software AES on a 1.2 GHz A7 is a real cost on every database read.
+Adiantum (XChaCha12 + NH + Poly1305) was designed by Google for exactly this
+case — entry-level Android devices without AES acceleration — and is several
+times faster than AES-XTS in software on this class of core. `CONFIG_CRYPTO_ADIANTUM`.
+
+### Per-directory is the feature, not a compromise
+
+FDE would create a bootstrap problem this design cannot easily solve: the
+initramfs mounts `/NeoDCT/User` and reads `.ndsys/pending.prop` **before**
+`switch_root`, long before any PIN could be typed — and the UI that would collect
+a PIN lives on the rootfs that has not been mounted yet.
+
+fscrypt makes that a non-question: encrypt `db/`, `.remote/`, the wallpaper;
+leave `.ndsys/` and `logs/` alone. Which is Android's Device-Encrypted vs
+Credential-Encrypted split, arrived at from the same constraint.
+
+### The honest limit
+
+A four- or five-digit security code is 10⁴–10⁵ of entropy. **Against an attacker
+who dumps the NAND, that is not a secret.** A KDF tuned to a full second on the
+A7 makes 10,000 guesses about three hours *on the phone* and minutes on a
+desktop; there is no KDF parameter that fixes a four-digit input.
+
+Android's answer is hardware: a TEE that holds a device-bound key and rate-limits
+attempts, so guesses must go through the secure element at its pace rather than
+offline at the attacker's. Whether the RV1103 offers usable OTP/eFuse to bind a
+key to is worth investigating before designing around its absence — but the
+design must not *assume* it.
+
+So state the guarantee accurately: **this protects a lost or borrowed phone from
+a casual finder. It does not protect against forensics.** That is not a small
+thing — "someone picks up my phone on a bus" is the realistic threat for a
+phone, and it is the one currently uncovered.
+
+### What it does not do
+
+**Nothing in section 9 is addressed by encryption.** Once the phone is booted and
+unlocked, the data is plaintext to every process, and every process is root. A
+rogue app reads the decrypted databases exactly as it does today.
+
+Encryption defends against an attacker holding the **hardware**. The audit's
+findings are about an attacker holding **execution**. They are orthogonal, and
+this must not displace Phase 0 or Phase 1 in the queue.
+
+### Four things specific to this codebase
+
+1. **The update backup writes the databases to the SD card in plaintext.**
+   `nd_update_backup_user_data()` (`apps/Update/main.c:641`) copies every `.db`
+   from `/NeoDCT/User/db` into `backup_db` on the card. Encrypt the databases and
+   this quietly exports them in the clear onto removable media — the exact thing
+   the feature exists to prevent. It has to change in the same commit.
+2. **`.remote/id_ed25519` belongs in the encrypted set.** A phone that encrypts
+   its SMS and leaves an ssh key to a relay in the clear has protected the
+   smaller secret.
+3. **SMS arriving while locked.** If `sms_inbox.db` is credential-encrypted and
+   the key is not loaded, the modem thread cannot write it. The Nokia model
+   solves this for free: the security code is entered **once at startup**, so the
+   phone is unlocked for the session, and "press # to unlock" is a UI keyguard
+   that does not re-lock the crypto. Same as Android's "CE unlocks at first
+   unlock and stays unlocked". Worth being deliberate that this is the choice,
+   rather than arriving at it by accident.
+4. **Migration.** fscrypt sets a policy on an **empty** directory; existing
+   plaintext data cannot be encrypted in place. Back up, wipe, recreate, restore.
+   On an 8 MiB partition that is tractable, and the update system already has
+   most of the pieces.
+
+### The one decision that cannot wait
+
+`CONFIG_FS_ENCRYPTION`, `CONFIG_FS_ENCRYPTION_ALGS`, `CONFIG_CRYPTO_ADIANTUM`,
+`CONFIG_UBIFS_FS` encryption support and `CONFIG_KEYS` are **kernel** options,
+and per `AGENTS.md` a kernel cannot ship in an `.ndsw` — it needs a full reflash.
+
+Section 3's real fix (`CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG`) needs a reflash
+too. **Set both sets of flags in the same kernel build**, even though the
+userspace for encryption lands much later. A flag left unset is a second reflash
+of every phone that exists, and the whole point of doing this while there are two
+of them is that reflashing is currently cheap.
