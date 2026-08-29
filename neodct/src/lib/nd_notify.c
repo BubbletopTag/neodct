@@ -87,6 +87,7 @@
 #include "nd_paths.h"
 #include "nd_proc.h"
 #include "nd_settings.h"
+#include "nd_timeset.h"
 #include "nd_types.h"
 
 #include "nd_notify_priv.h"
@@ -381,10 +382,19 @@ typedef struct {
 } nd_ringer;
 
 struct nd_notify {
-    /* Banner state -- the four Python fields and nothing more. */
-    const char *kind; /* ND_NOTIFY_KIND_SMS, or NULL */
+    /* Banner state -- the four Python fields, plus the two an event needs
+     * that a text does not. */
+    const char *kind; /* ND_NOTIFY_KIND_SMS, ND_NOTIFY_KIND_EVENT, or NULL */
     int32_t count;
     int64_t latest;
+
+    /* The reminder's own line. A text's banner is derived entirely from
+     * `count`, so it needed no storage; an event's says what it is, and the
+     * title has to survive from the poll that found it until the frame that
+     * draws it. Truncated to the banner's own width on the way in rather
+     * than on the way out, so nothing downstream has to know the limit. */
+    char event_title[ND_NOTIFY_LINE_MAX];
+    int64_t event_when;
 
     /* What ringtone_path() last settled on. Kept because the header hands
      * the caller a const char * and the Python hands back a str; the buffer
@@ -702,15 +712,46 @@ void nd_notify_close(nd_notify *n)
  * Posting, and the banner the home screen draws from
  * ------------------------------------------------------------------ */
 
+/* A banner of a different kind is a different banner: its count does not
+ * carry over. nd_notify.h says why the newest news simply wins. Reached only
+ * when both kinds exist, so an SMS-only phone follows exactly the path it
+ * always did. */
+static void take_over(nd_notify *n, const char *kind)
+{
+    if (n->kind != NULL && strcmp(n->kind, kind) != 0) {
+        n->count = 0;
+        n->latest = -1;
+        n->event_title[0] = '\0';
+        n->event_when = 0;
+    }
+    n->kind = kind;
+}
+
 void nd_notify_post_sms(nd_notify *n, int64_t row_id, bool tone)
 {
     if (n == NULL)
         return;
-    n->kind = ND_NOTIFY_KIND_SMS;
+    take_over(n, ND_NOTIFY_KIND_SMS);
     n->count++;
     n->latest = row_id;
     if (tone)
         (void)nd_notify_play_tone(n, ND_SMS_TONE);
+}
+
+void nd_notify_post_event(nd_notify *n, int64_t row_id, const char *title, int64_t when, bool tone)
+{
+    if (n == NULL)
+        return;
+    take_over(n, ND_NOTIFY_KIND_EVENT);
+    n->count++;
+    n->latest = row_id;
+    /* An untitled appointment still has to say something. */
+    (void)nd_strlcpy(n->event_title, (title != NULL && title[0] != '\0') ? title : "Reminder",
+                     sizeof n->event_title);
+    n->event_when = when;
+    nd_log(ND_LOG_NOTIFY, "Reminder due (event %lld): %s", (long long)row_id, n->event_title);
+    if (tone)
+        (void)nd_notify_play_tone(n, ND_NOTIFY_EVENT_TONE);
 }
 
 bool nd_notify_active(const nd_notify *n)
@@ -740,16 +781,35 @@ size_t nd_notify_banner_lines(const nd_notify *n, char l1[ND_NOTIFY_LINE_MAX],
         return 0u;
     l1[0] = '\0';
     l2[0] = '\0';
-    /* banner_lines() returns () for anything that is not an SMS banner, and
-     * "sms" is the only kind there is. The comparison is kept so that adding
-     * a second kind cannot silently start drawing a message count for it. */
-    if (n == NULL || n->kind == NULL || strcmp(n->kind, ND_NOTIFY_KIND_SMS) != 0)
+    /* banner_lines() returns () for a banner it has no wording for. The
+     * comparison the Python needed for one kind is what lets a second one be
+     * added here without either drawing the other's words. */
+    if (n == NULL || n->kind == NULL)
         return 0u;
 
-    (void)nd_snprintf(l1, ND_NOTIFY_LINE_MAX, "%d %s", (int)n->count,
-                      (n->count == 1) ? "message" : "messages");
-    (void)nd_strlcpy(l2, "received", ND_NOTIFY_LINE_MAX);
-    return 2u;
+    if (strcmp(n->kind, ND_NOTIFY_KIND_SMS) == 0) {
+        (void)nd_snprintf(l1, ND_NOTIFY_LINE_MAX, "%d %s", (int)n->count,
+                          (n->count == 1) ? "message" : "messages");
+        (void)nd_strlcpy(l2, "received", ND_NOTIFY_LINE_MAX);
+        return 2u;
+    }
+
+    if (strcmp(n->kind, ND_NOTIFY_KIND_EVENT) == 0) {
+        if (n->count == 1) {
+            /* The one that is due, named, with the time it is due at --
+             * which is the whole message on a phone whose banner is two
+             * lines. Several at once fall back to counting them, exactly as
+             * several texts do. */
+            (void)nd_strlcpy(l1, n->event_title, ND_NOTIFY_LINE_MAX);
+            nd_timeset_format_clock(l2, ND_NOTIFY_LINE_MAX, (time_t)n->event_when);
+        } else {
+            (void)nd_snprintf(l1, ND_NOTIFY_LINE_MAX, "%d reminders", (int)n->count);
+            (void)nd_strlcpy(l2, "due", ND_NOTIFY_LINE_MAX);
+        }
+        return 2u;
+    }
+
+    return 0u;
 }
 
 void nd_notify_dismiss(nd_notify *n)
@@ -758,10 +818,14 @@ void nd_notify_dismiss(nd_notify *n)
         return;
     /* C pressed, or the messages were opened. The banner goes; the mail stays
      * unread in the inbox and the envelope keeps flashing, because the unread
-     * count is a SQL query and not this counter. */
+     * count is a SQL query and not this counter. A dismissed reminder has no
+     * such second life: the appointment is still in the calendar, but nothing
+     * on the home screen goes on saying so. */
     n->kind = NULL;
     n->count = 0;
     n->latest = -1;
+    n->event_title[0] = '\0';
+    n->event_when = 0;
 }
 
 /* ------------------------------------------------------------------ *

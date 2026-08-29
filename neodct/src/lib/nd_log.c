@@ -99,7 +99,7 @@ static const struct tag_colour NAMED[] = {
 /* logstyle.APP_TAGS. Membership only -- the colour is derived. */
 static const char *const APP_TAGS[] = {"Koki",  "Music",   "CallLog",  "Settings", "PB",
                                        "Tones", "Games",   "Messages", "Clock",    "Calculator",
-                                       "Power", "MicTest", "Sleepy"};
+                                       "Power", "MicTest", "Sleepy",   "Calendar"};
 
 static unsigned tag_char_sum(const char *tag)
 {
