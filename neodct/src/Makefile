@@ -413,6 +413,12 @@ install: all
 	$(Q)$(if $(LIB_SRCS),$(INSTALL) -m 0755 $(LIB) $(DESTDIR)$(PREFIX)/lib/,:)
 	$(Q)$(if $(CORE_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-core $(DESTDIR)$(PREFIX)/bin/,:)
 	$(Q)$(if $(APPRUN_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-apprun $(DESTDIR)$(PREFIX)/bin/,:)
+	@# nd-selftest goes ON the phone, unlike nd-shoot, because the questions
+	@# it answers only have answers there: whether eudev applied the rules,
+	@# whether the vendor kernel has CONFIG_MNT_NS, and whether ndusr_ut is
+	@# really shut out of the databases. It is ~65 kB against libneodct,
+	@# which is already mapped, and it only reads.
+	$(Q)$(if $(SELF_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-selftest $(DESTDIR)$(PREFIX)/bin/,:)
 	@# The panel daemon keeps its historical path: /NeoDCT/System/hw/. Both
 	@# etc/init.d/S90display and mkinitramfs.py's PANEL_DAEMON hardcode it,
 	@# and mkinitramfs reads the built target tree rather than the overlay,
