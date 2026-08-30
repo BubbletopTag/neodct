@@ -34,22 +34,66 @@
 # with a good ending.
 SUBSYSTEM=="i2c-dev", GROUP="i2c", MODE="0660"
 
+# ============ THE QUOTING RULES, WHICH ARE NOT THE SHELL'S ============
+#
+# Two different parsers read a RUN+= value, one after the other, and they do
+# not agree with each other. Both are in eudev 3.2.14:
+#
+#   get_key()          src/udev/udev-rules.c -- reads the RULE. A value runs
+#                      from one double quote to the next; \" inside it is
+#                      honoured and does not end the value. Line continuation
+#                      is backslash-newline, checked as line[len-2].
+#
+#   udev_build_argv()  src/udev/udev-event.c -- splits that value into ARGV,
+#                      and it has NO escapes whatsoever. It walks the string;
+#                      a quote character, single or double, starts an element
+#                      that ends at the next one of the same kind; anything
+#                      else is split on spaces.
+#
+# So the rule to follow is the second parser's, because it is the stricter
+# one: the script handed to `sh -c` must contain no quote character at all.
+# There is nothing to escape it WITH. One apostrophe inside the script ends
+# the argv element in the middle of itself, and the remainder becomes further
+# arguments that sh never looks at -- with no error, because both parsers
+# think they succeeded.
+#
+# Hence single quotes around the script and none inside it. Every path below
+# comes from sysfs and has no spaces in it, so nothing inside needs quoting
+# anyway.
+#
+# $$ is how a literal $ reaches the shell. A bare $ before a name eudev does
+# not recognise is copied through, so $b would happen to work today -- but
+# $id, $name, $links, $result and a dozen more ARE substitutions, and a
+# shell variable is one rename away from becoming one.
+#
+# A syntax error here costs this rule and not the file: parse_file() ignores
+# what add_rule() returns and reads the next line. Smaller blast radius than
+# it first looks, and still not one worth spending.
+
 # --- backlight ------------------------------------------------------------
 #
 # nd_backlight.c writes brightness. A udev rule is the ordinary way to hand
 # an attribute to a group; the alternative is a setuid helper for something
 # that is one integer.
 SUBSYSTEM=="backlight", ACTION=="add", \
-    RUN+="/bin/sh -c 'chgrp video /sys%p/brightness 2>/dev/null; chmod 0664 /sys%p/brightness 2>/dev/null'"
+    RUN+="/bin/sh -c 'b=/sys%p/brightness; [ -e $$b ] && chgrp video $$b && chmod 0664 $$b'"
 
 # --- cpufreq --------------------------------------------------------------
 #
 # nd_cpufreq.c sets scaling_min_freq and scaling_max_freq -- the phone drops
 # its ceiling on the home screen and raises it for Koki. cpufreq attributes
-# are not a udev subsystem event on every kernel, so this is attached to the
-# cpu subsystem's add.
+# are not a udev subsystem event on every kernel, so this hangs off the cpu
+# subsystem's add and checks for the directory rather than assuming it.
+#
+# The `[ -e ]` is not about log noise -- a RUN child's stderr goes to
+# /dev/null unless udevd is at LOG_INFO or above, and a non-zero exit is
+# logged at debug and otherwise discarded, so a rule that fails on every boot
+# fails SILENTLY. It is there because not every kernel exports all three
+# attributes: QEMU's virt machine has no cpufreq directory at all, and a
+# kernel built with one governor has no scaling_governor. Testing for each
+# one is what makes the rule mean the same thing on both.
 SUBSYSTEM=="cpu", ACTION=="add", \
-    RUN+="/bin/sh -c 'for f in /sys%p/cpufreq/scaling_min_freq /sys%p/cpufreq/scaling_max_freq /sys%p/cpufreq/scaling_governor; do [ -e \"$$f\" ] && { chgrp ndusr \"$$f\"; chmod 0664 \"$$f\"; }; done' 2>/dev/null"
+    RUN+="/bin/sh -c 'for f in scaling_min_freq scaling_max_freq scaling_governor; do p=/sys%p/cpufreq/$$f; [ -e $$p ] && { chgrp ndusr $$p; chmod 0664 $$p; }; done'"
 
 # --- uinput ---------------------------------------------------------------
 #
