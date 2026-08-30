@@ -31,6 +31,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "../../apps/Browser/browser.h"
 #include "nd_priv.h"
 #include "nd_proc.h"
 #include "nd_types.h"
@@ -351,6 +352,188 @@ static void test_a_spec_that_asks_for_nothing_is_unchanged(void)
     }
 }
 
+/* ---- the mount namespace, SECURITY-PLAN.md section 2 ------------------ */
+
+/* $TMPDIR if the environment has one, /tmp otherwise. Deliberately not
+ * NEODCT_ROOT: that is the fake /NeoDCT a test writes settings into, and a
+ * scratch directory to hide is not phone state. */
+static const char *tmpdir(void)
+{
+    const char *dir = getenv("TMPDIR");
+
+    return (dir != NULL && dir[0] == '/') ? dir : "/tmp";
+}
+
+/* system(), with the return value looked at -- glibc marks it
+ * warn_unused_result and this file builds with -Werror. */
+static void run_shell(const char *cmd)
+{
+    int rc = system(cmd);
+
+    if (rc != 0)
+        (void)fprintf(stderr, "  note: `%s` exited %d\n", cmd, rc);
+}
+
+/* Ask a child what it can see, through nd_proc_spawn. */
+static int what_the_child_sees(const char *const *hide, bool ns, const char *probe,
+                               char *out, size_t out_sz)
+{
+    nd_proc_spec spec;
+    nd_proc_status st;
+    const char *argv[4];
+    pid_t pid = -1;
+    int fds[2];
+    ssize_t n;
+
+    out[0] = '\0';
+    if (pipe(fds) != 0)
+        return -1;
+    argv[0] = "sh";
+    argv[1] = "-c";
+    argv[2] = probe;
+    argv[3] = NULL;
+
+    (void)memset(&spec, 0, sizeof spec);
+    spec.argv = argv;
+    spec.owner = ND_OWNER_SYSTEM;
+    spec.private_mounts = ns;
+    spec.hide_paths = hide;
+    spec.fds[0].child_fd = 1;
+    spec.fds[0].our_fd = fds[1];
+    spec.n_fds = 1u;
+
+    if (nd_proc_spawn("/bin/sh", &spec, &pid) != ND_OK) {
+        (void)close(fds[0]);
+        (void)close(fds[1]);
+        return -1;
+    }
+    (void)close(fds[1]);
+    n = read(fds[0], out, out_sz - 1u);
+    (void)close(fds[0]);
+    (void)nd_proc_wait(pid, 5.0, &st);
+    if (n > 0)
+        out[n] = '\0';
+    return st.exited ? st.exit_status : -1;
+}
+
+static void test_namespaces(void)
+{
+    char seen[512];
+    char probe[512];
+    char dir[64];
+    const char *hide[2];
+    int rc;
+
+    if (!nd_proc_namespaces_available()) {
+        SKIP("this kernel has no mount namespaces");
+        return;
+    }
+    CHECK(nd_proc_namespaces_available(), "and it is remembered, not re-asked");
+
+    /* A directory with something in it, under TMPDIR so nothing of the
+     * machine's is touched. */
+    (void)nd_snprintf(dir, sizeof dir, "%s/nd-ns-%ld", tmpdir(), (long)getpid());
+    (void)nd_snprintf(probe, sizeof probe, "mkdir -p '%s' && echo secret > '%s/f'", dir,
+                      dir);
+    run_shell(probe);
+
+    hide[0] = dir;
+    hide[1] = NULL;
+
+    (void)nd_snprintf(probe, sizeof probe, "cat '%s/f' 2>/dev/null || echo GONE", dir);
+
+    /* Without the namespace: visible, which is the control. */
+    rc = what_the_child_sees(NULL, false, probe, seen, sizeof seen);
+    CHECK(rc == 0 && strncmp(seen, "secret", 6u) == 0,
+          "without a namespace the child reads the file");
+
+    /* With it: the path still exists and holds nothing. */
+    rc = what_the_child_sees(hide, true, probe, seen, sizeof seen);
+    CHECK(rc == 0 && strncmp(seen, "GONE", 4u) == 0,
+          "a hidden path is empty inside the namespace");
+
+    /* And the parent still sees it -- MS_REC|MS_PRIVATE on / is what stops
+     * the child's mounts propagating out and hiding it from the whole
+     * phone. */
+    {
+        char path[128];
+        FILE *f;
+
+        (void)nd_snprintf(path, sizeof path, "%s/f", dir);
+        f = fopen(path, "r");
+        CHECK(f != NULL, "the parent's view is untouched");
+        if (f != NULL)
+            (void)fclose(f);
+    }
+
+    /* A hide path that does not exist is dropped before the fork rather than
+     * killing the child: RemoteShell has not necessarily created .remote. */
+    {
+        const char *missing[3];
+
+        (void)nd_strlcpy(probe, "echo alive", sizeof probe);
+        missing[0] = "/nd/no/such/path";
+        missing[1] = dir;
+        missing[2] = NULL;
+        rc = what_the_child_sees(missing, true, probe, seen, sizeof seen);
+        CHECK(rc == 0 && strncmp(seen, "alive", 5u) == 0,
+              "a hide path that does not exist is not fatal");
+    }
+
+    /* Cleanup. */
+    (void)nd_snprintf(probe, sizeof probe, "rm -rf '%s'", dir);
+    run_shell(probe);
+}
+
+/* The browser's own list has to be a list, terminated, and has to name the
+ * things the audit says it must. */
+static void test_the_browser_hides_what_it_should(void)
+{
+    static const char *const hide[] = ND_BROWSER_HIDE_PATHS;
+    const char *const wanted[] = {"/NeoDCT/System/engineering", "/NeoDCT/User/db",
+                                  "/NeoDCT/User/.remote", "/NeoDCT/User/.ndsys"};
+    size_t i;
+    size_t n = 0u;
+
+    while (hide[n] != NULL)
+        n++;
+    CHECK(n > 0u, "the browser hides something");
+    CHECK(n < (size_t)ND_PROC_MAX_HIDE, "and not more than a spec can carry");
+
+    for (i = 0u; i < sizeof wanted / sizeof wanted[0]; i++) {
+        size_t j;
+        bool found = false;
+
+        for (j = 0u; j < n; j++) {
+            if (strcmp(hide[j], wanted[i]) == 0)
+                found = true;
+        }
+        CHECK(found, wanted[i]);
+    }
+
+    /* And must NOT hide what it needs: its own home page, the shared library
+     * it is linked against, the media player it execs, and the one directory
+     * it may write to. Hiding any of these is a browser that does not
+     * start. */
+    {
+        const char *const needed[] = {"/NeoDCT/System", "/NeoDCT/System/lib",
+                                      "/NeoDCT/System/apps", "/NeoDCT/System/core",
+                                      "/NeoDCT/User/browser"};
+        size_t k;
+
+        for (k = 0u; k < sizeof needed / sizeof needed[0]; k++) {
+            size_t j;
+            bool hidden = false;
+
+            for (j = 0u; j < n; j++) {
+                if (strcmp(hide[j], needed[k]) == 0)
+                    hidden = true;
+            }
+            CHECK(!hidden, needed[k]);
+        }
+    }
+}
+
 int main(void)
 {
     test_lookup();
@@ -359,6 +542,8 @@ int main(void)
     test_the_drop();
     test_spawn_runs_the_child_as_the_user();
     test_a_spec_that_asks_for_nothing_is_unchanged();
+    test_namespaces();
+    test_the_browser_hides_what_it_should();
 
     if (g_fail != 0) {
         (void)fprintf(stderr, "test_priv: %d of %d checks FAILED\n", g_fail, g_checks);

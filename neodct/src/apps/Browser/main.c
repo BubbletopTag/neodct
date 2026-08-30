@@ -1095,6 +1095,26 @@ int app_run(nd_ui *ui)
      * binary. */
     spec.no_new_privs = true;
 
+    /* And a mount namespace, which is what covers the half DAC cannot:
+     * /NeoDCT/System is world-readable by design, so `file:///` enumerates
+     * the system tree however low the browser's uid is. browser.h lists what
+     * is hidden and why each entry is safe to hide.
+     *
+     * Fails open: CONFIG_MNT_NS is a vendor kernel question SECURITY-PLAN.md
+     * section 6 lists as unverified on the phone, and a kernel without it
+     * still has to open the browser. Said out loud once, because a
+     * confinement that quietly did not happen is exactly what this work is
+     * against. */
+    {
+        static const char *const hide[] = ND_BROWSER_HIDE_PATHS;
+
+        spec.private_mounts = true;
+        spec.hide_paths = hide;
+        if (!nd_proc_namespaces_available())
+            nd_log(ND_LOG_BROWSER, "no mount namespaces in this kernel; the "
+                                   "browser can still read /NeoDCT/System");
+    }
+
     if (devnull >= 0) {
         spec.fds[spec.n_fds].child_fd = 1; /* stdout=DEVNULL */
         spec.fds[spec.n_fds].our_fd = devnull;

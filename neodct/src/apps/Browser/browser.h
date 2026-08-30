@@ -58,6 +58,51 @@ extern "C" {
  * without being able to list what else is up there. */
 #define ND_BROWSER_HOME_DIR "/NeoDCT/User/browser"
 
+/* What the browser is given an empty view of. SECURITY-PLAN.md section 2.
+ *
+ * DAC cannot help with any of these, which is the whole reason the list
+ * exists: /NeoDCT/System has to be readable by every app, so
+ * `file:///NeoDCT/System/...` enumerates the entire system tree no matter
+ * who netsurf runs as -- SECURITY-AUDIT.md finding 5. A mount namespace is
+ * the answer because it removes a path from EXISTENCE rather than denying
+ * access to it: no `..`, no symlink and no /proc/self/root back out.
+ *
+ * Every entry is somewhere netsurf provably never reads, which is what makes
+ * turning this on safe without a phone to try it on:
+ *
+ *   System/engineering  LinuxShell, raw-AT Modem, RemoteShell and Downgrade
+ *                       -- the four apps a compromised browser would most
+ *                       like to find, and today `file:///` lists them
+ *   System/keys         the release public key
+ *   System/tones,       the owner's media, and the wallpaper the phone is
+ *   System/wallpapers   currently showing
+ *   User/db             contacts, messages, the call log
+ *   User/.remote        the ssh keys
+ *   User/.ndsys         the update records
+ *   User/.seedrng       the entropy seed
+ *
+ * The four under User/ are already denied by mode bits. They are here anyway
+ * because the two mechanisms fail differently -- a mode bit is one chmod
+ * away from being wrong, and a path that is not there is not.
+ *
+ * NOT here, and the reason section 2 is not finished: the minimal /dev.
+ * netsurf scans /dev/input/event0..31 and takes every keyboard it finds
+ * (libnsfb src/surface/linux.c), so on QEMU it reads the real one -- every
+ * keypress on the machine, whichever window has focus. On the phone
+ * /dev/input holds only the synthetic bridge the core makes, which is why
+ * the plan calls the emulator the more dangerous configuration here. Fixing
+ * it means giving the child a /dev containing that bridge and nothing else,
+ * and the bridge's own event node has to be discovered from uinput at
+ * runtime -- work that cannot be validated without booting.
+ */
+#define ND_BROWSER_HIDE_PATHS                                                   \
+    {                                                                           \
+        "/NeoDCT/System/engineering", "/NeoDCT/System/keys",                    \
+            "/NeoDCT/System/tones", "/NeoDCT/System/wallpapers",                \
+            "/NeoDCT/User/db", "/NeoDCT/User/.remote", "/NeoDCT/User/.ndsys",   \
+            "/NeoDCT/User/.seedrng", NULL                                       \
+    }
+
 /* subprocess.run(["dmesg"], ...) is a PATH lookup; execve is not, so the
  * launcher has to name the file. Busybox and util-linux both install it
  * here. See BR-6 in OPEN-QUESTIONS.md. */

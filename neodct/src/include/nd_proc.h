@@ -54,6 +54,9 @@ typedef enum { ND_OWNER_APP = 0, ND_OWNER_AUDIO, ND_OWNER_TONE, ND_OWNER_SYSTEM 
 /* Descriptors to hand the child. Anything not listed is closed on exec. */
 #define ND_PROC_MAX_FDS 8
 
+/* Paths a child may be given an empty view of. See `hide_paths`. */
+#define ND_PROC_MAX_HIDE 16
+
 typedef struct {
     int child_fd; /* the number the child will see */
     int our_fd;   /* the descriptor to dup2 onto it */
@@ -115,7 +118,45 @@ typedef struct {
      * regain privilege through a setuid binary either way, and it is the
      * precondition for the seccomp filter in Phase 3. */
     bool no_new_privs;
+
+    /* ---- the mount namespace. SECURITY-PLAN.md section 2. --------------
+     *
+     * unshare(CLONE_NEWNS) in the child, then MS_REC|MS_PRIVATE on / so
+     * nothing done afterwards propagates back out. This is the 5.10
+     * stand-in for Landlock, which does not exist before 5.13, and it is
+     * strictly more thorough than a permission would be: it removes paths
+     * from EXISTENCE rather than denying access to them, so there is no
+     * `..`, no symlink and no /proc/self/root trick to walk back out.
+     *
+     * It matters for the world-readable half of the image, which is
+     * precisely what DAC cannot help with. /NeoDCT/System has to be readable
+     * by every app, so `file:///NeoDCT/System/...` in the browser enumerates
+     * the whole system tree no matter who the browser runs as --
+     * SECURITY-AUDIT.md finding 5.
+     *
+     * hide_paths is over-mounted with an empty, read-only, mode-0000 tmpfs:
+     * the directory still exists and is empty and unreadable, which is a
+     * quieter failure for the program inside than a missing path and just as
+     * final. Resolve the list before the fork -- a path that does not exist
+     * is dropped there, so that a failure in the child is always a real one.
+     *
+     * FAIL-OPEN ON unshare, deliberately. CONFIG_MNT_NS is a vendor BSP
+     * question the plan's section 6 lists as unverified on the phone, and a
+     * kernel without it must still open the browser -- the uid boundary is
+     * what carries the confinement, and this is defence on top of it. A hide
+     * that fails AFTER the namespace exists is a different matter and kills
+     * the child, because that one is a bug rather than a missing feature. */
+    bool private_mounts;
+    const char *const *hide_paths; /* NULL-terminated, or NULL */
 } nd_proc_spec;
+
+/* Whether this kernel can give a child a mount namespace at all.
+ *
+ * Answered by trying it in a throwaway child, once, and remembering. Call it
+ * from the parent and log the answer: a phone whose kernel was built without
+ * CONFIG_MNT_NS otherwise loses section 2's confinement silently, which is
+ * the failure mode the whole plan is written against. */
+bool nd_proc_namespaces_available(void);
 
 /* fork + execve, in that order and nothing in between. *pid_out receives the
  * child's pid. ND_ERR_IO when the fork itself fails; an execve failure is

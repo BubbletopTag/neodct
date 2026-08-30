@@ -51,6 +51,10 @@
 #include "nd_paths.h"
 #include "nd_proc.h"
 
+#include <sched.h>
+#include <sys/mount.h>
+#include <sys/wait.h>
+
 #include "nd_priv.h"
 #include "nd_svc.h"
 #include "nd_types.h"
@@ -115,6 +119,32 @@ static void on_sigchld(int signo)
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0)
         remember(pid, status);
     errno = saved;
+}
+
+bool nd_proc_namespaces_available(void)
+{
+    /* -1 not yet asked, 0 no, 1 yes. Asked at most once per process: the
+     * answer is a property of the kernel and cannot change under us. */
+    static int known = -1;
+    pid_t pid;
+    int status = 0;
+
+    if (known >= 0)
+        return known == 1;
+
+    /* In a child, because unshare(CLONE_NEWNS) SUCCEEDS -- and the core
+     * would then be in a mount namespace of its own for the rest of the
+     * boot, which is not a thing to do by accident while asking a question. */
+    (void)fflush(NULL);
+    pid = fork();
+    if (pid < 0)
+        return false; /* not remembered: a failed fork says nothing */
+    if (pid == 0)
+        _exit(unshare(CLONE_NEWNS) == 0 ? 0 : 1);
+    if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status))
+        return false;
+    known = (WEXITSTATUS(status) == 0) ? 1 : 0;
+    return known == 1;
 }
 
 nd_err nd_proc_reaper_start(void)
@@ -288,8 +318,14 @@ nd_err nd_proc_spawn(const char *path, const nd_proc_spec *spec, pid_t *pid_out)
     char *const *envp;
     bool close_others;
     bool no_new_privs;
+    bool private_mounts;
     nd_priv_id run_as;
     int fd_limit;
+    /* Copied out of the spec before the fork, and filtered to what exists:
+     * a hide that fails in the child is then always a bug rather than a
+     * path RemoteShell has not created yet. */
+    const char *hide[ND_PROC_MAX_HIDE];
+    size_t n_hide;
 
     if (path == NULL || spec == NULL || spec->argv == NULL || pid_out == NULL)
         return ND_ERR_INVAL;
@@ -299,6 +335,20 @@ nd_err nd_proc_spawn(const char *path, const nd_proc_spec *spec, pid_t *pid_out)
     n_fds = spec->n_fds;
     close_others = spec->close_others;
     no_new_privs = spec->no_new_privs;
+    private_mounts = spec->private_mounts;
+    n_hide = 0u;
+    if (spec->hide_paths != NULL) {
+        size_t h;
+
+        for (h = 0u; spec->hide_paths[h] != NULL && n_hide < ND_PROC_MAX_HIDE; h++) {
+            /* access() rather than a stat of the type: what matters is that
+             * mount() will have a target, and a path we cannot even reach is
+             * one the child cannot reach either. Done HERE because access()
+             * is not on the async-signal-safe list. */
+            if (access(spec->hide_paths[h], F_OK) == 0)
+                hide[n_hide++] = spec->hide_paths[h];
+        }
+    }
     /* A copy, like everything else here: after the fork the child may not
      * dereference anything that could have been mid-update in another
      * thread, and nd_priv_id is plain integers precisely so this works. */
@@ -375,6 +425,35 @@ nd_err nd_proc_spawn(const char *path, const nd_proc_spec *spec, pid_t *pid_out)
                 }
                 if (!keep)
                     (void)close(fd);
+            }
+        }
+
+        /* The mount namespace, BEFORE the privilege drop, because unsharing
+         * one and mounting inside it both need CAP_SYS_ADMIN -- which is
+         * exactly the privilege about to be given away.
+         *
+         * unshare failing is not fatal: CONFIG_MNT_NS is a vendor kernel
+         * question and a phone without it must still open its browser. The
+         * uid boundary is what carries the confinement; this is defence on
+         * top of it. A hide failing after the namespace exists IS fatal,
+         * because that one is a bug and the alternative is a child that
+         * believes it cannot see something it can. */
+        if (private_mounts && unshare(CLONE_NEWNS) == 0) {
+            size_t h;
+
+            /* Without this every mount below propagates back into the
+             * parent's namespace, which would hide these paths from the
+             * whole phone rather than from this child. */
+            if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0)
+                _exit(123);
+            for (h = 0u; h < n_hide; h++) {
+                /* An empty, read-only, mode-0000 tmpfs. The directory still
+                 * exists and is empty, which is a quieter failure inside the
+                 * child than a missing path and just as final. */
+                if (mount("none", hide[h], "tmpfs",
+                          MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC,
+                          "size=0k,mode=0000") != 0)
+                    _exit(124);
             }
         }
 

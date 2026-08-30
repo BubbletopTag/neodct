@@ -9,6 +9,12 @@ It exists because the audit's Phase 2 does not survive contact with the
 hardware, and because the shape of the fix changes completely once that is
 admitted.
 
+**Most of this is now built.** Section 7 at the end records what landed, what
+was changed on the way and what is left, so that this file stays a plan
+rather than becoming a description of a past that never happened. Nothing
+above section 7 has been rewritten to match the implementation: where the two
+disagree, section 7 says so and gives the reason.
+
 ---
 
 ## 0. The correction that reorders everything
@@ -645,8 +651,133 @@ Stated plainly so nobody builds on it by accident:
   If `/proc/config.gz` is not built in, the SDK's own `.config` says the same.
 - **`CONFIG_SECCOMP_FILTER` and `CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG`**, same
   caveat. Phase 3 and the Phase 0 verity fix depend on them respectively.
-- **Whether `GPM` is only a LINKS dependency.** It may also be a NetSurf
-  framebuffer input option; the netsurf package needs reading before it is
-  dropped.
-- **Nothing here has been built or booted.** This is a plan derived from reading
-  the tree, not a change that has been tested.
+- ~~**Whether `GPM` is only a LINKS dependency.**~~ **Settled: it is.**
+  `package/netsurf/Config.in` selects expat, jpeg, libiconv, libpng and
+  openssl; `BR2_PACKAGE_NETSURF_FRAMEBUFFER` selects nothing and the
+  framebuffer branch of `netsurf.mk` adds only freetype. A word grep for gpm
+  across the whole vendored netsurf and libnsfb returns nothing, and the
+  built `netsurf-fb` carries no `libgpm` in its `DT_NEEDED` -- the only
+  binaries in the image that do are `links` and gpm's own two tools. ncurses
+  `dlopen`s it and does not need it.
+- **Nothing here has been booted.** Most of it is now built and covered by
+  host tests -- see section 7 -- but no part of it has run on a phone.
+
+---
+
+## 7. What was built
+
+Phases 0 and 1 landed, section 1's Option C landed, and section 2's mechanism
+landed with one caller. Section 3 was deliberately not started, for a reason
+this document gives itself.
+
+Everything below is covered by host tests that run in `python3 -m pytest
+neodct/tests/` and `cd neodct/src && make test`. Nothing has been booted, on
+QEMU or on hardware, so the acceptance walk in section 4 -- browser opens a
+page, Koki plays sfx, a card mounts, a call rings -- is still owed.
+
+### Phase 0, complete
+
+| | |
+| --- | --- |
+| Signature before the `dd` | `nd-verify`, a statically linked verifier, and the release key are packed into the initramfs; `ndsys-apply.sh` verifies `manifest.sig` over `manifest.json` and then compares **every field of `pending.prop` against the signed manifest**. The signature alone would not be enough: the attack is a genuine package with a rewritten record, so that the applier writes a real image and records an attacker's root hash to verify against forever. |
+| `nosuid,nodev` everywhere writable | `/tmp`, `/dev/shm`, `/run` in fstab; the user partition in `initramfs/init`; every card mount in both mounters. `noexec` on the applier's read-only card mount and on the arrival partition. |
+| `env.sh` gated | On `neodct.devenv=1` on the kernel cmdline or `/etc/neodct-devenv` in the verity-covered rootfs. **Not** on engineering mode, which lives in `settings.prop` on the partition the attacker just wrote to. |
+| Dead packages | `LINKS`, `LINKS_GRAPHICS`, `GPM`, `ALSA_UTILS_ALSAMIXER` and `MPG123`, one commit each. ~6.2 MB, of which links is 84%. |
+| xattrs | `CONFIG_SQUASHFS_XATTR` -- mksquashfs already stored them; the kernel was ignoring them. |
+
+### Phase 1, most of it
+
+`ndusr` and `ndusr_ut` exist with explicit ids, the group memberships the
+audit tabulates, and udev rules for what eudev's stock ones miss --
+`/dev/i2c-*` above all, which had no rule anywhere and is therefore
+`root:root 0600` today. `S00userdata` lays down the mode-bit layout of
+section 1 and takes ownership of a partition carried over from an older
+image, once. `run_neodct.sh` sets `umask 0027` so what is written afterwards
+matches.
+
+**The browser runs as `ndusr_ut`**, and its `HOME` moved from `/NeoDCT/User`
+-- the root of the whole writable partition -- to `/NeoDCT/User/browser`.
+Everything netsurf starts inherits the drop, so `neodct-play` is confined by
+the same line.
+
+**What is left: nd-core itself still runs as root.** Three things stop it and
+none of them is group membership:
+
+- `reboot` and `poweroff`, which the Power app spawns;
+- `clock_settime()` after an SNTP sync, which is `CAP_SYS_TIME`;
+- starting `sshd`, which needs privilege to bind and to drop its own.
+
+The audit's own advice is to prefer an auditable setuid helper to a
+capability on the whole core, and writing a setuid root binary that cannot be
+booted before it ships is not a trade worth making. `nd_priv` is the
+mechanism it will use.
+
+### Section 1, Option C, complete -- with two deliberate departures
+
+A NeoDCT card is two FAT32 partitions, `NEODCT` and `NEODCTUT`, and the phone
+partitions its own cards: there is no sfdisk, no parted and no batch-mode
+fdisk in the image, so the 66-byte partition table is written by hand.
+Settings offers a format from a card that *works*, not only from one that
+cannot be read -- a card made on a computer has one partition and could never
+gain a second otherwise.
+
+Two numbers differ from the table in section 1, and both are forced by the
+design's own requirements rather than chosen:
+
+- **p1 is `dmask=0026`, not `0027`.** 0026 gives 0751 directories, which is
+  what lets `ndusr_ut` traverse `sdcard` to reach `untrusted` while `ls` of
+  the owner's music is `EACCES` -- the same trick `/NeoDCT/User` uses. With
+  0027 the arrival partition would be mounted somewhere its own user could
+  not reach.
+- **p2 is `gid=ndusr`, not `gid=ndusr_ut`.** This document says installing a
+  download is "an explicit copy from p2 to p1 that the owner performs through
+  the UI", and the UI is `ndusr`. A group it cannot read is a download nobody
+  can ever do anything with.
+
+### Section 2, the mechanism only
+
+`nd_proc_spec` carries `private_mounts` and `hide_paths`:
+`unshare(CLONE_NEWNS)`, `MS_REC|MS_PRIVATE` on `/`, then an empty read-only
+`mode=0000` tmpfs over each path. The browser uses it for the world-readable
+half of the image that DAC cannot help with -- `/NeoDCT/System/engineering`
+above all, which `file:///` lists today and which holds LinuxShell, raw-AT
+Modem, RemoteShell and Downgrade.
+
+It **fails open** when `unshare` fails, because `CONFIG_MNT_NS` is the vendor
+kernel question section 6 lists as unverified and a phone without it still
+has to open its browser. `nd_proc_namespaces_available()` says so once in the
+log rather than letting it be silent.
+
+**What is left: the minimal `/dev`, which is the part that matters most.**
+netsurf scans `/dev/input/event0..31` and takes every keyboard it finds
+(`libnsfb/src/surface/linux.c`), so on QEMU it reads the real one -- every
+keypress on the machine, whichever window has focus. Giving it a `/dev` with
+the synthetic bridge and nothing else needs that bridge's own event node,
+which `nd_uinput` does not expose and which has to be discovered from uinput
+at runtime. That is work whose correctness can only be established by
+booting.
+
+### Section 3, deliberately not started
+
+Not an omission. Section 3 of this document says the order is the opposite of
+the intuitive one:
+
+> 1. remove the direct path -- mount namespace: `/dev/ttyUSB2` does not exist
+>    for ut
+> 2. THEN the abstraction is the only path
+> 3. THEN a check inside it is enforcement rather than a suggestion
+>
+> Doing 3 before 1 produces a permission system that politely asks.
+
+The minimal `/dev` above is step 1 and it is not finished, so a `permissions`
+field in `manifest.json` enforced in `nd_svc` would be exactly the thing this
+document warns against building first. seccomp is in the same phase and
+behind the same door. `no_new_privs`, which is seccomp's precondition, is
+already set on untrusted children.
+
+### One thing this plan did not ask for
+
+`neodct/tests/test_defconfig_copies.py`. `AGENTS.md` lists "two copies of
+every defconfig" first under Gotchas and the advice was to remember to diff
+them by hand; section 4 then asks for four package removals in four commits,
+which is eight edits across four files. It is a guard, not a feature.
