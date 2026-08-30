@@ -339,24 +339,24 @@ cmd_qemu() {
         return 0
     fi
     log "booting the image on $VNC_DISPLAY"
-    # Two things a headless container does not have and QEMU's GTK frontend
-    # insists on. Neither is a NeoDCT concern, which is why they live here and
-    # not in run_qemu.sh:
+    # XDG_RUNTIME_DIR is unset in a container with no login session, and QEMU's
+    # GTK frontend wants one. That IS specific to running it this way, so it
+    # belongs here.
     #
-    #   XDG_RUNTIME_DIR  unset in a container with no session; without it QEMU
-    #                    dies on "XDG_RUNTIME_DIR not set" before drawing.
-    #   NEODCT_AUDIO     the default backend wants PulseAudio and fails with
-    #                    "could not stat pidfile .../pulse/pid". There is no
-    #                    sound card here and nothing to listen to it, so the
-    #                    honest setting is none. Override it if you are
-    #                    testing the ringer, and start a pulse daemon first.
+    # The audio backend used to be forced to none here too, with a comment
+    # claiming it was not run_qemu.sh's concern. That was wrong: run_qemu.sh
+    # defaulted to PulseAudio, so anyone who ran it directly on a headless box
+    # -- which is most of the machines this rig exists to serve -- got two
+    # fatal errors that never mention audio. It probes for a sound server
+    # itself now, and this script deliberately does not second-guess it: one
+    # default in one place is what stops the two drifting apart again, which
+    # is exactly how the bug got there.
     if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
         XDG_RUNTIME_DIR="$RUNDIR/xdg"
         mkdir -p "$XDG_RUNTIME_DIR"
         chmod 700 "$XDG_RUNTIME_DIR"
         export XDG_RUNTIME_DIR
     fi
-    export NEODCT_AUDIO="${NEODCT_AUDIO:-none}"
     # run_qemu.sh's own defaults, with the display it already knows how to
     # take. Everything else -- snapshot, verity, the card -- stays the
     # caller's to set through its documented environment variables.
