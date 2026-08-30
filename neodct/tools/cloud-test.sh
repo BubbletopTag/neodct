@@ -15,7 +15,8 @@
 #   cloud-test.sh start      X + openbox + VNC + noVNC, then print the URLs
 #   cloud-test.sh qemu       boot the NeoDCT image inside that X server
 #   cloud-test.sh tunnel     (re)open the ngrok tunnels and print the URLs
-#   cloud-test.sh shot FILE  grab the framebuffer to a PNG, for the agent
+#   cloud-test.sh shot FILE  grab the whole desktop to a PNG, for the agent
+#   cloud-test.sh panel FILE grab JUST the phone panel, which is what to look at
 #   cloud-test.sh key K      send one key to the QEMU window (see KEYS below)
 #   cloud-test.sh status     what is running, and where
 #   cloud-test.sh stop       tear it all down
@@ -129,9 +130,10 @@
 #       --http-proxy "$HTTPS_PROXY" \
 #       wss://<a-b-c-d>.sslip.io:443
 #
-# Then the far end opens http://<vps>:6080/vnc.html in any browser.
-#   2. An ngrok Pay-as-you-go plan, after which proxy_url is permitted and
-#      this script works unchanged.
+# Then the far end opens http://<vps>:6080/vnc.html in any browser. Watch for
+# SNI DnsName(...) rather than SNI IpAddress(...) in the client log: the
+# hostname is what lets the proxy's validation succeed, and connecting to the
+# bare IP fails even with a valid certificate on the far end.
 #
 # DO NOT "fix" this by unsetting HTTPS_PROXY. It is the host's egress policy,
 # not a misconfiguration, and working around it is out of bounds even when
@@ -190,6 +192,22 @@ mkdir -p "$RUNDIR"
 log() { printf '[cloud-test] %s\n' "$*"; }
 die() { printf '[cloud-test] %s\n' "$*" >&2; exit 1; }
 
+# ============ EVERYTHING HERE OUTLIVES THE SHELL THAT STARTS IT ============
+#
+# A plain `cmd &` is a child of this script, and this script is usually a child
+# of an agent's tool call. When that call returns, the process group is reaped
+# and the whole session dies -- silently, minutes later, so the first symptom
+# is a VNC client that cannot connect to a display that was definitely up.
+#
+# It cost this file three separate outages (the X server, the terminals, and a
+# four-hour Buildroot run that stopped mid-line with no error) before the
+# pattern was recognised. setsid detaches into a new session so nothing
+# upstream can take it with them.
+spawn() {
+    log_file="$1"; shift
+    setsid nohup "$@" </dev/null >>"$log_file" 2>&1 &
+}
+
 # ============ WHY THESE ARE PORT CHECKS AND NOT pgrep ============
 #
 # `pgrep -f qemu-system-aarch64` matches THE SHELL THAT INVOKED THIS SCRIPT,
@@ -204,6 +222,52 @@ die() { printf '[cloud-test] %s\n' "$*" >&2; exit 1; }
 # pidfile and a short-enough name respectively.
 listening() { ss -ltn 2>/dev/null | awk -v p=":$1" '$4 ~ p"$" {found=1} END {exit !found}'; }
 qemu_pid()  { [ -f "$RUNDIR/qemu.pid" ] && kill -0 "$(cat "$RUNDIR/qemu.pid")" 2>/dev/null; }
+
+# ------------------------------------------------------------------ #
+# The desktop openbox needs to be usable
+# ------------------------------------------------------------------ #
+
+# Openbox ships no root menu worth having, and on a screen full of windows
+# there is frequently no desktop left to right-click on anyway -- which reads
+# exactly like a broken window manager. So: a menu with the things this session
+# actually needs, and a keybinding that works wherever the pointer is.
+install_desktop_config() {
+    conf="${HOME:-/root}/.config/openbox"
+    mkdir -p "$conf"
+
+    cat > "$conf/menu.xml" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+<menu id="root-menu" label="NeoDCT">
+  <item label="Terminal">
+    <action name="Execute"><execute>xterm -fa Monospace -fs 11 -bg #0b0e13 -fg #c8d0e0 -geometry 100x30</execute></action>
+  </item>
+  <separator label="Phone"/>
+  <item label="Boot NeoDCT (QEMU)">
+    <action name="Execute"><execute>CLOUD_TEST_SH qemu</execute></action>
+  </item>
+  <item label="Stop QEMU">
+    <action name="Execute"><execute>CLOUD_TEST_SH stop-qemu</execute></action>
+  </item>
+  <item label="QEMU log">
+    <action name="Execute"><execute>xterm -T "qemu log" -fa Monospace -fs 10 -geometry 110x30 -e sh -c "tail -f RUNDIR_PATH/qemu.log"</execute></action>
+  </item>
+  <separator/>
+  <item label="Reconfigure Openbox"><action name="Reconfigure"/></item>
+</menu>
+</openbox_menu>
+XML
+    sed -i "s#CLOUD_TEST_SH#$HERE/cloud-test.sh#g; s#RUNDIR_PATH#$RUNDIR#g" "$conf/menu.xml"
+
+    # Ctrl+Alt+M for the menu, Ctrl+Alt+T for a terminal. Both matter because
+    # a maximised window leaves nowhere to right-click.
+    if [ ! -f "$conf/rc.xml" ] && [ -f /etc/xdg/openbox/rc.xml ]; then
+        sed 's#<keyboard>#<keyboard>\
+    <keybind key="C-A-m"><action name="ShowMenu"><menu>root-menu</menu></action></keybind>\
+    <keybind key="C-A-t"><action name="Execute"><execute>xterm -fa Monospace -fs 11 -geometry 100x28</execute></action></keybind>#' \
+            /etc/xdg/openbox/rc.xml > "$conf/rc.xml"
+    fi
+}
 
 # ------------------------------------------------------------------ #
 # start
@@ -226,12 +290,11 @@ cmd_start() {
         fi
 
         log "starting Xtigervnc on $VNC_DISPLAY ($GEOMETRY)"
-        Xtigervnc "$VNC_DISPLAY" \
+        spawn "$RUNDIR/xvnc.log" Xtigervnc "$VNC_DISPLAY" \
             -geometry "$GEOMETRY" -depth 24 \
             -rfbport "$VNC_PORT" -rfbauth "$PASSFILE" \
             -localhost=0 -AlwaysShared -SecurityTypes VncAuth \
-            -desktop "NeoDCT cloud test" \
-            > "$RUNDIR/xvnc.log" 2>&1 &
+            -desktop "NeoDCT cloud test"
         # The X socket appears a beat after the process does; everything below
         # fails confusingly without it.
         i=0
@@ -241,10 +304,15 @@ cmd_start() {
         [ -e "/tmp/.X11-unix/X${VNC_DISPLAY#:}" ] || die "Xtigervnc did not come up; see $RUNDIR/xvnc.log"
     fi
 
-    if ! pgrep -f "openbox.*$VNC_DISPLAY" >/dev/null 2>&1 && ! pgrep -x openbox >/dev/null 2>&1; then
+    if ! pgrep -x openbox >/dev/null 2>&1; then
         log "starting openbox"
-        DISPLAY="$VNC_DISPLAY" openbox > "$RUNDIR/openbox.log" 2>&1 &
-        sleep 1
+        # openbox has NO --display flag. It reads DISPLAY from the environment
+        # and exits instantly with "Invalid command line argument" otherwise,
+        # which leaves a session with no window manager -- no title bars and,
+        # more confusingly, a desktop where right-click does nothing.
+        install_desktop_config
+        spawn "$RUNDIR/openbox.log" env DISPLAY="$VNC_DISPLAY" openbox
+        sleep 2
     fi
     # A mid-grey root window rather than the default stipple: a 240x175 phone
     # panel on a black desktop is hard to find, and the stipple moires.
@@ -252,9 +320,9 @@ cmd_start() {
 
     if ! listening "$NOVNC_PORT"; then
         log "starting noVNC on :$NOVNC_PORT"
-        websockify --web=/usr/share/novnc "$NOVNC_PORT" "localhost:$VNC_PORT" \
-            > "$RUNDIR/novnc.log" 2>&1 &
-        sleep 1
+        spawn "$RUNDIR/novnc.log" websockify --web=/usr/share/novnc \
+            "$NOVNC_PORT" "localhost:$VNC_PORT"
+        sleep 2
     fi
 
     log "up. VNC password: $(cat "$PLAINFILE" 2>/dev/null || echo '(see '"$PASSFILE"')')"
@@ -271,10 +339,28 @@ cmd_qemu() {
         return 0
     fi
     log "booting the image on $VNC_DISPLAY"
+    # Two things a headless container does not have and QEMU's GTK frontend
+    # insists on. Neither is a NeoDCT concern, which is why they live here and
+    # not in run_qemu.sh:
+    #
+    #   XDG_RUNTIME_DIR  unset in a container with no session; without it QEMU
+    #                    dies on "XDG_RUNTIME_DIR not set" before drawing.
+    #   NEODCT_AUDIO     the default backend wants PulseAudio and fails with
+    #                    "could not stat pidfile .../pulse/pid". There is no
+    #                    sound card here and nothing to listen to it, so the
+    #                    honest setting is none. Override it if you are
+    #                    testing the ringer, and start a pulse daemon first.
+    if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+        XDG_RUNTIME_DIR="$RUNDIR/xdg"
+        mkdir -p "$XDG_RUNTIME_DIR"
+        chmod 700 "$XDG_RUNTIME_DIR"
+        export XDG_RUNTIME_DIR
+    fi
+    export NEODCT_AUDIO="${NEODCT_AUDIO:-none}"
     # run_qemu.sh's own defaults, with the display it already knows how to
     # take. Everything else -- snapshot, verity, the card -- stays the
     # caller's to set through its documented environment variables.
-    DISPLAY="$VNC_DISPLAY" setsid nohup "$HERE/run_qemu.sh" > "$RUNDIR/qemu.log" 2>&1 &
+    spawn "$RUNDIR/qemu.log" env DISPLAY="$VNC_DISPLAY" "$HERE/run_qemu.sh"
     echo $! > "$RUNDIR/qemu.pid"
     sleep 3
     tail -5 "$RUNDIR/qemu.log" 2>/dev/null || true
@@ -320,12 +406,48 @@ cmd_shot() {
     log "wrote $out"
 }
 
+# ============ WHY THE QEMU WINDOW IS PICKED BY SIZE ============
+#
+# QEMU owns TWO windows whose names match "QEMU": the visible one, and a 10x10
+# icon window named "qemu" in lower case. xdotool's --name is a case-INSENSITIVE
+# regex, so `search --name QEMU | head -1` returns whichever the server lists
+# first, and that is usually the icon. Keys sent there go nowhere at all, which
+# looks exactly like a hung phone.
+#
+# Geometry is the honest discriminator: the panel window is 320x240 and the
+# icon is 10x10.
+qemu_window() {
+    DISPLAY="$VNC_DISPLAY" xdotool search --name QEMU 2>/dev/null | while read -r w; do
+        wide=$(DISPLAY="$VNC_DISPLAY" xdotool getwindowgeometry "$w" 2>/dev/null |
+                   sed -n 's/.*Geometry: \([0-9]*\)x[0-9]*.*/\1/p')
+        [ -n "$wide" ] && [ "$wide" -gt 100 ] && echo "$w"
+    done | tail -1
+}
+
 cmd_key() {
     [ $# -ge 1 ] || die "usage: cloud-test.sh key <name>"
     command -v xdotool >/dev/null 2>&1 || die "xdotool is not installed"
-    win="$(DISPLAY="$VNC_DISPLAY" xdotool search --name 'QEMU' | head -1)"
+    win="$(qemu_window)"
     [ -n "$win" ] || die "no QEMU window on $VNC_DISPLAY"
-    DISPLAY="$VNC_DISPLAY" xdotool key --window "$win" "$@"
+    # Activate first, then send through XTEST rather than with --window: SDL
+    # ignores the synthetic events XSendEvent delivers, so --window presses are
+    # accepted by the X server and dropped by QEMU.
+    DISPLAY="$VNC_DISPLAY" xdotool windowactivate --sync "$win" 2>/dev/null || true
+    for k in "$@"; do
+        DISPLAY="$VNC_DISPLAY" xdotool key --clearmodifiers "$k"
+        sleep 0.4
+    done
+}
+
+# The panel alone, without the desktop around it -- what an agent actually
+# wants to look at. 240x175 upscaled is unreadable to a vision model otherwise.
+cmd_panel() {
+    out="${1:-$RUNDIR/panel.png}"
+    win="$(qemu_window)"
+    [ -n "$win" ] || die "no QEMU window on $VNC_DISPLAY"
+    DISPLAY="$VNC_DISPLAY" import -window "$win" "$out" 2>/dev/null \
+        || die "could not capture the QEMU window"
+    log "wrote $out"
 }
 
 # ------------------------------------------------------------------ #
@@ -368,10 +490,14 @@ cmd_stop() {
 case "${1:-status}" in
     start)  cmd_start ;;
     qemu)   cmd_qemu ;;
+    stop-qemu)
+            if qemu_pid; then kill "$(cat "$RUNDIR/qemu.pid")" 2>/dev/null || true; fi
+            rm -f "$RUNDIR/qemu.pid"; log "qemu stopped" ;;
     tunnel) cmd_tunnel ;;
     shot)   shift; cmd_shot "$@" ;;
     key)    shift; cmd_key "$@" ;;
+    panel)  shift; cmd_panel "$@" ;;
     status) cmd_status ;;
     stop)   cmd_stop ;;
-    *)      die "usage: cloud-test.sh {start|qemu|tunnel|shot|key|status|stop}" ;;
+    *)      die "usage: cloud-test.sh {start|qemu|stop-qemu|tunnel|shot|panel|key|status|stop}" ;;
 esac
