@@ -548,7 +548,7 @@ wordlist and matches "links", "curl" and "gpm" as ordinary words.
 | Package | Finding |
 | --- | --- |
 | `MPG123` | Live code, unreachable path. `koki_audio.c:641` probes for it, but the selection order is override → `mpv` → `mpg123`, and `mpv` is unconditionally in the image, so the `mpg123` rung can never be taken. Removing it costs a fallback that cannot fire. Keep if the intent is that `mpv` may one day be dropped. |
-| `DOSFSTOOLS_MKFS_FAT` | Referenced only by `neodct-sdcard:249`'s `do_format()`. Under §1 Option B that line becomes an ext formatter, and busybox's `CONFIG_MKE2FS=y` already supplies one — so this sub-option leaves with it. `FSCK_FAT` and `FATLABEL` stay while foreign FAT cards are still mounted for importing media. |
+| ~~`DOSFSTOOLS_MKFS_FAT`~~ | **Keep.** An earlier revision listed this for removal on the assumption that cards would become ext. §1 Option C keeps them FAT, so `neodct-sdcard:249`'s `do_format()` still needs `mkfs.fat` — and needs it twice, once per partition. Listed here only because removing it was previously proposed and would now break formatting. |
 
 ### Keep — and why, so nobody removes them later
 
