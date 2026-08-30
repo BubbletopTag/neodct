@@ -50,6 +50,8 @@
 #include "nd_log.h"
 #include "nd_paths.h"
 #include "nd_proc.h"
+
+#include "nd_priv.h"
 #include "nd_svc.h"
 #include "nd_types.h"
 #include "nd_ui.h"
@@ -285,6 +287,8 @@ nd_err nd_proc_spawn(const char *path, const nd_proc_spec *spec, pid_t *pid_out)
     char *const *argv;
     char *const *envp;
     bool close_others;
+    bool no_new_privs;
+    nd_priv_id run_as;
     int fd_limit;
 
     if (path == NULL || spec == NULL || spec->argv == NULL || pid_out == NULL)
@@ -294,6 +298,11 @@ nd_err nd_proc_spawn(const char *path, const nd_proc_spec *spec, pid_t *pid_out)
 
     n_fds = spec->n_fds;
     close_others = spec->close_others;
+    no_new_privs = spec->no_new_privs;
+    /* A copy, like everything else here: after the fork the child may not
+     * dereference anything that could have been mid-update in another
+     * thread, and nd_priv_id is plain integers precisely so this works. */
+    run_as = spec->run_as;
     /* sysconf() BEFORE the fork: it is not on the async-signal-safe list, and
      * the child between fork and execve may call nothing that is not. */
     fd_limit = close_others ? (int)sysconf(_SC_OPEN_MAX) : 0;
@@ -367,6 +376,34 @@ nd_err nd_proc_spawn(const char *path, const nd_proc_spec *spec, pid_t *pid_out)
                 if (!keep)
                     (void)close(fd);
             }
+        }
+
+        /* Become somebody else, LAST, immediately before the execve.
+         *
+         * Last because everything above needs the privilege the caller had:
+         * dup2 onto a descriptor the child could not have opened for itself
+         * is the whole point of the inherited-fd design, and close() on a
+         * range is cheaper before the uid changes than after. Immediately
+         * before, because the window between dropping and exec'ing is code
+         * running as the target user with the parent's memory still mapped,
+         * and it should be as close to nothing as it can be.
+         *
+         * nd_priv_become() is four syscalls on integers copied before the
+         * fork, and every one of them is read back -- see nd_priv.h on why
+         * the order is the whole of it. A failure is not recoverable and
+         * must not be ignored: continuing would run untrusted code with
+         * whatever privilege happened to be left. 120 + the step, so a
+         * caller's waitpid can tell WHICH call failed apart from the 126 of
+         * a failed dup2 and the 127 of a failed execve. */
+        if (no_new_privs && !run_as.valid) {
+            if (nd_priv_no_new_privs() != 0)
+                _exit(121);
+        }
+        {
+            int step = nd_priv_become(&run_as);
+
+            if (step != 0)
+                _exit(120 + step);
         }
 
         (void)execve(path, argv, envp);

@@ -41,6 +41,7 @@
 #include <sys/types.h>
 
 #include "nd_crash.h"
+#include "nd_priv.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 
@@ -90,6 +91,30 @@ typedef struct {
      * long-lived that the core does not own, or it will hold the core's pipes
      * open for as long as it runs. */
     bool close_others;
+
+    /* Run the child as somebody else. SECURITY-PLAN.md section 1.
+     *
+     * Resolved with nd_priv_lookup() in the parent -- getpwnam allocates and
+     * reads a file, and neither is allowed after the fork -- then applied by
+     * the child with nd_priv_become(), which is four syscalls on integers
+     * that were copied before the fork. A `valid` of false means "no such
+     * user in this image", which is a no-op rather than a failure, so a
+     * caller needs no branch for a build without the users table.
+     *
+     * This is the ONE call site the plan asks for, and the reason section 3
+     * insists on the order it does: an app denied libneodct writes ten lines
+     * of termios and talks to /dev/ttyUSB2 itself, so a library is not a
+     * boundary. A uid is, because it is the kernel's answer rather than
+     * ours. Zeroed by memset like every other field, so a spec that does not
+     * mention it runs the child as the caller, exactly as before. */
+    nd_priv_id run_as;
+
+    /* prctl(PR_SET_NO_NEW_PRIVS) in the child even when it keeps its uid.
+     * Independent of run_as: a child that stays root gains nothing from it,
+     * but a child that is going to load untrusted code should not be able to
+     * regain privilege through a setuid binary either way, and it is the
+     * precondition for the seccomp filter in Phase 3. */
+    bool no_new_privs;
 } nd_proc_spec;
 
 /* fork + execve, in that order and nothing in between. *pid_out receives the

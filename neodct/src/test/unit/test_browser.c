@@ -62,6 +62,7 @@
 #include "nd_paths.h"
 #include "nd_proc.h"
 #include "nd_t9.h"
+#include "nd_priv.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 
@@ -925,6 +926,51 @@ static void t_run_keeps_existing_home(void)
     nd_log_set_colour(was);
 }
 
+/* SECURITY-PLAN.md section 1, and SECURITY-AUDIT.md 2.5. HOME is where
+ * netsurf writes its cookie jar, its URL database and its cache, and it used
+ * to be the ROOT of the writable partition -- the same directory that holds
+ * the SMS databases, the ssh keys and the update records. */
+static void t_home_is_a_directory_of_its_own(void)
+{
+    /* Not the whole user partition -- which is where it used to be. */
+    CHECK(strcmp(ND_BROWSER_HOME_DIR, "/NeoDCT/User") != 0);
+    /* But still on the only writable storage there is. */
+    CHECK(strncmp(ND_BROWSER_HOME_DIR, "/NeoDCT/User/", 13u) == 0);
+}
+
+/* An image built without BR2_ROOTFS_USERS_TABLES has no ndusr_ut, and the
+ * browser must then start anyway -- as the core, exactly as every build
+ * before this one did. A phone that refuses to open its browser because a
+ * user is missing is a worse phone than one that opens it as root.
+ *
+ * This is also what the test suite itself exercises on any build host: the
+ * users are in the IMAGE, not on the machine running the tests. */
+static void t_run_without_the_untrusted_user_still_starts(void)
+{
+    const char *out;
+    bool was = nd_log_colour_enabled();
+    nd_priv_id id;
+    char expect[64];
+
+    if (nd_priv_lookup(ND_PRIV_USER_UT, &id)) {
+        /* This machine really does have one. Nothing to prove here, and
+         * dropping to it would need root. */
+        return;
+    }
+
+    nd_log_set_colour(false);
+    make_devices();
+    write_exec(ND_BROWSER_BIN, "#!/bin/sh\necho \"uid=$(id -u)\" >&2\nexit 0\n");
+
+    CHECK_INT(g_api.app_run(bare_ui()), 0);
+
+    out = console_text();
+    (void)nd_snprintf(expect, sizeof expect, "[Browser] uid=%lu\r\n",
+                      (unsigned long)getuid());
+    check_has(out, expect);
+    nd_log_set_colour(was);
+}
+
 static void t_run_nonzero_exit(void)
 {
     const char *out;
@@ -1030,6 +1076,8 @@ int main(void)
     RUN(t_run_missing_browser);
     RUN(t_run_normal_exit);
     RUN(t_run_keeps_existing_home);
+    RUN(t_home_is_a_directory_of_its_own);
+    RUN(t_run_without_the_untrusted_user_still_starts);
     RUN(t_run_nonzero_exit);
     RUN(t_run_killed_dumps_dmesg);
     RUN(t_run_without_a_console);

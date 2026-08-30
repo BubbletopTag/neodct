@@ -42,9 +42,21 @@ extern "C" {
  * memory pressure can be watched from the host. */
 #define ND_BROWSER_CONSOLE "/dev/console"
 
-/* Python's env.setdefault("HOME", "/NeoDCT/User"), verbatim and NOT
- * ND_ROOT-resolved: it is handed to another program, not opened by us. */
-#define ND_BROWSER_HOME_DIR "/NeoDCT/User"
+/* The browser's HOME. Not ND_ROOT-resolved: it is handed to another program,
+ * not opened by us.
+ *
+ * It used to be /NeoDCT/User -- the ROOT of the whole writable partition,
+ * which is where the Python put it. That was a reasonable default when
+ * everything was root and there was nothing to separate; it is not one now.
+ * netsurf writes its cookie jar, its URL database and its cache into HOME,
+ * and /NeoDCT/User also holds the SMS databases, the ssh keys and the update
+ * records. SECURITY-AUDIT.md section 2.5.
+ *
+ * /NeoDCT/User/browser is created by S00userdata as 0770 ndusr:ndusr_ut --
+ * the one directory the untrusted set may write, and the reason the parent
+ * is 0751 rather than 0750: ndusr_ut has to be able to REACH this by name
+ * without being able to list what else is up there. */
+#define ND_BROWSER_HOME_DIR "/NeoDCT/User/browser"
 
 /* subprocess.run(["dmesg"], ...) is a PATH lookup; execve is not, so the
  * launcher has to name the file. Busybox and util-linux both install it

@@ -59,6 +59,7 @@
 #include "nd_keypad.h"
 #include "nd_log.h"
 #include "nd_paths.h"
+#include "nd_priv.h"
 #include "nd_proc.h"
 #include "nd_t9.h"
 #include "nd_types.h"
@@ -1061,6 +1062,39 @@ int app_run(nd_ui *ui)
     spec.argv = argv;
     spec.envp = envp;
     spec.owner = ND_OWNER_SYSTEM;
+
+    /* The browser runs as ndusr_ut. SECURITY-PLAN.md section 1, and the
+     * single most valuable line in Phase 1: a NetSurf RCE stops yielding
+     * root and starts yielding a process that can browse the web and write
+     * to one directory.
+     *
+     * Concretely, after this it cannot read /NeoDCT/User/db (contacts,
+     * messages, the call log), /NeoDCT/User/.remote (the ssh keys) or
+     * /NeoDCT/User/.ndsys (the update records), and it cannot open
+     * /dev/ttyUSB2 -- so `echo ATD1900555xxxx; > /dev/ttyUSB2`, which
+     * SECURITY-AUDIT.md section 4 Q1 answers "yes, trivially", becomes
+     * EACCES. It keeps the screen and the keys, because a browser that
+     * cannot draw is not a browser; section 2's mount namespace is what
+     * narrows THAT, by giving it a /dev with almost nothing in it.
+     *
+     * The lookup is here, in the parent, because getpwnam allocates and
+     * reads a file and neither is allowed after a fork. An image with no
+     * ndusr_ut leaves run_as.valid false, which nd_priv_become() treats as a
+     * no-op -- the browser then runs exactly as it did before, rather than
+     * refusing to open.
+     *
+     * Everything the browser starts inherits this, which is the point:
+     * neodct-play is exec'd BY netsurf when a <video> is clicked, so the
+     * media player -- the other half of the plan's untrusted set, and the
+     * one an MMS attachment will reach -- is confined by the same line. */
+    if (!nd_priv_lookup(ND_PRIV_USER_UT, &spec.run_as))
+        nd_log(ND_LOG_BROWSER, "no " ND_PRIV_USER_UT " in this image; "
+                               "the browser runs with the core's privileges");
+    /* Independent of the drop, and set even when it does not happen: nothing
+     * netsurf execs should be able to regain privilege through a setuid
+     * binary. */
+    spec.no_new_privs = true;
+
     if (devnull >= 0) {
         spec.fds[spec.n_fds].child_fd = 1; /* stdout=DEVNULL */
         spec.fds[spec.n_fds].our_fd = devnull;
