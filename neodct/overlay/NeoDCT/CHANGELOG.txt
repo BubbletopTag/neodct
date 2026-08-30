@@ -1,5 +1,38 @@
 # NeoDCT OS Changelog
 
+Unreleased
+Not cut yet. Rename this heading to the version being released and
+set VERSION_ID in etc/os-release to match -- release.sh requires a
+section headed exactly the version it is tagging.
+
+--- Sound reaches the earbuds from everything, not just from music ---
+
+Koki had no sound over Bluetooth headphones while the music app did, and
+the game was not at fault. Both play through aplay on ALSA's "default", so
+the earbuds really were the default; what differed was the shape of the
+config BtAudioService writes for them.
+
+The speaker route is wrapped in ALSA's `plug`, whose whole job is rate and
+channel conversion. The earbud route was not. That matters because nothing
+on this phone converts its own audio, deliberately -- each thing that makes
+a noise asks for whatever suits it, and lets plug do the rest. Koki's mixer
+is 22050 Hz mono, MusicPlayer passes the file's own rate and channels, and
+the notification tones are 44100 stereo.
+
+A bare bluealsa PCM offers only what the A2DP codec negotiated, which is
+44100 or 48000 and stereo. Anything else fails to open, and a failed open
+is silence.
+
+That is why it looked like a Koki bug. 44100 stereo is exactly what A2DP
+wants, so the ringtone always matched and an ordinary music file did too.
+Koki's 22050 mono never could -- and neither could a music file that was
+not 44100 stereo, which is the half of the fault nobody had hit yet.
+
+Fixed
+- Bluetooth audio converts rate and channel count, so every sound on the
+  phone reaches the earbuds instead of only the ones that already happened
+  to be in A2DP's format.
+
 0.4.10a
 Red and blue, the right way round.
 
