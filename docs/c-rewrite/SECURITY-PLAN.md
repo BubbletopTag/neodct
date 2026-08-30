@@ -135,6 +135,10 @@ mounted for `ndusr_ut`, `ndusr_ut` has the entire card — including any
 `authorized_keys` sitting on it, which `SECURITY-AUDIT.md` §4 Q5 vector 4
 already flags as loadable straight off a card.
 
+There are two ways out, and they are genuinely different bets.
+
+#### Option A — keep FAT, bind-mount the subtree
+
 The only mechanism that expresses "this subtree and nothing else" on a
 filesystem with no permissions is a **bind mount inside a mount namespace**:
 
@@ -146,13 +150,83 @@ launcher:      unshare(CLONE_NEWNS)
                exec the untrusted binary
 ```
 
-So the mount namespace is **not** an optional Phase 2 improvement. Putting
-untrusted data on the card requires it. That is a genuine reordering of the plan
-and it is the SD card's doing, not a preference — see §5.
+Keeps the card readable on any computer. Makes the namespace a prerequisite
+rather than an improvement, and therefore makes `CONFIG_MNT_NS` in a vendor BSP
+kernel load-bearing.
 
-`noexec,nosuid,nodev` on the card matters more here than it does in the audit's
-framing, because this is now the one place untrusted code *chooses* the
-contents.
+#### Option B — format the card ext, and use ordinary permissions
+
+An ext filesystem has real ownership, so the whole problem disappears:
+
+```
+/NeoDCT/User/sdcard              0751  ndusr:ndusr
+/NeoDCT/User/sdcard/untrusted    0770  ndusr:ndusr_ut
+/NeoDCT/User/sdcard/music        0750  ndusr:ndusr
+```
+
+Most of the machinery for this already exists and was found rather than
+assumed:
+
+| | |
+| --- | --- |
+| `CARD_FSTYPES="vfat exfat ext4 ext3 ext2"` | ext cards **already mount** (`neodct-sdcard:162`) |
+| the `*)` branch already passes `rw,noatime` | the FAT-only `utf8,flush` are correctly excluded |
+| `neodct-sdcard format DEV` already exists | the phone can format its own cards (`:239`) |
+| busybox `CONFIG_MKE2FS=y` | **an ext formatter is already in the image** — no new package |
+
+So the change is roughly one line in `do_format()` — `mkfs.vfat -F 32` becomes
+the ext equivalent — plus creating the directory tree with the right ownership
+while the phone still has it mounted.
+
+**What it costs, stated honestly, because it is not free:**
+
+1. **Interoperability, which is the real price.** A FAT card reads on any
+   computer. An ext card does not read on Windows or macOS without third-party
+   software. The entire sideloading workflow depends on this — Settings' own
+   help text tells the owner to *"Format a card as FAT32, make a folder called
+   wallpapers on it"* (`apps/Settings/main.c:92`). Wallpapers, music and tones
+   all arrive this way.
+2. **ext can express things FAT structurally cannot: setuid bits and device
+   nodes.** A card is removable and its contents are chosen by whoever had it
+   last. On FAT, `nosuid,nodev` is close to moot because the filesystem cannot
+   represent either. On ext it becomes **mandatory** — `SECURITY-AUDIT.md`
+   finding 9 stops being hygiene and becomes the thing standing between a
+   crafted card and a root shell. Switching to ext makes that mount option
+   load-bearing where it currently is not.
+3. **Numeric uids live on the medium.** ext stores uid 1001, not "ndusr_ut". A
+   card formatted anywhere else carries meaningless numbers. Mitigated by the
+   phone owning the formatting — which it already can — but that makes
+   "format on the phone" a requirement rather than a convenience.
+4. **Journalling on cheap flash, on a device that loses power without warning.**
+   Worth choosing deliberately: ext2 (no journal, and what busybox's `mke2fs`
+   produces) or ext4 with the journal disabled.
+
+#### Recommendation
+
+**B, with the warning the owner suggested, and A's namespace still built —
+for `/dev`, not for storage.**
+
+The reasoning is that B removes an entire dependency on a kernel feature nobody
+here controls, and does it with parts already in the image. That is worth more
+than the interop, *for this owner*, who is the only user and who can format a
+card on the phone.
+
+But the interop loss is real and should be softened rather than ignored:
+
+- **Keep the FAT mount path.** A foreign FAT card should still mount for
+  importing music and wallpapers — that direction is the one that matters, and
+  it is read-mostly.
+- **The untrusted directory is only offered on a NeoDCT-formatted ext card.**
+  On a FAT card, `ndusr_ut` falls back to `/NeoDCT/User/browser/` for state, and
+  downloads are **refused with a clear message** rather than silently filling an
+  8 MiB partition that the rest of the phone needs.
+- **Warn before formatting**, exactly as proposed: the format screen should say
+  that a NeoDCT card is no longer readable on a PC, and why. That is a real
+  trade the owner is making and it should be made on purpose.
+
+Note what B does *not* remove: the namespace is still wanted for the minimal
+`/dev` of §2 and for keeping `file:///` out of `/NeoDCT/System`. It stops being
+a **prerequisite for storage**, which is the part that was forcing the ordering.
 
 ### Where DAC stops, and what to add
 
@@ -356,7 +430,7 @@ wordlist and matches "links", "curl" and "gpm" as ordinary words.
 | Package | Finding |
 | --- | --- |
 | `MPG123` | Live code, unreachable path. `koki_audio.c:641` probes for it, but the selection order is override → `mpv` → `mpg123`, and `mpv` is unconditionally in the image, so the `mpg123` rung can never be taken. Removing it costs a fallback that cannot fire. Keep if the intent is that `mpv` may one day be dropped. |
-| `DOSFSTOOLS_MKFS_FAT` | No reference. Cards are formatted on a PC per the Settings help text. `FSCK_FAT` and `FATLABEL` *are* referenced and stay. |
+| `DOSFSTOOLS_MKFS_FAT` | Referenced only by `neodct-sdcard:249`'s `do_format()`. Under §1 Option B that line becomes an ext formatter, and busybox's `CONFIG_MKE2FS=y` already supplies one — so this sub-option leaves with it. `FSCK_FAT` and `FATLABEL` stay while foreign FAT cards are still mounted for importing media. |
 
 ### Keep — and why, so nobody removes them later
 
@@ -413,23 +487,22 @@ fraction of the work.
 a bind mount of `sdcard/untrusted/` as the only card path that exists for
 `ndusr_ut`.
 
-This phase was originally the "nice to have that closes `file:///` properly". It
-is not: **§1 shows that untrusted data on the SD card cannot be confined any
-other way**, because FAT has no ownership to attach a permission to. So the
-order is now:
+**How required it is depends on the card decision in §1.**
 
-- untrusted data on the card **requires** Phase 2;
-- MMS through MediaWidget (§2) **requires** the per-message bind mount, which is
-  Phase 2 machinery;
-- and `CONFIG_MNT_NS` in the SDK kernel therefore stops being a detail to
-  confirm eventually and becomes the **first thing to check**, because two
-  features depend on it. See §6.
+Under Option A (keep FAT) it is a hard prerequisite: FAT has no ownership to
+attach a permission to, so untrusted data on a card is impossible without it,
+and `CONFIG_MNT_NS` in a vendor BSP kernel becomes load-bearing.
 
-If the SDK kernel turns out to lack mount namespaces, the fallback is a second
-FAT mount of the same card with different `uid=`/`fmask=` options, which is
-uglier and weaker — it gives `ndusr_ut` a differently-permissioned view of the
-*whole* card rather than a subtree. Worth knowing that the fallback exists;
-worth much more to confirm the kernel before needing it.
+Under **Option B (ext-formatted cards), which is the recommendation**, storage
+confinement is ordinary DAC and this phase drops back to what it was: the way to
+give untrusted processes a minimal `/dev` (§2) and to keep `file:///` out of
+`/NeoDCT/System`. Still worth doing, no longer blocking, and no longer a bet on
+a kernel config nobody here can read.
+
+That is the main reason to prefer B. It is not that ext is more secure than a
+bind mount — it is that ext needs nothing from the SDK kernel, and every
+dependency removed from a kernel we do not control is a dependency that cannot
+turn out to be missing at the worst moment.
 
 **Phase 3 — seccomp, then the permission field.**
 `no_new_privs` + a filter that denies `socket()` for apps that declare no
