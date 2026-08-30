@@ -70,3 +70,8 @@ neodct/overlay/tests/*.mkv
 # commit nor blocks a release tag. The build leaves it out via
 # NEODCT_EXCLUDE_APPS=Tube. Remove this line when Tube is ready to ship.
 neodct/overlay/NeoDCT/System/apps/Tube/
+
+############################
+# Personal images (wallpapers with people)
+############################
+wallpaper.png
