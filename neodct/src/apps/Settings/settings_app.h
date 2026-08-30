@@ -105,6 +105,8 @@ extern const char *const nd_setapp_get_more_help_with_card;
 
 /* SDCARD_HELP, the TextScroller behind every memory-card message. */
 extern const char *const nd_setapp_sdcard_help;
+/* The destructive confirmation, shared by both routes to a format. */
+extern const char *const nd_setapp_format_warning;
 
 /* run()'s VerticalList and _show_engineering_mode()'s.
  *

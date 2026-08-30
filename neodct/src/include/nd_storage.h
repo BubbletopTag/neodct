@@ -31,6 +31,24 @@ extern "C" {
 
 #define ND_SD_MOUNT_POINT      "/NeoDCT/User/sdcard"
 #define ND_SD_STATE_FILE       "/run/neodct/sdcard.prop"
+
+/* The arrival partition, when the card has one.
+ *
+ * SECURITY-PLAN.md section 1: a NeoDCT card is two FAT32 partitions, because
+ * a FAT filesystem has no ownership of its own and mount options apply to
+ * the whole of one. p1 belongs to ndusr and holds what the OWNER copied on;
+ * p2 belongs to ndusr_ut, is mounted noexec, and holds what ARRIVED --
+ * downloads and MMS attachments.
+ *
+ * It is mounted INSIDE p1, which works because p1's dmask makes its
+ * directories 0751: ndusr_ut traverses "sdcard" to reach "untrusted" without
+ * being able to list the owner's music.
+ *
+ * A foreign card has no such partition and nd_storage_untrusted_dir() then
+ * says so -- which is the right answer for "where do I put this download",
+ * not a degraded one. */
+#define ND_SD_UNTRUSTED_NAME  "untrusted"
+#define ND_SD_UNTRUSTED_MOUNT ND_SD_MOUNT_POINT "/" ND_SD_UNTRUSTED_NAME
 #define ND_SD_UPDATE_SUFFIX    ".ndsw"
 #define ND_SD_PREFERRED_UPDATE "UPDATE.ndsw"
 
@@ -53,6 +71,11 @@ typedef struct {
     char fstype[32]; /* "vfat"; empty when absent      */
     char label[64];
     char mountpoint[128]; /* always ND_SD_MOUNT_POINT       */
+    /* Where the arrival partition is mounted, or empty when the card has
+     * none -- a foreign card, a card too small to have been partitioned, or
+     * the QEMU virtiofs share, which is one filesystem by construction.
+     * Published by neodct-sdcard as `untrusted=` in the state file. */
+    char untrusted[128];
     bool removable;       /* fstype != "virtiofs"           */
 } nd_card;
 
@@ -69,6 +92,20 @@ bool nd_storage_folder(const char *name, char *out, size_t out_sz);
 /* mkdir -p all five. false on the FIRST failure; folders created before it
  * stay created. */
 bool nd_storage_setup_folders(void);
+
+/* Where a download or an MMS attachment goes: the card's arrival partition.
+ *
+ * false when there is not one, and the caller's answer to that must be to
+ * REFUSE rather than to fall back to the user partition. /NeoDCT/User is
+ * 8 MiB on the phone and the settings, the message databases and the call
+ * log all write there, so a browser that fills it takes the rest of the
+ * system down with it -- which is the failure the two-partition design
+ * exists to make impossible.
+ *
+ * Deliberately NOT gated on the card being "ready": the five NeoDCT folders
+ * live on the media partition and have nothing to say about whether the
+ * arrival one is mounted. */
+bool nd_storage_untrusted_dir(char *out, size_t out_sz);
 
 /* Where to look for wallpapers, tones or music: the stock system directory
  * first, then the card's folder, keeping only directories that exist.

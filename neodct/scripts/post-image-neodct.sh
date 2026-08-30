@@ -135,26 +135,91 @@ fi
 rm -rf "$SKEL"
 
 # --- sdcard.img ----------------------------------------------------------
+#
+# The emulator's card, and it is built the way the PHONE builds one: two
+# FAT32 partitions, media and arrival, per SECURITY-PLAN.md section 1. The
+# partition table comes from the phone's own helper rather than from a copy
+# of its arithmetic -- `neodct-sdcard` is sourced for write_mbr() and
+# partition_plan() -- so a card made here and a card made by Settings cannot
+# drift apart. That matters more than it sounds: QEMU is the only place the
+# two-partition path gets exercised before it reaches hardware.
+#
+# The two filesystems are made in separate files and dd'd into place, rather
+# than with mkfs.vfat --offset. --offset arrived in dosfstools 4.2 and this
+# has to work with whatever host-dosfstools buildroot pinned; writing at an
+# offset is one dd either way.
+build_sdcard_image() {   # build_sdcard_image PATH MKFS
+    _img="$1"
+    _mkfs="$2"
+    _helper="$NEODCT_DIR/overlay/NeoDCT/System/hw/neodct-sdcard"
+
+    rm -f "$_img"
+    dd if=/dev/zero of="$_img" bs=1M count="$SDCARD_MB" status=none
+
+    if [ ! -r "$_helper" ]; then
+        say "no $_helper; making a single-filesystem card"
+        "$_mkfs" -F 32 -n NEODCT "$_img" > /dev/null
+        sdcard_folders "$_img" ""
+        return 0
+    fi
+
+    # SOURCE_ONLY stops the helper dispatching on "$1"; it only defines
+    # functions. Everything it needs from the environment it defaults.
+    _plan="$(NEODCT_SDCARD_SOURCE_ONLY=1 sh -c \
+        ". \"$_helper\"; partition_plan \"$_img\"" 2>/dev/null)" || _plan=""
+    if [ -z "$_plan" ] || [ "$_plan" = "superfloppy" ]; then
+        say "sdcard.img is too small to partition; one filesystem then"
+        "$_mkfs" -F 32 -n NEODCT "$_img" > /dev/null
+        sdcard_folders "$_img" ""
+        return 0
+    fi
+
+    # shellcheck disable=SC2086  # four numbers, deliberately word-split
+    set -- $_plan
+    _p1_start="$1"; _p1_sectors="$2"; _p2_start="$3"; _p2_sectors="$4"
+
+    NEODCT_SDCARD_SOURCE_ONLY=1 sh -c \
+        ". \"$_helper\"; write_mbr \"$_img\" $_p1_start $_p1_sectors \
+            $_p2_start $_p2_sectors" || {
+        say "could not write a partition table into sdcard.img"
+        return 1
+    }
+
+    # mkfs.vfat's block count is in 1 KiB units, so half the sector count.
+    _tmp1="$_img.p1"
+    _tmp2="$_img.p2"
+    "$_mkfs" -F 32 -n NEODCT -C "$_tmp1" "$((_p1_sectors / 2))" > /dev/null
+    "$_mkfs" -F 32 -n NEODCTUT -C "$_tmp2" "$((_p2_sectors / 2))" > /dev/null
+    sdcard_folders "$_tmp1" ""
+    dd if="$_tmp1" of="$_img" bs=512 seek="$_p1_start" conv=notrunc status=none
+    dd if="$_tmp2" of="$_img" bs=512 seek="$_p2_start" conv=notrunc status=none
+    rm -f "$_tmp1" "$_tmp2"
+
+    say "sdcard.img (${SDCARD_MB}M): media $((_p1_sectors / 2048))M NEODCT," \
+        "arrival $((_p2_sectors / 2048))M NEODCTUT"
+}
+
+# The five NeoDCT folders, in whichever FAT image is handed over.
+sdcard_folders() {   # sdcard_folders IMAGE OFFSET-SUFFIX
+    if MMD="$(host_tool mmd)"; then
+        for folder in wallpapers tones backup_db music update untrusted; do
+            # "untrusted" is the mountpoint the arrival partition goes on,
+            # and it lives on the media side -- the same way sdcard/ itself
+            # is a directory on /NeoDCT/User.
+            MTOOLS_SKIP_CHECK=1 "$MMD" -i "$1$2" "::/$folder" 2>/dev/null || true
+        done
+    else
+        say "  no mtools: the phone will offer to set the folders up"
+    fi
+}
+
 # Never overwrite an existing card image: it is where the user drops their
 # music, wallpapers and UPDATE.ndsw between builds.
 if [ -f "$BINARIES_DIR/sdcard.img" ]; then
     say "sdcard.img exists, leaving it alone"
 else
     if MKFSVFAT="$(host_tool mkfs.vfat)"; then
-        rm -f "$BINARIES_DIR/sdcard.img"
-        dd if=/dev/zero of="$BINARIES_DIR/sdcard.img" bs=1M \
-            count="$SDCARD_MB" status=none
-        "$MKFSVFAT" -F 32 -n NEODCT "$BINARIES_DIR/sdcard.img" > /dev/null
-        if MMD="$(host_tool mmd)"; then
-            for folder in wallpapers tones backup_db music update; do
-                MTOOLS_SKIP_CHECK=1 "$MMD" -i "$BINARIES_DIR/sdcard.img" \
-                    "::/$folder" 2>/dev/null || true
-            done
-            say "sdcard.img (${SDCARD_MB}M FAT32 NEODCT, folders created)"
-        else
-            say "sdcard.img (${SDCARD_MB}M FAT32 NEODCT, no mtools: the phone"
-            say "  will offer to set the folders up on first insert)"
-        fi
+        build_sdcard_image "$BINARIES_DIR/sdcard.img" "$MKFSVFAT"
     else
         say "mkfs.vfat not found; skipping sdcard.img"
     fi

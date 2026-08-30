@@ -87,6 +87,12 @@ void nd_storage_card(nd_card *out)
     fstype = nd_props_get(values, "fstype", "");
     device = nd_props_get(values, "device", "");
     label = nd_props_get(values, "label", "");
+    /* Missing on a card with no arrival partition, and on every state file
+     * written before there was such a thing -- the default is the empty
+     * string either way, which is exactly "there is nowhere to put a
+     * download". */
+    (void)nd_strlcpy(out->untrusted, nd_props_get(values, "untrusted", ""),
+                     sizeof out->untrusted);
 
     /* Computed BEFORE any of the returns below, so an absent card still
      * reports removable == true. test_storage.py pins the virtiofs case. */
@@ -104,8 +110,11 @@ void nd_storage_card(nd_card *out)
         strcmp(reported, "ready") != 0) {
         /* device, fstype and label are deliberately left blank here: the
          * Python passes "" for all three on this branch even though it read
-         * values for them. */
+         * values for them. The arrival mount goes with them, for a reason of
+         * its own -- a stale path to a card that is not there is a directory
+         * a download would be written into and then lost with the card. */
         out->state = ND_CARD_ABSENT;
+        out->untrusted[0] = '\0';
         goto done;
     }
 
@@ -124,6 +133,18 @@ bool nd_storage_is_ready(void)
 
     nd_storage_card(&card);
     return card.state == ND_CARD_READY;
+}
+
+bool nd_storage_untrusted_dir(char *out, size_t out_sz)
+{
+    nd_card card;
+
+    if (out == NULL || out_sz == 0u)
+        return false;
+    nd_storage_card(&card);
+    if (card.untrusted[0] == '\0')
+        return false;
+    return nd_strlcpy(out, card.untrusted, out_sz) < out_sz;
 }
 
 bool nd_storage_folder(const char *name, char *out, size_t out_sz)

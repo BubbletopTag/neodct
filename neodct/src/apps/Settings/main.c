@@ -107,6 +107,26 @@ const char *const nd_setapp_get_more_help_with_card =
  * _show_about() and _show_memory_card(), which is why it reads as an
  * afterthought there. The two leading spaces in the folder table are load
  * bearing -- TextScroller draws them. */
+/* Shown before anything is written, on both routes to a format -- the card
+ * that cannot be read and the card that can. It has to say two things, and
+ * the second one is new:
+ *
+ *   everything on it goes, which was always true; and
+ *
+ *   the card is REPARTITIONED, because a NeoDCT card is two FAT32
+ *   partitions rather than one (SECURITY-PLAN.md section 1). What it no
+ *   longer has to say -- and this is why Option C was chosen over
+ *   formatting the card as ext -- is that the card will stop reading on a
+ *   PC. It will not. Both partitions are FAT32 and any computer opens the
+ *   first one.
+ */
+const char *const nd_setapp_format_warning =
+    "Format this card?\n"
+    "EVERYTHING ON IT WILL BE ERASED!\n"
+    "\n"
+    "It is split in two: one part for your music and pictures, one for "
+    "downloads. Both still read on a computer.";
+
 const char *const nd_setapp_sdcard_help =
     "A NeoDCT memory card is a FAT32 card with these folders on it:\n"
     "\n"
@@ -117,7 +137,13 @@ const char *const nd_setapp_sdcard_help =
     "  update       UPDATE.ndsw system updates\n"
     "\n"
     "You can make one on a computer, or let the phone do it. Setting up only "
-    "adds the folders. Formatting erases everything on the card.";
+    "adds the folders. Formatting erases everything on the card.\n"
+    "\n"
+    "A card the phone formats gets a second, separate area for downloads and "
+    "picture messages. Things that arrive on their own go there and cannot "
+    "reach your music, and nothing there can run. A card you make on a "
+    "computer works for everything above, but has nowhere for downloads to "
+    "go.";
 
 size_t nd_setapp_bt_lines(char lines[][ND_SETAPP_BT_LINE_MAX], size_t max, bool enabled,
                           bool connected)
@@ -1180,6 +1206,46 @@ static int sdcard_format(const char *device)
     return -st.signo;
 }
 
+/* The destructive one, on both routes to it.
+ *
+ * It used to be reachable ONLY from the "this card cannot be read" branch,
+ * which was fine while a format just laid down one filesystem: a card that
+ * already mounted had nothing to gain. That stopped being true with
+ * SECURITY-PLAN.md section 1. A NeoDCT card is now two FAT32 partitions, and
+ * the second one -- the arrival side, where downloads and picture messages
+ * land -- can only come from the phone partitioning the card. Leaving the
+ * format behind the unreadable-card branch would mean an owner with a
+ * perfectly good FAT32 card could never get one, which is the whole feature
+ * unreachable for the people most likely to want it.
+ */
+static void offer_format(nd_ui *ui, const nd_card *card)
+{
+    nd_msgdialog dialog;
+
+    nd_msgdialog_init(&dialog, ui, nd_setapp_format_warning);
+    nd_msgdialog_set_button(&dialog, "Format");
+    if (nd_msgdialog_show(&dialog) != ND_KEY_ENTER)
+        return;
+    if (card->device[0] == '\0') {
+        nd_msgdialog_init(&dialog, ui, "No card device to format.");
+        nd_msgdialog_set_button(&dialog, "OK");
+        nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
+        (void)nd_msgdialog_show(&dialog);
+        return;
+    }
+    if (sdcard_format(card->device) == 0) {
+        nd_msgdialog_init(&dialog, ui, "Card formatted and ready.");
+        nd_msgdialog_set_button(&dialog, "OK");
+    } else {
+        nd_msgdialog_init(&dialog, ui,
+                          "Formatting failed.\nThe card may be write "
+                          "protected.");
+        nd_msgdialog_set_button(&dialog, "OK");
+        nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
+    }
+    (void)nd_msgdialog_show(&dialog);
+}
+
 static void show_memory_card(nd_ui *ui)
 {
     nd_card card;
@@ -1209,6 +1275,12 @@ static void show_memory_card(nd_ui *ui)
         (void)nd_msgdialog_show(&dialog);
         nd_scroller_init(&help, ui, nd_setapp_sdcard_help, NULL, NULL);
         nd_scroller_show(&help);
+        /* A card that already works can still be missing the arrival
+         * partition -- every card made on a computer is. Offer, do not
+         * insist: the answer for a card that is doing its job is usually no,
+         * and the dialog's cancel key is what says it. */
+        if (card.untrusted[0] == '\0')
+            offer_format(ui, &card);
         return;
     }
 
@@ -1238,30 +1310,7 @@ static void show_memory_card(nd_ui *ui)
 
     /* "Nothing we can mount: the only way forward is to reformat, which is
      * destructive, so make that unmistakable." */
-    nd_msgdialog_init(&dialog, ui,
-                      "This card cannot be read.\n"
-                      "Format it? EVERYTHING ON IT WILL BE ERASED!");
-    nd_msgdialog_set_button(&dialog, "Format");
-    if (nd_msgdialog_show(&dialog) != ND_KEY_ENTER)
-        return;
-    if (card.device[0] == '\0') {
-        nd_msgdialog_init(&dialog, ui, "No card device to format.");
-        nd_msgdialog_set_button(&dialog, "OK");
-        nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
-        (void)nd_msgdialog_show(&dialog);
-        return;
-    }
-    if (sdcard_format(card.device) == 0) {
-        nd_msgdialog_init(&dialog, ui, "Card formatted and ready.");
-        nd_msgdialog_set_button(&dialog, "OK");
-    } else {
-        nd_msgdialog_init(&dialog, ui,
-                          "Formatting failed.\nThe card may be write "
-                          "protected.");
-        nd_msgdialog_set_button(&dialog, "OK");
-        nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
-    }
-    (void)nd_msgdialog_show(&dialog);
+    offer_format(ui, &card);
 }
 
 /* ------------------------------------------------------------------ *

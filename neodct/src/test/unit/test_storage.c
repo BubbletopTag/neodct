@@ -312,6 +312,104 @@ static void test_a_corrupt_state_file_reads_as_no_card(void)
     CHECK_INT(card.state, ND_CARD_ABSENT);
 }
 
+/* ------------------------------------------------------------------ *
+ * The arrival partition
+ * ------------------------------------------------------------------ *
+ *
+ * SECURITY-PLAN.md section 1. A NeoDCT card is two FAT32 partitions because
+ * a FAT filesystem has no ownership of its own and mount options apply to
+ * the whole of one -- so p1 belongs to ndusr and holds what the owner copied
+ * on, and p2 belongs to ndusr_ut, is mounted noexec, and holds what arrived.
+ * neodct-sdcard publishes the second as `untrusted=`.
+ */
+
+static void insert_with_untrusted(const char *untrusted)
+{
+    char body[512];
+
+    CHECK_INT(nd_snprintf(body, sizeof body,
+                          "state=mounted\ndevice=/dev/mmcblk1p1\nfstype=vfat\n"
+                          "label=NEODCT\nuntrusted=%s\n",
+                          untrusted),
+              ND_OK);
+    pt_write_text(STATE, body);
+    pt_mkdir(MOUNT);
+}
+
+static void test_a_two_partition_card_offers_somewhere_for_a_download(void)
+{
+    nd_card card;
+    char path[ND_PATH_MAX];
+
+    use_scratch_paths();
+    insert_with_untrusted(MOUNT "/untrusted");
+
+    nd_storage_card(&card);
+    CHECK_STR(card.untrusted, MOUNT "/untrusted");
+    CHECK(nd_storage_untrusted_dir(path, sizeof path));
+    CHECK_STR(path, MOUNT "/untrusted");
+}
+
+static void test_a_foreign_card_offers_nowhere(void)
+{
+    nd_card card;
+    char path[ND_PATH_MAX];
+
+    use_scratch_paths();
+    insert_default(FOLDERS, 5u);
+
+    nd_storage_card(&card);
+    CHECK_STR(card.untrusted, "");
+    /* False, and the caller's answer must be to REFUSE the download rather
+     * than fall back to /NeoDCT/User -- which is 8 MiB on the phone and is
+     * where the settings, the messages and the call log live. */
+    CHECK(!nd_storage_untrusted_dir(path, sizeof path));
+}
+
+static void test_a_state_file_from_before_any_of_this_still_reads(void)
+{
+    nd_card card;
+
+    use_scratch_paths();
+    pt_write_text(STATE, "state=mounted\ndevice=/dev/vdc\nfstype=vfat\nlabel=NEODCT\n");
+    pt_mkdir(MOUNT);
+
+    nd_storage_card(&card);
+    CHECK_INT(card.state, ND_CARD_NEEDS_SETUP);
+    CHECK_STR(card.untrusted, "");
+}
+
+static void test_a_card_that_was_pulled_leaves_no_stale_path(void)
+{
+    nd_card card;
+    char path[ND_PATH_MAX];
+
+    use_scratch_paths();
+    pt_write_text(STATE, "state=absent\ndevice=\nfstype=\nlabel=\n"
+                         "untrusted=" MOUNT "/untrusted\n");
+
+    nd_storage_card(&card);
+    CHECK_INT(card.state, ND_CARD_ABSENT);
+    /* A path to a card that is not there is a directory a download would be
+     * written into and lost with the card. */
+    CHECK_STR(card.untrusted, "");
+    CHECK(!nd_storage_untrusted_dir(path, sizeof path));
+}
+
+static void test_the_untrusted_directory_is_not_gated_on_the_five_folders(void)
+{
+    char path[ND_PATH_MAX];
+
+    use_scratch_paths();
+    insert_with_untrusted(MOUNT "/untrusted");
+
+    /* No wallpapers/tones/music/backup_db/update, so the card is
+     * NEEDS_SETUP -- and the arrival partition is mounted regardless. The
+     * five folders live on the media side and have nothing to say about it. */
+    CHECK(!nd_storage_is_ready());
+    CHECK(nd_storage_untrusted_dir(path, sizeof path));
+}
+
 int main(void)
 {
     RUN(test_no_card_when_nothing_is_mounted);
@@ -334,6 +432,11 @@ int main(void)
     RUN(test_non_package_files_on_the_card_are_ignored);
     RUN(test_no_updates_without_a_card);
     RUN(test_a_corrupt_state_file_reads_as_no_card);
+    RUN(test_a_two_partition_card_offers_somewhere_for_a_download);
+    RUN(test_a_foreign_card_offers_nowhere);
+    RUN(test_a_state_file_from_before_any_of_this_still_reads);
+    RUN(test_a_card_that_was_pulled_leaves_no_stale_path);
+    RUN(test_the_untrusted_directory_is_not_gated_on_the_five_folders);
 
     nd_storage_set_paths(NULL, NULL);
     return pt_report("test_storage");

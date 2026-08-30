@@ -71,6 +71,7 @@ static struct {
     const char *const *get_more_help;
     const char *const *get_more_help_with_card;
     const char *const *sdcard_help;
+    const char *const *format_warning;
     const char *const *menu;
     const char *const *eng_options;
     const char *const *msgstyle_options;
@@ -92,6 +93,7 @@ static bool api_open(void *h)
     api.get_more_help = dlsym(h, "nd_setapp_get_more_help");
     api.get_more_help_with_card = dlsym(h, "nd_setapp_get_more_help_with_card");
     api.sdcard_help = dlsym(h, "nd_setapp_sdcard_help");
+    api.format_warning = dlsym(h, "nd_setapp_format_warning");
     api.menu = dlsym(h, "nd_setapp_menu");
     api.eng_options = dlsym(h, "nd_setapp_eng_options");
     api.msgstyle_options = dlsym(h, "nd_setapp_msgstyle_options");
@@ -209,6 +211,12 @@ static void test_strings(void)
               "is in the phone and they appear in this list. 240x175 looks best, and a "
               ".gif that size animates.",
               "GET_MORE_HELP_WITH_CARD");
+    /* The last paragraph arrived with SECURITY-PLAN.md section 1: a card the
+     * phone formats is TWO FAT32 partitions, and the second one is where
+     * downloads and picture messages land -- separate from the owner's
+     * music, and noexec. A card made on a computer has one partition and
+     * therefore nowhere for a download to go, which the owner has to be told
+     * in the one place they are told what a NeoDCT card is. */
     CHECK_STR(*api.sdcard_help,
               "A NeoDCT memory card is a FAT32 card with these folders on it:\n"
               "\n"
@@ -219,8 +227,30 @@ static void test_strings(void)
               "  update       UPDATE.ndsw system updates\n"
               "\n"
               "You can make one on a computer, or let the phone do it. Setting up only "
-              "adds the folders. Formatting erases everything on the card.",
+              "adds the folders. Formatting erases everything on the card.\n"
+              "\n"
+              "A card the phone formats gets a second, separate area for downloads and "
+              "picture messages. Things that arrive on their own go there and cannot "
+              "reach your music, and nothing there can run. A card you make on a "
+              "computer works for everything above, but has nowhere for downloads to "
+              "go.",
               "SDCARD_HELP");
+
+    /* The destructive confirmation. It has to say the card is erased, which
+     * it always did, and that it is REPARTITIONED, which is new. What it
+     * does NOT have to say is that the card will stop reading on a PC --
+     * and that is the whole reason section 1 chose two FAT partitions over
+     * reformatting the card as ext. */
+    CHECK(api.format_warning != NULL && *api.format_warning != NULL,
+          "FORMAT_WARNING exists");
+    if (api.format_warning != NULL && *api.format_warning != NULL) {
+        CHECK(strstr(*api.format_warning, "ERASED") != NULL,
+              "it says the card is erased");
+        CHECK(strstr(*api.format_warning, "split in two") != NULL,
+              "and that the card is repartitioned");
+        CHECK(strstr(*api.format_warning, "read on a computer") != NULL,
+              "and that it still reads on a PC, which is the point of FAT");
+    }
 
     CHECK_STR(ND_SETAPP_SYSTEM_WALLPAPER_DIR, "/NeoDCT/System/wallpapers", "SYSTEM_WALLPAPER_DIR");
     CHECK_STR(ND_SETAPP_WALLPAPER_DIR, "/NeoDCT/User/wallpapers", "WALLPAPER_DIR");
