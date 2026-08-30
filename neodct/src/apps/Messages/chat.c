@@ -87,13 +87,13 @@
 /* Bubbles. The 0.72 is the fraction of the screen one may occupy before its
  * text wraps: wide enough for a sentence, narrow enough that left and right
  * are still obviously different sides. */
-#define BUBBLE_MAX_W_NUM  72
-#define BUBBLE_MAX_W_DEN  100
-#define BUBBLE_PAD_X      4
-#define BUBBLE_PAD_Y      3
-#define BUBBLE_LINE_H     15
-#define BUBBLE_GAP        4
-#define BUBBLE_MAX_LINES  8
+#define BUBBLE_MAX_W_NUM 72
+#define BUBBLE_MAX_W_DEN 100
+#define BUBBLE_PAD_X     4
+#define BUBBLE_PAD_Y     3
+#define BUBBLE_LINE_H    15
+#define BUBBLE_GAP       4
+#define BUBBLE_MAX_LINES 8
 
 /* The message box at the bottom of a conversation. */
 #define BOX_H 20
@@ -168,7 +168,7 @@ static void threads_draw(nd_ui *ui, thread_list *tl, nd_softkey *bar)
     size_t i;
     bool on_new = (tl->selected == 0u);
 
-    (void)nd_draw_rect_fill(d, ND_RECT(0, 0, w, content_bottom), ND_BLACK);
+    nd_ui_paint_chrome_content(ui);
 
     (void)nd_draw_text(d, CHAT_MARGIN, 1, "Messages", ui->font_n, ND_WHITE);
     (void)nd_draw_line(d, 0, CHAT_HEADER_H, w, CHAT_HEADER_H, ND_GRAY, 1);
@@ -349,8 +349,7 @@ static void layout_bubble(nd_ui *ui, const nd_msg_bubble *b, bubble_layout *out)
 {
     char storage[BUBBLE_MAX_LINES][ND_TEXT_LINE_MAX];
     nd_lines lines;
-    int32_t max_text_w =
-        (nd_ui_width(ui) * BUBBLE_MAX_W_NUM) / BUBBLE_MAX_W_DEN - 2 * BUBBLE_PAD_X;
+    int32_t max_text_w = (nd_ui_width(ui) * BUBBLE_MAX_W_NUM) / BUBBLE_MAX_W_DEN - 2 * BUBBLE_PAD_X;
     size_t i;
     int32_t widest = 0;
 
@@ -419,7 +418,7 @@ static void chat_draw(nd_ui *ui, chat_view *v, const char *title, nd_softkey *ba
     int32_t y;
     size_t i;
 
-    (void)nd_draw_rect_fill(d, ND_RECT(0, 0, w, content_bottom), ND_BLACK);
+    nd_ui_paint_chrome_content(ui);
 
     /* The transcript starts at v->first, whose top sits exactly on view_top,
      * so nothing is ever cut by the header. Only the bottom edge clips, and
@@ -461,12 +460,12 @@ static void chat_draw(nd_ui *ui, chat_view *v, const char *title, nd_softkey *ba
 
     /* A last bubble hanging past the fold is painted over -- one rectangle,
      * and cheaper than clipping every draw call inside the loop. */
-    (void)nd_draw_rect_fill(d, ND_RECT(0, view_bottom + 1, w, content_bottom), ND_BLACK);
+    nd_ui_paint_chrome(ui, ND_RECT(0, view_bottom + 1, w, content_bottom));
 
     /* The header goes on LAST so the transcript can never reach it, and the
      * title is ellipsized because a contact name is whatever the phone book
      * says it is. */
-    (void)nd_draw_rect_fill(d, ND_RECT(0, 0, w, CHAT_HEADER_H), ND_BLACK);
+    nd_ui_paint_chrome(ui, ND_RECT(0, 0, w, CHAT_HEADER_H));
     {
         char fitted[64];
 
@@ -494,8 +493,7 @@ static void chat_draw(nd_ui *ui, chat_view *v, const char *title, nd_softkey *ba
     }
 
     if (v->n == 0u) {
-        (void)nd_draw_text(d, CHAT_MARGIN + 4, view_top + 30, "No messages.", ui->font_s,
-                           ND_GRAY);
+        (void)nd_draw_text(d, CHAT_MARGIN + 4, view_top + 30, "No messages.", ui->font_s, ND_GRAY);
     }
 
     nd_softkey_update(bar, on_box(v) ? "Write" : "Options", true);
@@ -573,8 +571,7 @@ void nd_msg_show_thread(nd_ui *ui, const char *peer, const char *display)
     if (ui == NULL || ui->draw == NULL || peer == NULL)
         return;
 
-    (void)nd_strlcpy(title, (display != NULL && display[0] != '\0') ? display : peer,
-                     sizeof title);
+    (void)nd_strlcpy(title, (display != NULL && display[0] != '\0') ? display : peer, sizeof title);
 
     memset(&v, 0, sizeof v);
     v.msgs = calloc((size_t)ND_MSG_BUBBLES_MAX, sizeof *v.msgs);

@@ -307,7 +307,6 @@ void nd_pagedlist_draw(nd_pagedlist *p)
     nd_ui *ui;
     nd_draw *d;
     int32_t screen_w;
-    int32_t screen_h;
     int32_t header_y;
     int32_t max_w;
     int32_t line_h = 0;
@@ -328,11 +327,10 @@ void nd_pagedlist_draw(nd_pagedlist *p)
     ui = p->ui;
     d = ui->draw;
     screen_w = nd_ui_width(ui);
-    screen_h = nd_ui_height(ui);
     header_y = nd_ui_header_divider_y(ui);
 
     /* Full-screen clear: this widget owns the softkey strip too. */
-    (void)nd_draw_rect_fill(d, ND_RECT(0, 0, screen_w, screen_h), ND_BLACK);
+    nd_ui_paint_chrome_full(ui);
     (void)nd_draw_text(d, 5, 5, (p->title != NULL) ? p->title : "", ui->font_xl, ND_WHITE);
     (void)nd_draw_line(d, 0, header_y, screen_w, header_y, ND_WHITE, 1);
 
@@ -418,6 +416,12 @@ void nd_pagedlist_draw(nd_pagedlist *p)
     (void)nd_ui_present(ui);
 }
 
+/* See nd_ui_set_repaint(). */
+static void pagedlist_repaint(void *ctx)
+{
+    nd_pagedlist_draw((nd_pagedlist *)ctx);
+}
+
 int32_t nd_pagedlist_show(nd_pagedlist *p)
 {
     if (p == NULL)
@@ -445,25 +449,35 @@ int32_t nd_pagedlist_show(nd_pagedlist *p)
 
     nd_pagedlist_draw(p);
 
-    for (;;) {
-        int32_t key = nd_ui_wait_for_key(p->ui);
+    {
+        nd_ui_repaint saved = nd_ui_set_repaint(p->ui, pagedlist_repaint, p);
+        int32_t out;
 
-        if (key == ND_KEY_DOWN) {
-            if (p->n_items > 0u) {
-                p->selected_index = (p->selected_index + 1u) % p->n_items;
-                nd_pagedlist_draw(p);
+        for (;;) {
+            int32_t key = nd_ui_wait_for_key(p->ui);
+
+            if (key == ND_KEY_DOWN) {
+                if (p->n_items > 0u) {
+                    p->selected_index = (p->selected_index + 1u) % p->n_items;
+                    nd_pagedlist_draw(p);
+                }
+            } else if (key == ND_KEY_UP) {
+                if (p->n_items > 0u) {
+                    p->selected_index = (p->selected_index + p->n_items - 1u) % p->n_items;
+                    nd_pagedlist_draw(p);
+                }
+            } else if (key == ND_KEY_ENTER) {
+                /* Returns 0 even for an empty list, which draw() never renders
+                 * a row for. Latent in the Python and reproduced here. */
+                out = (int32_t)p->selected_index;
+                break;
+            } else if (key == ND_KEY_CLEAR) {
+                out = ND_WIDGET_BACK;
+                break;
             }
-        } else if (key == ND_KEY_UP) {
-            if (p->n_items > 0u) {
-                p->selected_index = (p->selected_index + p->n_items - 1u) % p->n_items;
-                nd_pagedlist_draw(p);
-            }
-        } else if (key == ND_KEY_ENTER) {
-            /* Returns 0 even for an empty list, which draw() never renders a
-             * row for. Latent in the Python and reproduced here. */
-            return (int32_t)p->selected_index;
-        } else if (key == ND_KEY_CLEAR) {
-            return ND_WIDGET_BACK;
         }
+
+        nd_ui_restore_repaint(p->ui, saved);
+        return out;
     }
 }

@@ -701,10 +701,34 @@ static void drop_stage(void)
 /* uistub.StubUI._prepare_user_dir(): the ack file that skips the first-boot
  * security modal, and settings.prop with the keys sorted. Every StubUI in
  * shoot_docs.py defaults to engineering=True and skip_notice=True. */
+/* --wallpaper NAME forces one into EVERY group, including the six that
+ * deliberately render without one. The reference recipe still says which
+ * groups have a wallpaper -- this exists because "wallpaper everywhere" is a
+ * feature whose whole surface is the screens that used to be black, and
+ * seeing them all wallpapered is the only way to review it. NULL leaves each
+ * group with the wallpaper its own recipe asks for. */
+static const char *g_wallpaper_override;
+
+/* --anim N: how many consecutive home frames to write into <out>/anim.
+ * 0 disables the whole group, which is the default -- it is not one of the
+ * reference frames and a normal shoot must not grow a directory. */
+static long g_anim_frames;
+
+/* --set KEY=VALUE, appended to every settings.prop this tool writes. Sweeping
+ * system.ui.wpeverywhere_dim across a shoot is otherwise a rebuild per
+ * value. */
+#define SHOOT_MAX_EXTRA_SETTINGS 8
+static const char *g_extra_settings[SHOOT_MAX_EXTRA_SETTINGS];
+static size_t g_n_extra_settings;
+
 static void write_settings(const char *wallpaper_name)
 {
     char path[ND_PATH_MAX];
     FILE *f;
+    size_t i;
+
+    if (g_wallpaper_override != NULL)
+        wallpaper_name = g_wallpaper_override;
 
     if (nd_snprintf(path, sizeof path, "%s/NeoDCT/User/.ack_security_warning", g_stage) == ND_OK) {
         f = fopen(path, "w");
@@ -726,6 +750,8 @@ static void write_settings(const char *wallpaper_name)
          * ones live under /NeoDCT/User. */
         (void)fprintf(f, "system.ui.wallpaper=/NeoDCT/System/wallpapers/%s\n", wallpaper_name);
     }
+    for (i = 0u; i < g_n_extra_settings; i++)
+        (void)fprintf(f, "%s\n", g_extra_settings[i]);
     (void)fclose(f);
 }
 
@@ -793,6 +819,83 @@ static void key_script_end(key_script *ks, nd_ui *ui)
     nd_input_close(ks->in);
     nd_input_channel_close(&ks->ch);
     ks->active = false;
+}
+
+/* ------------------------------------------------------------------ *
+ * --anim -- the home screen, N frames in a row
+ * ------------------------------------------------------------------ *
+ *
+ * Not a reference frame and not in the manifest: an animated wallpaper is the
+ * one thing in this system a single PNG cannot show, and reviewing it means
+ * looking at a sequence. The frames go in <out>/anim as plain PNGs, numbered,
+ * for whatever the reader wants to assemble them with.
+ *
+ * IT WORKS BECAUSE OF THE VIRTUAL CLOCK, not in spite of it. nd_vclock
+ * advances 0.1 s per COMMITTED frame, and nd_ui_tick_wallpaper() advances the
+ * GIF by one frame whenever the wallpaper is due. Every delay this decoder
+ * reports is at most 0.1 s (a 40 ms wallpaper included), so exactly one GIF
+ * frame lands per captured frame -- deterministically, on any machine, at any
+ * speed. Assemble the result at the GIF's own rate and it plays at the rate
+ * the phone plays it.
+ */
+static void shoot_home_animation(nd_capture *cap, long n_frames)
+{
+    nd_fb *fb = nd_capture_fb(cap);
+    nd_ui ui;
+    char dir[ND_PATH_MAX];
+    long i;
+
+    if (n_frames <= 0)
+        return;
+
+    printf("[shoot] home animation (%ld frames)\n", n_frames);
+
+    if (nd_snprintf(dir, sizeof dir, "%s/anim", g_out) != ND_OK) {
+        g_failed++;
+        return;
+    }
+    root_off();
+    (void)nd_mkdir_p(dir, 0755u);
+    root_on();
+
+    /* No write_settings() of its own: --wallpaper (or the home group's
+     * Palestine.jpg) is already in force, and pointing this at a still is a
+     * legitimate thing to do -- it produces N identical frames, which is the
+     * correct answer for a .jpg. */
+    write_settings("Palestine.jpg");
+    nd_vclock_enable();
+    nd_ui_sim_clear(&ui);
+    if (nd_ui_init(&ui, fb) != ND_OK) {
+        nd_log_err(ND_LOG_UI, "shoot: nd_ui_init failed (home animation)");
+        g_failed++;
+        return;
+    }
+    nd_ui_sim_status(&ui, 4, 4, "Tello");
+
+    for (i = 0; i < n_frames; i++) {
+        char path[ND_PATH_MAX];
+        const nd_image *frame;
+
+        nd_ui_update(&ui);
+        frame = nd_capture_recent(cap, 0u);
+        if (frame == NULL) {
+            nd_log_err(ND_LOG_FB, "shoot: no animation frame %ld", i);
+            g_failed++;
+            break;
+        }
+        if (nd_snprintf(path, sizeof path, "%s/home-%04ld.png", dir, i) != ND_OK)
+            break;
+        root_off();
+        if (nd_image_save_png(frame, path) != ND_OK) {
+            root_on();
+            nd_log_err(ND_LOG_FB, "shoot: cannot write %s", path);
+            g_failed++;
+            break;
+        }
+        root_on();
+    }
+    printf("  %-30s %ld frames\n", "anim/home-NNNN.png", i);
+    nd_ui_teardown(&ui);
 }
 
 /* ------------------------------------------------------------------ *
@@ -1190,8 +1293,8 @@ static void run_app_inproc(nd_capture *cap, nd_ui *ui, const char *manifest_name
         g_failed++;
         return;
     }
-    if (nd_path_join(so_path, sizeof so_path, nd_ui_app_list(ui, NULL)[idx].path,
-                     ND_APP_SO_NAME) != ND_OK) {
+    if (nd_path_join(so_path, sizeof so_path, nd_ui_app_list(ui, NULL)[idx].path, ND_APP_SO_NAME) !=
+        ND_OK) {
         g_failed++;
         return;
     }
@@ -1223,9 +1326,23 @@ static void run_app_inproc(nd_capture *cap, nd_ui *ui, const char *manifest_name
         return;
     }
 
-    nd_capture_set_budget(cap, frame_budget);
-    (void)run(ui);
-    nd_capture_clear_budget(cap);
+    /* nd-apprun reads manifest.json's "useWallpaper" in nd_ui_init_app(); this
+     * tool dlopens the app into the CORE's context instead, so nothing has
+     * read it. Do it here, around the call only, or the first app that opted
+     * out would blacken every screen shot after it. */
+    {
+        bool saved_wp = ui->app_use_wallpaper;
+
+        ui->app_use_wallpaper = nd_app_manifest_use_wallpaper(nd_ui_app_list(ui, NULL)[idx].path);
+        nd_ui_invalidate_chrome(ui);
+
+        nd_capture_set_budget(cap, frame_budget);
+        (void)run(ui);
+        nd_capture_clear_budget(cap);
+
+        ui->app_use_wallpaper = saved_wp;
+        nd_ui_invalidate_chrome(ui);
+    }
 
     key_script_end(&ks, ui);
     save_recent(cap, slug);
@@ -1632,8 +1749,8 @@ static void shoot_engineering_apps(nd_capture *cap)
          * policy). On a glibc host it is byte-exact, because CPython's
          * math.sin is the platform libm's and the capture ran the same code
          * on the same doubles. The budget exists for musl on the device. */
-        run_app_inproc(cap, &ui, ENG_CASES[i].manifest_name, ENG_CASES[i].budget,
-                       ENG_CASES[i].slug, NULL, 0u, ENG_CASES[i].hold, ND_APP_SYM_RUN);
+        run_app_inproc(cap, &ui, ENG_CASES[i].manifest_name, ENG_CASES[i].budget, ENG_CASES[i].slug,
+                       NULL, 0u, ENG_CASES[i].hold, ND_APP_SYM_RUN);
 
         nd_ui_teardown(&ui);
         nd_ui_sim_clear(&ui);
@@ -1880,6 +1997,11 @@ static void usage(FILE *out)
                        "                  or $NEODCT_OVERLAY, or $NEODCT_GOLDEN/../../overlay\n"
                        "  --keep-stage    do not delete the staged /NeoDCT root on exit\n"
                        "  --list          print the frame names this build renders and skips\n"
+                       "  --wallpaper N   force wallpapers/N into EVERY group, including the\n"
+                       "                  ones whose recipe renders without one\n"
+                       "  --set K=V       add a line to every settings.prop written; repeatable\n"
+                       "  --anim N        also write N consecutive home frames into <out>/anim,\n"
+                       "                  which is how an animated wallpaper is reviewed\n"
                        "\n"
                        "$NEODCT_ROOT is used as the staged root only when it already contains\n"
                        "NeoDCT/System; otherwise a temporary one is staged.\n");
@@ -1914,6 +2036,23 @@ int main(int argc, char **argv)
             overlay = argv[++i];
         } else if (strcmp(argv[i], "--keep-stage") == 0) {
             g_keep_stage = true;
+        } else if (strcmp(argv[i], "--wallpaper") == 0 && i + 1 < argc) {
+            g_wallpaper_override = argv[++i];
+        } else if (strcmp(argv[i], "--set") == 0 && i + 1 < argc) {
+            if (g_n_extra_settings >= SHOOT_MAX_EXTRA_SETTINGS) {
+                (void)fprintf(stderr, "nd-shoot: at most %d --set options\n",
+                              SHOOT_MAX_EXTRA_SETTINGS);
+                return 2;
+            }
+            g_extra_settings[g_n_extra_settings++] = argv[++i];
+        } else if (strcmp(argv[i], "--anim") == 0 && i + 1 < argc) {
+            char *end = NULL;
+
+            g_anim_frames = strtol(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0' || g_anim_frames < 0 || g_anim_frames > 100000) {
+                (void)fprintf(stderr, "nd-shoot: --anim wants a frame count\n");
+                return 2;
+            }
         } else if (strcmp(argv[i], "--list") == 0) {
             print_list();
             return 0;
@@ -1967,6 +2106,8 @@ int main(int argc, char **argv)
     shoot_telephony(cap);
     shoot_engineering_apps(cap);
     shoot_widgets(cap);
+    /* Last, so a failure here cannot cost the reference frames. */
+    shoot_home_animation(cap, g_anim_frames);
 
     root_off();
     if (nd_capture_write_manifest(cap) != ND_OK) {
@@ -1990,8 +2131,7 @@ int main(int argc, char **argv)
         g_failed++;
     }
 
-    printf("[shoot] wrote %zu frames, skipped %zu, %zu failed\n", g_saved, n_skipped(),
-           g_failed);
+    printf("[shoot] wrote %zu frames, skipped %zu, %zu failed\n", g_saved, n_skipped(), g_failed);
     printf("[shoot] compare with:\n"
            "  python3 neodct/tools/goldenframe.py --compare neodct/tests/golden %s\n",
            g_out);

@@ -233,8 +233,7 @@ const char *nd_btapp_verdict_str(nd_btapp_verdict v)
     }
 }
 
-static void check_set(nd_btapp_check *c, nd_btapp_step step, nd_btapp_verdict v,
-                      const char *detail)
+static void check_set(nd_btapp_check *c, nd_btapp_step step, nd_btapp_verdict v, const char *detail)
 {
     c->step = step;
     c->verdict = v;
@@ -260,8 +259,7 @@ size_t nd_btapp_selftest(nd_btapp_check *out, size_t max, bool do_scan)
         check_set(&out[i], (nd_btapp_step)i, ND_BTAPP_SKIP, "");
 
     if (!nd_bt_available()) {
-        check_set(&out[ND_BTAPP_STEP_KERNEL], ND_BTAPP_STEP_KERNEL, ND_BTAPP_FAIL,
-                  strerror(errno));
+        check_set(&out[ND_BTAPP_STEP_KERNEL], ND_BTAPP_STEP_KERNEL, ND_BTAPP_FAIL, strerror(errno));
         return (size_t)ND_BTAPP_STEP_N;
     }
     check_set(&out[ND_BTAPP_STEP_KERNEL], ND_BTAPP_STEP_KERNEL, ND_BTAPP_PASS, "CONFIG_BT is on");
@@ -367,7 +365,7 @@ static void draw_page(nd_ui *ui, const char *title, const nd_btapp_row *rows, si
     int32_t pitch;
     size_t i;
 
-    (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, screen_w, bottom), ND_BLACK);
+    nd_ui_paint_chrome_content(ui);
     (void)nd_draw_text(ui->draw, 5, 0, title, ui->font_xl, ND_WHITE);
     (void)nd_draw_line(ui->draw, 0, 30, screen_w, 30, ND_WHITE, 1);
 
@@ -601,8 +599,7 @@ int app_run(nd_ui *ui)
         nd_vlist menu;
         int32_t choice;
 
-        nd_vlist_init(&menu, ui, "Bluetooth", nd_btapp_menu, (size_t)ND_BTAPP_MENU_N,
-                      ND_BTAPP_ID);
+        nd_vlist_init(&menu, ui, "Bluetooth", nd_btapp_menu, (size_t)ND_BTAPP_MENU_N, ND_BTAPP_ID);
         choice = nd_vlist_show(&menu);
         if (choice == ND_WIDGET_BACK)
             return 0;

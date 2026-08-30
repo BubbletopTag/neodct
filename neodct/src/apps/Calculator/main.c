@@ -410,7 +410,7 @@ static void calc_draw(calc_app *a)
     int32_t w = 0;
     int32_t x;
 
-    (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, a->screen_w, a->content_bottom), ND_BLACK);
+    nd_ui_paint_chrome_content(ui);
 
     (void)nd_calc_display_text(&a->st, text, sizeof text);
     nd_ui_text_size(ui, text, ui->font_xl, &w, NULL);

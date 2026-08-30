@@ -197,7 +197,6 @@ static void print_banner(void)
     (void)printf("%s\n\n", line);
 }
 
-
 static void nap(double seconds)
 {
     struct timespec ts;
@@ -295,7 +294,9 @@ static void core_run(nd_fb *fb, bool idle_measure)
 
         nd_ui_update(&ui);
         nd_ui_show_pending_battery_warning(&ui);
-        key = nd_ui_read_keypress(&ui, 0.1);
+        /* 0.1 s unless an animated wallpaper owes a frame sooner. A still
+         * wallpaper, or none, gets exactly the poll this loop always had. */
+        key = nd_ui_read_keypress(&ui, nd_ui_frame_timeout(&ui, 0.1));
         if (key == ND_KEY_INCOMING_CALL) {
             /* Where the Python raised IncomingCall from inside read_keypress
              * and let it unwind to here. */

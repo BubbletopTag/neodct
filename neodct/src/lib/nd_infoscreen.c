@@ -63,7 +63,7 @@ int32_t nd_infoscreen_show(nd_ui *ui, const char *title, const char *value,
         softkey_text = "Back";
 
     /* Rows 0..145 only: the strip below is repainted by the bar at the end. */
-    (void)nd_draw_rect_fill(d, ND_RECT(0, 0, screen_w, content_bottom), ND_BLACK);
+    nd_ui_paint_chrome_content(ui);
 
     nd_text_size(ui->font_n, title, &tw, &th);
 

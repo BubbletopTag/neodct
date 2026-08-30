@@ -161,7 +161,7 @@ void nd_phonebook_center_message(nd_ui *ui, const char *text, double duration, c
     if (font == NULL)
         font = ui->font_xl; /* `font = font or ui.font_xl` */
 
-    (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, screen_w, content_bottom), ND_BLACK);
+    nd_ui_paint_chrome_content(ui);
     nd_ui_text_size(ui, text, font, &w, &h);
     y = nd_max32(10, floordiv(content_bottom - h, 2));
     (void)nd_draw_text(ui->draw, floordiv(screen_w - w, 2), y, text, font, fill);
@@ -175,17 +175,15 @@ void nd_phonebook_center_message(nd_ui *ui, const char *text, double duration, c
 
 void nd_phonebook_calling_screen(nd_ui *ui, const nd_contact *contact)
 {
-    int32_t screen_w;
     int32_t content_bottom;
     int32_t y;
 
     if (ui == NULL || ui->draw == NULL || contact == NULL)
         return;
 
-    screen_w = nd_ui_width(ui);
     content_bottom = nd_ui_content_bottom(ui);
 
-    (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, screen_w, content_bottom), ND_BLACK);
+    nd_ui_paint_chrome_content(ui);
 
     /* max(12, int(content_bottom * 0.30)) -- int() truncates toward zero, so
      * 145 * 0.30 is 43 and not 44. The three lines are then spaced by a hard

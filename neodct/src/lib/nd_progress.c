@@ -137,7 +137,6 @@ bool nd_progress_draw(nd_progress *p, int64_t done, int64_t total)
     nd_ui *ui;
     nd_draw *d;
     int32_t width;
-    int32_t bottom;
     int32_t percent;
     int32_t span;
     int32_t filled;
@@ -163,10 +162,9 @@ bool nd_progress_draw(nd_progress *p, int64_t done, int64_t total)
     ui = p->ui;
     d = ui->draw;
     width = nd_ui_width(ui);
-    bottom = nd_ui_content_bottom(ui);
     font_small = small_font_of(ui);
 
-    (void)nd_draw_rect_fill(d, ND_RECT(0, 0, width, bottom), ND_BLACK);
+    nd_ui_paint_chrome_content(ui);
 
     if (p->header != NULL && p->header[0] != '\0') {
         (void)nd_draw_text(d, 10, p->header_box.y0, p->header, font_small, ND_WHITE);

@@ -127,26 +127,36 @@ static void test_strings(void)
     CHECK_STR(*api.get_more_label, "Get more...", "GET_MORE_LABEL");
     CHECK_STR(api.exts[0], ".jpg", "SUPPORTED_WALLPAPERS[0]");
     CHECK_STR(api.exts[1], ".jpeg", "SUPPORTED_WALLPAPERS[1]");
+    /* .gif is third and last: animated wallpapers. The two above keep their
+     * indices so this is an addition, not a reshuffle. */
+    CHECK_STR(api.exts[2], ".gif", "SUPPORTED_WALLPAPERS[2]");
 
+    /* Reworded when .gif joined the list: the sentences now name both
+     * extensions, and the recommended size is the panel's real 240x175
+     * rather than the 240x240 the Python said. A .gif at that size animates
+     * and one at any other size is resampled every frame, which is worth a
+     * clause in the only place a person is told what to copy onto a card. */
     CHECK_STR(*api.get_more_help,
               "Get more wallpapers by adding an SD card!\n"
               "\n"
               "Format a card as FAT32, make a folder called \"wallpapers\" on it, and "
-              "copy your .jpg files into it.\n"
+              "copy your .jpg or .gif files into it.\n"
               "\n"
-              "240x240 pictures look best. Put the card in the phone and they appear in "
-              "this list. The phone can set a blank card up for you.",
+              "240x175 pictures look best, and a .gif that size animates. Put the card "
+              "in the phone and they appear in this list. The phone can set a blank "
+              "card up for you.",
               "GET_MORE_HELP");
     CHECK_STR(*api.get_more_help_with_card,
               "Get more wallpapers from your SD card!\n"
               "\n"
-              "Copy .jpg files into the \"wallpapers\" folder on the card that is in "
-              "the phone and they appear in this list. 240x240 looks best.",
+              "Copy .jpg or .gif files into the \"wallpapers\" folder on the card that "
+              "is in the phone and they appear in this list. 240x175 looks best, and a "
+              ".gif that size animates.",
               "GET_MORE_HELP_WITH_CARD");
     CHECK_STR(*api.sdcard_help,
               "A NeoDCT memory card is a FAT32 card with these folders on it:\n"
               "\n"
-              "  wallpapers   .jpg pictures\n"
+              "  wallpapers   .jpg and .gif pictures\n"
               "  tones        .mp3 ringtones\n"
               "  music        your music\n"
               "  backup_db    copies of your contacts\n"
@@ -393,10 +403,27 @@ static void test_about(void)
     CHECK(px_is(fx.canvas, line_pad, header_y, 255, 255, 255), "the divider starts at line_pad");
     CHECK(px_is(fx.canvas, 240 - line_pad, header_y, 255, 255, 255),
           "and ends at screen_w - line_pad");
-    CHECK(px_is(fx.canvas, line_pad - 1, header_y, 0, 0, 0), "one pixel left of it is black");
-    CHECK(px_is(fx.canvas, 240 - line_pad + 1, header_y, 0, 0, 0),
-          "one pixel right of it is black");
-    CHECK(px_is(fx.canvas, 0, 0, 0, 0, 0), "the screen was cleared to black first");
+    /* Just past each end the divider must not have drawn -- so the pixel
+     * there is whatever the framework painted as the background, and the same
+     * goes for the top-left corner. That used to be spelled "is black", which
+     * stopped being the background when the framework started drawing the
+     * wallpaper behind app chrome. Asking the UI what it would have painted
+     * says the same thing on either. */
+    {
+        const nd_image *bg = nd_ui_chrome_wallpaper(&fx.ui);
+        nd_color c;
+
+#define BG_AT(X, Y) (bg != NULL ? nd_image_get_px(bg, (X), (Y)) : ND_BLACK)
+        c = BG_AT(line_pad - 1, header_y);
+        CHECK(px_is(fx.canvas, line_pad - 1, header_y, c.r, c.g, c.b),
+              "one pixel left of it is background, not divider");
+        c = BG_AT(240 - line_pad + 1, header_y);
+        CHECK(px_is(fx.canvas, 240 - line_pad + 1, header_y, c.r, c.g, c.b),
+              "one pixel right of it is background, not divider");
+        c = BG_AT(0, 0);
+        CHECK(px_is(fx.canvas, 0, 0, c.r, c.g, c.b), "the screen was cleared first");
+#undef BG_AT
+    }
 
     /* The body is grey (128,128,128); a fully-covered pixel of it is exactly
      * that, since the text is composited onto black. */
@@ -509,8 +536,7 @@ static void test_messages_style_writes_the_setting(void)
     int rc = -1;
     uint64_t frames = 0u;
 
-    CHECK_STR(ND_SETAPP_MSGSTYLE_KEY, "system.ui.messages_style",
-              "the key the Messages app reads");
+    CHECK_STR(ND_SETAPP_MSGSTYLE_KEY, "system.ui.messages_style", "the key the Messages app reads");
 
     run_script(PICK_CHAT, ND_ARRAY_LEN(PICK_CHAT), &rc, &frames);
     CHECK_INT(rc, 0, "Back out returns 0");

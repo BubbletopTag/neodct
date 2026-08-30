@@ -207,6 +207,15 @@ void nd_appsel_draw(nd_appsel *s)
     (void)nd_ui_present(ui);
 }
 
+/* See nd_ui_set_repaint(): the menu is the screen an animated wallpaper is
+ * most visible on, and it is a blocking loop. */
+static void appsel_repaint(void *ctx)
+{
+    nd_appsel_draw((nd_appsel *)ctx);
+}
+
+static int32_t appsel_loop(nd_appsel *s);
+
 int32_t nd_appsel_show(nd_appsel *s)
 {
     if (s == NULL)
@@ -229,6 +238,19 @@ int32_t nd_appsel_show(nd_appsel *s)
 
     nd_appsel_draw(s);
 
+    /* The loop is a separate function only so the repainter is put back on
+     * every way out of it, of which there are three. */
+    {
+        nd_ui_repaint saved = nd_ui_set_repaint(s->ui, appsel_repaint, s);
+        int32_t choice = appsel_loop(s);
+
+        nd_ui_restore_repaint(s->ui, saved);
+        return choice;
+    }
+}
+
+static int32_t appsel_loop(nd_appsel *s)
+{
     for (;;) {
         int32_t key = nd_ui_wait_for_key(s->ui);
 

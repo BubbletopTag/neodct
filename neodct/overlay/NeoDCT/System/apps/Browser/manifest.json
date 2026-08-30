@@ -1,5 +1,6 @@
 {
     "name": "Browser",
+    "useWallpaper": false,
     "id": "11",
     "icon": "icon.png",
     "exec": "main.py"

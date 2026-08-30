@@ -308,7 +308,6 @@ void nd_dialer_draw_call(nd_ui *ui, const char *number, const char *name)
     const char *label;
     int32_t secs = -1;
     int32_t screen_w;
-    int32_t screen_h;
     int32_t content_bottom;
     int32_t label_x;
     int32_t label_y;
@@ -323,12 +322,11 @@ void nd_dialer_draw_call(nd_ui *ui, const char *number, const char *name)
         return;
     d = ui->draw;
     screen_w = nd_ui_width(ui);
-    screen_h = nd_ui_height(ui);
     content_bottom = nd_ui_content_bottom(ui);
 
     /* The FULL screen, softkey strip included -- unlike most widgets, which
      * clear rows 0..content_bottom only. call_screen.py:118. */
-    (void)nd_draw_rect_fill(d, ND_RECT(0, 0, screen_w, screen_h), ND_BLACK);
+    nd_ui_paint_chrome_full(ui);
 
     draw_handset_icon(d, 8, 10);
 
@@ -395,7 +393,7 @@ void nd_dialer_draw_incoming(nd_ui *ui, const char *caller_text, bool blink_on)
     screen_h = nd_ui_height(ui);
     content_bottom = nd_ui_content_bottom(ui);
 
-    (void)nd_draw_rect_fill(d, ND_RECT(0, 0, screen_w, screen_h), ND_BLACK);
+    nd_ui_paint_chrome_full(ui);
 
     /* Caller: name or number, centred across the top by INK width, so the
      * centring shifts with which letters are in it. */

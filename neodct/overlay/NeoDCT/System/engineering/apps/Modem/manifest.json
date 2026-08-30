@@ -1,5 +1,6 @@
 {
     "name": "ModemInfo",
+    "useWallpaper": false,
     "id": "9005",
     "icon": "icon.png",
     "exec": "main.py"

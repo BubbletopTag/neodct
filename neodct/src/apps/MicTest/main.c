@@ -46,9 +46,9 @@
 #include "nd_mic.h"
 #include "nd_paths.h"
 #include "nd_proc.h"
-#include "nd_vclock.h"
 #include "nd_types.h"
 #include "nd_ui.h"
+#include "nd_vclock.h"
 #include "nd_widgets.h"
 
 const char *const nd_mictest_title = "MicTest";
@@ -162,7 +162,7 @@ static void draw_waveform(nd_ui *ui, const char *label, const nd_mic_column *col
     band.y0 = 0;
     band.x1 = ND_UI_W - 1;
     band.y1 = ND_UI_H - 1;
-    (void)nd_draw_rect_fill(ui->draw, band, ND_BLACK);
+    nd_ui_paint_chrome(ui, band);
 
     (void)nd_draw_text(ui->draw, 5, 0, nd_mictest_title, ui->font_xl, ND_WHITE);
     (void)nd_draw_text(ui->draw, 5, 22, label, ui->font_s, ND_GRAY);

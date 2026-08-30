@@ -157,7 +157,7 @@ void nd_textinput_draw(nd_textinput *t, bool blink_state)
     /* Rows 0..content_bottom only. A caller's earlier softkey update survives
      * into this frame -- widget-textinput.png still carries the "Select" the
      * PagedList before it painted. */
-    (void)nd_draw_rect_fill(d, ND_RECT(0, 0, screen_w, content_bottom), ND_BLACK);
+    nd_ui_paint_chrome_content(ui);
 
     /* No fit_text: a long title runs off the right edge. Port the bug. */
     (void)nd_draw_text(d, 5, 5, nz(t->title), ui->font_xl, ND_WHITE);
@@ -313,11 +313,31 @@ nd_widget_result nd_textinput_handle_key(nd_textinput *t, int32_t key)
     return ND_WIDGET_RESULT_TYPED;
 }
 
+/* See nd_ui_set_repaint(). The cursor is carried by POINTER so a repaint
+ * redraws the field in whatever blink phase it is actually in -- it must not
+ * toggle it. "An idle field never blinks" is a documented quirk of this
+ * widget (see the header), and an animated wallpaper is not a reason for it
+ * to start. */
+typedef struct {
+    nd_textinput *t;
+    const bool *cursor_on;
+} textinput_repaint_ctx;
+
+static void textinput_repaint(void *ctx)
+{
+    const textinput_repaint_ctx *c = ctx;
+
+    nd_textinput_draw(c->t, *c->cursor_on);
+}
+
 const char *nd_textinput_show(nd_textinput *t)
 {
     nd_softkey softkey;
     bool cursor_on = true;
     double last_blink;
+    textinput_repaint_ctx rctx;
+    nd_ui_repaint saved;
+    const char *out;
 
     if (t == NULL)
         return NULL;
@@ -327,6 +347,10 @@ const char *nd_textinput_show(nd_textinput *t)
 
     last_blink = nd_time_now();
     nd_textinput_draw(t, cursor_on);
+
+    rctx.t = t;
+    rctx.cursor_on = &cursor_on;
+    saved = nd_ui_set_repaint(t->ui, textinput_repaint, &rctx);
 
     for (;;) {
         int32_t key;
@@ -346,12 +370,19 @@ const char *nd_textinput_show(nd_textinput *t)
             continue; /* `if key is None: continue` */
 
         action = nd_textinput_handle_key(t, key);
-        if (action == ND_WIDGET_RESULT_CONFIRM)
-            return t->text;
-        if (action == ND_WIDGET_RESULT_CANCEL)
-            return NULL;
+        if (action == ND_WIDGET_RESULT_CONFIRM) {
+            out = t->text;
+            break;
+        }
+        if (action == ND_WIDGET_RESULT_CANCEL) {
+            out = NULL;
+            break;
+        }
         if (action == ND_WIDGET_RESULT_TYPED || action == ND_WIDGET_RESULT_BACKSPACE ||
             action == ND_WIDGET_RESULT_MODE)
             nd_textinput_draw(t, cursor_on);
     }
+
+    nd_ui_restore_repaint(t->ui, saved);
+    return out;
 }

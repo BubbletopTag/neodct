@@ -57,8 +57,8 @@
 
 #include <sqlite3.h>
 
+#include "nd_app.h"
 #include "nd_capture.h"
-#include "nd_settings.h"
 #include "nd_contacts.h"
 #include "nd_db.h"
 #include "nd_draw.h"
@@ -70,6 +70,7 @@
 #include "nd_keypad.h"
 #include "nd_modem.h"
 #include "nd_paths.h"
+#include "nd_settings.h"
 #include "nd_svc.h"
 #include "nd_text.h"
 #include "nd_types.h"
@@ -312,10 +313,9 @@ static bool api_open(void)
            g_api.thread_messages != NULL && g_api.thread_mark_read != NULL &&
            g_api.style_options != NULL && g_api.send_flow_to != NULL &&
            g_api.show_write_prefill != NULL && g_api.show_threads != NULL &&
-           g_api.composer_title != NULL &&
-           g_api.show_thread != NULL &&
-           g_api.run != NULL && g_api.open_message != NULL && g_api.open_inbox != NULL &&
-           g_api.shutdown != NULL && g_api.fetch_inbox != NULL && g_api.fetch_outbox != NULL &&
+           g_api.composer_title != NULL && g_api.show_thread != NULL && g_api.run != NULL &&
+           g_api.open_message != NULL && g_api.open_inbox != NULL && g_api.shutdown != NULL &&
+           g_api.fetch_inbox != NULL && g_api.fetch_outbox != NULL &&
            g_api.fetch_inbox_one != NULL && g_api.mark_read != NULL && g_api.del_inbox != NULL &&
            g_api.del_outbox != NULL && g_api.save_outbox != NULL && g_api.wrap_text != NULL &&
            g_api.format_timestamp != NULL && g_api.codepoints != NULL &&
@@ -348,6 +348,49 @@ typedef struct {
     nd_input *input;
     int write_fd;
 } fixture;
+
+/* ============ WHY THE FIXTURE HAS A WALLPAPER ============
+ *
+ * The reference frames this test compares against come out of nd-shoot, whose
+ * app group runs every stock app with Palestine.jpg set. Since the framework
+ * started drawing the wallpaper behind app chrome, that is what those frames
+ * contain, and a fixture that rendered on black would differ from them in
+ * three quarters of its pixels -- in the background, not in anything Messages
+ * did.
+ *
+ * So the fixture establishes the same two facts nd_ui_init_app() does for a
+ * real app process: manifest.json's "useWallpaper", read from the app's OWN
+ * manifest rather than assumed here, and the wallpaper itself. ND_ROOT points
+ * at the overlay for the two reads and is put back afterwards.
+ *
+ * `font_path` is <overlay>/NeoDCT/System/ui/resources/fonts/font.ttf, which is
+ * where the overlay root is recovered from -- resolve_font() has already done
+ * the searching. */
+static void fx_apply_reference_wallpaper(fixture *fx, const char *font_path)
+{
+    static const char *const FONT_TAIL = "/NeoDCT/System/ui/resources/fonts/font.ttf";
+    char overlay[1024];
+    char saved[ND_PATH_MAX];
+    size_t flen = strlen(font_path);
+    size_t tlen = strlen(FONT_TAIL);
+
+    fx->ui.app_use_wallpaper = false;
+    if (flen <= tlen || strcmp(font_path + (flen - tlen), FONT_TAIL) != 0)
+        return;
+    if (flen - tlen >= sizeof overlay)
+        return;
+    memcpy(overlay, font_path, flen - tlen);
+    overlay[flen - tlen] = '\0';
+
+    (void)nd_strlcpy(saved, nd_path_root(), sizeof saved);
+    if (nd_path_set_root(overlay) != ND_OK)
+        return;
+    fx->ui.app_use_wallpaper = nd_app_manifest_use_wallpaper("/NeoDCT/System/apps/Messages");
+    if (fx->ui.app_use_wallpaper)
+        nd_ui_set_wallpaper(&fx->ui,
+                            nd_ui_load_wallpaper("/NeoDCT/System/wallpapers/Palestine.jpg"));
+    (void)nd_path_set_root(saved[0] != '\0' ? saved : NULL);
+}
 
 static bool fx_init(fixture *fx)
 {
@@ -391,11 +434,17 @@ static bool fx_init(fixture *fx)
     fx->ui.modem = NULL;
     /* Only the core's own bar is transparent, and this context is not it. */
     fx->ui.softkey_exists = true;
+    fx_apply_reference_wallpaper(fx, path);
     return true;
 }
 
 static void fx_free(fixture *fx)
 {
+    /* The wallpaper and the chrome copy the fixture caused to be loaded. A
+     * real app process ends and the kernel takes them back; a test process
+     * runs sixty fixtures and LeakSanitizer counts every one. */
+    nd_ui_invalidate_chrome(&fx->ui);
+    nd_ui_set_wallpaper(&fx->ui, NULL);
     if (fx->write_fd >= 0)
         (void)close(fx->write_fd);
     if (fx->input != NULL)
@@ -1782,9 +1831,8 @@ static void test_threads_unknown_recipient(void)
 
             /* Spelled either way -- the raw number the list carries, or the
              * key the grouping produced. */
-            CHECK_INT((int)g_api.thread_messages(ND_MSG_PEER_UNKNOWN, b,
-                                                 (size_t)ND_MSG_BUBBLES_MAX),
-                      1);
+            CHECK_INT(
+                (int)g_api.thread_messages(ND_MSG_PEER_UNKNOWN, b, (size_t)ND_MSG_BUBBLES_MAX), 1);
             free(b);
         }
     }
@@ -1935,10 +1983,10 @@ static void test_thread_screen_navigates(void)
         fx_free(&fx);
         return;
     }
-    script_key(&fx, ND_KEY_UP);   /* off the box, onto the last bubble */
-    script_key(&fx, ND_KEY_UP);   /* and up through the transcript     */
+    script_key(&fx, ND_KEY_UP); /* off the box, onto the last bubble */
+    script_key(&fx, ND_KEY_UP); /* and up through the transcript     */
     script_key(&fx, ND_KEY_UP);
-    script_key(&fx, ND_KEY_UP);   /* already at the top; must not wrap */
+    script_key(&fx, ND_KEY_UP); /* already at the top; must not wrap */
     script_key(&fx, ND_KEY_DOWN);
     hold_key(&fx, ND_KEY_CLEAR);
 

@@ -1,5 +1,6 @@
 {
     "name": "Bluetooth",
+    "useWallpaper": false,
     "id": "9007",
     "icon": "icon.png",
     "exec": "main.py"

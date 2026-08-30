@@ -1,5 +1,6 @@
 {
     "name": "Koki Mobile",
+    "useWallpaper": false,
     "id": "10",
     "icon": "icon.png",
     "exec": "main.py"

@@ -725,6 +725,9 @@ nd_image *nd_image_open(const char *path)
         img = nd_image_load_png(path);
     else if (got >= 2u && magic[0] == 0xFFu && magic[1] == 0xD8u)
         img = nd_image_load_jpeg(path);
+    else if (got >= 6u && memcmp(magic, "GIF8", 4) == 0 &&
+             (memcmp(magic + 4u, "7a", 2) == 0 || memcmp(magic + 4u, "9a", 2) == 0))
+        img = nd_image_load_gif(path);
 
     /* A missing or undecodable file is None in the Python, not an exception
      * anybody catches. Callers fall back to a placeholder. */

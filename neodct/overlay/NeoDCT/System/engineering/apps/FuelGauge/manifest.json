@@ -1,5 +1,6 @@
 {
     "name": "FuelGauge",
+    "useWallpaper": false,
     "id": "9004",
     "icon": "icon.png",
     "exec": "main.py"

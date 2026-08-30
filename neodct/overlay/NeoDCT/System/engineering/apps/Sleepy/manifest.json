@@ -1,5 +1,6 @@
 {
     "name": "Sleepy",
+    "useWallpaper": false,
     "id": "9008",
     "icon": "icon.png",
     "exec": "main.py"
