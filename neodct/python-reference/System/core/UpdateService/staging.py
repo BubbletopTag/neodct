@@ -20,6 +20,11 @@ STATE_DIR = "/NeoDCT/User/.ndsys"
 
 PENDING_RECORD = "pending.prop"
 PENDING_IMAGE = "pending.img"
+# Written beside a loose staged image so the initramfs has a signature to
+# check. A .ndsw carries both members itself, so stage_package() needs no
+# equivalent -- ndsys-apply.sh unzips them straight out of the package.
+PENDING_MANIFEST = "pending.manifest.json"
+PENDING_SIGNATURE = "pending.manifest.sig"
 INSTALLED_RECORD = "installed.prop"
 RESULT_RECORD = "last_result.prop"
 
@@ -161,11 +166,19 @@ def _unlink(path):
         pass
 
 
-def stage(parsed_manifest, image_path, state_dir=None):
+def stage(parsed_manifest, image_path, state_dir=None, signature=None):
     """Make `image_path` the pending update described by `parsed_manifest`.
 
     The image is *moved* into the state directory -- a system image is tens
     of megabytes and the user partition cannot be asked to hold two copies.
+
+    `signature` is the detached release signature over the manifest bytes.
+    A loose image is not a package, so unlike stage_package() there is
+    nothing for the applier to read a signature OUT of at boot -- it has to
+    be written beside the image here or the initramfs has nothing to check
+    and will refuse to install (SECURITY-AUDIT.md section 3, and the gate in
+    ndsys-apply.sh). It is optional only because this path predates the gate;
+    staging without one produces an update the phone will not install.
     """
     state_dir = str(state_dir or STATE_DIR)
     os.makedirs(state_dir, exist_ok=True)
@@ -174,7 +187,17 @@ def stage(parsed_manifest, image_path, state_dir=None):
     # Drop any earlier attempt before its record, so a crash here reads as
     # "nothing pending" rather than "pending, image missing".
     _unlink(os.path.join(state_dir, PENDING_RECORD))
+    _unlink(os.path.join(state_dir, PENDING_MANIFEST))
+    _unlink(os.path.join(state_dir, PENDING_SIGNATURE))
     os.replace(str(image_path), image)
+    if signature is not None:
+        # The exact bytes the signature covers, never a re-serialisation:
+        # manifest.py keeps `raw` for this reason and re-encoding would
+        # change the whitespace the signer signed.
+        with open(os.path.join(state_dir, PENDING_MANIFEST), "wb") as handle:
+            handle.write(parsed_manifest.raw)
+        with open(os.path.join(state_dir, PENDING_SIGNATURE), "wb") as handle:
+            handle.write(signature)
     _sync_dir(state_dir)
 
     verity = parsed_manifest.verity
@@ -212,11 +235,17 @@ def stage_package(parsed_manifest, package_path, image_bytes, state_dir=None):
     package, which the caller reads from the zip.
 
     The signature is checked here, by the running system, before this is
-    called. The initramfs has no crypto and cannot repeat that, so the
-    record carries the sha256 the verified manifest gave, and the applier
-    checks the bytes it is about to write against it. Swapping the card
-    between staging and reboot therefore fails the hash rather than
-    installing something nobody signed.
+    called -- and checked AGAIN by the initramfs, which now carries its own
+    verifier and the release key (nd-verify, packed by mkinitramfs.py). That
+    second check is not belt and braces: this record and the root hash it
+    leads to live on the WRITABLE partition, so without it anything able to
+    write /NeoDCT/User could stage its own image and have the next boot
+    verify cleanly against it forever (SECURITY-AUDIT.md section 3).
+
+    Nothing extra has to be written for it here. A .ndsw carries manifest.json
+    and manifest.sig as members, so ndsys-apply.sh reads the signature out of
+    the same package it streams the image from, and compares every field of
+    this record against the signed manifest before anything reaches dd.
     """
     state_dir = str(state_dir or STATE_DIR)
     os.makedirs(state_dir, exist_ok=True)

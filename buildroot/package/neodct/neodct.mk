@@ -111,4 +111,23 @@ define NEODCT_INSTALL_TARGET_CMDS
 	$(NEODCT_MAKE_ENV) $(MAKE) -C $(@D) DESTDIR=$(TARGET_DIR) install
 endef
 
+# nd-verify goes to BINARIES_DIR, not to the rootfs.
+#
+# It is the update signature check the initramfs runs before it dd's an image
+# over the system partition -- SECURITY-AUDIT.md section 3 -- and it is a
+# statically linked 4 MB binary because an initramfs cannot borrow the
+# rootfs's libcrypto. Nothing in the running system calls it: the Update app
+# checks the same signature through libneodct, which every process already
+# maps. So installing it into TARGET_DIR would put those 4 MB into the
+# read-only squashfs where they would never be executed.
+#
+# BINARIES_DIR is where boot artefacts live, beside the kernel and the
+# initramfs it gets packed into, and buildroot does not sweep it into any
+# filesystem image. post-image-neodct.sh hands the path to mkinitramfs.py.
+NEODCT_INSTALL_IMAGES = YES
+
+define NEODCT_INSTALL_IMAGES_CMDS
+	$(NEODCT_MAKE_ENV) $(MAKE) -C $(@D) BOOTDESTDIR=$(BINARIES_DIR) install-boot
+endef
+
 $(eval $(generic-package))

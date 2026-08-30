@@ -160,6 +160,7 @@ APPRUN_SRCS := $(wildcard apprun/*.c)
 MEDIA_SRCS  := $(wildcard mediawidget/*.c)
 SHOOT_SRCS  := $(wildcard tools/nd_shoot*.c)
 SELF_SRCS   := $(wildcard tools/nd_selftest*.c)
+VERIFY_SRCS := $(wildcard tools/nd_verify*.c)
 DISPLAYD_SRCS := $(wildcard displayd/*.c)
 TEST_SRCS   := $(wildcard test/unit/*.c)
 
@@ -172,6 +173,7 @@ APPRUN_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(APPRUN_SRCS))
 MEDIA_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(MEDIA_SRCS))
 SHOOT_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(SHOOT_SRCS))
 SELF_OBJS   := $(patsubst %.c,$(OBJDIR)/%.o,$(SELF_SRCS))
+VERIFY_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(VERIFY_SRCS))
 DISPLAYD_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(DISPLAYD_SRCS))
 
 TEST_BINS := $(patsubst test/unit/%.c,$(TESTDIR)/%,$(TEST_SRCS))
@@ -192,6 +194,7 @@ TARGETS += $(if $(APPRUN_SRCS),$(BINDIR)/nd-apprun)
 TARGETS += $(if $(MEDIA_SRCS),$(BINDIR)/neodct-play)
 TARGETS += $(if $(SHOOT_SRCS),$(BINDIR)/nd-shoot)
 TARGETS += $(if $(SELF_SRCS),$(BINDIR)/nd-selftest)
+TARGETS += $(if $(VERIFY_SRCS),$(BINDIR)/nd-verify)
 TARGETS += $(if $(DISPLAYD_SRCS),$(BINDIR)/neodct_displayd)
 TARGETS += $(APP_SOS)
 
@@ -224,6 +227,7 @@ skipped:
 	$(Q)$(if $(APPRUN_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-apprun (no apprun/*.c yet)';)
 	$(Q)$(if $(SHOOT_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-shoot (no tools/nd_shoot*.c yet)';)
 	$(Q)$(if $(SELF_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-selftest (no tools/nd_selftest*.c yet)';)
+	$(Q)$(if $(VERIFY_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-verify (no tools/nd_verify*.c yet)';)
 	$(Q)$(if $(TEST_SRCS),,printf '  %-7s %s\n' 'SKIP' 'unit tests (no test/unit/*.c yet)';)
 
 $(OBJDIR)/%.o: %.c
@@ -292,6 +296,34 @@ $(BINDIR)/nd-shoot: $(SHOOT_OBJS) $(LIB)
 
 $(BINDIR)/nd-selftest: $(SELF_OBJS) $(LIB)
 	$(LINK_BIN)
+
+# ---- nd-verify: the initramfs signature check ----------------------
+#
+# The one binary here that does NOT link libneodct, and the one that is
+# linked statically. Both are deliberate and nd_verify.c's header explains
+# why: it runs inside the initramfs, before /NeoDCT exists, and a dynamic
+# build would mean shipping libcrypto.so.3 (5.8 MB) beside it instead of a
+# self-contained 4.3 MB. libneodct would drag in freetype, sqlite, libpng
+# and libjpeg for a program that only needs RSA and SHA-256.
+#
+# Static is attempted and NOT required: a developer host without a static
+# libcrypto still gets a working nd-verify for `make test`, it just cannot
+# go in an initramfs. Buildroot's staging always has libcrypto.a, so the
+# real image always gets the static one. The fallback says so out loud
+# rather than silently producing a binary the boot cannot use.
+VERIFY_LIBS := $(shell $(PKG_CONFIG) --libs libcrypto 2>/dev/null)
+
+$(BINDIR)/nd-verify: $(VERIFY_OBJS)
+	$(Q)mkdir -p $(dir $@)
+	$(say) LINK $@
+	$(Q)if $(CC) -static -o $@.static $^ $(LDFLAGS_ALL) $(VERIFY_LIBS) \
+	        > $@.link.log 2>&1; then \
+	    mv -f $@.static $@; rm -f $@.link.log; \
+	else \
+	    rm -f $@.static; \
+	    printf '  %-7s %s\n' 'NOTE' 'nd-verify: static link failed (see $@.link.log); linking dynamically'; \
+	    $(CC) -o $@ $^ $(LDFLAGS_ALL) $(VERIFY_LIBS); \
+	fi
 
 # One binary per test file, each with its own main(). No test framework: a
 # test that needs a framework to express itself is usually testing the
@@ -417,6 +449,31 @@ install: all
 	            $(INSTALL) -m 0755 $(STUB_SO) $$d/app.so; }; \
 	    done; \
 	fi
+
+# ---- boot artefacts, which do NOT belong in the rootfs -------------
+#
+# nd-verify is 4.3 MB of statically linked OpenSSL and its only caller is
+# neodct/initramfs/ndsys-apply.sh. Installing it into the target tree would
+# put those 4.3 MB into the read-only squashfs as well, where nothing would
+# ever run it -- the Update app checks the same signature through libneodct,
+# which is already mapped. So it goes to $(BOOTDESTDIR), which buildroot's
+# NEODCT_INSTALL_IMAGES_CMDS points at $(BINARIES_DIR), beside the kernel and
+# the initramfs it is packed into.
+BOOTDESTDIR ?= $(BUILD)/boot
+
+# STRIP comes from buildroot's TARGET_CONFIGURE_OPTS in the cross build and
+# defaults to the host's for a plain `make`. Stripping matters here in a way
+# it does not for the rootfs, which buildroot strips itself: BINARIES_DIR is
+# not touched, and unstripped this binary is 5.8 MB of debug info that would
+# be packed into the initramfs and, on the Luckfox, into the kernel image.
+STRIP ?= strip
+
+install-boot: all
+	$(Q)$(INSTALL) -d $(BOOTDESTDIR)
+	$(Q)$(if $(VERIFY_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-verify $(BOOTDESTDIR)/,:)
+	$(Q)$(if $(VERIFY_SRCS),$(STRIP) $(BOOTDESTDIR)/nd-verify 2>/dev/null || true,:)
+
+.PHONY: install-boot
 
 # ------------------------------------------------------------------ #
 # Housekeeping

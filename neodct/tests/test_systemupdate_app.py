@@ -647,11 +647,21 @@ def test_what_the_app_stages_is_what_the_applier_installs(env, tmp_path):
     # The card stands in for a mounted one: the applier installs straight
     # out of the .ndsw sitting on it, so the card has to be reachable at
     # boot the way it is on the phone.
+    # The boot-side signature gate, which the applier now runs before it
+    # writes anything (SECURITY-AUDIT.md section 3). nd-verify is a shim over
+    # openssl(1) so this test does not need the C tree built; the key is the
+    # suite's, which is the one make_ndsw signed with.
+    verifier = tmp_path / "nd-verify"
+    verifier.write_text('#!/bin/sh\nexec openssl dgst -sha256 -verify "$3" '
+                        '-signature "$2" "$1" >/dev/null 2>&1\n')
+    verifier.chmod(0o755)
     script = (
         'STATE_DIR="%s"; MNT_USER="%s"; SYS_DEV="%s"; USER_MOUNTED=1\n'
         'MNT_SDCARD="%s"; NDSYS_CARD_PREMOUNTED=1\n'
+        'NDSYS_VERIFY_BIN="%s"; NDSYS_RELEASE_KEY="%s"; NDSYS_TMPDIR="%s"\n'
         '. "%s"\napply_pending\n'
-        % (env.state, tmp_path / "user", device, env.card, APPLY_SH)
+        % (env.state, tmp_path / "user", device, env.card,
+           verifier, write_public_key(tmp_path), tmp_path / "run", APPLY_SH)
     )
     result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
 

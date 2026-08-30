@@ -296,7 +296,9 @@ EOF
 }
 
 clear_pending() {
-    rm -f "$STATE_DIR/pending.prop" "$STATE_DIR/pending.img" 2>/dev/null
+    rm -f "$STATE_DIR/pending.prop" "$STATE_DIR/pending.img" \
+          "$STATE_DIR/pending.manifest.json" "$STATE_DIR/pending.manifest.sig" \
+          2>/dev/null
     sync
     return 0
 }
@@ -316,6 +318,145 @@ package_image_size() {
 hash_prefix() {
     blocks=$((${2} / 4096))
     dd if="$1" bs=4096 count="$blocks" 2>/dev/null | sha256sum | cut -d' ' -f1
+}
+
+# --- the release signature -----------------------------------------------
+#
+# SECURITY-AUDIT.md section 3, the critical finding, and the reason this
+# section exists at all:
+#
+#     the running system checks the signature, writes pending.prop and
+#     installed.prop to the WRITABLE partition, and the initramfs then
+#     believes both.
+#
+# So a process that can write /NeoDCT/User stages its own image, records its
+# own verity root hash, and every boot after that verifies cleanly against
+# it. dm-verity was an integrity guarantee and not an authenticity one, and
+# an update replaces only the rootfs, so nothing removes the result.
+#
+# The check belongs HERE because the initramfs is the one link in that chain
+# an attacker cannot rewrite: it is built into the kernel image and replaced
+# only by a reflash, and so are the verifier and the public key it carries.
+# SECURITY-PLAN.md section 5 puts it in Phase 0.
+#
+# What is verified is manifest.json against manifest.sig -- the same detached
+# RSA/SHA-256 signature the Update app checked, over the same bytes, with the
+# same key. Then every field the record claims is compared against the field
+# the SIGNED manifest actually carries, so pending.prop stops being a trust
+# input and becomes a cache that has to agree with something signed.
+: "${NDSYS_VERIFY_BIN:=/bin/nd-verify}"
+: "${NDSYS_RELEASE_KEY:=/neodct-release.pub}"
+: "${NDSYS_TMPDIR:=/run/ndsys}"
+
+# Set from neodct.unsigned=1 on the kernel cmdline by init. The cmdline is
+# the U-Boot environment on the phone and -append in QEMU: not writable from
+# a running system, which is the whole point -- an escape hatch reachable
+# from the partition being defended would not be one.
+#
+# It exists because engineering mode can install an unsigned package on
+# purpose (apps/Update/main.c), and that is a real developer workflow. What
+# it cannot be is the default.
+: "${NDSYS_ALLOW_UNSIGNED:=}"
+
+# One field out of a manifest.json, by exact line.
+#
+# The manifest is json.dumps(indent=2), so a value is always alone on its
+# line at a known indent and a JSON string can never contain a raw newline.
+# Anchoring on the indent and the key name is therefore exact, and no line
+# other than the real one can match -- a changelog full of escaped quotes and
+# braces is still one line beginning with "changelog".
+#
+# This runs only on a manifest whose signature has ALREADY been checked, so
+# the parsing is of our own generator's output, not of a stranger's file.
+manifest_str() {   # manifest_str FILE INDENT KEY
+    sed -n "s/^$2\"$3\": \"\(.*\)\",\{0,1\}$/\1/p" "$1" 2>/dev/null | head -n1
+}
+
+manifest_num() {   # manifest_num FILE INDENT KEY
+    sed -n "s/^$2\"$3\": \([0-9][0-9]*\),\{0,1\}$/\1/p" "$1" 2>/dev/null | head -n1
+}
+
+# Put manifest.json and manifest.sig somewhere readable and echo the
+# directory. A .ndsw carries both; a loose staged image has them written
+# beside it by the staging code that produced it.
+manifest_pair() {   # manifest_pair IMAGE PACKAGE
+    dir="$NDSYS_TMPDIR/manifest"
+    rm -rf "$dir" 2>/dev/null
+    mkdir -p "$dir" 2>/dev/null || return 1
+    if [ -n "$2" ]; then
+        unzip -p "$1" manifest.json > "$dir/manifest.json" 2>/dev/null
+        unzip -p "$1" manifest.sig  > "$dir/manifest.sig"  2>/dev/null
+    else
+        cat "$STATE_DIR/pending.manifest.json" > "$dir/manifest.json" 2>/dev/null
+        cat "$STATE_DIR/pending.manifest.sig"  > "$dir/manifest.sig"  2>/dev/null
+    fi
+    [ -s "$dir/manifest.json" ] || return 1
+    [ -s "$dir/manifest.sig" ] || return 1
+    echo "$dir"
+}
+
+# Every field of the record that the signature covers. A mismatch means the
+# record was written by something other than the code that read this signed
+# manifest -- which is exactly the attack.
+#
+# An extraction that comes back EMPTY is a mismatch too, for every field but
+# the salt. The manifest is json.dumps(indent=2), so the patterns above are
+# exact for what mkupdate.py writes; if that formatting ever changes, this
+# fails closed and refuses the update rather than quietly comparing "" with
+# "" and letting a forged record through.
+field_agrees() {   # field_agrees KEY SIGNED-VALUE RECORD [may-be-empty]
+    _got="$(getprop "$1" "$3")"
+    if [ -z "$2" ] && [ -z "${4:-}" ]; then
+        log "$1: nothing readable in the signed manifest"
+        return 1
+    fi
+    if [ "$2" != "$_got" ]; then
+        log "$1: the record says '$_got', the signed manifest says '$2'"
+        return 1
+    fi
+    return 0
+}
+
+record_matches_manifest() {   # record_matches_manifest MANIFEST RECORD
+    _bad=0
+    field_agrees sha256 "$(manifest_str "$1" '  ' sha256)" "$2" || _bad=1
+    field_agrees version "$(manifest_str "$1" '  ' version)" "$2" || _bad=1
+    field_agrees platform "$(manifest_str "$1" '  ' platform)" "$2" || _bad=1
+    field_agrees buildtime "$(manifest_num "$1" '  ' buildtime)" "$2" || _bad=1
+    field_agrees verity_root_hash \
+        "$(manifest_str "$1" '    ' root_hash)" "$2" || _bad=1
+    field_agrees verity_block_size \
+        "$(manifest_num "$1" '    ' block_size)" "$2" || _bad=1
+    field_agrees verity_image_blocks \
+        "$(manifest_num "$1" '    ' image_blocks)" "$2" || _bad=1
+    # The one optional field: verity.salt may genuinely be absent, and then
+    # both sides are empty and that agreement is the right answer.
+    field_agrees verity_salt "$(manifest_str "$1" '    ' salt)" "$2" empty || _bad=1
+    [ "$_bad" = 0 ]
+}
+
+# The gate. True means "this image is the one the release key signed, and the
+# record describing it says what the signed manifest says".
+release_signature_ok() {   # release_signature_ok IMAGE PACKAGE RECORD
+    if [ ! -x "$NDSYS_VERIFY_BIN" ]; then
+        log "no signature verifier at $NDSYS_VERIFY_BIN"
+        return 1
+    fi
+    if [ ! -r "$NDSYS_RELEASE_KEY" ]; then
+        log "no release key at $NDSYS_RELEASE_KEY"
+        return 1
+    fi
+    dir="$(manifest_pair "$1" "$2")" || {
+        log "the update carries no manifest and signature to check"
+        return 1
+    }
+    if ! "$NDSYS_VERIFY_BIN" "$dir/manifest.json" "$dir/manifest.sig" \
+            "$NDSYS_RELEASE_KEY" > /dev/null 2>&1; then
+        log "manifest.sig is not a release signature over manifest.json"
+        return 1
+    fi
+    record_matches_manifest "$dir/manifest.json" "$3" || return 1
+    return 0
 }
 
 # The dm-verity table for the installed image. Data and hash share one
@@ -444,6 +585,26 @@ apply_pending() {
     fi
     sed "s/^attempts=.*/attempts=$((attempts + 1))/" "$PENDING" > "$PENDING.new" \
         && mv -f "$PENDING.new" "$PENDING" && sync
+
+    # Before the size and the hash, because both of those check the image
+    # against the RECORD and the record is the thing being distrusted here.
+    # See the section above: this is what stops /NeoDCT/User from choosing
+    # which operating system the phone runs.
+    #
+    # A refusal clears the pending update rather than retrying. An unsigned
+    # image will not become signed on the next boot, and leaving it staged
+    # means three boots spent hashing 51 MB to reach the same answer.
+    if release_signature_ok "$image" "$package" "$PENDING"; then
+        :
+    elif [ -n "$NDSYS_ALLOW_UNSIGNED" ]; then
+        log "WARNING: neodct.unsigned=1 -- installing $version with no signature check"
+    else
+        log "refusing to install $version: not signed by the release key"
+        record_result failed "$version" "not signed by the release key"
+        umount_card
+        clear_pending
+        return 0
+    fi
 
     if [ -n "$package" ]; then
         actual_size="$(package_image_size "$image")"

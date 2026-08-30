@@ -285,12 +285,42 @@ SPLASH_IMAGES = (
     (os.path.join("splash", "sadface.bmp"), "splash.raw"),
     (os.path.join("splash", "bootlogo.bmp"), "bootlogo.raw"),
 )
+
+# The update signature check (SECURITY-AUDIT.md section 3, the critical
+# finding). Two files, and the initramfs is useless for that purpose without
+# either of them, so both are required exactly as dmsetup is.
+#
+# nd-verify is a statically linked 4 MB binary and it comes from BINARIES_DIR
+# rather than from the target tree, on purpose: nothing in the running system
+# calls it -- the Update app checks the same signature through libneodct,
+# which is already mapped -- so putting it in target/ would add those 4 MB to
+# the read-only squashfs for nothing. See neodct/src/Makefile's install-boot.
+#
+# The public key DOES come from the target tree, and that is the point: it is
+# the same file the running system verifies against, so the initramfs and the
+# UI can never disagree about which key is the release key.
+VERIFIER_CANDIDATES = ("NeoDCT/System/bin/nd-verify", "usr/bin/nd-verify",
+                       "bin/nd-verify")
+RELEASE_KEY = "NeoDCT/System/keys/neodct-release.pub"
+RELEASE_KEY_TARGET = "neodct-release.pub"
 SPLASH_SOURCE, SPLASH_TARGET = SPLASH_IMAGES[0]
 # Matches UI_W/UI_H and neodctDisplay.c FB_W/FB_H.
 SPLASH_W, SPLASH_H = 240, 175
 
 
-def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None):
+def find_verifier(target_dir, verifier=None):
+    """Where nd-verify is, or None. `verifier` is a path from the caller."""
+    if verifier:
+        return str(verifier) if os.path.exists(str(verifier)) else None
+    for candidate in VERIFIER_CANDIDATES:
+        source = os.path.join(target_dir, candidate)
+        if os.path.exists(source):
+            return source
+    return None
+
+
+def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None,
+          verifier=None):
     """Stage and pack the initramfs. Returns the output path."""
     global LAST_STAGING
     target_dir = str(target_dir)
@@ -300,6 +330,9 @@ def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None):
                  % target_dir)
 
     binaries = {"bin/busybox": busybox}
+    # Plain files: copied verbatim, not chmod +x and not searched for
+    # DT_NEEDED. Only the release key so far.
+    plain_files = {}
 
     if extra_binaries is None:
         for candidate in DMSETUP_CANDIDATES:
@@ -326,6 +359,26 @@ def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None):
         # catch a stale target/ left over from a build for another board --
         # shipping a binary the kernel cannot exec is exactly the failure
         # this whole file has to avoid.
+        # The signature verifier and the key it checks against. Both are
+        # required, for the same reason dmsetup is: an initramfs without
+        # them cannot tell a release image from one somebody staged, and it
+        # would apply either. Shipping that silently is worse than failing
+        # the build, because it looks finished.
+        found = find_verifier(target_dir, verifier)
+        if found is None:
+            sys.exit("mkinitramfs: no nd-verify (looked at %s%s) -- build "
+                     "neodct/src and run its install-boot target; the update "
+                     "signature check cannot work without it"
+                     % ("--verifier %s, " % verifier if verifier else "",
+                        ", ".join(VERIFIER_CANDIDATES)))
+        binaries["bin/nd-verify"] = found
+
+        key = os.path.join(target_dir, RELEASE_KEY)
+        if not os.path.exists(key):
+            sys.exit("mkinitramfs: no %s in %s -- the initramfs has nothing "
+                     "to check update signatures against" % (RELEASE_KEY, target_dir))
+        plain_files[RELEASE_KEY_TARGET] = key
+
         panel = os.path.join(target_dir, PANEL_DAEMON)
         if os.path.exists(panel):
             try:
@@ -376,6 +429,12 @@ def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None):
         os.makedirs(os.path.dirname(destination), exist_ok=True)
         shutil.copy2(source, destination)
         os.chmod(destination, 0o755)
+
+    for archive_path, source in plain_files.items():
+        destination = os.path.join(staging, archive_path)
+        os.makedirs(os.path.dirname(destination) or staging, exist_ok=True)
+        shutil.copy2(source, destination)
+        os.chmod(destination, 0o644)
 
     for archive_path, source in resolve_libs(binaries.values(), lib_dirs).items():
         destination = os.path.join(staging, archive_path)
@@ -447,9 +506,12 @@ def main(argv=None):
     parser.add_argument("--target-dir", required=True)
     parser.add_argument("--init", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--verifier",
+                        help="path to nd-verify (default: search --target-dir)")
     args = parser.parse_args(argv)
 
-    path = build(args.target_dir, args.init, args.output)
+    path = build(args.target_dir, args.init, args.output,
+                 verifier=args.verifier)
     print("mkinitramfs: %s (%.1f KiB)"
           % (path, os.path.getsize(path) / 1024.0))
     return 0

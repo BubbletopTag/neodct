@@ -4,9 +4,13 @@ recovery_install_package is the one part of recovery that can destroy a
 system, so it lives apart from the menus and is driven here with real .ndsw
 files and a regular file standing in for the system device.
 
-Recovery deliberately cannot check signatures -- there is no crypto in the
-initramfs -- so what these tests pin down is that it never writes anything it
-has not hashed first, and that it records what the next boot needs.
+Recovery checks the release signature but, unlike the automatic applier, does
+not refuse over it: its whole premise is a person standing in front of a phone
+that will not boot, and an owner whose only image is an unsigned development
+build still has to be able to get it running. What it does instead is ask a
+different question, and there is a test for each. What these tests otherwise
+pin down is that it never writes anything it has not hashed first, and that it
+records what the next boot needs.
 """
 
 import hashlib
@@ -21,7 +25,7 @@ import zipfile
 
 import pytest
 
-from update_fixtures import build_image, make_ndsw
+from update_fixtures import build_image, make_ndsw, write_public_key
 
 INITRAMFS = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "initramfs")
@@ -538,3 +542,88 @@ def test_keys_come_from_the_display_and_not_from_the_shell_stdin(tmp_path):
     keys, _ = typed_into_the_screen(tmp_path, b"\x1b[B", count=1)
 
     assert keys == ["DOWN"]
+
+
+# --- what recovery says about the signature ------------------------------
+#
+# It used to say "Signature is NOT checked here", and that was honest: there
+# was no crypto in the initramfs. There is now (nd-verify and the release
+# key, packed for the gate in ndsys-apply.sh), so the panel has to stop
+# saying it -- and the question a person answers has to reflect which of the
+# two situations they are actually in.
+
+def signature_gate(tmp_path, key=None):
+    """The verifier and key init exports; nd-verify stood in for by openssl."""
+    verifier = tmp_path / "nd-verify"
+    verifier.write_text('#!/bin/sh\nexec openssl dgst -sha256 -verify "$3" '
+                        '-signature "$2" "$1" >/dev/null 2>&1\n')
+    verifier.chmod(0o755)
+    return ('NDSYS_VERIFY_BIN="%s"; NDSYS_RELEASE_KEY="%s"; NDSYS_TMPDIR="%s"\n'
+            % (verifier, key or write_public_key(tmp_path), tmp_path / "run"))
+
+
+def ask_is_signed(tmp_path, package, gate=None):
+    script = (
+        '%s'
+        '. "%s"\n'
+        'if recovery_package_is_signed "%s"; then echo SIGNED; else echo NOT; fi\n'
+        % (gate if gate is not None else signature_gate(tmp_path),
+           RECOVERY_SH, package)
+    )
+    return subprocess.run(["sh", "-c", script], capture_output=True,
+                          text=True).stdout.strip()
+
+
+def test_a_release_signed_package_reads_as_signed(tmp_path):
+    image, tree = build_image(blocks=4)
+    package = tmp_path / "UPDATE.ndsw"
+    make_ndsw(package, image=image, tree=tree)
+
+    assert ask_is_signed(tmp_path, package) == "SIGNED"
+
+
+def test_a_package_with_no_signature_member_reads_as_unsigned(tmp_path):
+    image, tree = build_image(blocks=4)
+    package = tmp_path / "UPDATE.ndsw"
+    make_ndsw(package, image=image, tree=tree,
+              members=("rootfs.squashfs", "manifest.json"))
+
+    assert ask_is_signed(tmp_path, package) == "NOT"
+
+
+def test_a_package_signed_by_another_key_reads_as_unsigned(tmp_path):
+    image, tree = build_image(blocks=4)
+    package = tmp_path / "UPDATE.ndsw"
+    make_ndsw(package, image=image, tree=tree)
+    other = tmp_path / "other.pub"
+    subprocess.run(["openssl", "genpkey", "-algorithm", "RSA",
+                    "-pkeyopt", "rsa_keygen_bits:2048",
+                    "-out", str(tmp_path / "other.key")],
+                   check=True, capture_output=True)
+    subprocess.run(["openssl", "rsa", "-in", str(tmp_path / "other.key"),
+                    "-pubout", "-out", str(other)],
+                   check=True, capture_output=True)
+
+    assert ask_is_signed(tmp_path, package,
+                         gate=signature_gate(tmp_path, key=other)) == "NOT"
+
+
+def test_no_verifier_reads_as_unsigned_rather_than_as_signed(tmp_path):
+    """"Is this signed?" with nothing able to answer is not "yes"."""
+    image, tree = build_image(blocks=4)
+    package = tmp_path / "UPDATE.ndsw"
+    make_ndsw(package, image=image, tree=tree)
+    gate = ('NDSYS_VERIFY_BIN="%s"; NDSYS_RELEASE_KEY="%s"; NDSYS_TMPDIR="%s"\n'
+            % (tmp_path / "nope", write_public_key(tmp_path), tmp_path / "run"))
+
+    assert ask_is_signed(tmp_path, package, gate=gate) == "NOT"
+
+
+def test_the_panel_no_longer_claims_signatures_are_unchecked():
+    """The old text was true and is not any more. A phone that says the wrong
+    thing about its own security is worse than one that says nothing."""
+    source = open(RECOVERY_SH).read()
+
+    assert "Signature is NOT checked here" not in source
+    assert "Signed by the release key" in source
+    assert "NOT SIGNED" in source

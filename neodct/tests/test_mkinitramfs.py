@@ -25,8 +25,49 @@ if TOOLS_DIR not in sys.path:
 import mkinitramfs
 
 HOST_BINARY = "/usr/bin/ls" if os.path.exists("/usr/bin/ls") else "/bin/ls"
-HOST_LIB_DIRS = [d for d in ("/usr/lib", "/lib", "/lib64", "/usr/lib64")
-                 if os.path.isdir(d)]
+
+
+def _host_lib_dirs():
+    """Where this machine keeps its shared libraries.
+
+    resolve_libs() searches a flat list, which is exactly right for the
+    target tree -- buildroot puts everything in lib/ and usr/lib/. A Debian
+    or Ubuntu build host does not: libc lives in /usr/lib/<triplet>/, so the
+    four fixed directories below find nothing and every test that resolves a
+    host binary fails for a reason that has nothing to do with the code.
+    Ask the machine instead of guessing.
+    """
+    dirs = [d for d in ("/usr/lib", "/lib", "/lib64", "/usr/lib64")
+            if os.path.isdir(d)]
+    for base in ("/usr/lib", "/lib"):
+        if not os.path.isdir(base):
+            continue
+        for entry in sorted(os.listdir(base)):
+            path = os.path.join(base, entry)
+            if "-linux-" in entry and os.path.isdir(path):
+                dirs.append(path)
+    return dirs
+
+
+HOST_LIB_DIRS = _host_lib_dirs()
+
+
+def boot_requirements(fake_target):
+    """Drop in the two files a real build path now insists on.
+
+    nd-verify and the release public key: without them the initramfs cannot
+    check an update signature and would install anything staged for it, so
+    mkinitramfs refuses to build one, exactly as it refuses without dmsetup.
+    Tests that are about something else still have to satisfy it.
+    """
+    verifier = fake_target / "usr" / "bin" / "nd-verify"
+    verifier.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(HOST_BINARY, verifier)
+    key = fake_target / "NeoDCT" / "System" / "keys" / "neodct-release.pub"
+    key.parent.mkdir(parents=True, exist_ok=True)
+    key.write_text("-----BEGIN PUBLIC KEY-----\nnot a real key\n"
+                   "-----END PUBLIC KEY-----\n")
+    return verifier, key
 
 
 def test_reads_the_libraries_a_binary_asks_for():
@@ -55,9 +96,17 @@ def test_resolves_the_whole_dependency_closure():
 
 
 def test_an_unresolvable_library_is_an_error_not_a_silent_omission(tmp_path):
-    """A missing .so means an initramfs that panics at boot instead."""
-    with pytest.raises(mkinitramfs.MissingLibrary, match="libc"):
+    """A missing .so means an initramfs that panics at boot instead.
+
+    Which library is named depends on the host binary's DT_NEEDED order, so
+    the assertion is that it names one of them -- not that it names libc.
+    """
+    needed, _ = mkinitramfs.elf_needed(HOST_BINARY)
+
+    with pytest.raises(mkinitramfs.MissingLibrary) as caught:
         mkinitramfs.resolve_libs([HOST_BINARY], [str(tmp_path)])
+
+    assert any(name in str(caught.value) for name in needed), caught.value
 
 
 def test_packs_a_cpio_containing_init_and_the_binaries(tmp_path):
@@ -123,6 +172,7 @@ def test_dmsetup_is_found_where_buildroot_actually_installs_it(tmp_path):
     (fake_target / "usr" / "lib").mkdir(parents=True)
     shutil.copy(HOST_BINARY, fake_target / "bin" / "busybox")
     shutil.copy(HOST_BINARY, fake_target / "usr" / "sbin" / "dmsetup")
+    boot_requirements(fake_target)
     for source in mkinitramfs.resolve_libs([HOST_BINARY], HOST_LIB_DIRS).values():
         shutil.copy(source, fake_target / "usr" / "lib" / os.path.basename(source))
     init = tmp_path / "init"
@@ -169,6 +219,7 @@ def test_the_library_search_aliases_the_loader_needs_are_present(tmp_path):
     (fake_target / "usr" / "sbin").mkdir(parents=True)
     shutil.copy(HOST_BINARY, fake_target / "bin" / "busybox")
     shutil.copy(HOST_BINARY, fake_target / "usr" / "sbin" / "dmsetup")
+    boot_requirements(fake_target)
     for source in mkinitramfs.resolve_libs([HOST_BINARY], HOST_LIB_DIRS).values():
         shutil.copy(source, fake_target / "usr" / "lib" / os.path.basename(source))
     init = tmp_path / "init"
@@ -192,6 +243,7 @@ def test_the_aliases_survive_into_the_archive(tmp_path):
     (fake_target / "usr" / "sbin").mkdir(parents=True)
     shutil.copy(HOST_BINARY, fake_target / "bin" / "busybox")
     shutil.copy(HOST_BINARY, fake_target / "usr" / "sbin" / "dmsetup")
+    boot_requirements(fake_target)
     for source in mkinitramfs.resolve_libs([HOST_BINARY], HOST_LIB_DIRS).values():
         shutil.copy(source, fake_target / "usr" / "lib" / os.path.basename(source))
     init = tmp_path / "init"
@@ -279,6 +331,7 @@ def _panel_tree(tmp_path, daemon_source):
     (fake_target / "usr" / "lib").mkdir(parents=True)
     shutil.copy(HOST_BINARY, fake_target / "bin" / "busybox")
     shutil.copy(HOST_BINARY, fake_target / "usr" / "sbin" / "dmsetup")
+    boot_requirements(fake_target)
     panel = fake_target / mkinitramfs.PANEL_DAEMON
     panel.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(daemon_source, panel)
@@ -339,3 +392,149 @@ def test_the_splash_lands_in_the_image_but_the_bitmap_does_not(tmp_path):
     names = _names_in(out)
     assert "splash.raw" in names
     assert not any(n.endswith(".bmp") for n in names), names
+
+
+# --- the update signature check ------------------------------------------
+#
+# SECURITY-AUDIT.md section 3: the applier writes a staged image to the
+# system partition, and before this it checked no signature. The check lives
+# in the initramfs because that is the one link in the chain a running system
+# cannot rewrite -- it is built into the kernel image. Which means the
+# verifier and the key have to actually be IN the cpio, and an initramfs
+# missing either of them is not a slightly worse initramfs, it is one that
+# installs whatever it is handed.
+
+def minimal_target(tmp_path, dmsetup=True):
+    fake_target = tmp_path / "target"
+    (fake_target / "bin").mkdir(parents=True)
+    (fake_target / "usr" / "lib").mkdir(parents=True)
+    shutil.copy(HOST_BINARY, fake_target / "bin" / "busybox")
+    if dmsetup:
+        (fake_target / "usr" / "sbin").mkdir(parents=True)
+        shutil.copy(HOST_BINARY, fake_target / "usr" / "sbin" / "dmsetup")
+    for source in mkinitramfs.resolve_libs([HOST_BINARY], HOST_LIB_DIRS).values():
+        shutil.copy(source, fake_target / "usr" / "lib" / os.path.basename(source))
+    return fake_target
+
+
+def archive_names(out):
+    raw = subprocess.run(["gzip", "-dc", str(out)], capture_output=True,
+                         check=True).stdout
+    return subprocess.run(["cpio", "-it", "--quiet"], input=raw,
+                          capture_output=True, check=True).stdout.decode().split()
+
+
+def test_the_verifier_and_the_key_are_both_in_the_image(tmp_path):
+    fake_target = minimal_target(tmp_path)
+    boot_requirements(fake_target)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "initramfs.cpio.gz"
+
+    mkinitramfs.build(fake_target, init, out)
+
+    names = archive_names(out)
+    assert "bin/nd-verify" in names, names
+    assert "neodct-release.pub" in names, names
+
+
+def test_the_key_in_the_image_is_the_key_the_phone_verifies_against(tmp_path):
+    """One file, taken from the target tree rather than committed twice. An
+    initramfs whose key had drifted from the rootfs's would refuse every
+    genuine update, and nothing would say why."""
+    fake_target = minimal_target(tmp_path)
+    _, key = boot_requirements(fake_target)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+
+    mkinitramfs.build(fake_target, init, tmp_path / "out.gz")
+
+    staged = os.path.join(mkinitramfs.LAST_STAGING, "neodct-release.pub")
+    assert open(staged, "rb").read() == key.read_bytes()
+
+
+def test_the_key_is_not_made_executable(tmp_path):
+    """It goes in as a plain file: it is not a binary and nothing resolves
+    DT_NEEDED against it."""
+    fake_target = minimal_target(tmp_path)
+    boot_requirements(fake_target)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+
+    mkinitramfs.build(fake_target, init, tmp_path / "out.gz")
+
+    staged = os.path.join(mkinitramfs.LAST_STAGING, "neodct-release.pub")
+    assert not os.access(staged, os.X_OK)
+
+
+def test_a_missing_verifier_fails_the_build(tmp_path):
+    """Not a warning. An initramfs without nd-verify cannot tell a release
+    image from one somebody staged, and it would apply either."""
+    fake_target = minimal_target(tmp_path)
+    key = fake_target / "NeoDCT" / "System" / "keys" / "neodct-release.pub"
+    key.parent.mkdir(parents=True)
+    key.write_text("x\n")
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+
+    with pytest.raises(SystemExit, match="nd-verify"):
+        mkinitramfs.build(fake_target, init, tmp_path / "out.gz")
+
+
+def test_a_missing_release_key_fails_the_build(tmp_path):
+    fake_target = minimal_target(tmp_path)
+    verifier = fake_target / "usr" / "bin" / "nd-verify"
+    verifier.parent.mkdir(parents=True)
+    shutil.copy(HOST_BINARY, verifier)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+
+    with pytest.raises(SystemExit, match="neodct-release.pub"):
+        mkinitramfs.build(fake_target, init, tmp_path / "out.gz")
+
+
+def test_the_verifier_can_come_from_outside_the_target_tree(tmp_path):
+    """It does: neodct.mk installs it into BINARIES_DIR, not into the rootfs,
+    because it is 4 MB of statically linked OpenSSL that nothing in the
+    running system calls. post-image-neodct.sh passes the path."""
+    fake_target = minimal_target(tmp_path)
+    key = fake_target / "NeoDCT" / "System" / "keys" / "neodct-release.pub"
+    key.parent.mkdir(parents=True)
+    key.write_text("x\n")
+    elsewhere = tmp_path / "images" / "nd-verify"
+    elsewhere.parent.mkdir()
+    shutil.copy(HOST_BINARY, elsewhere)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "out.gz"
+
+    mkinitramfs.build(fake_target, init, out, verifier=str(elsewhere))
+
+    assert "bin/nd-verify" in archive_names(out)
+
+
+def test_a_verifier_path_that_does_not_exist_is_an_error(tmp_path):
+    """Silently falling back to the target tree would produce an image whose
+    verifier is whatever happened to be lying around."""
+    fake_target = minimal_target(tmp_path)
+    key = fake_target / "NeoDCT" / "System" / "keys" / "neodct-release.pub"
+    key.parent.mkdir(parents=True)
+    key.write_text("x\n")
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+
+    with pytest.raises(SystemExit, match="nd-verify"):
+        mkinitramfs.build(fake_target, init, tmp_path / "out.gz",
+                          verifier=str(tmp_path / "not-here"))
+
+
+def test_the_post_image_hook_passes_the_verifier():
+    """The build wiring, not the script: if post-image stops passing it, the
+    build fails rather than shipping an unchecked initramfs -- but it should
+    not fail, so pin the argument."""
+    hook = open(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "scripts", "post-image-neodct.sh")).read()
+
+    assert "--verifier" in hook
+    assert "nd-verify" in hook

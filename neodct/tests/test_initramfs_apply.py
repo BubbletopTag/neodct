@@ -21,7 +21,7 @@ import pytest
 from System.core.UpdateService import manifest as manifest_mod
 from System.core.UpdateService import staging
 
-from update_fixtures import build_image, make_ndsw
+from update_fixtures import build_image, make_ndsw, sign, write_public_key
 
 APPLY_SH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -29,24 +29,77 @@ APPLY_SH = os.path.join(
 )
 
 
-def stage_an_update(tmp_path, **overrides):
-    """Stage a real update and return (state_dir, image_bytes, manifest)."""
+# --- the signature gate every run goes through ---------------------------
+#
+# SECURITY-AUDIT.md section 3: before this existed, the applier wrote
+# whatever pending.prop named and recorded whatever root hash it was given,
+# so anything that could write /NeoDCT/User chose the operating system.
+# apply_pending now refuses an image whose manifest is not signed by the
+# release key, so every test below has to present a real signature -- which
+# is the point: the happy path is now the signed path.
+#
+# The verifier is nd-verify in the image. Here it is a shim over openssl(1),
+# so the suite does not need the C tree built; test_verify.c is what pins
+# nd-verify itself against libneodct's verifier, and one test below runs the
+# real binary when it has been built.
+ND_VERIFY_REAL = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "src", "build", "default", "bin", "nd-verify",
+)
+
+
+def verifier_shim(tmp_path):
+    """A stand-in for nd-verify: same argv, same exit codes."""
+    path = tmp_path / "nd-verify"
+    path.write_text(
+        "#!/bin/sh\n"
+        "# argv: DATA SIG KEY -- 0 signed, 1 not, matching nd-verify.\n"
+        "exec openssl dgst -sha256 -verify \"$3\" -signature \"$2\" \"$1\" "
+        ">/dev/null 2>&1\n"
+    )
+    path.chmod(0o755)
+    return path
+
+
+def gate_env(tmp_path, verifier=None, key=None):
+    """The three variables init exports into the applier's environment."""
+    return (
+        'NDSYS_VERIFY_BIN="%s"; NDSYS_RELEASE_KEY="%s"; NDSYS_TMPDIR="%s"\n'
+        % (verifier or verifier_shim(tmp_path),
+           key or write_public_key(tmp_path),
+           tmp_path / "run")
+    )
+
+
+def stage_an_update(tmp_path, signature=True, **overrides):
+    """Stage a real update and return (state_dir, image_bytes, manifest).
+
+    The manifest is serialised the way mkupdate.py serialises it -- two-space
+    indent -- because that is what the applier's field extraction reads, and
+    signing a differently-formatted copy would prove nothing about the real
+    path.
+    """
     image, tree = build_image(blocks=8)
     body = make_ndsw(tmp_path / "src.ndsw", image=image, tree=tree, **overrides)
-    parsed = manifest_mod.parse(json.dumps(body).encode())
+    raw = json.dumps(body, indent=2).encode()
+    parsed = manifest_mod.parse(raw)
     staged = tmp_path / "pending.img"
     staged.write_bytes(image)
     state = tmp_path / "user" / ".ndsys"
-    staging.stage(parsed, staged, state)
+    staging.stage(parsed, staged, state,
+                  signature=sign(raw) if signature is True else signature)
     return state, image, parsed
 
 
-def run(state, sys_dev, tmp_path, command="apply_pending"):
+def run(state, sys_dev, tmp_path, command="apply_pending", gate=None):
     user = tmp_path / "user"
     (user / "logs").mkdir(parents=True, exist_ok=True)
     script = (
         'STATE_DIR="%s"; MNT_USER="%s"; SYS_DEV="%s"; USER_MOUNTED=1\n'
-        '. "%s"\n%s\n' % (state, user, sys_dev, APPLY_SH, command)
+        '%s'
+        '. "%s"\n%s\n' % (state, user, sys_dev,
+                           gate if gate is not None else gate_env(tmp_path),
+                           APPLY_SH, command)
     )
     return subprocess.run(["sh", "-c", script], capture_output=True, text=True)
 
@@ -480,7 +533,10 @@ def stage_a_package(tmp_path, name="UPDATE.ndsw", **overrides):
     (card / "update").mkdir(parents=True, exist_ok=True)
     package = card / "update" / name
     body = make_ndsw(package, image=image, tree=tree, **overrides)
-    parsed = manifest_mod.parse(json.dumps(body).encode())
+    # make_ndsw writes json.dumps(body, indent=2) into the zip and signs
+    # exactly those bytes; parse the same ones so the record carries what
+    # the signature covers.
+    parsed = manifest_mod.parse(json.dumps(body, indent=2).encode())
     state = tmp_path / "user" / ".ndsys"
     import zipfile
     with zipfile.ZipFile(str(package)) as handle:
@@ -489,13 +545,17 @@ def stage_a_package(tmp_path, name="UPDATE.ndsw", **overrides):
     return state, card, image, parsed
 
 
-def run_with_card(state, sys_dev, tmp_path, card, command="apply_pending"):
+def run_with_card(state, sys_dev, tmp_path, card, command="apply_pending",
+                  gate=None):
     user = tmp_path / "user"
     (user / "logs").mkdir(parents=True, exist_ok=True)
     script = (
         'STATE_DIR="%s"; MNT_USER="%s"; SYS_DEV="%s"; USER_MOUNTED=1\n'
         'MNT_SDCARD="%s"; NDSYS_CARD_PREMOUNTED=1\n'
-        '. "%s"\n%s\n' % (state, user, sys_dev, card, APPLY_SH, command)
+        '%s'
+        '. "%s"\n%s\n' % (state, user, sys_dev, card,
+                           gate if gate is not None else gate_env(tmp_path),
+                           APPLY_SH, command)
     )
     return subprocess.run(["sh", "-c", script], capture_output=True, text=True)
 
@@ -625,7 +685,9 @@ def run_ubi(state, sys_dev, tmp_path, tool):
     script = (
         'STATE_DIR="%s"; MNT_USER="%s"; SYS_DEV="%s"; USER_MOUNTED=1\n'
         'NDSYS_UBIUPDATEVOL="%s"\n'
-        '. "%s"\napply_pending\n' % (state, user, sys_dev, tool, APPLY_SH)
+        '%s'
+        '. "%s"\napply_pending\n'
+        % (state, user, sys_dev, tool, gate_env(tmp_path), APPLY_SH)
     )
     return subprocess.run(["sh", "-c", script], capture_output=True, text=True)
 
@@ -727,8 +789,9 @@ def run_ubi_full(state, sys_dev, tmp_path, upd, rsvol, sysfs):
     script = (
         'STATE_DIR="%s"; MNT_USER="%s"; SYS_DEV="%s"; USER_MOUNTED=1\n'
         'NDSYS_UBIUPDATEVOL="%s"; NDSYS_UBIRSVOL="%s"; NDSYS_UBI_SYSFS="%s"\n'
+        '%s'
         '. "%s"\napply_pending\n'
-        % (state, user, sys_dev, upd, rsvol, sysfs, APPLY_SH)
+        % (state, user, sys_dev, upd, rsvol, sysfs, gate_env(tmp_path), APPLY_SH)
     )
     return subprocess.run(["sh", "-c", script], capture_output=True, text=True)
 
@@ -774,3 +837,264 @@ def test_a_volume_that_already_fits_is_left_alone(tmp_path):
 
     assert not rslog.exists(), "resized a volume that already fits"
     assert staging.read_result(state)["result"] == "ok", result.stdout
+
+
+# ==========================================================================
+#  The release signature, which is what makes pending.prop a cache and not
+#  a trust input
+# ==========================================================================
+#
+# SECURITY-AUDIT.md section 3, the critical finding. Before this gate the
+# applier believed everything on the writable partition: a process that
+# could write /NeoDCT/User staged its own image, recorded its own verity
+# root hash, and every boot after that verified cleanly against it. An
+# update replaces only the rootfs, so nothing removed the result.
+#
+# The tests below are the attack, done as an attacker would do it, and the
+# refusal it now meets.
+
+def read_result(state):
+    result = staging.read_result(state)
+    return result["result"] if result else None
+
+
+def test_a_correctly_signed_update_installs(tmp_path):
+    """The control. Everything below has to be measured against this."""
+    state, image, _ = stage_an_update(tmp_path)
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\x00" * len(image))
+
+    run(state, device, tmp_path)
+
+    assert device.read_bytes()[:len(image)] == image
+    assert read_result(state) == "ok"
+
+
+def test_an_unsigned_image_is_refused(tmp_path):
+    """Somebody dropped pending.img and pending.prop on the partition and
+    rebooted. There is no manifest to check, so there is nothing to trust."""
+    state, image, _ = stage_an_update(tmp_path, signature=None)
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\x00" * len(image))
+
+    result = run(state, device, tmp_path)
+
+    assert device.read_bytes() == b"\x00" * len(image), "it wrote anyway"
+    assert read_result(state) == "failed"
+    assert "not signed" in result.stderr
+
+
+def test_a_signature_by_the_wrong_key_is_refused(tmp_path):
+    """The image is real, the manifest is well-formed, and the signature is
+    a perfectly valid signature -- by a key this phone does not carry."""
+    state, image, _ = stage_an_update(tmp_path)
+    other = tmp_path / "other.pub"
+    subprocess.run(["openssl", "genpkey", "-algorithm", "RSA",
+                    "-pkeyopt", "rsa_keygen_bits:2048",
+                    "-out", str(tmp_path / "other.key")],
+                   check=True, capture_output=True)
+    subprocess.run(["openssl", "rsa", "-in", str(tmp_path / "other.key"),
+                    "-pubout", "-out", str(other)],
+                   check=True, capture_output=True)
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\x00" * len(image))
+
+    result = run(state, device, tmp_path,
+                 gate=gate_env(tmp_path, key=other))
+
+    assert device.read_bytes() == b"\x00" * len(image)
+    assert read_result(state) == "failed"
+
+
+def test_a_tampered_manifest_is_refused(tmp_path):
+    """One byte of the signed manifest changed after signing."""
+    state, image, _ = stage_an_update(tmp_path)
+    manifest = state / "pending.manifest.json"
+    manifest.write_bytes(manifest.read_bytes().replace(b"0.3.2a", b"9.9.9z"))
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\x00" * len(image))
+
+    run(state, device, tmp_path)
+
+    assert device.read_bytes() == b"\x00" * len(image)
+    assert read_result(state) == "failed"
+
+
+def test_a_record_that_disagrees_with_the_signed_manifest_is_refused(tmp_path):
+    """THE attack, in its exact shape.
+
+    The signature is genuine and the manifest is untouched -- what the
+    attacker rewrote is the RECORD, so the applier would write their image
+    and then record their verity root hash as the one to verify against
+    forever. The signature alone does not stop that; comparing every field
+    the signature covers does."""
+    state, image, _ = stage_an_update(tmp_path)
+    record = state / "pending.prop"
+    forged = "".join(
+        "verity_root_hash=%s\n" % ("de" * 32) if line.startswith("verity_root_hash=")
+        else line + "\n"
+        for line in record.read_text().splitlines())
+    record.write_text(forged)
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\x00" * len(image))
+
+    result = run(state, device, tmp_path)
+
+    assert device.read_bytes() == b"\x00" * len(image)
+    assert read_result(state) == "failed"
+    assert "verity_root_hash" in result.stderr
+
+
+@pytest.mark.parametrize("field,value", [
+    ("sha256", "ab" * 32),
+    ("version", "9.9.9z"),
+    ("platform", "some-other-board"),
+    ("buildtime", "1"),
+    ("verity_block_size", "512"),
+    ("verity_image_blocks", "1"),
+    ("verity_salt", "ff" * 8),
+])
+def test_every_signed_field_is_compared(tmp_path, field, value):
+    """Each one is a lever on what the phone does with the image, so each one
+    has to be pinned to the signature rather than to the record."""
+    state, image, _ = stage_an_update(tmp_path)
+    record = state / "pending.prop"
+    lines = []
+    for line in record.read_text().splitlines():
+        lines.append("%s=%s" % (field, value)
+                     if line.startswith(field + "=") else line)
+    record.write_text("\n".join(lines) + "\n")
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\x00" * len(image))
+
+    result = run(state, device, tmp_path)
+
+    assert device.read_bytes() == b"\x00" * len(image), result.stderr
+    assert read_result(state) == "failed"
+
+
+def test_a_refusal_does_not_burn_three_boots(tmp_path):
+    """An unsigned image will not become signed on the next boot, and each
+    retry hashes the whole image to reach the same answer. Clear it."""
+    state, image, _ = stage_an_update(tmp_path, signature=None)
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\x00" * len(image))
+
+    run(state, device, tmp_path)
+
+    assert staging.read_pending(state) is None
+    assert not (state / "pending.img").exists()
+
+
+def test_a_missing_verifier_refuses_rather_than_installs(tmp_path):
+    """An initramfs built without nd-verify must not fall back to trusting
+    the record. mkinitramfs fails the build over this; if one ever escaped,
+    it stops here rather than installing anything staged for it."""
+    state, image, _ = stage_an_update(tmp_path)
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\x00" * len(image))
+
+    result = run(state, device, tmp_path,
+                 gate=gate_env(tmp_path, verifier=tmp_path / "no-such-verifier"))
+
+    assert device.read_bytes() == b"\x00" * len(image)
+    assert "no signature verifier" in result.stderr
+
+
+def test_a_missing_release_key_refuses_rather_than_installs(tmp_path):
+    state, image, _ = stage_an_update(tmp_path)
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\x00" * len(image))
+
+    result = run(state, device, tmp_path,
+                 gate=gate_env(tmp_path, key=tmp_path / "no-such-key.pub"))
+
+    assert device.read_bytes() == b"\x00" * len(image)
+    assert "no release key" in result.stderr
+
+
+def test_the_cmdline_escape_hatch_installs_an_unsigned_image(tmp_path):
+    """Engineering mode can build an unsigned package on purpose and that is
+    a real developer path. neodct.unsigned=1 is where it now lives -- on the
+    kernel cmdline, which is the U-Boot environment on the phone and cannot
+    be written from the partition being defended."""
+    state, image, _ = stage_an_update(tmp_path, signature=None)
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\x00" * len(image))
+
+    result = run(state, device, tmp_path,
+                 gate=gate_env(tmp_path) + 'NDSYS_ALLOW_UNSIGNED=1\n')
+
+    assert device.read_bytes()[:len(image)] == image
+    assert read_result(state) == "ok"
+    assert "WARNING" in result.stderr, "it must say what it is doing"
+
+
+def test_the_escape_hatch_is_off_unless_it_is_asked_for(tmp_path):
+    """Read the shipped init rather than trusting the variable name: the
+    only thing that may set it is the kernel cmdline."""
+    init = open(os.path.join(os.path.dirname(APPLY_SH), "init")).read()
+
+    assert "neodct.unsigned=1) ALLOW_UNSIGNED=1" in init
+    assert 'ALLOW_UNSIGNED=""' in init
+
+
+# --- the package path, which is the one the phone actually uses ----------
+
+def test_a_signed_package_installs_from_the_card(tmp_path):
+    """A .ndsw carries manifest.json and manifest.sig, so the applier reads
+    the signature out of the same zip it streams the image from."""
+    state, card, image, parsed = stage_a_package(tmp_path)
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\x00" * (len(image) + 8192))
+
+    result = run_with_card(state, device, tmp_path, card)
+
+    assert result.returncode == 0, result.stderr
+    assert device.read_bytes()[:len(image)] == image
+
+
+def test_a_package_with_no_signature_member_is_refused(tmp_path):
+    """The unsigned .ndsw engineering mode can install: the app may take it,
+    the boot may not."""
+    state, card, image, _ = stage_a_package(
+        tmp_path, members=("rootfs.squashfs", "manifest.json"))
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\x00" * (len(image) + 8192))
+
+    result = run_with_card(state, device, tmp_path, card)
+
+    assert device.read_bytes() == b"\x00" * (len(image) + 8192)
+    assert "no manifest and signature" in result.stderr
+
+
+def test_swapping_the_card_for_one_with_another_signed_package_is_refused(tmp_path):
+    """Both packages are genuinely signed. The record describes the first
+    one, the card now holds the second, and the file name is the same --
+    so the fields have to disagree, and they do."""
+    state, card, image, _ = stage_a_package(tmp_path)
+    other_image, other_tree = build_image(blocks=8, seed=b"other")
+    make_ndsw(card / "update" / "UPDATE.ndsw", image=other_image,
+              tree=other_tree, version="0.9.9a")
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\x00" * (len(image) + 8192))
+
+    result = run_with_card(state, device, tmp_path, card)
+
+    assert device.read_bytes() == b"\x00" * (len(image) + 8192), result.stderr
+    assert read_result(state) == "failed"
+
+
+@pytest.mark.skipif(not os.path.exists(ND_VERIFY_REAL),
+                    reason="nd-verify is not built (cd neodct/src && make)")
+def test_the_real_nd_verify_accepts_what_the_shim_accepts(tmp_path):
+    """The shim above is openssl(1); the phone runs nd-verify. One test with
+    the real binary, so the whole suite is not a test of openssl."""
+    state, image, _ = stage_an_update(tmp_path)
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\x00" * len(image))
+
+    run(state, device, tmp_path, gate=gate_env(tmp_path, verifier=ND_VERIFY_REAL))
+
+    assert device.read_bytes()[:len(image)] == image
+    assert read_result(state) == "ok"

@@ -19,6 +19,11 @@
 #   neodct.user=DEV     user-data partition: a block device holding ext4,
 #                       or "ubiN:volume" for ubifs on raw NAND
 #   neodct.verity=MODE  enforce (default) | permissive | off
+#   neodct.unsigned=1   install a staged update whose manifest carries no
+#                       valid release signature. Developer escape hatch for
+#                       the unsigned packages engineering mode can build; it
+#                       lives on the cmdline precisely because a running
+#                       system cannot write there.
 #   neodct.debug=1      verbose, and a shell instead of a silent stop
 
 # The kernel hands init a PATH of its own; be explicit so dmsetup and the
@@ -29,6 +34,7 @@ export PATH
 SYS_DEV=""
 USER_DEV=""
 VERITY_MODE="enforce"
+ALLOW_UNSIGNED=""
 DEBUG=""
 FORCE_RECOVERY=""
 RECOVERY_TTY_OVERRIDE=""
@@ -83,6 +89,7 @@ for word in $(cat /proc/cmdline 2>/dev/null); do
         neodct.sys=*)    SYS_DEV="${word#neodct.sys=}" ;;
         neodct.user=*)   USER_DEV="${word#neodct.user=}" ;;
         neodct.verity=*) VERITY_MODE="${word#neodct.verity=}" ;;
+        neodct.unsigned=1) ALLOW_UNSIGNED=1 ;;
         neodct.debug=*)  DEBUG="${word#neodct.debug=}" ;;
         neodct.recovery=*) FORCE_RECOVERY="${word#neodct.recovery=}" ;;
         neodct.rectty=*) RECOVERY_TTY_OVERRIDE="${word#neodct.rectty=}" ;;
@@ -103,6 +110,11 @@ wait_for_device() {
 find_by_label() {
     blkid 2>/dev/null | sed -n "s/^\([^:]*\):.*LABEL=\"$1\".*/\1/p" | head -n1
 }
+
+# ndsys-apply.sh reads this rather than the cmdline: it is sourced by the
+# host test suite too, where there is no /proc/cmdline to read.
+NDSYS_ALLOW_UNSIGNED="$ALLOW_UNSIGNED"
+export NDSYS_ALLOW_UNSIGNED
 
 # The helpers below need to be available before the devices are resolved.
 . /ndsys-apply.sh
@@ -138,6 +150,8 @@ USER_DEV="$(find_user_device "$USER_DEV")" || USER_DEV=""
 # Always log this: when something is wrong here, it is the first thing worth
 # knowing, and it is what the first real boot got wrong.
 log "system=${SYS_DEV:-NONE} user=${USER_DEV:-NONE} verity=$VERITY_MODE"
+[ -n "$ALLOW_UNSIGNED" ] && \
+    log "WARNING: neodct.unsigned=1 -- update signatures will not be enforced"
 
 if [ -z "$SYS_DEV" ]; then
     log "no system image found on any block device"

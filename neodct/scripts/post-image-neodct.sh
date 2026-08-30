@@ -57,9 +57,16 @@ mkdir -p "$SKEL/db" "$SKEL/logs" "$SKEL/.ndsys" \
     --installed-prop "$SKEL/.ndsys"
 
 # --- initramfs -----------------------------------------------------------
+# --verifier points at nd-verify, which the neodct package installs into
+# BINARIES_DIR rather than into the rootfs: it is 4 MB of statically linked
+# OpenSSL whose only caller is the initramfs, and the running system checks
+# the same signature through libneodct, which is already mapped. mkinitramfs
+# fails the build if it is not there -- an initramfs that cannot check an
+# update signature would install anything staged for it.
 "$NEODCT_DIR/scripts/mkinitramfs.py" \
     --target-dir "$TARGET_DIR" \
     --init "$NEODCT_DIR/initramfs" \
+    --verifier "$BINARIES_DIR/nd-verify" \
     --output "$BINARIES_DIR/initramfs.cpio.gz"
 
 # --- userdata.ext4 -------------------------------------------------------

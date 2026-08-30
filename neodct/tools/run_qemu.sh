@@ -20,6 +20,7 @@
 #   NEODCT_VERITY=off ...                     skip verity entirely
 #   NEODCT_DEBUG=1 ...                        verbose initramfs, no quiet
 #   NEODCT_DEVENV=0 ...                       do NOT source /NeoDCT/User/env.sh
+#   NEODCT_UNSIGNED=1 ...                     install unsigned updates
 #   NEODCT_APPEND="printk.time=1" ...         extra kernel cmdline (see below)
 #   NEODCT_SD=share ...                       host folder as the card (virtiofs)
 #   NEODCT_SD=none ...                        no card inserted
@@ -127,6 +128,15 @@ fi
 # NEODCT_DEVENV=0 takes it away, which is how to see what a shipped phone
 # does with an env.sh somebody left on the partition.
 [ "${NEODCT_DEVENV:-1}" = "0" ] || APPEND="$APPEND neodct.devenv=1"
+
+# The initramfs now refuses to install a staged update whose manifest is not
+# signed by the release key -- SECURITY-AUDIT.md section 3, the critical
+# finding. Engineering mode can still build and stage an UNSIGNED package on
+# purpose, and testing that path end to end needs the boot side to allow it.
+#
+# Off by default here as well as on the phone: an unsigned update installing
+# silently in QEMU is how a signature check stops being tested.
+[ -n "${NEODCT_UNSIGNED:-}" ] && APPEND="$APPEND neodct.unsigned=1"
 
 # Anything else you want on the kernel command line, appended last so it wins.
 # The reason this exists: printk.time=1. CONFIG_PRINTK_TIME is off in both

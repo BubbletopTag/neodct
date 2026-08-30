@@ -128,9 +128,9 @@ key those variants are skipped rather than written misleadingly.
 
 | Variant | Expected on screen | Bypass? |
 |---|---|---|
-| `unsigned` | `BAD SIGNATURE! UPDATE MAY BE CORRUPT!!` softkey **OK**, then `Install Anyway?` softkey **OK** | Yes, engineering mode only. **C** at the second dialog cancels |
-| `wrong-key` | same as above | Yes, engineering mode |
-| `tampered-manifest` | same as above (version reads `…-tampered`) | Yes, engineering mode |
+| `unsigned` | `BAD SIGNATURE! UPDATE MAY BE CORRUPT!!` softkey **OK**, then `Install Anyway?` softkey **OK** | Yes, engineering mode only, **and only as far as the reboot** — see below. **C** at the second dialog cancels |
+| `wrong-key` | same as above | Yes, engineering mode, same caveat |
+| `tampered-manifest` | same as above (version reads `…-tampered`) | Yes, engineering mode, same caveat |
 | `no-manifest` | `INVALID UPDATE! UPDATE MAY BE CORRUPT!!` softkey **OK** | No |
 | `no-image` | same | No |
 | `not-a-zip` | same | No |
@@ -148,6 +148,24 @@ byte in the image is only caught when the image is hashed during the copy.
 That is by design: it means you see the progress bar first. It is caught
 again by the initramfs before anything is written to the system partition,
 and a third time by dm-verity on every boot afterwards.
+
+**Engineering mode gets an unsigned package staged, not installed.** The
+initramfs checks the release signature itself before it writes anything, and
+it does not read engineering mode — that setting lives in `settings.prop` on
+the writable partition, which is exactly the partition the check exists to
+stop trusting (`SECURITY-AUDIT.md` section 3). So the three engineering-mode
+rows above stage, reboot, and come back with the old system and
+`last_result.prop` reading `not signed by the release key`. To carry one all
+the way through, boot with the escape hatch:
+
+```sh
+NEODCT_UNSIGNED=1 neodct/tools/run_qemu.sh
+```
+
+which puts `neodct.unsigned=1` on the kernel cmdline. That is the U-Boot
+environment on a real phone, so it is not something a running system can set
+for itself — which is the whole reason the hatch is there and not in a
+setting. The applier logs a `WARNING` line naming it on every boot it is used.
 
 **Turn engineering mode off** (Settings → Engineering Mode) and re-run the
 `unsigned` case: the dialog must become `BAD SIGNATURE! UPDATE MAY BE
@@ -204,9 +222,12 @@ NEODCT_RECOVERY=1 NEODCT_RECTTY=/dev/console neodct/tools/run_qemu.sh
 
 **update system** mounts the card, lists `*.ndsw`, hashes the image straight
 out of the zip *before* writing anything, writes it, reads it back, then
-records what is installed and reboots. It cannot check signatures -- there is
-no crypto in the initramfs -- so it is an integrity check gated on physical
-possession of the phone, and the confirmation screen says so.
+records what is installed and reboots. It checks the release signature and
+tells you the answer -- "Signed by the release key" or "is NOT SIGNED.
+Install it anyway?" -- but it does not refuse over it. Recovery exists to
+rescue a phone that will not boot, with a person standing in front of it, and
+an owner whose only image is an unsigned development build still has to be
+able to get it running. The automatic applier is the one that refuses.
 
 **wipe user data** erases contacts, messages and settings but keeps
 `.ndsys`: deleting that would take `installed.prop` with it, leaving the next

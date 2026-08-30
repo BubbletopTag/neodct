@@ -344,6 +344,28 @@ recovery_manifest_field() {
         | head -n1
 }
 
+# True when the package's manifest carries a valid release signature.
+#
+# Same verifier, same key and the same detached signature the automatic
+# applier checks, so "signed" means one thing on this phone. What differs is
+# what happens next: the applier refuses, recovery only changes the question
+# it puts on the panel. False also covers "there is no verifier", which is
+# the honest answer to "is this signed" when nothing can tell.
+recovery_package_is_signed() {   # recovery_package_is_signed NDSW
+    _dir="${NDSYS_TMPDIR:-/run/ndsys}/recovery"
+
+    [ -x "${NDSYS_VERIFY_BIN:-/bin/nd-verify}" ] || return 1
+    [ -r "${NDSYS_RELEASE_KEY:-/neodct-release.pub}" ] || return 1
+    rm -rf "$_dir" 2>/dev/null
+    mkdir -p "$_dir" 2>/dev/null || return 1
+    unzip -p "$1" manifest.json > "$_dir/manifest.json" 2>/dev/null
+    unzip -p "$1" manifest.sig  > "$_dir/manifest.sig"  2>/dev/null
+    [ -s "$_dir/manifest.json" ] && [ -s "$_dir/manifest.sig" ] || return 1
+    "${NDSYS_VERIFY_BIN:-/bin/nd-verify}" "$_dir/manifest.json" \
+        "$_dir/manifest.sig" "${NDSYS_RELEASE_KEY:-/neodct-release.pub}" \
+        > /dev/null 2>&1
+}
+
 # The size of a member, from the zip's own listing.
 recovery_member_size() {
     unzip -l "$1" "$2" 2>/dev/null | awk -v want="$2" '$NF == want {print $1; exit}'
@@ -355,9 +377,14 @@ recovery_member_size() {
 # records what is now installed. Never writes anything it has not hashed
 # first. Returns 0 on success.
 #
-# Note: recovery cannot check the *signature* -- there is no crypto in the
-# initramfs. It is an integrity check only, which is why this path requires
-# physical possession of the phone and says so on screen.
+# The signature IS checked now (nd-verify and the release key are in the
+# initramfs -- see the gate in ndsys-apply.sh), but unlike the automatic
+# applier, recovery does not refuse over it. Recovery exists to rescue a
+# phone that will not boot, its whole premise is a person standing in front
+# of it pressing keys, and an owner whose only image is an unsigned
+# development build must still be able to get the phone running. So the
+# result is reported to the caller and the caller asks a different question.
+# recovery_package_is_signed() below is what it asks.
 recovery_install_package() {
     package="$1"
     device="$2"
@@ -479,7 +506,14 @@ recovery_action_update() {
         done
     fi
 
-    if ! recovery_confirm "Install $(basename "$chosen")? Signature is NOT checked here."; then
+    # Two different questions, because they carry two different risks and a
+    # person is about to answer one of them.
+    if recovery_package_is_signed "$chosen"; then
+        _question="Install $(basename "$chosen")? Signed by the release key."
+    else
+        _question="$(basename "$chosen") is NOT SIGNED. Install it anyway?"
+    fi
+    if ! recovery_confirm "$_question"; then
         return
     fi
 
