@@ -109,6 +109,24 @@ log() { echo "[sdcard] $*" >&2; }
 # write_state can publish it without every caller having to pass it.
 UNTRUSTED_STATE=""
 
+# What try_mount() last published. A card with two partitions is described by
+# ONE record, and the arrival mount is only known after the media one is up --
+# so the record has to be written twice, and the second write must not have to
+# rediscover what the first one already knew. Re-deriving the fstype from
+# /proc/mounts would be the obvious way and the wrong one: it answers a
+# different question (what the kernel calls it) and answers nothing at all in
+# the host tests, which would quietly blank the field.
+MOUNTED_DEVICE=""
+MOUNTED_FSTYPE=""
+MOUNTED_LABEL=""
+
+# One value out of the record we last wrote, for the path where this process
+# did not do the mounting -- the second udev add event for a card whose media
+# side another invocation already brought up.
+read_state() {   # read_state KEY
+    sed -n "s/^$1=//p" "$STATE_FILE" 2>/dev/null | head -n1
+}
+
 write_state() {   # write_state STATE DEVICE FSTYPE LABEL
     mkdir -p "$STATE_DIR" 2>/dev/null
     cat > "$STATE_FILE.new" <<EOF
@@ -381,7 +399,9 @@ try_mount() {   # try_mount DEV
                 ;;
         esac
         if mount -t "$fstype" -o "$options" "$1" "$MOUNT_POINT" 2>/dev/null; then
-            write_state mounted "$1" "$fstype" "$(label_of "$1")"
+            MOUNTED_DEVICE="$1"; MOUNTED_FSTYPE="$fstype"
+            MOUNTED_LABEL="$(label_of "$1")"
+            write_state mounted "$1" "$fstype" "$MOUNTED_LABEL"
             log "mounted $1 ($fstype) at $MOUNT_POINT"
             return 0
         fi
@@ -390,7 +410,9 @@ try_mount() {   # try_mount DEV
     # Last resort: let the kernel pick from its own probe list.
     if mount -o "rw,noatime,$CARD_SAFETY_OPTS" "$1" "$MOUNT_POINT" 2>/dev/null; then
         fstype="$(mounted_fstype "$MOUNT_POINT")"
-        write_state mounted "$1" "${fstype:-unknown}" "$(label_of "$1")"
+        MOUNTED_DEVICE="$1"; MOUNTED_FSTYPE="${fstype:-unknown}"
+        MOUNTED_LABEL="$(label_of "$1")"
+        write_state mounted "$1" "$MOUNTED_FSTYPE" "$MOUNTED_LABEL"
         log "mounted $1 (${fstype:-unknown}) at $MOUNT_POINT"
         return 0
     fi
@@ -463,9 +485,13 @@ do_scan() {
         # with the media side already mounted -- and returning here is
         # exactly how the arrival partition would never be mounted at all.
         if ! mountpoint -q "$UNTRUSTED_MOUNT" 2>/dev/null; then
-            mount_untrusted "$(mounted_device "$MOUNT_POINT")" && \
-                write_state mounted "$(mounted_device "$MOUNT_POINT")" \
-                    "$(mounted_fstype "$MOUNT_POINT")" ""
+            if mount_untrusted "$(mounted_device "$MOUNT_POINT")"; then
+                # The record this process is amending was written by another
+                # invocation, so take its device, fstype and label back out of
+                # it rather than guessing them a second time.
+                write_state mounted "$(read_state device)" \
+                    "$(read_state fstype)" "$(read_state label)"
+            fi
         fi
         return 0
     fi
@@ -479,9 +505,9 @@ do_scan() {
         if try_mount "$device"; then
             mount_untrusted "$device"
             # try_mount already published; do it again now that the arrival
-            # mount is known, so one record describes the whole card.
-            write_state mounted "$device" "$(mounted_fstype "$MOUNT_POINT")" \
-                "$(label_of "$device")"
+            # mount is known, so one record describes the whole card. From
+            # what try_mount recorded, not from a fresh probe.
+            write_state mounted "$MOUNTED_DEVICE" "$MOUNTED_FSTYPE" "$MOUNTED_LABEL"
             return 0
         fi
     done
