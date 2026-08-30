@@ -30,6 +30,44 @@ define NEODCT_COPY_LICENSE
 endef
 NEODCT_POST_RSYNC_HOOKS += NEODCT_COPY_LICENSE
 
+# rsync -au, which is what buildroot's local-site step runs, has NO --delete.
+# It copies files in and never takes one out. So a file that is deleted from
+# neodct/src -- or that belongs to a branch you are no longer on -- stays in
+# the build copy forever and keeps being compiled.
+#
+# The Makefile globs (LIB_SRCS := $(wildcard lib/*.c)), so a stale .c is not
+# ignored: it is picked up as if it were part of the tree. Checking out a
+# branch that adds lib/nd_calendar.c, building an image, then checking out one
+# that does not have it gives a build that fails on a file the working tree
+# does not contain -- and if the stale file happens to still compile, it is
+# worse, because it silently SHIPS.
+#
+# buildroot's own rsync is not ours to change, so the pruning happens here,
+# right after it. Three things must survive, and the third is the one that
+# bites:
+#
+#   ./build      the cross build's output directory, excluded from the rsync
+#                for the reason above;
+#   ./LICENSE    copied in from one level above NEODCT_SITE, so it is never in
+#                the source tree either;
+#   ./.*         BUILDROOT'S OWN BOOKKEEPING. .stamp_configured, .stamp_built
+#                and .files-list*.txt live in $(@D) alongside the sources, and
+#                none of them exist in neodct/src -- so a prune that only knew
+#                about the first two would delete the package's build state
+#                every time it ran. Found by writing exactly that.
+define NEODCT_PRUNE_STALE_SOURCES
+	cd $(@D) && find . -path ./build -prune -o -name '.?*' -prune -o -type f -print | \
+	while read -r f; do \
+	    rel="$${f#./}"; \
+	    if [ "$$rel" != LICENSE ] && [ ! -e "$(NEODCT_SITE)/$$rel" ]; then \
+	        printf 'neodct: dropping stale %s (not in neodct/src)\n' "$$rel" >&2; \
+	        rm -f "$$f"; \
+	    fi; \
+	done; \
+	:
+endef
+NEODCT_POST_RSYNC_HOOKS += NEODCT_PRUNE_STALE_SOURCES
+
 NEODCT_DEPENDENCIES = host-pkgconf freetype jpeg libpng sqlite zlib openssl
 
 # Make a plain `make` notice that the source changed.
