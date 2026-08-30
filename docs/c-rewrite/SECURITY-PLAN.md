@@ -118,7 +118,7 @@ fallback:
 The split is by *size class*, not by trust: both are untrusted, and the small
 one exists so the browser still works with no card in the slot.
 
-### The problem this creates, and why it forces the namespace
+### The problem this creates: FAT has no ownership
 
 **A FAT filesystem has no ownership and no mode bits.** `chown` and `chmod` do
 not work on it. Permissions come from mount options — `uid=`, `gid=`, `fmask=`,
@@ -135,7 +135,10 @@ mounted for `ndusr_ut`, `ndusr_ut` has the entire card — including any
 `authorized_keys` sitting on it, which `SECURITY-AUDIT.md` §4 Q5 vector 4
 already flags as loadable straight off a card.
 
-There are two ways out, and they are genuinely different bets.
+There are three ways out. The third is the one to take, and it was missed on the
+first pass because the constraint was read as "FAT cannot express ownership"
+when the accurate version is "**a FAT filesystem** cannot express ownership" —
+and a card can carry more than one of them.
 
 #### Option A — keep FAT, bind-mount the subtree
 
@@ -201,32 +204,91 @@ while the phone still has it mounted.
    Worth choosing deliberately: ext2 (no journal, and what busybox's `mke2fs`
    produces) or ext4 with the journal disabled.
 
+#### Option C — two FAT32 partitions, which is the recommendation
+
+The ownership options FAT *does* have — `uid=`, `gid=`, `fmask=`, `dmask=` —
+apply per **mount**, and a mount is per **block device**. A partitioned card is
+two block devices. So two partitions get two genuinely independent sets of
+ownership options, with no kernel feature and no filesystem change:
+
+```
+p1  FAT32  uid=ndusr,    gid=ndusr,    dmask=0027,fmask=0137, nosuid,nodev
+           music, wallpapers, tones -- the import side
+
+p2  FAT32  uid=ndusr_ut, gid=ndusr_ut, dmask=0077,fmask=0177, nosuid,nodev,noexec
+           downloads, MMS attachments -- the untrusted side
+```
+
+This dominates the other two:
+
+| | A (namespace) | B (ext) | **C (two partitions)** |
+| --- | --- | --- | --- |
+| Needs an SDK kernel option | **yes** | no | **no** |
+| Card reads on a PC | yes | **no** | **yes** |
+| Needs a format | no | **yes** | yes (repartition) |
+| Can carry setuid / device nodes | no | **yes** | **no** |
+
+Note the last row, which is not obvious: staying on FAT keeps the property that
+a crafted card *structurally cannot* carry a setuid binary or a device node.
+Option B hands that away in exchange for ownership; C gets the ownership and
+keeps the property.
+
+`candidates()` already enumerates partitions before whole disks
+(`neodct-sdcard:145`), so the device discovery is done. What is missing is that
+the helper mounts **the first partition that works and returns** — it would need
+to mount both, and `do_format()` would need to lay down a partition table rather
+than a superfloppy. Both are contained changes to one shell script.
+
+The split is also a better fit for what the card is *for*: the media the owner
+copies on from a PC and the junk the browser downloads were never the same kind
+of data, and this makes that a boundary rather than a convention.
+
 #### Recommendation
 
-**B, with the warning the owner suggested, and A's namespace still built —
-for `/dev`, not for storage.**
+**C.** It needs nothing from the vendor kernel, keeps the card readable on any
+computer, and keeps FAT's inability to express setuid — which turns out to be a
+security property worth holding on to.
 
-The reasoning is that B removes an entire dependency on a kernel feature nobody
-here controls, and does it with parts already in the image. That is worth more
-than the interop, *for this owner*, who is the only user and who can format a
-card on the phone.
+The owner's warning is still worth showing, because repartitioning still wipes
+the card. It just no longer has to say "this card will not read on a PC any
+more".
 
-But the interop loss is real and should be softened rather than ignored:
+**A remains viable** now that the vendor kernel's config is known to be
+changeable — `CONFIG_MNT_NS` would make the bind-mount route work on a
+single-partition FAT card. It is the fallback if partitioning turns out to be
+awkward on the phone, not the plan.
 
-- **Keep the FAT mount path.** A foreign FAT card should still mount for
-  importing music and wallpapers — that direction is the one that matters, and
-  it is read-mostly.
-- **The untrusted directory is only offered on a NeoDCT-formatted ext card.**
-  On a FAT card, `ndusr_ut` falls back to `/NeoDCT/User/browser/` for state, and
-  downloads are **refused with a clear message** rather than silently filling an
-  8 MiB partition that the rest of the phone needs.
-- **Warn before formatting**, exactly as proposed: the format screen should say
-  that a NeoDCT card is no longer readable on a PC, and why. That is a real
-  trade the owner is making and it should be made on purpose.
+**B is the one to drop.** Its only advantage over C was ownership, which C also
+has, and it pays for it with interop and with the setuid property.
 
-Note what B does *not* remove: the namespace is still wanted for the minimal
-`/dev` of §2 and for keeping `file:///` out of `/NeoDCT/System`. It stops being
-a **prerequisite for storage**, which is the part that was forcing the ordering.
+---
+
+**A correction to the previous revision.** It offered, as A's fallback, "a
+second FAT mount of the same card with different `uid=`/`fmask=` options". That
+is unsound: mounting one block device twice generally shares the superblock and
+the second mount's options are ignored rather than applied. Two *partitions* is
+the version of that idea that actually works, and it is Option C.
+
+#### What holds regardless of which option wins
+
+- **A foreign, single-partition FAT card must still mount** for importing music
+  and wallpapers. That direction is the one the owner actually uses, and it is
+  read-mostly.
+- **The untrusted directory is only offered on a NeoDCT-formatted card.** On a
+  foreign card there is no `ndusr_ut` partition, so untrusted state falls back
+  to `/NeoDCT/User/browser/` and downloads are **refused with a clear message**
+  rather than silently filling an 8 MiB partition the rest of the phone writes
+  to.
+- **Warn before formatting.** Repartitioning wipes the card under any option, so
+  the format screen should say so plainly.
+- **`nosuid,nodev` on every card mount, `noexec` on the untrusted one.** Under
+  C this is defence in depth, because FAT cannot represent setuid anyway. Under
+  B it is the only thing between a crafted card and a root shell. Write it once,
+  now, and it is correct under either.
+- **None of this removes the namespace from the plan** — it is still wanted for
+  the minimal `/dev` of §2 and for keeping `file:///` out of `/NeoDCT/System`.
+  What C removes is storage's *dependency* on it, which is the part that was
+  forcing the phase order.
 
 ### Where DAC stops, and what to add
 
@@ -487,22 +549,19 @@ fraction of the work.
 a bind mount of `sdcard/untrusted/` as the only card path that exists for
 `ndusr_ut`.
 
-**How required it is depends on the card decision in §1.**
+Under **Option C in §1 (two FAT partitions), which is the recommendation**,
+storage confinement is ordinary mount options and this phase is what it always
+should have been: the way to give untrusted processes a minimal `/dev` (§2) and
+to keep `file:///` out of `/NeoDCT/System`. Worth doing, not blocking.
 
-Under Option A (keep FAT) it is a hard prerequisite: FAT has no ownership to
-attach a permission to, so untrusted data on a card is impossible without it,
-and `CONFIG_MNT_NS` in a vendor BSP kernel becomes load-bearing.
+Only Option A makes it a prerequisite, and only because a single FAT filesystem
+has no ownership to attach a permission to.
 
-Under **Option B (ext-formatted cards), which is the recommendation**, storage
-confinement is ordinary DAC and this phase drops back to what it was: the way to
-give untrusted processes a minimal `/dev` (§2) and to keep `file:///` out of
-`/NeoDCT/System`. Still worth doing, no longer blocking, and no longer a bet on
-a kernel config nobody here can read.
-
-That is the main reason to prefer B. It is not that ext is more secure than a
-bind mount — it is that ext needs nothing from the SDK kernel, and every
-dependency removed from a kernel we do not control is a dependency that cannot
-turn out to be missing at the worst moment.
+The vendor kernel's config **is** changeable — it has been changed before, for
+Bluetooth — so `CONFIG_MNT_NS` is no longer a bet. It is a task. That widens the
+options rather than settling them: C is still preferable because a change that
+needs no kernel rebuild ships faster and cannot regress when the SDK is next
+updated.
 
 **Phase 3 — seccomp, then the permission field.**
 `no_new_privs` + a filter that denies `socket()` for apps that declare no
