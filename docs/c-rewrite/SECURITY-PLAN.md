@@ -269,6 +269,60 @@ is unsound: mounting one block device twice generally shares the superblock and
 the second mount's options are ignored rather than applied. Two *partitions* is
 the version of that idea that actually works, and it is Option C.
 
+#### `noexec` on the card: what it does and does not break
+
+Worth being exact, because the obvious reading is wrong in one direction and
+not alarmed enough in the other.
+
+**It does not affect NetSurf or mpv.** Both live on the read-only rootfs —
+`ND_MPV_BIN` is `/usr/bin/mpv` (`nd_media.h:48`), `netsurf-fb` likewise. `noexec`
+refuses `execve()` of files *on the mount it is set on*; it says nothing about a
+program that lives elsewhere and merely *reads* data from it. Playing a video
+off a `noexec` card works exactly as it does today, and so does opening a file
+in the browser. Nothing in the current stack is affected.
+
+**It does break emulators, and by a mechanism worth naming.** The problem is
+not only `execve()` of a `pcsx-rearmed` binary sitting on the card. RetroArch's
+whole architecture is **cores loaded with `dlopen()`**, and `dlopen()` has to
+`mmap()` the library `PROT_EXEC` — which `noexec` refuses with `EACCES` just as
+it refuses `execve()`. So a `noexec` card blocks RetroArch cores even when
+RetroArch itself is installed on the rootfs.
+
+**And the same mechanism collides with NeoDCT's own app model.** `nd-apprun`
+loads apps by `dlopen()`ing `<app-dir>/app.so`. `SECURITY-AUDIT.md` §6 Phase 3
+says `/NeoDCT/User/apps` can start existing once confinement lands — and if that
+directory is ever on the card, a blanket `noexec` kills user-installable apps
+outright. That is a constraint on a decision not yet made, which is the cheapest
+time to notice it.
+
+#### So split by provenance, not by trust
+
+The right boundary is not "trusted vs untrusted". It is **did the owner choose
+to put this here, or did it arrive?**
+
+```
+p1  FAT32  uid=ndusr      nosuid,nodev            EXEC ALLOWED
+           media, installed apps, emulator cores, ROMs, saves
+
+p2  FAT32  uid=ndusr_ut   nosuid,nodev,noexec     NO EXEC
+           browser downloads, MMS attachments, anything that arrived unbidden
+```
+
+Both still get `nosuid,nodev`, and FAT cannot represent either anyway — that is
+the property Option C was chosen to keep.
+
+Installing something then becomes an **explicit copy from p2 to p1**, which is a
+deliberate act the owner performs through the UI. That is not friction to be
+engineered away; it is the moment responsibility is taken, and it is the only
+point in the whole design where an owner says "yes, run this". A downloaded ELF
+sitting in p2 cannot be executed by anything, including by a compromised
+browser — it has to be moved first, by a person.
+
+`noexec` earns its place on p2 precisely because that is where a hostile MMS
+attachment lands. Without it, "the attachment is really an ARM binary" is one
+`execve()` away from `ndusr_ut` code execution — not root, but exactly the
+foothold the confinement exists to deny.
+
 #### What holds regardless of which option wins
 
 - **A foreign, single-partition FAT card must still mount** for importing music
@@ -281,10 +335,12 @@ the version of that idea that actually works, and it is Option C.
   to.
 - **Warn before formatting.** Repartitioning wipes the card under any option, so
   the format screen should say so plainly.
-- **`nosuid,nodev` on every card mount, `noexec` on the untrusted one.** Under
-  C this is defence in depth, because FAT cannot represent setuid anyway. Under
-  B it is the only thing between a crafted card and a root shell. Write it once,
-  now, and it is correct under either.
+- **`nosuid,nodev` on every card mount; `noexec` only on the arrival
+  partition.** Under C, `nosuid,nodev` is defence in depth because FAT cannot
+  represent either. Under B it is the only thing between a crafted card and a
+  root shell. `noexec` is narrower on purpose — see the provenance split above;
+  putting it on the media partition would block emulator cores and, if user apps
+  ever live on the card, the app model itself.
 - **None of this removes the namespace from the plan** — it is still wanted for
   the minimal `/dev` of §2 and for keeping `file:///` out of `/NeoDCT/System`.
   What C removes is storage's *dependency* on it, which is the part that was
