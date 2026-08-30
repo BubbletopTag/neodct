@@ -3,6 +3,10 @@
 ############################
 buildroot/output/
 buildroot/dl/
+# A `make` run redirected to a file, which is how a headless agent watches
+# one. It is build output like the rest of this section, and it lands at the
+# top of the tree where it is easy to commit by accident.
+buildroot/build.log
 
 # Out-of-tree build dirs
 build-*/
