@@ -83,7 +83,7 @@ the user's own phrasing — *denied listing* — is precisely what the bits expr
 
 ```
 /NeoDCT/User           0751  ndusr:ndusr        o+x, o-r   traverse, cannot list
-/NeoDCT/User/browser   0770  ndusr:ndusr_ut     group rwx  ut's own space
+/NeoDCT/User/browser   0770  ndusr:ndusr_ut     group rwx  ut's state, not its data
 /NeoDCT/User/db        0750  ndusr:ndusr        o-x        ut cannot even enter
 /NeoDCT/User/.remote   0700  ndusr:ndusr                   nor this
 /NeoDCT/User/.ndsys    0700  ndusr:ndusr                   nor this
@@ -97,6 +97,62 @@ at the directory that denies entry.
 
 `ndusr_ut` must **not** be in group `ndusr`. The group is what separates
 "trusted apps share the user's data" from "the browser does not".
+
+### Where untrusted data actually goes: the card, not the partition
+
+`/NeoDCT/User` is **8 MiB** on the Luckfox — `docs/PARTITIONS.md:27`, a UBI
+volume on a 128 MiB NAND chip. That is enough for settings, a phonebook and an
+SMS database and nothing else. It is not a download directory, and treating it
+as one is how the *phone* breaks rather than the browser: settings, the message
+databases and the call log all write there, so a browser that fills the
+partition takes the rest of the system down with it.
+
+So the untrusted working directory is on the card, with the partition as a
+fallback:
+
+```
+/NeoDCT/User/sdcard/untrusted/   primary  downloads, MMS attachments, anything big
+/NeoDCT/User/browser/            fallback cookies and state when no card is present
+```
+
+The split is by *size class*, not by trust: both are untrusted, and the small
+one exists so the browser still works with no card in the slot.
+
+### The problem this creates, and why it forces the namespace
+
+**A FAT filesystem has no ownership and no mode bits.** `chown` and `chmod` do
+not work on it. Permissions come from mount options — `uid=`, `gid=`, `fmask=`,
+`dmask=` — and they apply to **the whole filesystem at once**.
+
+Today the card is mounted `rw,noatime,utf8,flush`
+(`System/hw/neodct-sdcard:177`) with no ownership options at all, so everything
+on it belongs to whoever mounted it.
+
+The consequence for this design is unavoidable and worth stating plainly:
+**there is no way to grant `ndusr_ut` `sdcard/untrusted/` and deny it
+`sdcard/music/` using permissions.** One mount, one uid, one gid. If the card is
+mounted for `ndusr_ut`, `ndusr_ut` has the entire card — including any
+`authorized_keys` sitting on it, which `SECURITY-AUDIT.md` §4 Q5 vector 4
+already flags as loadable straight off a card.
+
+The only mechanism that expresses "this subtree and nothing else" on a
+filesystem with no permissions is a **bind mount inside a mount namespace**:
+
+```
+core (ndusr):  mounts the card once, uid=ndusr, noexec,nosuid,nodev
+launcher:      unshare(CLONE_NEWNS)
+               bind /NeoDCT/User/sdcard/untrusted -> the only card path ut sees
+               drop to ndusr_ut
+               exec the untrusted binary
+```
+
+So the mount namespace is **not** an optional Phase 2 improvement. Putting
+untrusted data on the card requires it. That is a genuine reordering of the plan
+and it is the SD card's doing, not a preference — see §5.
+
+`noexec,nosuid,nodev` on the card matters more here than it does in the audit's
+framing, because this is now the one place untrusted code *chooses* the
+contents.
 
 ### Where DAC stops, and what to add
 
@@ -162,6 +218,49 @@ the three the proposal names as untrusted:
 The second row is the serious one. Read access to the real evdev node is a
 keylogger — it does not matter which app is in the foreground, an evdev reader
 sees everything typed, including into the dialler and any future PIN entry.
+
+### MMS goes through MediaWidget, not the browser
+
+Worth correcting an assumption it is easy to make: **MMS attachments will be
+displayed by MediaWidget — `mpv` — not by NetSurf.** That is why `mpv` belongs
+in the untrusted set alongside the browser, and it changes where the risk sits.
+
+`mpv` is a *larger* parser surface than the browser is for this purpose, not a
+smaller one. NetSurf with JavaScript off parses HTML, CSS and a handful of image
+formats. `mpv` brings a demuxer for every container it was built with and a
+decoder behind each — and an MMS attachment is bytes chosen by a stranger who
+needs only the phone number.
+
+Three things the current MediaWidget already does that turn out to be security
+properties rather than performance ones, and which must not be undone:
+
+| Flag | Why it matters now |
+| --- | --- |
+| `--no-config` (`nd_media.c:144`) | no config file on the card can change how the decoder behaves |
+| `--sub-auto=no` (`:163`) | mpv does not stat the directory around the file it was given |
+| tiny demuxer cache (`:177`) | bounds what a hostile file can make it allocate |
+| **no Lua in the build** (`:165`) | the scripting layer that would execute attacker-chosen code is absent entirely, so the options controlling it do not even exist |
+
+The last one is the strongest and the least visible — it is the mpv equivalent
+of NetSurf shipping with JavaScript off, and like that one it is a build
+property nobody would notice regressing. Both deserve a line in the build's
+acceptance check.
+
+**The copy-before-display step is the right instinct and worth making precise.**
+Copying the attachment into the untrusted directory before handing it to `mpv`
+means `mpv` never opens the message database's directory at all. To get the full
+value from it:
+
+- **Generate the filename.** Never reuse the one the sender supplied — it is
+  attacker-controlled text and the only thing it needs to survive is being
+  opened. A sequence number and the MIME type's extension is enough.
+- **Per-message directory, `0700 ndusr_ut`, removed on exit.** Bind-mounted into
+  the namespace while the viewer runs and gone afterwards, so the window in
+  which the file is reachable is the window in which it is on screen.
+- **Hand `mpv` a path inside its namespace, or an fd.** It should never need to
+  enumerate anything to find its own attachment.
+- The card is `noexec` (§1), which is what stops a "video" that is really an ELF
+  from being one command away from running.
 
 ### The mitigation the hardware hands us for free
 
@@ -303,14 +402,34 @@ to exist.
 **Phase 1 — the two users, DAC only.**
 `ndusr` and `ndusr_ut` exist; the mode-bit layout of §1; the core drops to
 `ndusr` after opening the framebuffer; udev rules and group membership for the
-devices the audit tabulates. Stop here and the browser still has `/dev/fb0`, but
-`ndusr_ut` can no longer read the SMS database, the ssh keys or the settings —
-which is most of the value for a fraction of the work.
+devices the audit tabulates. `/NeoDCT/User/browser` is the untrusted directory
+for now, because it is the one that works without a namespace. Stop here and the
+browser still has `/dev/fb0`, but `ndusr_ut` can no longer read the SMS
+database, the ssh keys or the settings — which is most of the value for a
+fraction of the work.
 
-**Phase 2 — the mount namespace.**
-`unshare(CLONE_NEWNS)` in the launcher for untrusted apps; minimal `/dev`;
-`/NeoDCT/User/browser` as the only writable path. This closes `file:///`
-properly and makes §3 step 1 true.
+**Phase 2 — the mount namespace. Required, not optional.**
+`unshare(CLONE_NEWNS)` in the launcher for untrusted apps; a minimal `/dev`;
+a bind mount of `sdcard/untrusted/` as the only card path that exists for
+`ndusr_ut`.
+
+This phase was originally the "nice to have that closes `file:///` properly". It
+is not: **§1 shows that untrusted data on the SD card cannot be confined any
+other way**, because FAT has no ownership to attach a permission to. So the
+order is now:
+
+- untrusted data on the card **requires** Phase 2;
+- MMS through MediaWidget (§2) **requires** the per-message bind mount, which is
+  Phase 2 machinery;
+- and `CONFIG_MNT_NS` in the SDK kernel therefore stops being a detail to
+  confirm eventually and becomes the **first thing to check**, because two
+  features depend on it. See §6.
+
+If the SDK kernel turns out to lack mount namespaces, the fallback is a second
+FAT mount of the same card with different `uid=`/`fmask=` options, which is
+uglier and weaker — it gives `ndusr_ut` a differently-permissioned view of the
+*whole* card rather than a subtree. Worth knowing that the fallback exists;
+worth much more to confirm the kernel before needing it.
 
 **Phase 3 — seccomp, then the permission field.**
 `no_new_privs` + a filter that denies `socket()` for apps that declare no
@@ -325,12 +444,19 @@ network, plus `ptrace`, `mount`, `reboot`. Then `permissions` in
 
 Stated plainly so nobody builds on it by accident:
 
-- **The SDK kernel's config.** `build-luckfox/` is not in this clone and the
-  kernel is built in a distrobox from the Rockchip SDK, so `CONFIG_SECCOMP_FILTER`,
-  `CONFIG_NAMESPACES`, `CONFIG_MNT_NS` and
-  `CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG` are **assumed present, not confirmed**.
-  Phases 2 and 3 and the Phase 0 verity fix each depend on one of them. Check
-  before scheduling, not during.
+- **`CONFIG_MNT_NS` in the SDK kernel — check this one first.** Two separate
+  features now rest on it: untrusted data on the SD card (§1) and the MMS
+  per-message bind mount (§2). `build-luckfox/` is not in this clone and the
+  kernel is built in a distrobox from the Rockchip SDK, so it is **assumed
+  present, not confirmed**. One command on the phone settles it:
+
+  ```sh
+  zcat /proc/config.gz | grep -E 'MNT_NS|NAMESPACES|SECCOMP_FILTER|VERITY'
+  ```
+
+  If `/proc/config.gz` is not built in, the SDK's own `.config` says the same.
+- **`CONFIG_SECCOMP_FILTER` and `CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG`**, same
+  caveat. Phase 3 and the Phase 0 verity fix depend on them respectively.
 - **Whether `GPM` is only a LINKS dependency.** It may also be a NetSurf
   framebuffer input option; the netsurf package needs reading before it is
   dropped.
