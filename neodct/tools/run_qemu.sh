@@ -27,7 +27,10 @@
 #   NEODCT_MODEM=1 ...                        pass the SIM7600 through
 #   NEODCT_BT=1 ...                           pass the UB500 dongle through
 #   NEODCT_NET=1 ...                          add a virtio NIC (browser testing)
-#   NEODCT_AUDIO=none ...                     no audio device
+#   NEODCT_AUDIO=none ...                     no audio device (the default when
+#                                             no PulseAudio server is running)
+#   NEODCT_AUDIO=pa ...                       force PulseAudio even if the
+#                                             probe below found no server
 #   NEODCT_DISPLAY=none ...                   no panel at all (the UI cannot
 #                                             boot; serial/recovery only)
 #   NEODCT_DISPLAY=offscreen ...              panel present, no window
@@ -45,10 +48,52 @@ MEMORY="${NEODCT_MEM:-72}"
 VERITY="${NEODCT_VERITY:-enforce}"
 SD_MODE="${NEODCT_SD:-image}"
 DISPLAY_MODE="${NEODCT_DISPLAY:-gtk}"
-AUDIO="${NEODCT_AUDIO:-pa}"
 SHARE_DIR="${NEODCT_SHARE:-$HOME/neodct-sdcard}"
 MONITOR="${NEODCT_MONITOR:-}"
 EXTRA="${NEODCT_QEMU_EXTRA:-}"
+
+# ============ WHY THE AUDIO BACKEND IS PROBED AND NOT ASSUMED ============
+#
+# This used to be plain `${NEODCT_AUDIO:-pa}`, and on any machine without a
+# PulseAudio daemon QEMU refuses to start AT ALL -- not "the phone boots
+# silently", but two fatal errors before the kernel is even loaded:
+#
+#     qemu-system-aarch64: XDG_RUNTIME_DIR not set
+#     qemu-system-aarch64: could not stat pidfile /run/xdg/pulse/pid
+#
+# Neither says the word "audio", so the obvious reading is that the image or
+# the script is broken. Setting XDG_RUNTIME_DIR by hand only advances it from
+# the first error to the second, because the real problem is that there is no
+# sound server behind the socket.
+#
+# That is every headless box: a CI runner, a container, a VPS over SSH -- and
+# a phone emulator with no speakers is worth far more than one that will not
+# boot. So the default is now "pa if something is actually listening,
+# otherwise none".
+#
+# An EXPLICIT NEODCT_AUDIO is still obeyed verbatim, `pa` included: someone
+# debugging their own audio setup wants QEMU's real complaint, not this
+# script's guess.
+pick_audio() {
+    # PULSE_SERVER wins wherever it is set -- it can name a TCP server or a
+    # socket somewhere else entirely, and probing the default path would
+    # wrongly conclude there is nothing there.
+    [ -n "${PULSE_SERVER:-}" ] && { echo pa; return; }
+    for sock in "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/pulse/native" \
+                "/run/user/$(id -u)/pulse/native"; do
+        [ -S "$sock" ] && { echo pa; return; }
+    done
+    echo none
+}
+
+if [ -n "${NEODCT_AUDIO:-}" ]; then
+    AUDIO="$NEODCT_AUDIO"
+else
+    AUDIO="$(pick_audio)"
+    [ "$AUDIO" = none ] && printf '%s\n' \
+        "run_qemu: no PulseAudio server; starting without audio." \
+        "run_qemu: set NEODCT_AUDIO=pa to force it and see QEMU's own error." >&2
+fi
 
 # SIM7600 as seen on the USB bus.
 MODEM_VENDOR="${NEODCT_MODEM_VENDOR:-0x1e0e}"

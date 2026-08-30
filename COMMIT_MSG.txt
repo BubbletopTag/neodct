@@ -2118,3 +2118,41 @@ newer than 0.4.9a and 0.4.9a is not newer than 0.4.10a -- verified by linking
 against the built library, not by reading it.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+================================================================================
+
+0.4.11a: a calendar, and a second thing the banner can say
+
+Merges PR #15 (Calendar, app 5) and the docs commit added to PR #12 after it
+was first merged. 327 checks across test_calendar and test_calendar_app,
+whole suite green.
+
+Calendar takes app slot 5 -- the one the phone being imitated gave to Call
+Divert, which this phone has never had. Reminders reuse NotifyService's
+existing banner rather than introducing a second notification idea: same two
+lines, same position, same keys, with the event's name where a message count
+used to be and View instead of Read.
+
+## conflicts
+
+nd_log.c: both sides added a tag. Union, and the order does not matter --
+the comment directly above APP_TAGS says "Membership only -- the colour is
+derived". A previous merge commit in this history claims the array order
+tracks app ids and that appending was therefore the only safe resolution.
+That was wrong. The resolution was harmless either way, but the reasoning
+was not, and it is the kind of thing a later reader would take at face value.
+
+CHANGELOG.txt: for the FOURTH release running, a PR's notes merged into a
+section that has already been tagged and published. Moved to 0.4.11a.
+
+That branch had also had to merge gif-wallpaper-support into itself to build,
+which is the clearest symptom yet: origin/main is still at 0.4.3a because
+release.sh pushes tags and never commits, so every branch starts eleven
+versions stale and has to reassemble the present out of other people's
+branches. One `git push origin main` ends it. Left for the user, who owns
+what lands on origin.
+
+Not merged: claude/readme-update-prototypes-f4mdpx, five docs commits with no
+PR open. "Merge all pull requests" did not cover it.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>

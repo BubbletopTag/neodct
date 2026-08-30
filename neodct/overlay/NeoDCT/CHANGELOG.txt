@@ -1,5 +1,74 @@
 # NeoDCT OS Changelog
 
+0.4.11a
+A calendar, and a second thing the banner can say.
+
+The phone keeps a diary now, and it can tell you about it the same way it
+tells you a text arrived.
+
+The notification half is the point. NotifyService has had exactly one kind
+of banner since the beginning -- "N message(s) received" mid-left on the
+home screen, the carrier line hidden behind it, the softkey turning into
+Read, C dismissing it. A reminder uses that, unchanged: same two lines,
+same position, same keys. It says the event's name and the time it is due
+instead of a message count, and the softkey says View instead of Read.
+There is no second notification idea to learn, because inventing one would
+have made the first one mean less.
+
+Added
+- Calendar, app 5 -- the slot the phone being imitated gave to Call
+  Divert, which this one has never had. It opens on the month, because a
+  calendar's front page is the month. Six rows of seven, always six even
+  for a month that fits in five, so that paging does not move every cell
+  under your thumb. Today is outlined, the day you are on is filled, the
+  neighbouring month's days are grey, and a day with something on it gets
+  a one-pixel bar underneath the number.
+  NaviKey opens Options: View day, New event, Go to date, Delete all.
+  A day is a list with New event at the top of it, so an empty day is an
+  offer rather than a dead end. An event opens as a page with its name,
+  its time and its rules on it, and Options there is Edit or Delete.
+- Reminders. An event can carry an alarm -- at the time, or 5, 15 or 30
+  minutes, an hour or a day before it. The core checks the diary every
+  fifteen seconds and puts the banner up when one comes due. It fires once
+  per occurrence, so a daily reminder comes round again tomorrow and an
+  edited event rings again because moving a meeting makes it a different
+  appointment.
+  A reminder that was missed while the phone was off still appears, for
+  twelve hours after its moment: long enough that a phone left off
+  overnight tells you about this morning, short enough that it never
+  surfaces one from last week as though it were news.
+  Pressing View on a single reminder opens that event. On several it opens
+  the calendar, which is the same choice Messages makes between a message
+  and the inbox.
+- Five kinds of note (reminder, meeting, call, birthday, note) and five
+  repeat rules (once, daily, weekly, monthly, yearly). A monthly note on
+  the 31st SKIPS the months that have no 31st and a yearly one on 29
+  February happens in leap years only -- neither silently moves an
+  appointment to a day nobody chose.
+
+Notes
+- The whole grid is reachable on the sixteen keys the 5190 has. There is
+  no left and no right on this keypad, so the second axis comes from the
+  number pad, which is sitting right there: 4 and 6 are a day either way,
+  2 and 8 (and Up and Down) are a week, 1 and 3 (and * and #) are a
+  month, 7 and 9 are a year, and 5 is today. Left and Right, which only a
+  development keyboard has, do what 4 and 6 do.
+- No sync of any kind: no CalDAV, no Google, no network. Events live in
+  one sqlite table on the user partition. A calendar that quietly fails to
+  sync would be worse than one that never claimed it could.
+- The date of an existing event cannot be edited; everything else about it
+  can. A masked field that is already full ignores every keypress until
+  something is deleted, so prefilling a date would cost eight presses of C
+  before the first useful one. Moving an appointment is delete and re-make
+  on the day you want it.
+
+Changed
+- The flashing envelope on the home screen follows the INBOX now rather
+  than any banner. It was drawn whenever a banner was up, which was the
+  same thing while a text was the only thing a banner could be about.
+- Banner lines are fitted to the screen before they are drawn. A message
+  count could never reach the signal meter; an event's name can.
+
 0.4.10a
 Red and blue, the right way round.
 

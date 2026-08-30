@@ -49,6 +49,7 @@
 typedef int (*app_run_fn)(nd_ui *ui);
 typedef int (*app_open_message_fn)(nd_ui *ui, int64_t message_id);
 typedef int (*app_open_inbox_fn)(nd_ui *ui);
+typedef int (*app_open_event_fn)(nd_ui *ui, int64_t event_id);
 typedef void (*app_shutdown_fn)(void);
 
 static int env_fd(const char *name)
@@ -69,7 +70,7 @@ static int env_fd(const char *name)
 static void usage(void)
 {
     (void)fprintf(stderr, "usage: nd-apprun <app-dir> [entry] [arg]\n"
-                          "  entry is one of: run, open_message, open_inbox\n");
+                          "  entry is one of: run, open_message, open_inbox, open_event\n");
 }
 
 int main(int argc, char **argv)
@@ -159,6 +160,15 @@ int main(int argc, char **argv)
             rc = 1;
         } else {
             rc = fn(&ui);
+        }
+    } else if (strcmp(entry, ND_APP_ENTRY_OPEN_EVENT) == 0) {
+        app_open_event_fn fn = (app_open_event_fn)(uintptr_t)dlsym(handle, ND_APP_SYM_OPEN_EVENT);
+
+        if (fn == NULL) {
+            nd_log_err(ND_LOG_OS, "App has no %s(ui): %s", ND_APP_SYM_OPEN_EVENT, app_dir);
+            rc = 1;
+        } else {
+            rc = fn(&ui, arg != NULL ? (int64_t)strtoll(arg, NULL, 10) : 0);
         }
     } else {
         app_run_fn fn = (app_run_fn)(uintptr_t)dlsym(handle, ND_APP_SYM_RUN);
