@@ -1219,14 +1219,22 @@ nd_err nd_rs_start(nd_rs_status *out, char *errmsg, size_t n)
      * a reflash resets it. sshd will not read an authorized_keys file under a
      * group- or world-writable directory. StrictModes is off in the config
      * below, but fixing the mode costs nothing and means a phone is not
-     * relying on that one line." The Python swallows any OSError here. */
+     * relying on that one line." The Python swallows any OSError here.
+     *
+     * ND_MODE_USER_DIR, not the 0755 this was written as. Both satisfy sshd
+     * -- neither is group- or world-writable -- but 0755 grants o+r, and o+r
+     * on this directory is the confinement in SECURITY-PLAN.md section 1
+     * gone: ndusr_ut could then list the partition and find .remote, .ndsys
+     * and db by name. Repairing a loose partition must not loosen a correct
+     * one, and this is the one place in the tree that chmods it outside
+     * S00userdata. */
     {
         char parent[ND_PATH_MAX];
         struct stat st;
 
         if (nd_path_resolve(parent, sizeof parent, ND_PATH_USER) == ND_OK &&
             stat(parent, &st) == 0 && S_ISDIR(st.st_mode) && (st.st_mode & 0022u) != 0u)
-            (void)chmod(parent, 0755);
+            (void)chmod(parent, ND_MODE_USER_DIR);
     }
 
     rc = nd_rs_ensure_host_key(errmsg, n);

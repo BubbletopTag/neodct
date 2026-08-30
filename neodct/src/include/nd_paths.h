@@ -47,6 +47,24 @@ extern "C" {
 
 /* ---- the writable user partition --------------------------------- */
 #define ND_PATH_USER          "/NeoDCT/User"
+
+/* The mode of that directory, and it is load-bearing rather than tidy.
+ *
+ * 0751 is o+x WITHOUT o+r: ndusr_ut can resolve a path THROUGH the partition
+ * to reach /NeoDCT/User/browser, and cannot list the partition to discover
+ * the ssh keys, the databases and the update records by name. Traversal and
+ * listing are different bits and the whole confinement in SECURITY-PLAN.md
+ * section 1 rests on the difference.
+ *
+ * Take o+x away and the browser has nowhere to write. Add o+r -- which is
+ * what 0755 does, and 0755 is the reflex -- and the boundary is gone with no
+ * other symptom. So anything that fixes this directory's mode fixes it to
+ * THIS, and says so by using this name.
+ *
+ * overlay/etc/init.d/S00userdata carries the same number in its own layout
+ * table, because it is shell and cannot include a header;
+ * tests/test_userdata_layout.py pins the two together. */
+#define ND_MODE_USER_DIR 0751u
 #define ND_PATH_SETTINGS_PROP "/NeoDCT/User/settings.prop"
 #define ND_PATH_KEYMAP        "/NeoDCT/User/keymap.json"
 #define ND_PATH_WALLPAPER     "/NeoDCT/User/wallpaper.jpg"

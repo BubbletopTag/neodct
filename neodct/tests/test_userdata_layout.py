@@ -214,3 +214,91 @@ def test_the_ui_runs_with_a_umask_that_matches_the_layout():
 
     assert re.search(r"^umask 0027$", body, re.M), "run_neodct.sh sets no umask"
     assert body.index("umask 0027") < body.index("nd-core"), "too late to matter"
+
+
+# ---------------------------------------------------------------- #
+# The mode of the partition root, in the three places that know it
+# ---------------------------------------------------------------- #
+#
+# 0751 is written down in a shell table, a C header and a self-test, because
+# S00userdata cannot include a header and nd-selftest must not read its
+# expectations out of the thing it is checking. Three copies of a number is a
+# bug waiting to happen unless something pins them together, so this does.
+#
+# It matters more than an ordinary duplicated constant: 0755 is the reflex,
+# 0755 differs by exactly o+r, and o+r here is the whole confinement. A drift
+# to 0755 breaks no test that looks for "not group-writable", starts nothing,
+# logs nothing, and lets the browser enumerate the ssh keys.
+
+PATHS_H = os.path.join(REPO, "neodct", "src", "include", "nd_paths.h")
+SRC_DIR = os.path.join(REPO, "neodct", "src")
+
+
+def nd_mode_user_dir():
+    text = open(PATHS_H).read()
+    m = re.search(r"#define\s+ND_MODE_USER_DIR\s+0([0-7]+)u", text)
+    assert m, "nd_paths.h no longer defines ND_MODE_USER_DIR"
+    return int(m.group(1), 8)
+
+
+def s00_root_mode():
+    text = open(SCRIPT).read()
+    m = re.search(r'NEODCT_USER_LAYOUT="\s*\n:([0-7]+)', text)
+    assert m, "S00userdata's layout table no longer starts with the root entry"
+    return int(m.group(1), 8)
+
+
+def test_the_header_and_the_init_script_agree():
+    assert nd_mode_user_dir() == s00_root_mode(), (
+        "nd_paths.h and S00userdata disagree about the mode of /NeoDCT/User"
+    )
+
+
+def test_the_mode_still_grants_traversal_and_withholds_listing():
+    """Pinned as the two properties rather than as the number, so that a
+    deliberate change has to argue with the design and not just with a
+    constant."""
+    mode = nd_mode_user_dir()
+    assert mode & stat.S_IXOTH, (
+        "o+x is gone: ndusr_ut cannot reach /NeoDCT/User/browser, and the "
+        "browser has nowhere to write"
+    )
+    assert not mode & stat.S_IROTH, (
+        "o+r is set: ndusr_ut can list /NeoDCT/User and find .remote, .ndsys "
+        "and db by name"
+    )
+    assert not mode & (stat.S_IWGRP | stat.S_IWOTH), (
+        "group- or world-writable: sshd refuses authorized_keys underneath it"
+    )
+
+
+def test_nothing_in_the_c_tree_chmods_the_partition_to_a_literal():
+    """The regression guard for the bug this test was written after.
+
+    nd_rs_start() repaired a loose partition by chmod'ing it to 0755 -- which
+    satisfies "not group-writable", which is what it was checking for, and
+    silently grants the o+r that the whole boundary is the absence of. Any
+    future repair path is going to be written by someone reaching for the
+    same reflex, so the rule is: chmod ND_PATH_USER only to ND_MODE_USER_DIR.
+    """
+    offenders = []
+    for root, _dirs, files in os.walk(SRC_DIR):
+        if os.sep + "build" in root or os.sep + "test" in root:
+            continue
+        for name in files:
+            if not name.endswith(".c"):
+                continue
+            path = os.path.join(root, name)
+            text = open(path, errors="replace").read()
+            # chmod(<anything>, 0<digits>) within four lines of ND_PATH_USER:
+            # close enough to catch the shape without matching every chmod in
+            # the tree, which are mostly on files this says nothing about.
+            for m in re.finditer(r"chmod\s*\([^;]*?,\s*(0[0-7]{3,4})\s*\)", text):
+                start = text.rfind("\n", 0, max(0, m.start() - 400))
+                window = text[max(0, start):m.end()]
+                if "ND_PATH_USER" in window:
+                    offenders.append(
+                        "%s: chmod to %s near ND_PATH_USER -- use ND_MODE_USER_DIR"
+                        % (os.path.relpath(path, REPO), m.group(1))
+                    )
+    assert not offenders, "\n".join(offenders)
