@@ -228,8 +228,11 @@ void nd_cal_month_draw(nd_ui *ui, int32_t year, int32_t month, int32_t day, uint
     nd_cal_split((time_t)nd_time_now(), &today_y, &today_m, &today_d, NULL, NULL);
 
     /* 1. Clear rows 0..content_bottom only -- the softkey strip is the
-     *    caller's and must survive. */
-    (void)nd_draw_rect_fill(d, ND_RECT(0, 0, g.screen_w, g.content_bottom), ND_BLACK);
+     *    caller's and must survive. This is the wallpapered background the
+     *    rest of the framework draws, not a black fill: it falls back to
+     *    black on its own when there is no wallpaper, when the feature is
+     *    off, or when a manifest says useWallpaper false. */
+    nd_ui_paint_chrome_content(ui);
 
     /* 2. "August 2026", and the breadcrumb itself. Sub-index -1 is the
      *    widgets' spelling of Python's None: this screen is not a list and
@@ -343,12 +346,42 @@ void nd_cal_month_draw(nd_ui *ui, int32_t year, int32_t month, int32_t day, uint
     (void)nd_ui_present(ui);
 }
 
+/* ============ WHAT THE ANIMATED WALLPAPER NEEDS FROM THIS SCREEN ========
+ *
+ * The month is where the app sits when nothing is happening, so it is the
+ * screen an animated wallpaper is behind for longest. The framework advances
+ * a frame inside nd_ui_read_keypress() and then calls whatever repainter is
+ * registered -- see nd_ui_set_repaint() -- so a screen that registers none
+ * freezes the animation for exactly as long as it is open.
+ *
+ * The grid redraws from four numbers plus the month's event mask, and the
+ * mask is the expensive one (a query over the whole diary). So the repainter
+ * carries the mask that is already loaded rather than reloading it: a
+ * wallpaper frame must not cost a database round trip. */
+typedef struct {
+    nd_ui *ui;
+    const int32_t *year;
+    const int32_t *month;
+    const int32_t *day;
+    const uint32_t *mask;
+} month_repaint_ctx;
+
+static void month_repaint(void *ctx)
+{
+    const month_repaint_ctx *c = (const month_repaint_ctx *)ctx;
+
+    nd_cal_month_draw(c->ui, *c->year, *c->month, *c->day, *c->mask);
+}
+
 bool nd_cal_month_show(nd_ui *ui, int32_t *year, int32_t *month, int32_t *day)
 {
     nd_softkey bar;
     uint32_t mask;
     int32_t shown_year;
     int32_t shown_month;
+    month_repaint_ctx rc;
+    nd_ui_repaint saved;
+    bool out;
 
     if (ui == NULL || year == NULL || month == NULL || day == NULL)
         return false;
@@ -365,6 +398,13 @@ bool nd_cal_month_show(nd_ui *ui, int32_t *year, int32_t *month, int32_t *day)
     mask = nd_cal_month_mask(*year, *month);
     nd_cal_month_draw(ui, *year, *month, *day, mask);
 
+    rc.ui = ui;
+    rc.year = year;
+    rc.month = month;
+    rc.day = day;
+    rc.mask = &mask;
+    saved = nd_ui_set_repaint(ui, month_repaint, &rc);
+
     for (;;) {
         int32_t key;
         nd_cal_nav nav;
@@ -375,18 +415,30 @@ bool nd_cal_month_show(nd_ui *ui, int32_t *year, int32_t *month, int32_t *day)
          * makes it exactly the loop an incoming call arrives at -- and a
          * blocking wait there would hold the sound card until the core gave
          * up and SIGKILLed us, with the phone ringing silently in the
-         * meantime. */
-        key = nd_ui_read_keypress(ui, 0.1);
-        if (nd_app_should_exit())
-            return false;
+         * meantime.
+         *
+         * The timeout is nd_ui_widget_timeout() rather than a literal 0.1 so
+         * that an animation runs at the GIF's rate instead of being capped at
+         * ten frames a second. It only ever shortens the wait -- it returns
+         * the default whenever nothing is animating -- so the teardown poll
+         * stays at least as responsive as it was. */
+        key = nd_ui_read_keypress(ui, nd_ui_widget_timeout(ui, 0.1));
+        if (nd_app_should_exit()) {
+            out = false;
+            break;
+        }
         if (key == ND_KEY_NONE)
             continue;
 
         nav = nd_cal_month_key(key, year, month, day);
-        if (nav == ND_CAL_NAV_OPEN)
-            return true;
-        if (nav == ND_CAL_NAV_BACK)
-            return false;
+        if (nav == ND_CAL_NAV_OPEN) {
+            out = true;
+            break;
+        }
+        if (nav == ND_CAL_NAV_BACK) {
+            out = false;
+            break;
+        }
         if (nav != ND_CAL_NAV_MOVED)
             continue;
 
@@ -401,4 +453,10 @@ bool nd_cal_month_show(nd_ui *ui, int32_t *year, int32_t *month, int32_t *day)
         }
         nd_cal_month_draw(ui, *year, *month, *day, mask);
     }
+
+    /* Restore, not clear: this screen is opened from the app's own loop and
+     * re-entered after every dialog, so the slot it found is the one it owes
+     * back. See nd_ui_set_repaint(). */
+    nd_ui_restore_repaint(ui, saved);
+    return out;
 }
