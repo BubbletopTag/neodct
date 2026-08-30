@@ -1,5 +1,22 @@
 #!/bin/sh
 
+# 0. What everything below inherits.
+#
+# 0027 means a file the UI creates is 0640 and a directory is 0750, which is
+# the layout S00userdata sets up: the group is ndusr, and "other" -- which is
+# ndusr_ut, the browser and the media player -- gets nothing.
+#
+# It has to be here rather than in the C, because it has to cover every
+# process the core forks as well as the core itself, and because the one file
+# it most needs to cover is settings.prop. /NeoDCT/User is 0751: ndusr_ut
+# cannot LIST the directory, but 0644 on a file whose name it can guess is
+# still a file it can read, and "settings.prop" is not a hard name to guess.
+#
+# Anything that genuinely needs a different mode already asks for one --
+# RemoteShell writes its keys 0600 by hand, and umask can only take bits
+# away, never add them.
+umask 0027
+
 # 1. Silence Kernel Messages
 # Prevents random system logs from drawing over your UI
 dmesg -n 1
