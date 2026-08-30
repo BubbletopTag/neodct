@@ -19,6 +19,7 @@
 #   NEODCT_VERITY=permissive ...              boot even if verity fails
 #   NEODCT_VERITY=off ...                     skip verity entirely
 #   NEODCT_DEBUG=1 ...                        verbose initramfs, no quiet
+#   NEODCT_DEVENV=0 ...                       do NOT source /NeoDCT/User/env.sh
 #   NEODCT_APPEND="printk.time=1" ...         extra kernel cmdline (see below)
 #   NEODCT_SD=share ...                       host folder as the card (virtiofs)
 #   NEODCT_SD=none ...                        no card inserted
@@ -117,6 +118,15 @@ if [ -n "${NEODCT_DEBUG:-}" ]; then
 else
     APPEND="$APPEND quiet loglevel=0"
 fi
+# /NeoDCT/User/env.sh is sourced as root before the UI starts, which is why
+# run_neodct.sh now refuses to do it unless something OUTSIDE the writable
+# partition says to -- SECURITY-AUDIT.md section 4 Q5 vector 2. In QEMU that
+# something is this line, and it is on by default because the whole point of
+# the emulator is to flip switches without rebuilding an image.
+#
+# NEODCT_DEVENV=0 takes it away, which is how to see what a shipped phone
+# does with an env.sh somebody left on the partition.
+[ "${NEODCT_DEVENV:-1}" = "0" ] || APPEND="$APPEND neodct.devenv=1"
 
 # Anything else you want on the kernel command line, appended last so it wins.
 # The reason this exists: printk.time=1. CONFIG_PRINTK_TIME is off in both

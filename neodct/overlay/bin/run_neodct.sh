@@ -39,9 +39,50 @@ mkdir -p /NeoDCT/User/logs 2>/dev/null || CRASH_LOG=/tmp/crash.log
 # which turns on T9 -- multi-tap, predictive, the # mode cycle and the mode
 # indicator -- on a keyboard that would otherwise take the QWERTY path and
 # have no modes at all. See docs/c-rewrite/spec-hw-input.md.
+#
+# ============ AND WHY IT IS GATED ============
+#
+# This is SECURITY-AUDIT.md section 4 Q5 vector 2, and it was rated Critical:
+# arbitrary shell, uid 0, from writable storage, on every boot, before the UI
+# starts. Anything that can write one file gets a permanent root backdoor
+# that survives an update -- an update replaces the rootfs and never touches
+# /NeoDCT/User.
+#
+# The feature is good and it stays. What it cannot be is unconditional, and
+# the gate has to be something the writable partition CANNOT set, or it is
+# not a gate. Two things qualify, and neither of them is a setting:
+#
+#   the kernel cmdline    U-Boot environment on the phone, -append in QEMU.
+#                         Not reachable from a running system at all.
+#   a file in the rootfs  read-only squashfs under dm-verity. Writing one
+#                         means replacing the signed image.
+#
+# Engineering mode is deliberately NOT accepted here, even though it gates
+# LinuxShell and raw AT: it lives in settings.prop on the writable partition,
+# so an attacker who can drop env.sh can set it in the same breath.
+NEODCT_DEVENV=""
+if [ -e /etc/neodct-devenv ]; then
+  NEODCT_DEVENV="rootfs marker"
+else
+  for word in $(cat /proc/cmdline 2>/dev/null); do
+    case "$word" in
+      neodct.devenv=1) NEODCT_DEVENV="kernel cmdline" ;;
+    esac
+  done
+fi
+
 if [ -r /NeoDCT/User/env.sh ]; then
-  echo "[NeoDCT] Sourcing /NeoDCT/User/env.sh" > /dev/tty0
-  . /NeoDCT/User/env.sh
+  if [ -n "$NEODCT_DEVENV" ]; then
+    echo "[NeoDCT] Sourcing /NeoDCT/User/env.sh ($NEODCT_DEVENV)" > /dev/tty0
+    . /NeoDCT/User/env.sh
+  else
+    # Loud on purpose. A developer who wonders why NEODCT_T9=1 stopped
+    # working needs to be told, and an owner who finds this line on a phone
+    # nobody develops on has just been told something much more interesting.
+    echo "[NeoDCT] IGNORING /NeoDCT/User/env.sh: no developer environment" \
+      > /dev/tty0
+    echo "[NeoDCT] boot with neodct.devenv=1 to enable it" > /dev/tty0
+  fi
 fi
 
 # nd-core replaces `python3 /NeoDCT/launcher.py`. It is the same program:

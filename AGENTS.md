@@ -94,6 +94,18 @@ without rebuilding a read-only rootfs:
 echo 'export NEODCT_T9=1' > /NeoDCT/User/env.sh
 ```
 
+**`env.sh` is gated.** It is arbitrary shell run as root from writable storage
+on every boot — `SECURITY-AUDIT.md` section 4 Q5 vector 2, and the reason a
+phone somebody can write one file on stays backdoored across updates, since an
+update replaces only the rootfs. It is now sourced only when something
+*outside* the writable partition says so: `neodct.devenv=1` on the kernel
+cmdline, or `/etc/neodct-devenv` in the read-only, verity-covered rootfs.
+`run_qemu.sh` passes the cmdline flag by default, so the workflow above is
+unchanged in QEMU; `NEODCT_DEVENV=0 run_qemu.sh` takes it away, which is how to
+see what a shipped phone does with an `env.sh` left on the partition.
+Engineering mode is deliberately not accepted as the gate: it lives in
+`settings.prop`, on the partition the attacker just wrote to.
+
 The C build has its own suite — `cd neodct/src && make test`, and
 `make ASAN=1 test` before you push anything. It includes the golden frames in
 `neodct/tests/golden/`, captured from the Python build during the port.
