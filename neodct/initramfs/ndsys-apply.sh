@@ -204,6 +204,16 @@ getprop() {
 # mount_card -- mount the first candidate that is not system or user.
 # Read-only: nothing at boot has any business writing to the card, and a
 # card pulled out mid-write is a card someone loses their messages from.
+#
+# nosuid,nodev,noexec as well, because this is the one mount in the whole boot
+# path whose contents were chosen by whoever last held the card. Nothing here
+# runs anything off it -- unzip reads the .ndsw and that is all -- so noexec
+# costs nothing and closes the crafted-card path SECURITY-AUDIT.md finding 9
+# describes. The card is FAT, which cannot represent a setuid bit or a device
+# node in the first place; these options are what makes that true for an ext
+# card somebody hands the phone as well.
+: "${NDSYS_CARD_MOUNT_OPTS:=ro,nosuid,nodev,noexec}"
+
 mount_card() {
     [ -n "$NDSYS_CARD_PREMOUNTED" ] && return 0
     mkdir -p "$MNT_SDCARD" 2>/dev/null
@@ -213,7 +223,8 @@ mount_card() {
         [ "$device" = "${USER_DEV:-}" ] && continue
         is_squashfs "$device" && continue
         for fstype in $NDSYS_CARD_FSTYPES; do
-            if mount -t "$fstype" -o ro "$device" "$MNT_SDCARD" 2>/dev/null; then
+            if mount -t "$fstype" -o "$NDSYS_CARD_MOUNT_OPTS" "$device" \
+                    "$MNT_SDCARD" 2>/dev/null; then
                 return 0
             fi
         done

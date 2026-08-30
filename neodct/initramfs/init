@@ -165,10 +165,22 @@ else
 fi
 
 # Not fatal: the phone can boot without it, it just has nowhere to save.
+#
+# nosuid,nodev on the only writable partition the phone has. Inert while
+# everything runs as root, and load-bearing the moment ndusr_ut exists: this
+# partition is where a compromised process writes, and without nosuid a
+# setuid-root file written there is a privilege escalation that survives a
+# reboot. Set here rather than in /etc/fstab because the partition never
+# appears there -- it is mounted before switch_root and mount --moved in.
+#
+# NOT noexec: /NeoDCT/User/apps is the eventual home of user-installed apps
+# and nd-apprun loads them with dlopen(), which noexec refuses exactly as it
+# refuses execve(). See SECURITY-PLAN.md section 1.
+USER_OPTS="rw,noatime,nosuid,nodev"
 if [ -n "$USER_READY" ]; then
     if user_is_ubi "$USER_DEV"; then USER_FSTYPE=ubifs; else USER_FSTYPE=ext4; fi
-    if mount -t "$USER_FSTYPE" -o rw,noatime "$USER_DEV" "$MNT_USER" 2>/dev/null || \
-       mount -o rw,noatime "$USER_DEV" "$MNT_USER" 2>/dev/null; then
+    if mount -t "$USER_FSTYPE" -o "$USER_OPTS" "$USER_DEV" "$MNT_USER" 2>/dev/null || \
+       mount -o "$USER_OPTS" "$USER_DEV" "$MNT_USER" 2>/dev/null; then
         USER_MOUNTED=1
         mkdir -p "$MNT_USER/logs" "$STATE_DIR" 2>/dev/null
     else

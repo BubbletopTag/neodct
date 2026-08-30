@@ -161,6 +161,23 @@ mounted_fstype() {
 # is what a NeoDCT card is.
 CARD_FSTYPES="vfat exfat ext4 ext3 ext2"
 
+# On every card mount, whatever is on it.
+#
+# A card is the one filesystem on this phone whose contents were chosen by
+# whoever last held it, and it is mounted automatically on insertion by
+# 60-neodct-sdcard.rules -- so "plug this in" is a code path an attacker with
+# thirty seconds of physical access controls end to end. FAT cannot represent
+# a setuid bit or a device node, so on a NeoDCT card these are defence in
+# depth; on the ext card the helper will happily mount (CARD_FSTYPES) they are
+# the only thing between a crafted card and a root shell.
+#
+# noexec is NOT here: it belongs on the partition things ARRIVE on, not on the
+# one the owner deliberately copied media to. See SECURITY-PLAN.md section 1,
+# "split by provenance, not by trust" -- a blanket noexec would also block
+# emulator cores and, if /NeoDCT/User/apps ever lives on a card, nd-apprun's
+# own dlopen() of app.so.
+CARD_SAFETY_OPTS="nosuid,nodev"
+
 try_mount() {   # try_mount DEV
     mkdir -p "$MOUNT_POINT" 2>/dev/null
 
@@ -177,6 +194,7 @@ try_mount() {   # try_mount DEV
             vfat|msdos|exfat) options="rw,noatime,utf8,flush" ;;
             *)                options="rw,noatime" ;;
         esac
+        options="$options,$CARD_SAFETY_OPTS"
         if mount -t "$fstype" -o "$options" "$1" "$MOUNT_POINT" 2>/dev/null; then
             write_state mounted "$1" "$fstype" "$(label_of "$1")"
             log "mounted $1 ($fstype) at $MOUNT_POINT"
@@ -185,7 +203,7 @@ try_mount() {   # try_mount DEV
     done
 
     # Last resort: let the kernel pick from its own probe list.
-    if mount -o rw,noatime "$1" "$MOUNT_POINT" 2>/dev/null; then
+    if mount -o "rw,noatime,$CARD_SAFETY_OPTS" "$1" "$MOUNT_POINT" 2>/dev/null; then
         fstype="$(mounted_fstype "$MOUNT_POINT")"
         write_state mounted "$1" "${fstype:-unknown}" "$(label_of "$1")"
         log "mounted $1 (${fstype:-unknown}) at $MOUNT_POINT"
@@ -205,7 +223,8 @@ mount_share() {
             neodct.sdshare=*)
                 tag="${word#neodct.sdshare=}"
                 mkdir -p "$MOUNT_POINT" 2>/dev/null
-                if mount -t virtiofs "$tag" "$MOUNT_POINT" 2>/dev/null; then
+                if mount -t virtiofs -o "$CARD_SAFETY_OPTS" "$tag" \
+                        "$MOUNT_POINT" 2>/dev/null; then
                     write_state share "$tag" virtiofs ""
                     log "mounted virtiofs share $tag at $MOUNT_POINT"
                     return 0

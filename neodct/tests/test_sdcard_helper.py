@@ -309,7 +309,31 @@ def test_a_card_with_no_readable_filesystem_is_reported_unmountable(tmp_path):
 def test_the_last_resort_lets_the_kernel_guess(tmp_path):
     """A filesystem we did not list but the kernel knows about."""
     result, tried, state = call_with_fake_mount(tmp_path, "/dev/vda",
-                                                '*"rw,noatime /dev/vda"*')
+                                                '*"/dev/vda"*"sdcard"*')
 
     assert result.returncode == 0
     assert state["state"] == "mounted"
+
+
+# --- what a card is mounted WITH -----------------------------------------
+# A card is the one filesystem on the phone whose contents were chosen by
+# whoever last held it, and udev mounts it automatically on insertion. So
+# "plug this in" is a path an attacker with thirty seconds of physical access
+# controls end to end, and the mount options are the whole of the defence.
+# SECURITY-PLAN.md section 0/1; SECURITY-AUDIT.md finding 9.
+
+@pytest.mark.parametrize("fstype", ["vfat", "ext4", "ext2"])
+def test_every_card_mount_is_nosuid_nodev(tmp_path, fstype):
+    _, tried, _ = call_with_fake_mount(tmp_path, "/dev/vda", '*"-t %s"*' % fstype)
+
+    for attempt in tried:
+        assert "nosuid" in attempt, attempt
+        assert "nodev" in attempt, attempt
+
+
+def test_the_last_resort_mount_is_nosuid_nodev_too(tmp_path):
+    """The kernel-guesses path is a mount like any other, and it is the one
+    that reaches a filesystem CARD_FSTYPES never named."""
+    _, tried, _ = call_with_fake_mount(tmp_path, "/dev/vda", '*"/dev/vda"*"sdcard"*')
+
+    assert "nosuid" in tried[-1] and "nodev" in tried[-1], tried[-1]
