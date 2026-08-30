@@ -77,7 +77,7 @@ stopped being expensive.
 | --- | --- | --- |
 | in-process `dr_mp3`/`dr_wav` → `aplay` | a few hundred kB | mp3, wav — the common case |
 | `mpv` | ~24 MB private | wma, flac, ogg — fallback only |
-| `mpg123` | small, mp3 only | available, currently unused |
+| ~~`mpg123`~~ | small, mp3 only | **removed from the image** — SECURITY-PLAN.md section 4. The selection order is override → `mpv` → `mpg123` and mpv is unconditional, so the rung could never be taken. It had never been in the Luckfox defconfig, so the phone never had it. `koki_audio.c` probes with `which()` at runtime, so `NEODCT_KOKI_MP3_PLAYER=mpg123` still works on a build that puts it back. |
 
 ---
 
@@ -93,8 +93,11 @@ In rough order of value:
    RSS figure suggests.
 2. **Then drop `BR2_PACKAGE_MPV`.** Only after step 1, and check nothing else
    selects it first.
-3. `mpg123` is already in the image and could replace mpv for mp3 specifically,
-   but the in-process decoder already covers mp3, so this buys nothing today.
+3. ~~`mpg123` could replace mpv for mp3 specifically~~ — it has left the image
+   (SECURITY-PLAN.md section 4) and the in-process decoder already covers mp3,
+   so it bought nothing. If step 1 ever makes this attractive again, putting
+   the package back is one defconfig line; `koki_audio.c` probes for it at
+   runtime and needs no change.
 
 **What is not worth doing:** adding an MPlayer package. It is not in Buildroot,
 it carries the same ffmpeg weight, and the format gap it would close is closed
