@@ -386,3 +386,78 @@ def test_the_i2c_rule_is_present_and_not_granted_to_the_untrusted_user():
             fields = line.split()
             assert "i2c" not in fields[7].split(","), "ndusr_ut is on the i2c bus"
             assert "dialout" not in fields[7].split(","), "ndusr_ut can dial"
+
+
+# ---------------------------------------------------------------- #
+# Receiving a key and injecting one are not the same privilege
+# ---------------------------------------------------------------- #
+#
+# The regression guard for the one thing nd-selftest found on the first real
+# boot, and the reason it is written as a rule rather than as a single
+# assertion about uinput: the mistake is structural, not typographical.
+#
+# Some device groups exist so the untrusted set can be given something --
+# `input` is how netsurf receives keypresses, `video` is how it draws. Any
+# rule that grants a DIFFERENT device to one of those groups silently grants
+# it to the untrusted set too. GROUP="input" on /dev/uinput reads as "the
+# keyboard group gets the keyboard device" and is in fact "the browser may
+# type into the phone".
+#
+# So: for every device below that ndusr_ut must never hold, the group named
+# in the rule must not be one ndusr_ut is in. Checked against the users table,
+# so adding ndusr_ut to a group later fails here rather than on a phone.
+
+# device -> why the untrusted set must not have it
+FORBIDDEN_TO_UNTRUSTED = {
+    "uinput": "it could type into the trusted UI and drive it -- the browser "
+              "owns the whole screen while it is up, so a process that can "
+              "both draw the UI and type into it can operate the real one",
+    "i2c-dev": "an i2c bus is reachable by address: the keypad matrix and the "
+               "fuel gauge are both on it",
+    "rtc": "setting the clock is how a certificate expiry check is defeated",
+}
+
+
+def untrusted_groups():
+    """Every group ndusr_ut is in, by name, from the users table."""
+    for line in open(USERS_TABLE):
+        if not line.startswith("ndusr_ut "):
+            continue
+        fields = line.split()
+        groups = {fields[2]}
+        if fields[7] != "-":
+            groups.update(fields[7].split(","))
+        return groups
+    return set()
+
+
+def test_no_rule_hands_the_untrusted_set_something_it_must_not_have():
+    ut = untrusted_groups()
+    assert ut, "ndusr_ut is not in the users table"
+    for lineno, line in RULE_LINES:
+        pairs = key_values(line)
+        group = next((v for k, _o, v in pairs if k == "GROUP"), None)
+        if group is None:
+            continue
+        # What device does this rule match? KERNEL= or SUBSYSTEM=.
+        targets = [v for k, _o, v in pairs if k in ("KERNEL", "SUBSYSTEM")]
+        for device, why in FORBIDDEN_TO_UNTRUSTED.items():
+            if not any(t.startswith(device) or device in t for t in targets):
+                continue
+            assert group not in ut, (
+                "line %d grants %s to group %s, and ndusr_ut is in %s.\n"
+                "  %s" % (lineno, device, group, group, why)
+            )
+
+
+def test_the_untrusted_set_keeps_what_it_needs():
+    """The other direction, so a fix for the above cannot be 'take it all
+    away'. netsurf that cannot draw or cannot see a keypress is not
+    confined, it is broken."""
+    ut = untrusted_groups()
+    for needed in ("video", "audio", "input"):
+        assert needed in ut, (
+            "ndusr_ut lost group %s -- the browser can no longer %s"
+            % (needed, {"video": "draw", "audio": "play sound",
+                        "input": "receive keys"}[needed])
+        )

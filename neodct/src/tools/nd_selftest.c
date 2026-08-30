@@ -69,6 +69,7 @@
 #include <unistd.h>
 
 #include "nd_paths.h"
+#include "nd_storage.h"
 #include "nd_priv.h"
 #include "nd_proc.h"
 
@@ -682,12 +683,41 @@ static void section_mounts(void)
                "developer's tree, NOT expected on a phone");
     }
 
+    /* The two halves of a NeoDCT card are NOT mounted alike, and asking the
+     * same question of both is how the first version of this got it wrong.
+     *
+     * noexec belongs on the partition things ARRIVE on, not on the one the
+     * owner copied their media to -- SECURITY-PLAN.md section 1, and the
+     * reason is that noexec refuses mmap(PROT_EXEC), and therefore dlopen(),
+     * as well as execve. Put it on the media partition and a plugin or a
+     * codec loaded from a card stops working; put it on the arrival
+     * partition and a downloaded binary cannot be run without the owner
+     * first copying it across, which is the deliberate act the design wants.
+     *
+     * So: nosuid and nodev on both, noexec required on arrival and expected
+     * ABSENT on media. */
     if (mount_options(ND_PATH_SDCARD_MOUNT, opts, sizeof opts)) {
         check_option(ND_PATH_SDCARD_MOUNT, opts, "nosuid", 1);
         check_option(ND_PATH_SDCARD_MOUNT, opts, "nodev", 1);
-        check_option(ND_PATH_SDCARD_MOUNT, opts, "noexec", 0);
+        if (has_option(opts, "noexec"))
+            report(R_FAIL, ND_PATH_SDCARD_MOUNT " is NOT noexec",
+                   "noexec here refuses dlopen too, and this is the owner's own "
+                   "media -- it belongs on the arrival partition instead");
+        else
+            report(R_PASS, ND_PATH_SDCARD_MOUNT " is NOT noexec", NULL);
     } else {
         report(R_SKIP, "the SD card is mounted", "no card in the slot");
+    }
+
+    if (mount_options(ND_SD_UNTRUSTED_MOUNT, opts, sizeof opts)) {
+        /* This one is the point of the split: downloads and MMS attachments
+         * land here, and nothing that lands here may be executed. */
+        check_option(ND_SD_UNTRUSTED_MOUNT, opts, "noexec", 1);
+        check_option(ND_SD_UNTRUSTED_MOUNT, opts, "nosuid", 1);
+        check_option(ND_SD_UNTRUSTED_MOUNT, opts, "nodev", 1);
+    } else {
+        report(R_SKIP, ND_SD_UNTRUSTED_MOUNT " is mounted",
+               "no arrival partition -- a card formatted elsewhere, or no card");
     }
 }
 
