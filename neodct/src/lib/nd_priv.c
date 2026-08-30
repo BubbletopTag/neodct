@@ -49,12 +49,40 @@ bool nd_priv_lookup(const char *user, nd_priv_id *out)
     out->uid = pw->pw_uid;
     out->gid = pw->pw_gid;
 
-    /* getgrouplist() wants the primary gid and includes it in what it
-     * returns. A truncating return (-1) leaves n set to how many there
-     * really are; take what fitted rather than failing, and say so. */
+    /* Pre-filled with the primary gid rather than left uninitialised, and
+     * that is not belt and braces.
+     *
+     * getgrouplist() returns -1 for TWO different reasons and musl's
+     * (src/passwd/getgrouplist.c) does not let the caller tell them apart
+     * from the return value alone:
+     *
+     *   truncation  the array is filled with the first *ngroups groups and
+     *               *ngroups is set to how many there really are;
+     *   an error    -- a failed allocation, an unreadable /etc/group -- takes
+     *               a goto straight to cleanup, BEFORE `*ngroups = n`. The
+     *               array is then PARTIALLY filled and *ngroups is whatever
+     *               the caller passed in.
+     *
+     * Reading the whole array back on that second path means handing
+     * setgroups() gids off the stack. Filling it with the primary gid first
+     * makes every unwritten slot a harmless duplicate of a group the process
+     * is entitled to, whichever path was taken. Zeroing it would be worse
+     * than useless: gid 0 is root's group. */
+    for (i = 0; i < (int)ND_PRIV_MAX_GROUPS; i++)
+        list[i] = pw->pw_gid;
+
     if (getgrouplist(user, pw->pw_gid, list, &n) < 0) {
-        nd_log_err(ND_LOG_OS, "%s is in more than %d groups; taking the first %d", user,
-                   (int)ND_PRIV_MAX_GROUPS, (int)ND_PRIV_MAX_GROUPS);
+        if (n > (int)ND_PRIV_MAX_GROUPS) {
+            /* Truncation: what fitted is real, so take it and say so. */
+            nd_log_err(ND_LOG_OS, "%s is in %d groups; taking the first %d", user, n,
+                       (int)ND_PRIV_MAX_GROUPS);
+        } else {
+            /* Anything else. The contents are not to be trusted, so fall
+             * back to the primary group alone -- which the block below adds
+             * back. A process in too few groups fails visibly; one in groups
+             * nobody granted it fails invisibly. */
+            nd_log_err(ND_LOG_OS, "cannot read the groups of %s; using its own only", user);
+        }
         n = (int)ND_PRIV_MAX_GROUPS;
     }
     if (n < 0)
