@@ -48,6 +48,39 @@ static void test_earbud_route_names_the_device(void)
     CHECK(strstr(text, "type hw") == NULL);
 }
 
+/* The earbuds need the SAME plug wrapper the speaker has, and this is the
+ * check that was missing when the route shipped without one.
+ *
+ * A bare bluealsa PCM offers only what A2DP negotiated -- 44100 or 48000,
+ * stereo -- while every noise on this phone is aplay asking for whatever suits
+ * it: Koki's mixer is 22050 mono, MusicPlayer passes the file's own rate and
+ * channels, nd_notify hardcodes 44100 stereo. Without plug, hw_params refuses
+ * anything that is not already A2DP's format and the app plays silence.
+ *
+ * It hid because 44100 stereo IS what A2DP wants, so the ringtone always
+ * matched and an ordinary music file did too. Koki's 22050 mono never could,
+ * which is why the report was "the game has no Bluetooth sound but music
+ * does". */
+static void test_earbud_route_converts_rate_and_channels(void)
+{
+    char text[ND_BTAUDIO_CONF_MAX];
+    const char *plug;
+    const char *bluealsa;
+
+    CHECK_INT(nd_btaudio_asound_text(text, sizeof text, "AA:BB:CC:DD:EE:FF", 1), ND_OK);
+
+    plug = strstr(text, "type plug");
+    bluealsa = strstr(text, "type bluealsa");
+    CHECK(plug != NULL);
+    CHECK(bluealsa != NULL);
+
+    /* Order is the whole point: plug has to be the OUTER pcm with bluealsa as
+     * its slave. The two names both being present would also be true of a
+     * config that wrapped them the wrong way round, which converts nothing. */
+    CHECK(plug < bluealsa);
+    CHECK(strstr(text, "slave.pcm") != NULL);
+}
+
 /* The ordinary line. The name keeps its spaces: "Skullcandy Indy ANC" is one
  * name, not three fields, and splitting on whitespace would show "Skullcandy"
  * in the list and lose the rest. */
@@ -368,6 +401,7 @@ int main(void)
 {
     RUN(test_speaker_route_matches_the_boot_script);
     RUN(test_earbud_route_names_the_device);
+    RUN(test_earbud_route_converts_rate_and_channels);
     RUN(test_parse_one_device);
     RUN(test_parse_skips_what_is_not_a_device);
     RUN(test_parse_reads_scan_output_with_its_markers);
