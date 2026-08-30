@@ -41,7 +41,6 @@ BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
 BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="board/qemu/aarch64-virt/linux.config"
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
 BR2_PACKAGE_DEJAVU=y
-BR2_PACKAGE_GPM=y
 # python3, Pillow, mutagen and miniaudio were here until the last app was
 # ported. Nothing on the phone runs Python any more: /bin/run_neodct.sh
 # execs nd-core, and nd-apprun dlopen()s <app-dir>/app.so. The sources they
