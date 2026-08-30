@@ -30,6 +30,10 @@ BR2_TOOLCHAIN_BUILDROOT_CXX=y
 BR2_TOOLCHAIN_BUILDROOT_MUSL=y
 BR2_TARGET_TZ_INFO=y
 BR2_ROOTFS_OVERLAY="../neodct/overlay"
+# Two users, so that "the browser" and "the phone" stop being the same
+# principal. SECURITY-PLAN.md section 1; the table itself carries the
+# reasoning, including why the ids are written out rather than allocated.
+BR2_ROOTFS_USERS_TABLES="../neodct/configs/users-table.txt"
 BR2_ROOTFS_POST_BUILD_SCRIPT="../neodct/scripts/post-build-prune-tests.sh ../neodct/scripts/post-build-system-metadata.sh ../neodct/scripts/post-build-nonfree-firmware.sh ../neodct/scripts/post-build-bt-on-demand.sh"
 BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS="luckfox-armv7"
 BR2_ROOTFS_POST_IMAGE_SCRIPT="board/qemu/post-image.sh"
