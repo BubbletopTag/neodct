@@ -77,7 +77,34 @@ def browser_icon(path):
     c.save(path)
 
 
+def calendar_icon(path):
+    """A month block: two binder tabs, a filled title bar, ruled days.
+
+    The icon this replaces was a solid white slab with the days punched out
+    of it -- black on white, when every other icon in the set is white line
+    art on black. Next to Calculator, which is the same idea (a box with a
+    grid in it), it read as that icon's photographic negative. So the body
+    is hollow here, and the only solid areas are the title bar and the days,
+    which is also what tells the two apart at the 80px the selector draws.
+    """
+    c = Canvas()
+    x0, y0, x1 = 7, 8, 32
+    c.outline(x0, y0, x1, 33, t=2)
+    c.rect(x0, y0, x1, y0 + 4)                 # title bar, solid
+    for tx in (13, 24):                        # binder tabs, above the bar
+        c.rect(tx, 3, tx + 1, y0 + 1)
+    # Four by three squares, not rows of dashes: a day is a square cell in
+    # the month view this opens on, and a square is also what survives the
+    # selector's downscale -- a 4x1 dash blurs into a rule.
+    for row in range(3):
+        for col in range(4):
+            dx, dy = x0 + 2 + col * 6, y0 + 7 + row * 6
+            c.rect(dx, dy, dx + 3, dy + 3)
+    c.save(path)
+
+
 if __name__ == "__main__":
     base = "neodct/overlay/NeoDCT/System/apps"
     update_icon(f"{base}/Update/icon.png")
     browser_icon(f"{base}/Browser/icon.png")
+    calendar_icon(f"{base}/Calendar/icon.png")
