@@ -104,6 +104,25 @@ ND_UNUSED_FN static void pt_new_case(void)
         exit(1);
     }
 
+    /* mkdtemp gives 0700, and 0700 is wrong for a fixture that code under
+     * test is going to drop privilege into.
+     *
+     * apps/Browser spawns netsurf as ndusr_ut. Against this fixture the
+     * "netsurf" it spawns is a script UNDER THIS DIRECTORY, so a 0700 case
+     * root means the dropped child cannot resolve the path to the program it
+     * was told to run -- and the test then observes a browser that produced
+     * no output, which is indistinguishable from every kind of real bug.
+     *
+     * 0711 is the same shape as the phone: / and /NeoDCT/System are
+     * traversable by everyone, which is exactly how netsurf reaches
+     * /usr/bin/netsurf-fb there. It grants traversal and not listing, so the
+     * fixture stays as private as 0700 made it to anything that does not
+     * already know a name inside it. */
+    if (chmod(tmpl, 0711) != 0) {
+        fprintf(stderr, "chmod 0711 %s: %s\n", tmpl, strerror(errno));
+        exit(1);
+    }
+
     (void)nd_strlcpy(g_case_root, tmpl, sizeof g_case_root);
     if (g_root_count < ND_ARRAY_LEN(g_roots))
         (void)nd_strlcpy(g_roots[g_root_count++], tmpl, ND_PATH_MAX);

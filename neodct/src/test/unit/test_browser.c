@@ -971,6 +971,63 @@ static void t_run_without_the_untrusted_user_still_starts(void)
     nd_log_set_colour(was);
 }
 
+/* And the other half of that fork: on a machine that DOES have an ndusr_ut
+ * and is running as root -- a phone, a QEMU image, a developer who made the
+ * users -- the browser must really become it.
+ *
+ * This is the assertion the tree did not have. apps/Browser's
+ * nd_priv_lookup(ND_PRIV_USER_UT, &spec.run_as) is the single line that
+ * confines the browser, and on an ordinary build host run_as.valid is false,
+ * so every run of the suite took the no-op path and the line was never
+ * executed. A test that cannot fail is not coverage, and this is exactly the
+ * kind of gap SECURITY-PLAN.md section 3 is about: the permission field was
+ * built before anything proved it was load-bearing.
+ *
+ * It still cannot run everywhere -- creating a user needs root and CI has
+ * neither -- so where it cannot, it says so rather than passing. nd-selftest
+ * asks the same question on the phone, where the answer is always available.
+ */
+static void t_run_with_the_untrusted_user_really_drops(void)
+{
+    const char *out;
+    bool was = nd_log_colour_enabled();
+    nd_priv_id id;
+    char expect[64];
+
+    if (!nd_priv_lookup(ND_PRIV_USER_UT, &id)) {
+        /* No such user here. t_run_without_the_untrusted_user_still_starts
+         * covers this machine instead. */
+        return;
+    }
+    if (geteuid() != 0u) {
+        /* The user exists but we cannot become anybody: setgroups() needs
+         * privilege, so the child would _exit(122) and the only thing left
+         * to assert is that a browser fails to start -- true, and not worth
+         * a test. */
+        printf("  SKIP  the browser really drops -- " ND_PRIV_USER_UT
+               " exists but this is uid %lu, not root\n", (unsigned long)geteuid());
+        return;
+    }
+
+    nd_log_set_colour(false);
+    make_devices();
+    write_exec(ND_BROWSER_BIN, "#!/bin/sh\necho \"uid=$(id -u)\" >&2\nexit 0\n");
+
+    CHECK_INT(g_api.app_run(bare_ui()), 0);
+
+    out = console_text();
+    /* The uid the child reports is the kernel's answer, not the launcher's:
+     * this is a real fork, a real nd_priv_become() and a real execve. */
+    (void)nd_snprintf(expect, sizeof expect, "[Browser] uid=%lu\r\n",
+                      (unsigned long)id.uid);
+    check_has(out, expect);
+    /* And say what it must NOT be, so that a drop which silently did not
+     * happen fails here rather than passing on a coincidence. */
+    if (id.uid != 0u)
+        check_lacks(out, "[Browser] uid=0\r\n");
+    nd_log_set_colour(was);
+}
+
 static void t_run_nonzero_exit(void)
 {
     const char *out;
@@ -1078,6 +1135,7 @@ int main(void)
     RUN(t_run_keeps_existing_home);
     RUN(t_home_is_a_directory_of_its_own);
     RUN(t_run_without_the_untrusted_user_still_starts);
+    RUN(t_run_with_the_untrusted_user_really_drops);
     RUN(t_run_nonzero_exit);
     RUN(t_run_killed_dumps_dmesg);
     RUN(t_run_without_a_console);

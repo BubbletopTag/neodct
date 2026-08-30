@@ -368,13 +368,21 @@ $(foreach d,$(TEST_APP_DIRS),$(eval $(call TEST_APP_RULE,$(patsubst test/apps/%/
 # Every unit test must pass WITH NO ARGUMENTS. The acceptance gate
 # (neodct/tools/verify-c-build.sh) additionally runs some of them with an
 # explicit reference path; treat that as an override, not as the only way in.
+#
+# The scratch root is chmod'ed 0711 below rather than left at the 0700
+# mktemp -d gives it, because it is the parent of every per-case root and
+# apps/Browser spawns netsurf as ndusr_ut. On a machine that HAS an ndusr_ut
+# -- a phone, a QEMU image, a developer who created one -- a 0700 root means
+# the dropped child cannot resolve the path to the fake netsurf it was told
+# to run, and the test sees a browser that produced nothing at all. 0711 is
+# the phone's own shape: traversable by everyone, listable by nobody.
 
 test: all $(TEST_BINS) $(TEST_APP_SOS)
 	$(Q)if [ -z "$(strip $(TEST_BINS))" ]; then \
 	    printf '  %-7s %s\n' 'SKIP' 'make test: no test/unit/*.c yet'; exit 0; \
 	fi; \
 	fail=0; \
-	root=$$(mktemp -d); \
+	root=$$(mktemp -d); chmod 0711 $$root; \
 	for t in $(TEST_BINS); do \
 	    printf '  %-7s %s\n' 'TEST' "$$t"; \
 	    if ! NEODCT_ROOT=$$root NEODCT_GOLDEN=$(GOLDEN) NEODCT_COLOR=1 \
