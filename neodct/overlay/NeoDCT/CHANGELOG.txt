@@ -1,5 +1,52 @@
 # NeoDCT OS Changelog
 
+Unreleased
+The browser stops being the phone.
+
+Until now every process on this phone was root, which meant the security
+boundary between an app and the rest of the phone was the app's own good
+manners. The browser is the sharpest case: NetSurf is 300,000 lines of C
+parsing bytes chosen by strangers, and a bug anywhere in it was a bug
+everywhere on the phone.
+
+It now runs as its own user, with its own directory, and cannot read your
+contacts, your messages, your call log or the phone's ssh keys. It cannot
+open the modem, so it cannot dial or send an SMS. The one place it may write
+is its own folder.
+
+The other half is the update system. An update was signed and the signature
+was checked -- by the app, in userspace, with the result written to the same
+writable partition anything on the phone could rewrite. So anything that
+could write one file could install its own operating system, permanently,
+and every boot afterwards would verify it as genuine. The check now happens
+before the write, in the initramfs, which lives inside the kernel image and
+can only be replaced by reflashing the phone.
+
+Added
+- A NeoDCT card the phone formats is now split in two: one part for your
+  music, pictures and ringtones, one for downloads and picture messages.
+  Things that arrive on their own land in the second part, cannot reach your
+  media, and cannot be run. Installing something you downloaded is a
+  deliberate copy you make. Both parts still read on any computer. A card
+  made on a computer works as it always did, with nowhere for downloads to
+  go.
+- Settings offers to format a card that already works, not only one it
+  cannot read -- otherwise a card made on a computer could never gain the
+  second part.
+
+Fixed
+- Updates are checked against the release key before they are written,
+  not only before they are staged. A staged update whose record disagrees
+  with what was signed is refused.
+- /NeoDCT/User/env.sh is no longer run automatically. It was a developer
+  convenience that was also a way for anything that could write one file to
+  run as root on every boot. It still works when the phone is booted with
+  neodct.devenv=1.
+- Everything writable is mounted so that a program on it cannot gain
+  privilege: the user partition, /tmp, /dev/shm and every memory card.
+- Removed four packages nothing used, including a second, complete web
+  browser that was in every image and that nothing could launch.
+
 0.4.10a
 Red and blue, the right way round.
 
