@@ -110,6 +110,30 @@ The C build has its own suite — `cd neodct/src && make test`, and
 `make ASAN=1 test` before you push anything. It includes the golden frames in
 `neodct/tests/golden/`, captured from the Python build during the port.
 
+**Neither suite can see the confinement.** Every security test in the tree
+checks what the image was *built* to do; none can check what the kernel
+*decides*, because a build host has no `ndusr`, no `/dev/i2c-3`, a writable
+root and possibly no `CONFIG_MNT_NS`. That half is `nd-selftest`, which ships
+in `/NeoDCT/System/bin` and runs on the phone or in QEMU:
+
+```sh
+nd-selftest              # everything; exit 1 if anything failed
+nd-selftest boundary     # can ndusr_ut reach the databases, the keys, the records
+nd-selftest processes    # who is actually running as whom, right now
+```
+
+It forks and really drops before each probe, so the answers are the kernel's.
+A SKIP is not a PASS — it means the check did not run, usually because the
+device or the user is not there. Run it after anything that touches
+`users-table.txt`, the udev rules, `S00userdata`, the mount options or
+`nd_priv.c`.
+
+One consequence worth knowing before it confuses you: **if you create an
+`ndusr_ut` on your build host, `test_browser` starts exercising the real
+privilege drop.** That is deliberate and it is the only way to cover
+`apps/Browser`'s `nd_priv_lookup()` from a host at all, but it needs root —
+as a normal user with that account present, those cases print SKIP.
+
 **Golden frames are a regression net, not a gate.** The port is finished and
 apps are now being deliberately redesigned, so a frame that stops matching
 because you changed that screen on purpose is the point, not a failure — re-cut

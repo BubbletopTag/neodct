@@ -46,6 +46,12 @@ Fixed
   privilege: the user partition, /tmp, /dev/shm and every memory card.
 - Removed four packages nothing used, including a second, complete web
   browser that was in every image and that nothing could launch.
+- Turning on the remote shell no longer loosens the permissions on your
+  data. It tidied up the folder your contacts and messages live in, and
+  tidied it up slightly too far -- enough that the browser could have seen
+  the names of what was in there. It only did this on phones whose folder
+  had been left loose by an older version, which are the phones that needed
+  the protection most.
 
 0.4.10a
 Red and blue, the right way round.

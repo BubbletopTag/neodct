@@ -662,6 +662,49 @@ Stated plainly so nobody builds on it by accident:
 - **Nothing here has been booted.** Most of it is now built and covered by
   host tests -- see section 7 -- but no part of it has run on a phone.
 
+  There is now a program for exactly this. `nd-selftest` ships in
+  `/NeoDCT/System/bin` and answers every question in this section from the
+  phone itself, including the `zcat` above:
+
+  ```sh
+  nd-selftest              # everything
+  nd-selftest kernel       # just the three lines above, plus no_new_privs
+  nd-selftest boundary     # can ndusr_ut reach the databases, keys, records
+  nd-selftest processes    # who is actually running as whom, right now
+  ```
+
+  It does not read mode bits and do arithmetic on them -- the host tests
+  already do that, and it answers a different question. It forks, calls
+  `nd_priv_become()` exactly as `nd_proc.c` does before an `execve`, performs
+  one operation and reports what the kernel said. Half its checks pass when
+  an `open()` fails; `ENOENT` is reported as SKIP rather than PASS, because a
+  boundary that holds only because the thing behind it is missing is not a
+  boundary.
+
+- **Whether SELinux could take the remaining power off root.** Worth
+  recording because it is the one MAC that 5.10 is not too old for -- SELinux
+  has been in mainline since 2.6, so unlike Landlock this is a config
+  question and not a version question. Checked in this tree:
+
+  | | state |
+  |---|---|
+  | Kernel | `CONFIG_SECURITY` is not in the QEMU config at all, and the BSP kernel is out of tree. Same "assumed, not confirmed" bucket as `MNT_NS`; add `SECURITY_SELINUX` to the same `zcat`. Needs a reflash -- a kernel cannot ship in a `.ndsw`. |
+  | Labels | Half done already. `CONFIG_SQUASHFS_XATTR=y` landed here for SECURITY.md item 5 and is exactly the prerequisite; buildroot runs `setfiles` over the staging tree in `fs/common.mk` before the image is made. `/NeoDCT/User` is ext4/ubifs, both of which take xattrs. |
+  | musl | Fine. `libselinux` selects `musl-fts` for non-glibc, aarch64 has `BR2_PACKAGE_AUDIT_ARCH_SUPPORTS`, and the image is dynamically linked. |
+  | Policy | The cost, and buildroot says so: `package/refpolicy/Config.in` reads *"The refpolicy works for the most part in permissive mode... Individual policies would need to be tweaked to get everything functioning properly."* Permissive takes no power off root -- it logs what it would have denied. |
+
+  What it would buy that a setuid helper cannot: four of the five operations
+  in section 7's list would be better served by small helpers, but a helper
+  only moves a capability out of the core. A compromised core still reads
+  `/NeoDCT/User/.remote`, still opens the modem, still execs what it
+  downloaded. SELinux constrains the core *while* it holds `CAP_SYS_TIME`.
+
+  It does not compete with what is here. Policy is written against the uid
+  split, not instead of it: a domain transition keys on the executable and
+  the uid that execs it, so `ndusr`/`ndusr_ut` existing makes the policy
+  smaller. Next-flash item, sized as a policy-authoring project rather than
+  as a config flag.
+
 ---
 
 ## 7. What was built
@@ -775,7 +818,37 @@ document warns against building first. seccomp is in the same phase and
 behind the same door. `no_new_privs`, which is seccomp's precondition, is
 already set on untrusted children.
 
-### One thing this plan did not ask for
+### Two things this plan did not ask for
+
+`neodct/src/tools/nd_selftest.c`. The Makefile has had the hook for it all
+along -- `SELF_SRCS`, the link rule, and a `SKIP nd-selftest (no
+tools/nd_selftest*.c yet)` printed on every build -- and section 6 above is
+the argument for filling it in: every host test in this branch establishes
+what the image was *built* to do, and none of them can see what the kernel
+*decides*. Validated by creating real users, running the shipped
+`S00userdata` against a real partition, and then applying four mutations one
+at a time; each was caught with a line naming what opened.
+
+It found one real bug on its first run. `nd_rs_start()` repaired a
+group-writable `/NeoDCT/User` by chmod'ing it to `0755` -- which satisfies
+the "not group-writable" that sshd wants and that the existing test asserts,
+and grants the `o+r` that this whole section is the absence of. It fires only
+on a partition that arrived loose from `mkfs` or from a build before any of
+this existed, which is to say on exactly the phones that most need the
+layout. Now `ND_MODE_USER_DIR`, pinned three ways in
+`test_userdata_layout.py` -- including a guard that nothing in the C tree
+chmods `ND_PATH_USER` to a literal, because the next repair path will be
+written by somebody reaching for the same reflex.
+
+It also turned up that the browser's privilege drop had never been executed
+by a test. On a build host there is no `ndusr_ut`, so `run_as.valid` is false
+and every run took the documented no-op path; the fixture's `mkdtemp` root
+was `0700`, so on a machine that *did* have the user the dropped child could
+not even reach the fake netsurf. Case roots are `0711` now -- the phone's own
+shape -- and `t_run_with_the_untrusted_user_really_drops` asserts the uid the
+kernel actually gave it.
+
+### One more
 
 `neodct/tests/test_defconfig_copies.py`. `AGENTS.md` lists "two copies of
 every defconfig" first under Gotchas and the advice was to remember to diff
