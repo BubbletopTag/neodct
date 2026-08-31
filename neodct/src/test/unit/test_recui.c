@@ -1079,6 +1079,44 @@ static void t_render_the_screens(void)
     nd_recfb_close(&fb);
 }
 
+
+/* The bug a real recovery boot found, and the two halves that make it one.
+ *
+ * On a phone booted with neodct.recovery=1, "update system" with no card in
+ * the slot drew "No .ndsw on the car" -- a sentence that had lost the word it
+ * was about. nd_recdraw_text_fit() truncates at the character that does not
+ * fit, with no ellipsis, which is right for a menu label and wrong for prose.
+ *
+ * Both assertions matter and they fail for different reasons. The first says
+ * the string really does overflow at LARGE, so the step-down is not
+ * cargo-cult; if a future font makes it fit, this fails and somebody deletes
+ * the step-down deliberately rather than leaving dead code. The second says
+ * that after stepping down the sentence is WHOLE -- not shorter, not
+ * ellipsized, whole -- which is the thing a person standing in front of a
+ * bricked phone actually needs. */
+static void t_a_message_too_wide_for_the_big_font_is_not_cut(void)
+{
+    const char *const said[] = {
+        "No .ndsw on the card.", /* the one that was seen truncated */
+        "Copy one into update/", "No SD card found.",
+        "FAILED. See the serial", "User data wiped.",
+    };
+    const int32_t room = 240 - 20; /* nd_recmessage_draw's own margin */
+    char out[ND_RECUI_ITEM_MAX];
+    int32_t w = 0;
+    size_t i;
+
+    nd_recdraw_text_size(ND_RECFONT_LARGE, said[0], &w, NULL);
+    CHECK(w > room);
+
+    /* Every line recovery can say has to survive the small font whole,
+     * because there is no third size to fall back to. */
+    for (i = 0u; i < sizeof said / sizeof said[0]; i++) {
+        (void)nd_recdraw_text_fit(out, sizeof out, said[i], ND_RECFONT_SMALL, room);
+        CHECK_STR(out, said[i]);
+    }
+}
+
 int main(void)
 {
     RUN(t_only_the_sixteen_real_keys);
@@ -1106,6 +1144,7 @@ int main(void)
     RUN(t_the_list_clears_only_the_content_rows);
     RUN(t_the_destructive_question_opens_with_neither_answer_lit);
     RUN(t_a_long_message_stops_before_the_prompt);
+    RUN(t_a_message_too_wide_for_the_big_font_is_not_cut);
     RUN(t_a_raw_splash_blits_at_either_depth);
     RUN(t_render_the_screens);
 

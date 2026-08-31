@@ -785,15 +785,39 @@ void nd_recmessage_draw(nd_recfb *fb, const char *const *lines, size_t n_lines)
 
     for (i = 0u; i < n_lines && i < ND_RECUI_MAX_MSG_LINE; i++) {
         const char *text = (lines[i] != NULL) ? lines[i] : "";
+        nd_recfontsize fs = ND_RECFONT_LARGE;
+        int32_t this_h = line_h;
+        int32_t room = fb->w - 20;
+        int32_t wide = 0;
+
+        /* STEP DOWN A SIZE RATHER THAN CUT THE SENTENCE.
+         *
+         * nd_recdraw_text_fit() truncates at the character that does not fit,
+         * with no ellipsis, which is right for a menu label and wrong here.
+         * "No .ndsw on the card." does not fit at LARGE on a 240 px panel, and
+         * a real recovery boot showed it as "No .ndsw on the car" -- a
+         * sentence that has lost the word it was about. CODING-STANDARDS and
+         * the widget rules both say the same thing about long strings: change
+         * the font, do not ellipsize.
+         *
+         * Two sizes exist, so this is one step and then a truncation that
+         * should never be reached. The shell already hand-wraps these into
+         * short lines; this is the backstop for the ones that are still too
+         * long, and for whatever somebody adds later without measuring. */
+        nd_recdraw_text_size(ND_RECFONT_LARGE, text, &wide, NULL);
+        if (wide > room) {
+            fs = ND_RECFONT_SMALL;
+            nd_recdraw_text_size(ND_RECFONT_SMALL, "Ag", NULL, &this_h);
+        }
 
         /* Stop before the prompt rather than drawing through it. put_px()
          * would clip at the panel edge, but not before it had painted over
          * the softkey strip, where the caller's legend lives. */
-        if (y + line_h > prompt_y)
+        if (y + this_h > prompt_y)
             break;
-        (void)nd_recdraw_text_fit(label, sizeof label, text, ND_RECFONT_LARGE, fb->w - 20);
-        nd_recdraw_text(fb, 10, y, label, ND_RECFONT_LARGE, ND_RECCOL_WHITE);
-        y += line_h + 6;
+        (void)nd_recdraw_text_fit(label, sizeof label, text, fs, room);
+        nd_recdraw_text(fb, 10, y, label, fs, ND_RECCOL_WHITE);
+        y += this_h + 6;
     }
 
     nd_recdraw_text(fb, 10, prompt_y, "Press any key", ND_RECFONT_SMALL, ND_RECCOL_WHITE);
