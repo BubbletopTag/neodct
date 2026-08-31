@@ -910,7 +910,7 @@ Apps drop to `ndusr`. That was never blocked by any of the five operations,
 and it is where almost all the value was: an app is 26 processes' worth of
 attack surface and the core is one.
 
-Two exceptions, both in `nd_proc_app_needs_root()`:
+There used to be two exceptions in `nd_proc_app_needs_root()`. There is one:
 
 - **Engineering apps, when engineering mode is on.** RemoteShell exists to
   hand out a root shell and LinuxShell, Modem, KeypadMapperI2C and FuelGauge
@@ -918,10 +918,14 @@ Two exceptions, both in `nd_proc_app_needs_root()`:
   making the phone safer. Decided by *where the app lives* — under
   `/NeoDCT/System/engineering/apps/` — which is on the read-only, dm-verity'd
   rootfs and therefore cannot be forged.
-- **A shrinking list of stock apps** whose one privileged operation has no
-  route through `nd_svc` yet. Written as whole paths, not names, so that a
-  directory called `Power` somewhere else is just a directory. Every name
-  removed from that list is one verb added to `nd_svc.h`.
+
+The other was **a shrinking list of stock apps** whose one privileged
+operation had no route through `nd_svc` yet, written as whole paths and not
+names so that a directory called `Power` somewhere else was just a directory.
+It shrank to nothing. All five operations became verbs on the service socket —
+`reboot` and `poweroff` (`spec-app-services.md` §9), then `set_clock` and
+`format_card` (§10) — and `ROOT_STOCK_APPS` is now an empty array with a
+warning above it. **No stock app on this phone runs as root.**
 
 ### The gate, stated plainly because it is a hole
 

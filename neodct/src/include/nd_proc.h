@@ -203,9 +203,9 @@ nd_err nd_proc_terminate(pid_t pid, double grace_s, nd_proc_status *out);
  * tested without forking anything -- the launcher's own behaviour cannot be,
  * because a test cannot become another user.
  *
- * ============ THE TWO REASONS AN APP KEEPS ROOT ============
+ * ============ THE ONE REASON AN APP KEEPS ROOT ============
  *
- * 1. IT IS AN ENGINEERING APP AND ENGINEERING MODE IS ON.
+ * IT IS AN ENGINEERING APP AND ENGINEERING MODE IS ON.
  *
  *    RemoteShell exists to give a developer a root shell; LinuxShell, Modem,
  *    KeypadMapperI2C and FuelGauge exist to poke at hardware. Confining them
@@ -221,26 +221,26 @@ nd_err nd_proc_terminate(pid_t pid, double grace_s, nd_proc_status *out);
  *    stores the virtual prefix it was given, so this comparison means the
  *    same thing under a test root as on a phone.
  *
- * 2. IT IS ONE OF FOUR STOCK APPS WITH A PRIVILEGED OPERATION AND NOWHERE
- *    YET TO SEND IT. This is a debt, and it is written down as a list rather
- *    than as a manifest field so that it is uncomfortable to look at:
+ * ============ THERE USED TO BE A SECOND, AND THERE IS NOT ANY MORE ============
  *
- *      Power     poweroff, reboot
- *      Update    reboot, to finish installing
- *      Downgrade reboot
- *      Clock     settimeofday after the user sets the time by hand
- *      Settings  neodct-sdcard format
+ * Five STOCK apps kept root because each had one privileged operation and
+ * nowhere to send it. The list was written out longhand so that it was
+ * uncomfortable to look at, and it is empty now:
  *
- *    None of these belong to the app. Each is a thing the CORE should do on
- *    the app's behalf, over the nd_svc socket that already exists for sending
- *    an SMS -- and the core stays root, so it can. Every name removed from
- *    this list is one verb added to nd_svc.h, and the list reaching zero is
- *    what "the abstraction is the only path" means in SECURITY-PLAN.md
- *    section 3.
+ *      Power     poweroff, reboot        -> nd_svc_reboot/poweroff
+ *      Update    reboot, to finish       -> nd_svc_reboot
+ *      Downgrade reboot                  -> nd_svc_reboot, via Update's dlopen
+ *      Clock     settimeofday by hand    -> nd_svc_set_clock
+ *      Settings  neodct-sdcard format    -> nd_svc_format_card
  *
- *    They are NOT dropped in the meantime, because a phone that cannot be
- *    switched off is a worse phone, and shipping that to buy a boundary
- *    nobody has finished is the wrong trade.
+ * None of those five operations belonged to the app. Each is a thing the CORE
+ * does on the app's behalf, over the nd_svc socket that already existed for
+ * sending an SMS -- and the core stays root, so it can. That is what "the
+ * abstraction is the only path" means in SECURITY-PLAN.md section 3, and it
+ * is now true of every stock app on the phone.
+ *
+ * ROOT_STOCK_APPS still exists, empty, in nd_proc.c. Read the comment above
+ * it before adding anything to it.
  *
  * ============ WHAT THIS IS NOT ============
  *

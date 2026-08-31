@@ -55,6 +55,7 @@
 #include <sys/types.h>
 
 #include "nd_font.h"
+#include "nd_paths.h"
 #include "nd_text.h"
 #include "nd_types.h"
 #include "nd_ui.h"
@@ -71,10 +72,12 @@ extern "C" {
 #define ND_SETAPP_SYSTEM_WALLPAPER_DIR "/NeoDCT/System/wallpapers"
 #define ND_SETAPP_WALLPAPER_DIR        "/NeoDCT/User/wallpapers"
 
-/* SDCARD_HELPER. Passed to execve UNRESOLVED, because subprocess.call() in
- * the Python is not remapped by uistub's PathRemap either and nd_proc.h says
- * an executable path is not ND_ROOT-resolved. */
-#define ND_SETAPP_SDCARD_HELPER "/NeoDCT/System/hw/neodct-sdcard"
+/* SDCARD_HELPER. The app no longer runs it -- nd_svc_format_card() asks the
+ * core to, so that no app has to hold the privilege to repartition a disk --
+ * and the string moved to nd_paths.h with it. The name stays because it is
+ * still the Python constant this file is a transcription of, and because
+ * test_settings_app.c pins its value. */
+#define ND_SETAPP_SDCARD_HELPER ND_PATH_SDCARD_HELPER
 
 /* SUPPORTED_WALLPAPERS. A real two-element tuple here, unlike the Tones
  * app's `(".mp3")`, which is a string (OPEN-QUESTIONS.md TN-2). */

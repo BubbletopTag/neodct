@@ -680,39 +680,56 @@ static void pump_keys(nd_ui *ui, nd_input_channel *ch)
  * Which user an app runs as -- see nd_proc.h for the reasoning
  * ------------------------------------------------------------------ */
 
-/* Stock apps that still hold root because their one privileged operation has
- * no route through nd_svc yet, written as WHOLE PATHS rather than names.
+/* Stock apps that hold root because their one privileged operation has no
+ * route through nd_svc.
  *
- * The name alone is not safe to match on, and the difference is the whole of
- * this comment. "Does this app's directory end in /Power" grants root to a
- * directory called Power ANYWHERE -- and while nothing today can create one
- * outside the two read-only directories the scanner reads, the moment a third
- * app directory exists (a user-installed set is the obvious one) a folder
- * named Power in it inherits reboot. That is a privilege grant arriving as a
- * side effect of a feature nobody connected to privilege, which is exactly
- * how this kind of hole gets made.
+ * ============ IT IS EMPTY, AND THAT IS THE POINT ============
  *
- * A full-path match cannot do that. /NeoDCT/System/apps/Power is a specific
- * directory on a dm-verity'd squashfs, and being called Power buys nothing at
- * all anywhere else.
+ * NO STOCK APP RUNS AS ROOT. Every one of them is launched as ndusr with
+ * no_new_privs set, and the only apps on this phone that are not are the
+ * engineering ones, when engineering mode is on, deliberately.
  *
- * Every entry here is a debt. See the header. */
-static const char *const ROOT_STOCK_APPS[] = {
-    ND_PATH_APPS_DIR "/Clock",    /* settimeofday */
-    ND_PATH_APPS_DIR "/Settings", /* neodct-sdcard format */
-    NULL,
-};
-
-/* Paid off, and left here as the record of what paying one off looks like:
+ * The five that used to be here, and what each was traded for:
  *
  *   Power, Update, Downgrade   all three wanted only reboot and poweroff, and
  *                              both are now verbs on the service socket
  *                              (spec-app-services.md section 9). Downgrade
  *                              cost nothing extra -- it has no halt code of
  *                              its own and reaches Update's through dlopen.
+ *   Clock                      settimeofday(), now nd_svc_set_clock(), which
+ *                              the core performs after refusing any date
+ *                              outside what this build will believe.
+ *   Settings                   the SD-card format helper, now
+ *                              nd_svc_format_card() -- and note that the verb
+ *                              takes NO DEVICE: the core reads the card
+ *                              itself, so there is no block-device name for
+ *                              an app to choose. Section 10.
  *
- * Two left. Each needs the same treatment: a verb on the socket, served by
- * the core, and then a name deleted from here. */
+ * ============ IF YOU ARE ABOUT TO ADD ONE ============
+ *
+ * Don't, until the verb has been tried and found impossible; the five above
+ * all looked like they needed root and none of them did. If a name really
+ * must go here, WRITE IT AS A WHOLE PATH, as every entry above was written,
+ * because the name alone is not safe to match on:
+ *
+ * "Does this app's directory end in /Power" grants root to a directory called
+ * Power ANYWHERE -- and while nothing today can create one outside the two
+ * read-only directories the scanner reads, the moment a third app directory
+ * exists (a user-installed set is the obvious one) a folder named Power in it
+ * inherits reboot. That is a privilege grant arriving as a side effect of a
+ * feature nobody connected to privilege, which is exactly how this kind of
+ * hole gets made.
+ *
+ * A full-path match cannot do that. /NeoDCT/System/apps/Power is a specific
+ * directory on a dm-verity'd squashfs, and being called Power buys nothing at
+ * all anywhere else.
+ *
+ * The NULL is the whole array. C forbids a zero-length one, and the loop
+ * below reads the terminator, so an empty policy costs a pointer and no
+ * special case. */
+static const char *const ROOT_STOCK_APPS[] = {
+    NULL,
+};
 
 /* Is `path` inside `dir`? A prefix test that stops at a component boundary,
  * because a plain strncmp would also match /NeoDCT/System/engineering/appsX

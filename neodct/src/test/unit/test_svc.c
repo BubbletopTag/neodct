@@ -37,18 +37,19 @@
 #include <ftw.h>
 #include <poll.h>
 #include <pthread.h>
+#include <pwd.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <pwd.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "nd_app.h"
 #include "nd_battery.h"
+#include "nd_clock.h"
 #include "nd_draw.h"
 #include "nd_font.h"
 #include "nd_image.h"
@@ -57,6 +58,7 @@
 #include "nd_paths.h"
 #include "nd_priv.h"
 #include "nd_proc.h"
+#include "nd_storage.h"
 #include "nd_svc.h"
 #include "nd_types.h"
 #include "nd_ui.h"
@@ -1366,6 +1368,223 @@ static void test_a_halt_with_nothing_to_spawn(core_fixture *fx)
     halt_fake_free(&fake);
 }
 
+/* ---- 5c. the clock, over the wire ---- */
+
+/* The WINDOW is pinned in test_clock.c, which is the file that can stage a
+ * version.prop and therefore the only one that can say what the window is to
+ * the second. What is under test here is the other half: that the request
+ * crosses the socket at all, that the core -- not the app -- decides, and
+ * that a refusal is a failed operation rather than a protocol error.
+ *
+ * So this needs one value INSIDE the window and two certainly outside it,
+ * and it derives the first the way the implementation does rather than
+ * hard-coding a year that stops being true. */
+static time_t clock_window_floor(void)
+{
+    time_t epoch = 0;
+
+    if (!nd_clock_build_epoch(&epoch) || epoch < (time_t)ND_CLOCK_SANE_MIN)
+        epoch = (time_t)ND_CLOCK_SANE_MIN;
+    return epoch;
+}
+
+static time_t a_time_this_build_will_believe(void)
+{
+    return clock_window_floor() + 86400;
+}
+
+static void test_the_clock_over_the_wire(core_fixture *fx)
+{
+    nd_svc_server *s = NULL;
+    nd_ui app; /* an APP's context: no handles, as nd_app.h says */
+    int child_fd;
+
+    memset(&app, 0, sizeof app);
+    CHECK_INT(nd_svc_server_open(&s), ND_OK);
+    if (s == NULL)
+        return;
+    child_fd = dup(nd_svc_server_child_fd(s));
+    CHECK(child_fd >= 0);
+    if (child_fd < 0) {
+        nd_svc_server_free(s);
+        return;
+    }
+    CHECK(client_from_fd(child_fd));
+    CHECK_INT(nd_svc_server_start(s, &fx->ui), ND_OK);
+
+    /* Nothing here moves the machine's clock: nd_clock.c refuses to call
+     * clock_settime() while NEODCT_ROOT is set, and stage_root() set it. */
+    CHECK(nd_svc_set_clock(a_time_this_build_will_believe()));
+
+    /* The epoch, and a date past 2100. Both are outside every window this
+     * build could compute, whatever version.prop says -- and both are refused
+     * by the CLIENT half, before a record is built, because they are outside
+     * the coarse 2020-2100 range as well. */
+    CHECK(!nd_svc_set_clock((time_t)0));
+    CHECK(!nd_svc_set_clock((time_t)ND_CLOCK_SANE_MAX + 1));
+
+    /* A day past the ceiling: inside 2020-2100, so this one CROSSES THE WIRE
+     * and is refused by the core. Without it the two cases above would pass
+     * on a build whose server-side bound had been deleted entirely, since
+     * they never reach it. */
+    {
+        time_t past_the_ceiling = clock_window_floor() + ND_SVC_CLOCK_MAX_SKEW_S + 86400;
+
+        if (past_the_ceiling <= (time_t)ND_CLOCK_SANE_MAX)
+            CHECK(!nd_svc_set_clock(past_the_ceiling));
+    }
+
+    /* A refused clock leaves the channel open, exactly as a refused SEND_SMS
+     * does: this is a failed operation, not a protocol error. */
+    CHECK(nd_svc_modem_present(&app));
+
+    nd_svc_client_close();
+    nd_svc_server_stop(s);
+    (void)close(child_fd);
+}
+
+/* ---- 5d. formatting a card, with the mkfs injected out ---- */
+
+/* Where this case's fake /run/neodct/sdcard.prop lives. ND_ROOT keeps it
+ * inside the stage, exactly as test_storage.c does it. */
+#define FMT_MOUNT "/sdcard"
+#define FMT_STATE "/sdcard.prop"
+
+typedef struct {
+    pthread_mutex_t mu;
+    int32_t calls;
+    char device[64]; /* what the CORE resolved, which is the whole point */
+    int result;      /* what the fake helper exits with */
+} format_fake;
+
+/* Runs on the CORE's serving thread, in place of the spawn-and-wait.
+ *
+ * No handshake, unlike halt_fake_spawn(): the format's answer DEPENDS on the
+ * helper's exit status, so the reply cannot precede the work and there is no
+ * ordering claim to prove. The client returning is already proof that this
+ * ran. */
+static int format_fake_run(const char *device, void *user)
+{
+    format_fake *f = user;
+    int rc;
+
+    (void)pthread_mutex_lock(&f->mu);
+    f->calls++;
+    (void)nd_strlcpy(f->device, (device != NULL) ? device : "", sizeof f->device);
+    rc = f->result;
+    (void)pthread_mutex_unlock(&f->mu);
+    return rc;
+}
+
+static int format_fake_calls(format_fake *f)
+{
+    int n;
+
+    (void)pthread_mutex_lock(&f->mu);
+    n = (int)f->calls;
+    (void)pthread_mutex_unlock(&f->mu);
+    return n;
+}
+
+static void format_fake_device(format_fake *f, char *out, size_t out_sz)
+{
+    (void)pthread_mutex_lock(&f->mu);
+    (void)nd_strlcpy(out, f->device, out_sz);
+    (void)pthread_mutex_unlock(&f->mu);
+}
+
+/* neodct-sdcard's own output format, which nd_storage.c parses. */
+static void write_card_state(const char *state, const char *device, const char *fstype)
+{
+    char body[256];
+
+    CHECK_INT(nd_snprintf(body, sizeof body, "state=%s\ndevice=%s\nfstype=%s\nlabel=NEODCT\n",
+                          state, device, fstype),
+              ND_OK);
+    pt_write_text(FMT_STATE, body);
+}
+
+static void test_a_format_over_the_wire(core_fixture *fx)
+{
+    nd_svc_format_sim sim;
+    format_fake fake;
+    nd_svc_server *s = NULL;
+    nd_ui app;
+    char device[64];
+    int child_fd;
+
+    memset(&app, 0, sizeof app);
+    memset(&fake, 0, sizeof fake);
+    (void)pthread_mutex_init(&fake.mu, NULL);
+    memset(&sim, 0, sizeof sim);
+    sim.run = format_fake_run;
+    sim.user = &fake;
+
+    nd_storage_set_paths(FMT_MOUNT, FMT_STATE);
+
+    CHECK_INT(nd_svc_server_open(&s), ND_OK);
+    if (s == NULL) {
+        (void)pthread_mutex_destroy(&fake.mu);
+        nd_storage_set_paths(NULL, NULL);
+        return;
+    }
+    child_fd = dup(nd_svc_server_child_fd(s));
+    CHECK(child_fd >= 0);
+    if (child_fd < 0) {
+        nd_svc_server_free(s);
+        (void)pthread_mutex_destroy(&fake.mu);
+        nd_storage_set_paths(NULL, NULL);
+        return;
+    }
+    CHECK(client_from_fd(child_fd));
+    nd_svc_format_simulate(&sim);
+    CHECK_INT(nd_svc_server_start(s, &fx->ui), ND_OK);
+
+    /* THE ASSERTION THIS WHOLE CASE EXISTS FOR. nd_svc_format_card() takes no
+     * argument -- the app could not name a device if it wanted to -- and the
+     * device the helper is pointed at comes out of the state file the CORE
+     * read. Settings used to pass card->device across the boundary; this is
+     * what replaced it. */
+    write_card_state("mounted", "/dev/vdc1", "vfat");
+    fake.result = 0;
+    CHECK(nd_svc_format_card());
+    CHECK_INT(format_fake_calls(&fake), 1);
+    format_fake_device(&fake, device, sizeof device);
+    CHECK_STR(device, "/dev/vdc1");
+
+    /* A helper that ran and failed. Settings draws "Formatting failed." */
+    (void)pthread_mutex_lock(&fake.mu);
+    fake.result = 1;
+    (void)pthread_mutex_unlock(&fake.mu);
+    CHECK(!nd_svc_format_card());
+    CHECK_INT(format_fake_calls(&fake), 2);
+
+    /* The QEMU share. `removable` is (fstype != "virtiofs") and the refusal
+     * happens BEFORE the helper is reached -- the call count is the proof,
+     * because mkfs on a directory of the developer's machine is not something
+     * a "did it work" boolean could take back. */
+    write_card_state("share", "/dev/vdc", "virtiofs");
+    CHECK(!nd_svc_format_card());
+    CHECK_INT(format_fake_calls(&fake), 2);
+
+    /* No card: ABSENT blanks the device, so there is nothing to point at and
+     * again nothing is spawned. */
+    write_card_state("nocard", "/dev/vdc", "vfat");
+    CHECK(!nd_svc_format_card());
+    CHECK_INT(format_fake_calls(&fake), 2);
+
+    /* Every one of those refusals is a failed operation, not a protocol
+     * error: the channel is still good. */
+    CHECK(nd_svc_modem_present(&app));
+
+    nd_svc_client_close();
+    nd_svc_server_stop(s);
+    nd_svc_format_simulate(NULL);
+    (void)close(child_fd);
+    (void)pthread_mutex_destroy(&fake.mu);
+    nd_storage_set_paths(NULL, NULL);
+}
+
 /* ------------------------------------------------------------------ *
  * 6. A real child process, launched by the real launcher
  * ------------------------------------------------------------------ */
@@ -1516,6 +1735,8 @@ int main(void)
     test_the_halt_lookup_is_execvps();
     test_a_halt_over_the_wire(&fx);
     test_a_halt_with_nothing_to_spawn(&fx);
+    test_the_clock_over_the_wire(&fx);
+    test_a_format_over_the_wire(&fx);
 
     /* SvcApp asks for a poweroff, and the launcher's own server thread is
      * the one that serves it -- so the fake has to be installed around the

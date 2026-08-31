@@ -8,7 +8,7 @@
  *   the CORE   nd_svc_server_*, and svc_thread() below. One thread, created
  *              AFTER the fork and destroyed after the waitpid, serving one
  *              socket that dies with the launch.
- *   an APP     nd_svc_client_*, and the six nd_svc_* calls. No thread; the
+ *   an APP     nd_svc_client_*, and the ten nd_svc_* calls. No thread; the
  *              app blocks on its own request because it has nothing else to
  *              do until the answer comes.
  *
@@ -59,10 +59,12 @@
 
 #include "nd_app.h"
 #include "nd_battery.h"
+#include "nd_clock.h"
 #include "nd_log.h"
 #include "nd_modem.h"
 #include "nd_paths.h"
 #include "nd_proc.h"
+#include "nd_storage.h"
 #include "nd_svc.h"
 #include "nd_types.h"
 #include "nd_ui.h"
@@ -81,7 +83,9 @@ typedef enum {
     SVC_OP_BATTERY_QUICKSTART = 4,
     /* Appended, so no number an existing build sends changes meaning. */
     SVC_OP_REBOOT = 5,
-    SVC_OP_POWEROFF = 6
+    SVC_OP_POWEROFF = 6,
+    SVC_OP_SET_CLOCK = 7,
+    SVC_OP_FORMAT_CARD = 8
 } svc_op;
 
 /* Outcome of the exchange, as opposed to the outcome of the operation. */
@@ -100,6 +104,10 @@ typedef struct {
     uint32_t op;
     uint32_t text_len; /* SEND_SMS only; strlen(text) */
     uint32_t pad;
+    /* SET_CLOCK only. int64_t and not time_t: the record goes over a socket
+     * and its layout must not depend on how wide the compiler made time_t.
+     * Placed after six uint32_t so it lands 8-byte aligned with no hole. */
+    int64_t when;
     char number[ND_MODEM_NUMBER_MAX];
     char text[ND_MODEM_TEXT_MAX];
 } svc_req;
@@ -358,6 +366,12 @@ static bool valid_request(const svc_req *r)
         return false;
     if (!bounded_string(r->number, sizeof r->number) || !bounded_string(r->text, sizeof r->text))
         return false;
+    /* A field an operation does not use must be zero, which is what every
+     * sender leaves it as: svc_call() memsets the record and only SET_CLOCK
+     * writes here. Enforcing it costs nothing and keeps "this op ignores that
+     * field" from quietly becoming "this op ignores that field today". */
+    if (r->op != SVC_OP_SET_CLOCK && r->when != 0)
+        return false;
 
     switch (r->op) {
     case SVC_OP_SEND_SMS:
@@ -368,14 +382,23 @@ static bool valid_request(const svc_req *r)
         if (r->text[r->text_len] != '\0' || strlen(r->text) != (size_t)r->text_len)
             return false; /* an embedded NUL, or a length that lied */
         return valid_utf8(r->text, (size_t)r->text_len);
+    case SVC_OP_SET_CLOCK:
+        /* Only the coarse window is decidable from the record alone, and
+         * that is all that is checked here: the real bound is the build
+         * epoch, which is a file read and belongs with the operation. This
+         * one still earns its place -- it is the same window ClockService
+         * applies to an answer from the network, so a number outside it is
+         * refused for the same reason wherever it came from. */
+        return r->when >= (int64_t)ND_CLOCK_SANE_MIN && r->when <= (int64_t)ND_CLOCK_SANE_MAX;
     case SVC_OP_MODEM_STATUS:
     case SVC_OP_BATTERY:
     case SVC_OP_BATTERY_QUICKSTART:
-    /* The two verbs carry no arguments, so there is nothing left to check
-     * once the record itself is sound -- which is the shape of the win, not
-     * an omission. spec-app-services.md 9.7. */
+    /* Three of the four verbs carry no arguments, so there is nothing left to
+     * check once the record itself is sound -- which is the shape of the win,
+     * not an omission. spec-app-services.md 9.7 and 10.4. */
     case SVC_OP_REBOOT:
     case SVC_OP_POWEROFF:
+    case SVC_OP_FORMAT_CARD:
         return true;
     default:
         return false;
@@ -553,6 +576,170 @@ static void halt_perform(const svc_halt_plan *plan)
 }
 
 /* ------------------------------------------------------------------ *
+ * The clock, and formatting a card
+ * ------------------------------------------------------------------ *
+ *
+ * The other two things a stock app used to need root for. nd_svc.h carries
+ * the argument for each; spec-app-services.md section 10 carries the working.
+ * What matters here is that BOTH FUNCTIONS BELOW ARE CALLED FROM BOTH SIDES
+ * of the socket -- serve() runs them for an app, and the client half runs
+ * them itself in a process that has no core to ask. One implementation, so
+ * the rule cannot differ by caller.
+ */
+
+/* The whole of the clock policy, in one place.
+ *
+ * The lower bound is the build epoch because nothing legitimate predates the
+ * image doing the asking; the upper bound is that plus ND_SVC_CLOCK_MAX_SKEW_S
+ * because forward is the direction that ages a certificate out. nd_svc.h has
+ * the long form, including what was checked rather than assumed. */
+static bool clock_in_bounds(time_t when)
+{
+    time_t floor_epoch;
+    time_t ceiling;
+
+    /* version.prop's system.os.buildepoch, read the way ClockService reads
+     * it. An image without one -- a host test, a tree with nothing staged --
+     * falls back to nd_clock.h's own sane floor, which is the value
+     * ClockService already trusts as "no real time is earlier than this".
+     * Falling back to zero instead would turn a missing file into no bound at
+     * all, which is the wrong direction to fail in. */
+    if (!nd_clock_build_epoch(&floor_epoch) || floor_epoch < (time_t)ND_CLOCK_SANE_MIN)
+        floor_epoch = (time_t)ND_CLOCK_SANE_MIN;
+
+    if (when < floor_epoch)
+        return false;
+
+    /* The addition and not `when - floor_epoch > SKEW`: the two are the same
+     * test, and the subtraction overflows for a `when` the app is free to
+     * choose. The guard after it covers the other end -- a version.prop from
+     * far enough in the future to overflow the addition instead. */
+    ceiling = floor_epoch + ND_SVC_CLOCK_MAX_SKEW_S;
+    if (ceiling < floor_epoch)
+        return false;
+    return when <= ceiling;
+}
+
+/* The reason string is fixed HERE and not carried on the wire. An app that
+ * chose it would be writing whatever it liked into the core's log with the
+ * core's authority, and the CLOCK tag exists precisely so that a person
+ * reading a serial console can believe what moved the clock. */
+static bool clock_set_bounded(time_t when)
+{
+    if (!clock_in_bounds(when)) {
+        nd_log_err(ND_LOG_CLOCK,
+                   "refusing to set the clock to %lld: outside what this build will "
+                   "believe",
+                   (long long)when);
+        return false;
+    }
+    return nd_clock_set(when, "set by hand in the Clock app");
+}
+
+/* Set only by nd_svc_format_simulate(); the barriers are the ones the halt
+ * hook documents. See nd_svc.h. */
+static nd_svc_format_sim g_format_sim;
+static bool g_format_sim_on;
+
+void nd_svc_format_simulate(const nd_svc_format_sim *sim)
+{
+    if (sim == NULL) {
+        memset(&g_format_sim, 0, sizeof g_format_sim);
+        g_format_sim_on = false;
+        return;
+    }
+    g_format_sim = *sim;
+    g_format_sim_on = true;
+}
+
+/* THE DEVICE IS READ HERE AND NOWHERE ELSE. That single fact is the security
+ * design: Settings used to pass card->device across, and a verb shaped that
+ * way would let any app name a block device. The helper's own
+ * is_reserved_device() would still have refused the two that matter, but
+ * "the helper checks" is a second line, not a first, and this removes the
+ * need for it. */
+static bool format_card(void)
+{
+    nd_card card;
+    const char *argv[4];
+    nd_proc_spec spec;
+    nd_proc_status st;
+    pid_t pid = -1;
+    int fd;
+    int rc;
+
+    /* Never fails; an unreadable state file reads as an absent card. */
+    nd_storage_card(&card);
+
+    /* The app's own "No card device to format." check, moved. ABSENT blanks
+     * the device and UNFORMATTED keeps it, which is why the state is not
+     * consulted: the question is whether there is something to format, and
+     * the device string is the answer to it. */
+    if (card.device[0] == '\0') {
+        nd_log_err(ND_LOG_OS, "App service: format asked for, but there is no card device");
+        return false;
+    }
+
+    /* On QEMU the "card" is a virtiofs share -- a directory on the
+     * developer's machine -- and mkfs on it is not a thing anybody meant to
+     * ask for. nd_storage.h computes `removable` as (fstype != "virtiofs")
+     * before any other branch, so this is exactly that question. */
+    if (!card.removable) {
+        nd_log_err(ND_LOG_OS, "App service: refusing to format %s: it is not a removable card",
+                   card.device);
+        return false;
+    }
+
+    if (g_format_sim_on && g_format_sim.run != NULL) {
+        rc = g_format_sim.run(card.device, g_format_sim.user);
+        nd_log(ND_LOG_OS, "App service: format of %s (simulated) exited %d", card.device, rc);
+        return rc == 0;
+    }
+
+    argv[0] = ND_PATH_SDCARD_HELPER;
+    argv[1] = "format";
+    argv[2] = card.device;
+    argv[3] = NULL;
+
+    memset(&spec, 0, sizeof spec);
+    spec.argv = argv;
+    spec.owner = ND_OWNER_SYSTEM;
+    /* The helper logs to stderr and the serial console is where that has to
+     * land; nd_proc_spec closes anything it is not given. Settings mapped the
+     * three through for this reason and so does this. */
+    for (fd = 0; fd <= 2; fd++) {
+        spec.fds[spec.n_fds].child_fd = fd;
+        spec.fds[spec.n_fds].our_fd = fd;
+        spec.n_fds++;
+    }
+
+    nd_log(ND_LOG_OS, "App service: formatting %s", card.device);
+    if (nd_proc_spawn(ND_PATH_SDCARD_HELPER, &spec, &pid) != ND_OK) {
+        nd_log_err(ND_LOG_OS, "cannot run %s: %s", ND_PATH_SDCARD_HELPER, strerror(errno));
+        return false;
+    }
+
+    memset(&st, 0, sizeof st);
+    if (nd_proc_wait(pid, ND_SVC_FORMAT_WAIT_S, &st) != ND_OK) {
+        /* Four minutes with no exit is not a slow card, it is a wedged
+         * helper, and leaving it wedged would leave the serving thread in
+         * here for the life of the core. Killing an mkfs is destructive --
+         * but so is the state it is already in, and the alternative is a
+         * phone that cannot be told anything again until it reboots. */
+        nd_log_err(ND_LOG_OS,
+                   "App service: the format of %s has not finished in %.0fs; stopping it",
+                   card.device, ND_SVC_FORMAT_WAIT_S);
+        (void)nd_proc_terminate(pid, ND_SVC_JOIN_S, NULL);
+        return false;
+    }
+
+    /* subprocess.call()'s "0 is success" and nothing else: a signalled helper
+     * is a failure, which the app's own `== 0` already said, since a signal
+     * gave it a negative. */
+    return st.exited && st.exit_status == 0;
+}
+
+/* ------------------------------------------------------------------ *
  * The core's side: serving one request
  * ------------------------------------------------------------------ */
 
@@ -605,6 +792,20 @@ static void serve(nd_ui *ui, const svc_req *req, svc_resp *out, svc_halt_plan *h
                        reboot ? "reboot" : "power off", reboot ? "reboot" : "poweroff");
         return;
     }
+
+    /* Neither of these has a service object to be absent either, for the
+     * same reason the halt does not: the clock and the card reader are not
+     * pointers the core holds. Always present; `ok` is the whole answer. */
+    case SVC_OP_SET_CLOCK:
+        out->present = 1u;
+        nd_log(ND_LOG_CLOCK, "App service: set the clock to %lld", (long long)req->when);
+        out->ok = clock_set_bounded((time_t)req->when) ? 1u : 0u;
+        return;
+
+    case SVC_OP_FORMAT_CARD:
+        out->present = 1u;
+        out->ok = format_card() ? 1u : 0u;
+        return;
 
     case SVC_OP_SEND_SMS:
         if (ui->modem == NULL) {
@@ -972,8 +1173,8 @@ bool nd_svc_client_active(void)
  * channel is CLOSED rather than retried: a peer that has gone or a stream
  * that has lost its framing will not recover, and an app that kept trying
  * would spend its whole life in here. */
-static svc_status svc_call(uint32_t op, const char *number, const char *text, svc_resp *out,
-                           double timeout_s)
+static svc_status svc_call_at(uint32_t op, const char *number, const char *text, int64_t when,
+                              svc_resp *out, double timeout_s)
 {
     svc_req req;
     char buf[RESP_BUF_SZ];
@@ -990,6 +1191,7 @@ static svc_status svc_call(uint32_t op, const char *number, const char *text, sv
     req.version = SVC_VERSION;
     req.size = (uint32_t)sizeof req;
     req.op = op;
+    req.when = when;
     /* Both are refused locally when they do not fit rather than truncated:
      * half a phone number is a different phone number, and half a message is
      * the tail-dropping OPEN-QUESTIONS.md C-2 already ruled against. */
@@ -1044,6 +1246,15 @@ static svc_status svc_call(uint32_t op, const char *number, const char *text, sv
     out->modem.caller_id[sizeof out->modem.caller_id - 1u] = '\0';
     out->modem.probe_why[sizeof out->modem.probe_why - 1u] = '\0';
     return (svc_status)out->status;
+}
+
+/* Every operation but SET_CLOCK, which is every operation that was here
+ * before the clock verb existed. valid_request() refuses a non-zero `when` on
+ * all of them, so this is the shape that keeps that true by construction. */
+static svc_status svc_call(uint32_t op, const char *number, const char *text, svc_resp *out,
+                           double timeout_s)
+{
+    return svc_call_at(op, number, text, 0, out, timeout_s);
 }
 
 /* ------------------------------------------------------------------ *
@@ -1181,7 +1392,7 @@ bool nd_svc_battery_quickstart(const nd_ui *ui)
 }
 
 /* ------------------------------------------------------------------ *
- * The two verbs
+ * The four verbs
  * ------------------------------------------------------------------ */
 
 /* No nd_ui * to consult, so the rule "a direct handle always wins" becomes
@@ -1222,4 +1433,49 @@ bool nd_svc_reboot(void)
 bool nd_svc_poweroff(void)
 {
     return svc_halt(false);
+}
+
+/* The same rule svc_halt() follows: a direct handle always wins becomes "the
+ * core does it; an app asks the core", and a process with no channel IS the
+ * core as far as this library can tell. What is different from the halt is
+ * that the POLICY runs on whichever side does the work rather than only in
+ * serve() -- clock_set_bounded() and format_card() are the same two functions
+ * either way -- because a rule you could get out of by not having a socket
+ * would not be a rule. */
+bool nd_svc_set_clock(time_t when)
+{
+    svc_resp resp;
+
+    if (g_client_fd < 0)
+        return clock_set_bounded(when);
+
+    /* The coarse window is checked here too, before the record goes out. Not
+     * because the core would accept it -- valid_request() refuses the same
+     * range -- but because a time_t that does not fit in the wire's int64_t
+     * would be truncated into one that does, and an out-of-range request must
+     * fail as an out-of-range request rather than arrive as a different one. */
+    if (when < (time_t)ND_CLOCK_SANE_MIN || when > (time_t)ND_CLOCK_SANE_MAX) {
+        nd_log_err(ND_LOG_CLOCK, "refusing to ask for %lld: outside 2020-2100", (long long)when);
+        return false;
+    }
+
+    if (svc_call_at(SVC_OP_SET_CLOCK, NULL, NULL, (int64_t)when, &resp, ND_SVC_TIMEOUT_S) !=
+        SVC_ST_OK)
+        return false;
+    return resp.ok != 0u;
+}
+
+bool nd_svc_format_card(void)
+{
+    svc_resp resp;
+
+    if (g_client_fd < 0)
+        return format_card();
+
+    /* ND_SVC_FORMAT_TIMEOUT_S, which sits above the ND_SVC_FORMAT_WAIT_S the
+     * core allows the helper, so that the side which knows why it failed is
+     * the side that gives up first. nd_svc.h. */
+    if (svc_call(SVC_OP_FORMAT_CARD, NULL, NULL, &resp, ND_SVC_FORMAT_TIMEOUT_S) != SVC_ST_OK)
+        return false;
+    return resp.ok != 0u;
 }

@@ -1028,3 +1028,322 @@ Then actually switch the phone off, which no host test can do.
 - **No hardware has run this.** A build host has no `CAP_SYS_BOOT` story worth testing and
   no init to signal. What the host tests prove is the boundary and the ordering; that
   `poweroff` still switches a Luckfox off has to be seen on a Luckfox.
+
+---
+
+## 10. The last two: the clock, and formatting a card
+
+*Design for `set_clock` and `format_card` on the service socket. Pays off the last two
+names in `ROOT_STOCK_APPS`: `Clock` and `Settings` leave the list, **the list is empty**,
+and no stock app on this phone runs as root.*
+
+§4 says four operations and no more, and that any further one must have the same argument
+made again. §9 made it for `reboot` and `poweroff`. This section makes it for the last
+two, which start from a harder place than those did: **`reboot` and `poweroff` obviously
+carried no arguments, and these two obviously did.** "Set the clock" names a time and
+"format the card" named a device.
+
+Most of what follows is about narrowing that. One of the two ends up carrying nothing at
+all — `format_card` takes no device, because the core reads the card itself — and the
+other carries a single integer inside a bound the core checks. So the finished API is
+three argument-free verbs and one bounded number, which is not where it started.
+
+**Read §10 before citing §4 or §9.15.** §9.15 says "`Clock` and `Settings` keep root. The
+list is shorter, not empty." That was true when it was written and is the thing this
+section changes. As with §4, it is left standing rather than corrected: it is the record
+of where the work had got to, and a later reader needs it.
+
+### 10.1 The state this starts from
+
+After §9, `ROOT_STOCK_APPS` holds two names:
+
+```c
+ND_PATH_APPS_DIR "/Clock",    /* settimeofday */
+ND_PATH_APPS_DIR "/Settings", /* neodct-sdcard format */
+```
+
+Each is one call. `apps/Clock/main.c` ends `show_clock_settings()` with
+
+```c
+nd_clock_set(when, "set by hand in the Clock app")
+```
+
+and `apps/Settings/main.c` ends `offer_format()` with `sdcard_format(card->device)`, which
+is a `nd_proc_spawn()` of `/NeoDCT/System/hw/neodct-sdcard format <device>` followed by an
+unbounded `nd_proc_wait()`.
+
+Everything else both apps do already works unprivileged, and — as in §9.1 — that was
+checked rather than assumed. `Settings` writes `settings.prop`, reads and writes
+`/NeoDCT/User/wallpapers`, drives Bluetooth through `nd_bt`, and lists the card; all of
+that is `ndusr`-owned or `ndusr`-readable already. `Clock` reads and writes
+`system.clock.ntp_sync` in `settings.prop` and formats strings.
+
+Unlike §9's case, **deleting these two names without adding the verbs fails loudly**, in
+both directions and honestly:
+
+| app | what an `ndusr` build does | what the user sees |
+| --- | --- | --- |
+| `Clock` | `clock_settime()` returns `EPERM` (no `CAP_SYS_TIME`) | "The clock would not take it." |
+| `Settings` | the helper execs and fails: `umount`/`mount` need `CAP_SYS_ADMIN`, and `/run/neodct` is not `ndusr`-writable | "Formatting failed." |
+
+Note which call fails in the second row, because it is not the obvious one. **`ndusr` is
+in the `disk` group** (`configs/users-table.txt`), so `mkfs.vfat` on the card device
+itself would very likely *succeed*; what an unprivileged helper cannot do is unmount the
+card first, mount the result, and publish the new state to `/run/neodct/sdcard.prop`. An
+`ndusr` `Settings` would therefore not fail cleanly — it would fail *after* writing a
+filesystem. That is an argument for the verb rather than against it, and it is the reason
+the row says what it says.
+
+So the "silent nothing" problem that made §9.1 refuse to just delete the names does not
+arise here: both failures reach the user. The reason to add verbs instead of accepting
+the loss is that a phone whose clock cannot be set and whose card cannot be formatted is
+a worse phone — and, for the card, that the halfway failure above is worse than either.
+
+### 10.2 Setting the clock: what an app can reach by choosing the time
+
+The clock **already moves without anybody asking**. `nd_clock_start()` applies a floor at
+boot from `version.prop`'s build epoch, then syncs over SNTP on a detached thread. So "a
+process decided what time it is" is the normal case and not a new power. What is new is
+an *app* choosing the value, and possibly choosing a hostile one.
+
+Two things were checked rather than assumed.
+
+**The release signature does not read the clock.** `nd_signing.c` has no `notBefore`, no
+`notAfter` and no `time()` call, and neither does the initramfs gate in `ndsys-apply.sh`.
+This is the one that would have settled the question the other way: if a certificate
+validity window gated installs, then a clock an app could move would be a route to
+installing something whose signing key had been revoked. It does not, so it is not.
+
+**TLS does read it.** `nd_clock.h`'s first paragraph is about exactly this: a phone that
+boots at the Unix epoch fails every "not valid before" check on the internet at once. The
+dangerous direction is therefore **forward**: far enough ahead and an *expired*
+certificate reads as current, so a download could come from a server whose key was
+revoked. It still could not be installed — the `.ndsw` is signature-checked in the
+initramfs, after the download, by code the running system cannot rewrite — but the
+download itself is worth not handing over.
+
+Hence the bound, which is the whole of the API's narrowing:
+
+```
+refuse  when < build epoch                          nothing legitimate predates the image
+refuse  when > build epoch + ND_SVC_CLOCK_MAX_SKEW_S   ten years; the direction that ages
+                                                       certificates out
+```
+
+Ten years is far more than a person correcting a date needs and far less than the
+multi-decade jump that expires a long-lived CA root. Between the two bounds the phone
+believes its owner, which is the entire point of a clock app.
+
+Three details of the bound that are load-bearing:
+
+- **A missing `version.prop` does not mean no bound.** The floor falls back to
+  `ND_CLOCK_SANE_MIN` (2020-01-01) — the value `ClockService` already trusts as "no real
+  time is earlier than this" — rather than to zero.
+- **A `version.prop` from before 2020 does not widen the window.** It is clamped up to
+  `ND_CLOCK_SANE_MIN`. `version.prop` is machine-written but lives on the same partition
+  as everything else, and a `1970` in it must not buy a clock in 1980.
+- **The reason string is not on the wire.** The core logs
+  `set by hand in the Clock app`, fixed at the call site. An app choosing that string
+  would be writing whatever it liked into the core's log with the core's authority, and
+  the `[CLOCK]` tag exists so that a person on a serial console can believe what moved the
+  clock.
+
+### 10.3 Formatting a card: the verb takes no device, and that is the design
+
+`Settings` passed `card->device` to the helper. **A verb shaped that way would let any app
+on the phone name a block device**, and the two most interesting ones here are the
+partitions the phone is running from. `neodct-sdcard`'s own `is_reserved_device()` would
+have refused those two — but "the helper checks" is a second line of defence, not a first,
+and the point of moving the operation is to stop needing one.
+
+So `nd_svc_format_card()` **takes no argument at all**. The core calls `nd_storage_card()`
+itself and formats what it finds. There is no string to validate because there is no
+string, which is the same shape §9 gave `reboot` and `poweroff` for the same reason.
+
+Two refusals the core makes before the helper is reached:
+
+| condition | why |
+| --- | --- |
+| `card.device` is empty | `ND_CARD_ABSENT` blanks it. Nothing to format. This is `Settings`' own "No card device to format." check, moved. |
+| `!card.removable` | `removable` is `fstype != "virtiofs"`, and on QEMU the "card" is a directory on the developer's machine. `mkfs` on it is not something anybody meant to ask for. |
+
+**Why allowing this at all is a smaller step than it looks.** An app can *already* destroy
+the card's contents: `neodct-sdcard` mounts p1 `uid=ndusr`, so every file on it is one
+`unlink()` away from any app on the phone. The verb adds "and rewrite the partition
+table", which is the same loss by a faster route, not a new one. What it does **not** add
+is reach: the format is confined to the one device the core found, and no app can move it.
+
+**What is genuinely lost: the app can no longer cancel the format.** `Settings` held the
+helper's pid and `SIGTERM`ed it from `app_shutdown()`, which ran when an incoming call
+arrived mid-`mkfs`. The pid now lives in the core, so `app_shutdown()` is empty. On its
+own terms this is an improvement — an `mkfs` killed half way leaves a card that mounts
+nowhere — but it is a behaviour change and it is named here rather than left to be
+discovered. If the core is stopped while a format is in flight, `nd_svc_server_stop()`
+detaches the serving thread after `ND_SVC_JOIN_S` and the format runs to completion, which
+is the same trade `ND_SVC_JOIN_S` already makes for an SMS on the wire.
+
+### 10.4 What crosses the wire
+
+Two new operation numbers, appended so that no number an existing build sends changes
+meaning:
+
+```c
+SVC_OP_SET_CLOCK   = 7,
+SVC_OP_FORMAT_CARD = 8
+```
+
+`SVC_OP_FORMAT_CARD` carries nothing. `SVC_OP_SET_CLOCK` adds one field to `svc_req`:
+
+```c
+int64_t when;   /* after the six uint32_t, so it lands 8-byte aligned with no hole */
+```
+
+`int64_t` and not `time_t`: the record goes over a socket and its layout must not depend
+on how wide the compiler made `time_t`.
+
+`valid_request()` gains three things:
+
+1. `SVC_OP_SET_CLOCK` must carry a `when` inside `[ND_CLOCK_SANE_MIN, ND_CLOCK_SANE_MAX]`
+   — the only part of the rule decidable from the record alone. The real bound is the
+   build epoch, which is a file read and belongs with the operation.
+2. `SVC_OP_FORMAT_CARD` is accepted with nothing further to check, as the two halt verbs
+   are.
+3. **Every operation that is not `SVC_OP_SET_CLOCK` must carry `when == 0`.** That is what
+   every sender leaves it as, and enforcing it keeps "this op ignores that field" from
+   quietly becoming "this op ignores that field *today*".
+
+### 10.5 Timing
+
+The clock verb uses `ND_SVC_TIMEOUT_S` (5 s): everything the core does is a bounded file
+read and a syscall.
+
+The format is the first operation on this channel that can take minutes. The old code did
+not bound it at all — `nd_proc_wait(pid, -1.0, ...)` — so the two new constants are the
+finite version of "forever":
+
+```c
+#define ND_SVC_FORMAT_WAIT_S    240.0   /* the core -> the helper */
+#define ND_SVC_FORMAT_TIMEOUT_S 250.0   /* the app  -> the core   */
+```
+
+The ordering between them matters and is the same reasoning `ND_SVC_SMS_TIMEOUT_S` (45)
+uses against the core's own 35-second worst case: **the side that knows why it failed must
+give up first.** If the core times out it replies "failed" and `Settings` draws
+"Formatting failed."; if the app timed out first it would close the channel and report a
+transport failure for what is really a wedged `mkfs`. On a core timeout the helper is
+terminated, because four minutes with no exit is a wedged helper and leaving it would keep
+the serving thread in there for the life of the core.
+
+Note what is *not* shared with §9.4's ordering rule. The halt verbs reply **before** they
+act, because the act cannot fail in a reportable way and `sync(2)` is unbounded. These two
+reply **after**, because the answer is the result: "did the clock take it" and "did the
+format work" are the entire content of the reply.
+
+### 10.6 Both sides run the same policy
+
+`svc_halt()` follows the rule "a direct handle always wins" in its degenerate form: there
+is no `ui->` handle for the phone, so a process with **no channel** — `nd-core` itself, a
+hand-launched `nd-apprun`, `nd-shoot`, a unit test — does the work itself.
+
+These two do the same, with one addition that matters: **the policy runs on whichever side
+does the work.** `clock_in_bounds()` and the card refusals are inside
+`clock_set_bounded()` and `format_card()`, which `serve()` calls for an app and the client
+half calls for a process with no socket. A rule that only existed on the far side of a
+socket would be a rule you could get out of by not having one.
+
+### 10.7 Testing
+
+**`test/unit/test_clock.c`** — the window, to the second. This is the file that can stage
+a `version.prop` (`pt_new_case()` gives every case a fresh `ND_ROOT`), so it is the only
+one that can pin the bound exactly:
+
+1. inside the window is taken — the build epoch itself, a day later, and the last second
+   of the window;
+2. before the build epoch is refused, including `VCLOCK_NOW` (2024, against a 2026 build)
+   and `0`;
+3. one second past the ceiling is refused, and so is 2100;
+4. with **no** `version.prop` the window still has a floor at `ND_CLOCK_SANE_MIN`;
+5. a `version.prop` reading 2000-01-01 does not lower it.
+
+Nothing here moves the machine's clock: `nd_clock.c` refuses `clock_settime()` while
+`NEODCT_ROOT` is set, which it always is under this harness. Its `capture_begin()` was
+extended to capture **stderr as well as stdout**, because a refusal is an error-level log
+line and a case pinning it would otherwise have asserted nothing at all, silently.
+
+**`test/unit/test_svc.c`** — the wire, in the existing loopback fixture:
+
+6. a time inside the window crosses and is accepted;
+7. `0` and `> 2100` are refused by the *client* half, before a record is built;
+8. a day past the ceiling — inside 2020–2100, so it **crosses the wire** and is refused by
+   the core. Without this case, 7 would still pass on a build whose server-side bound had
+   been deleted entirely;
+9. a format with a fake helper (`nd_svc_format_simulate()`) returning 0 succeeds, **and the
+   device the helper was pointed at is the one in the state file the core read** — which is
+   the assertion the whole case exists for, since the app cannot name one;
+10. a helper returning 1 fails;
+11. a `virtiofs` card is refused **and the helper is never called** — the call count is the
+    proof, because `mkfs` on the developer's machine is not something a boolean could take
+    back;
+12. an absent card is refused, likewise without a call;
+13. after every one of those refusals the channel is still good — a failed operation, not a
+    protocol error.
+
+`nd_svc_format_simulate()` is the sibling of `nd_svc_halt_simulate()` and exists for the
+same reason `power.h` gives: a test suite that can repartition the machine it runs on is
+not a test suite. It replaces the spawn-and-wait and **nothing else** — the validation, the
+`nd_storage_card()` read, both refusals and the logging are all real. The clock verb needs
+no partner to it, because `nd_clock_set()` has honoured `NEODCT_ROOT` since it was written.
+
+**`test/unit/test_proc.c`** — `t_the_named_stock_apps_still_hold_root()` becomes
+`t_no_stock_app_holds_root()`, and it is deliberately a loop over **every** stock app name
+(`STUB_STOCK_APPS` from `src/Makefile`, which is what decides `apps/` versus
+`engineering/apps/` and is therefore the real definition of "stock") rather than over a
+remembered list: a name that reappears in `ROOT_STOCK_APPS` should fail whether or not
+anybody thought to add it here. It asserts both `engineering_mode` values, because
+engineering mode grants root by *location* and `/NeoDCT/System/apps` is not that location.
+`t_the_stock_name_alone_grants_nothing()`'s last assertion flips from
+`CHECK(nd_proc_app_needs_root(&real, false))` to `CHECK(!...)`; that one line is what these
+two verbs bought.
+
+**On the phone.** `nd-selftest processes` is the acceptance test and it needs no change:
+it reports `FAIL a stock app is running as root -- it did not drop` for anything under
+`/NeoDCT/System/apps/` that is not `ndusr`, so opening `Clock` and `Settings` and seeing
+PASS is the whole of it. Then set the clock by hand, and format a card.
+
+### 10.8 What this does not do
+
+- **`ROOT_STOCK_APPS` is empty; it is not deleted.** The array and the loop stay, with the
+  comment above it rewritten into a warning about what adding a name would mean. An empty
+  policy costs one `NULL` pointer and no special case.
+- **Engineering apps still run as root when engineering mode is on.** That is deliberate and
+  is the *one* remaining reason any app on this phone is privileged. `RemoteShell` exists to
+  hand a developer a root shell; confining it would not make the phone safer.
+- **The engineering-mode gate is still `settings.prop`.** Unchanged, still a hole, and still
+  written down as one in `nd_proc.h`. The second gate (`neodct.engmode=1` on the kernel
+  command line, which the writable partition cannot set) is one `&&` away and is not this
+  section's work.
+- **`nd_modem.h` is unchanged.** No dial, no answer, no hang-up, no raw AT. §9.2 argued why
+  taking the phone down is a different question; nothing here reopens that one.
+- **This is not enforcement.** As §9.15 says: the kernel refusing `CAP_SYS_TIME` and
+  `CAP_SYS_ADMIN` to `ndusr` is the boundary. These verbs are the supported route through
+  it. SELinux is what turns "the core is allowed to" into "the core is allowed to *this
+  much*", and that track is separate.
+- **It does not close the `disk` group, which is now the loudest hole next door.**
+  `configs/users-table.txt` puts `ndusr` in `disk`, and eudev's shipped
+  `50-udev-default.rules` line 70 is `SUBSYSTEM=="block", GROUP="disk"` — with no `MODE`,
+  which udev turns into `0660` whenever a group is set. So **every block device node on
+  the phone is `root:disk 0660`, and every app now running as `ndusr` can open the system
+  and user partitions read-write and rewrite them raw.** That was harmless while stock
+  apps ran as root and it is not harmless now: it goes around the `/NeoDCT/User` mode-bit
+  boundary entirely, and dm-verity turns a rewritten rootfs into a brick rather than into
+  a compromise, which is better but not good.
+
+  Nothing in `neodct/src` opens a block device from an app — the card is mounted by
+  `neodct-sdcard`, which runs as root — so `disk` looks removable from `ndusr`'s group
+  list. "Looks removable" is not "was tried on a phone", which is why it is written down
+  here rather than done in this change. It wants: the group dropped from
+  `users-table.txt`, an `nd-selftest` probe that opens each block node as `ndusr` and
+  FAILs if it succeeds, and a boot.
+- **No hardware has run this.** The host tests prove the bound, the refusals and the wire.
+  That `mkfs.vfat` still partitions a real SD card through the core rather than through the
+  app has to be seen on a Luckfox.

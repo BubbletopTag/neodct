@@ -39,18 +39,27 @@
  * call by accident, and must not be able to type ATH at the modem on
  * purpose. See spec-app-services.md section 4.
  *
- * ============ AND TWO VERBS THAT ARE NOT SERVICES AT ALL ============
+ * ============ AND FOUR VERBS THAT ARE NOT SERVICES AT ALL ============
  *
- * nd_svc_reboot() and nd_svc_poweroff() are here for the opposite reason to
- * the four above. Those four ADDED something an app could not do; these two
- * TAKE AWAY something three apps could -- resolving a program name along
- * $PATH and fork/exec'ing it with the privilege to power-cycle the machine.
- * Power, Update and Downgrade did exactly that, and it was the only reason
- * any app needed privilege the other twenty-two do not.
+ * nd_svc_reboot(), nd_svc_poweroff(), nd_svc_set_clock() and
+ * nd_svc_format_card() are here for the opposite reason to the four above.
+ * Those four ADDED something an app could not do; these four TAKE AWAY
+ * something five apps could -- run as root.
  *
- * The verbs carry no arguments, on purpose: the moment the app chooses the
- * string, the core is running a program of the app's choosing as root, which
- * is the thing being removed. See spec-app-services.md section 9.
+ * Power, Update and Downgrade resolved a program name along $PATH and
+ * fork/exec'd it with the privilege to power-cycle the machine. Clock called
+ * settimeofday(). Settings ran the SD-card helper. Those five calls were the
+ * whole of ROOT_STOCK_APPS in nd_proc.c, and therefore the whole reason any
+ * stock app ran with privilege the rest do not. With these four verbs the
+ * list is empty and EVERY stock app runs as ndusr.
+ *
+ * THREE OF THE FOUR CARRY NO ARGUMENTS AT ALL, including the format -- the
+ * core reads the card itself rather than being handed a device name. The
+ * fourth carries a single bounded integer. That is not thrift: the moment the
+ * app chooses the string, the core is doing something of the app's choosing
+ * as root, which is the thing being removed. Section 4's rule -- make the
+ * argument again -- applies to each; spec-app-services.md sections 9 and 10
+ * are where it was made.
  *
  * ============ EVERY CALL CAN FAIL, INCLUDING THE TRANSPORT ============
  *
@@ -73,6 +82,8 @@
 
 #ifndef ND_SVC_H_INCLUDED
 #define ND_SVC_H_INCLUDED
+
+#include <time.h>
 
 #include "nd_battery.h"
 #include "nd_modem.h"
@@ -101,6 +112,18 @@ extern "C" {
  * that precedes them -- or it would abort sends that were about to succeed.
  * It must also be finite, so a wedged core cannot wedge the app. */
 #define ND_SVC_SMS_TIMEOUT_S 45.0
+
+/* An app waiting for a card to be formatted. The old code did not wait a
+ * bounded time at all -- Settings called nd_proc_wait(pid, -1.0) and blocked
+ * until the helper was done -- so this is the finite version of "forever",
+ * picked so it cannot fire while anything is still making progress: two
+ * mkfs.vfat runs, a partition-table re-read and a sync(2) on the slowest card
+ * the phone will accept. The core gives the helper ND_SVC_FORMAT_WAIT_S and
+ * the app gives the core a little more, so that when a format really does
+ * wedge, the side that KNOWS WHY is the side that gives up first and the user
+ * gets "Formatting failed." rather than a silent timeout. */
+#define ND_SVC_FORMAT_WAIT_S    240.0
+#define ND_SVC_FORMAT_TIMEOUT_S 250.0
 
 /* How long the core waits for its service thread after the app has gone.
  * Past this the thread is detached to finish its in-flight request and free
@@ -241,6 +264,102 @@ extern const char *const *const nd_svc_reboot_commands[ND_SVC_HALT_CANDIDATES];
 bool nd_svc_halt_which(const char *name, char *out, size_t out_sz);
 
 /* ------------------------------------------------------------------ *
+ * The last two: the clock, and formatting a card
+ * ------------------------------------------------------------------ *
+ *
+ * These paid off the final two names in nd_proc.c's ROOT_STOCK_APPS -- Clock
+ * and Settings -- which is what emptied it. They are a different shape from
+ * REBOOT and POWEROFF, because those took no arguments and these have
+ * something to say; section 4's rule applies to each, so the argument is made
+ * again below. The working is spec-app-services.md section 10.
+ *
+ * ============ SETTING THE CLOCK ============
+ *
+ * The clock ALREADY moves without anybody asking. nd_clock_start() applies a
+ * floor at boot and then syncs over SNTP on a detached thread, so "a process
+ * decided what time it is" is the normal case and not a new power. What is
+ * new is an app choosing the value.
+ *
+ * What that can and cannot reach was checked rather than assumed:
+ *
+ *   THE RELEASE SIGNATURE DOES NOT READ THE CLOCK. nd_signing.c has no
+ *   notBefore, no notAfter and no time() call, and neither does the
+ *   initramfs gate. So no clock buys an install of anything unsigned, which
+ *   is the one outcome that would have settled this the other way.
+ *
+ *   TLS DOES. nd_clock.h's first paragraph is about exactly this: a clock in
+ *   1970 fails every "not valid before" check. Forward is the dangerous
+ *   direction -- far enough ahead and an EXPIRED certificate looks current,
+ *   so a download could come from a server whose key was revoked. It still
+ *   could not be installed: the .ndsw is signature-checked in the initramfs,
+ *   after the download and by something the running system cannot rewrite.
+ *
+ * So the bound is not decoration. Below the build epoch is refused because
+ * no legitimate time predates the image asking; ND_SVC_CLOCK_MAX_SKEW_S
+ * ahead is refused because that is the direction that ages certificates out.
+ * Between them the phone believes its owner, which is the whole point of a
+ * clock app.
+ *
+ * ============ FORMATTING A CARD ============
+ *
+ * TAKES NO DEVICE, and that is the entire security design rather than an
+ * ergonomic choice. Settings used to pass card->device to the helper; a verb
+ * shaped that way would let any app name a block device, and the two most
+ * interesting ones on this phone are the system partition and the user
+ * partition. The core reads nd_storage_card() itself, so there is no string
+ * to validate because there is no string.
+ *
+ * It also refuses a card that is not `removable`, which on QEMU is the
+ * virtiofs share -- a directory on the developer's machine, and mkfs on it
+ * is not a thing anybody meant to ask for.
+ *
+ * The argument for allowing it at all is that AN APP CAN ALREADY DESTROY THE
+ * CARD'S CONTENTS. It is mounted uid=ndusr, so every file on it is one
+ * unlink() away from any app on the phone. The verb adds "and rewrite the
+ * partition table", which is the same loss by a faster route, not a new one.
+ * What it does NOT add is reach: the format is confined to the one device
+ * the core found, and no app can move it.
+ */
+
+/* How far ahead of the build epoch a hand-set clock may be. Ten years is far
+ * more than a person correcting a date needs and far less than the
+ * multi-decade jump that ages a long-lived CA certificate out. Behind the
+ * build epoch there is no allowance at all: nothing legitimate predates the
+ * image doing the asking. */
+#define ND_SVC_CLOCK_MAX_SKEW_S ((time_t)(10 * 365 * 24 * 60 * 60))
+
+/* nd_clock_set(), performed by the core, with the bound above applied first.
+ *
+ * false is refused-or-failed and the caller cannot tell which. That is
+ * deliberate: Clock draws one sentence for both, because "the phone will not
+ * believe that date" and "the phone could not write that date" are the same
+ * instruction to the person holding it -- try a different one.
+ *
+ * THE BOUND IS APPLIED ON WHICHEVER SIDE RUNS THE OPERATION, so a process
+ * with no channel -- nd-shoot, a hand-launched nd-apprun, a unit test -- gets
+ * exactly the same answer as an app on the phone. A rule that only existed on
+ * the far side of a socket would be a rule you could get out of by not having
+ * one. */
+bool nd_svc_set_clock(time_t when);
+
+/* neodct-sdcard format, performed by the core, on WHICHEVER CARD THE CORE
+ * ITSELF CAN SEE -- see above for why there is no device parameter.
+ *
+ * false is "the card was not formatted", and it covers a card that is absent,
+ * one that is not removable, a helper that is missing, and a helper that ran
+ * and failed. Settings drew one sentence for the last of those already and
+ * now draws it for all four.
+ *
+ * It blocks for as long as the format takes, which is the same thing the app
+ * did when it ran the helper itself. What is no longer true is that the app
+ * can KILL the helper: it used to hold the pid and cancel it from
+ * app_shutdown(), and now the core holds it. That is a change for the better
+ * on its own terms -- an mkfs interrupted by an incoming call leaves a card
+ * that mounts nowhere -- but it is a change, and spec-app-services.md 10.3 is
+ * where the argument is. */
+bool nd_svc_format_card(void);
+
+/* ------------------------------------------------------------------ *
  * The halt simulation -- TESTS ONLY, in the sense nd_ui_sim.h means it
  * ------------------------------------------------------------------ *
  *
@@ -270,6 +389,35 @@ typedef struct {
 
 /* NULL clears it. */
 void nd_svc_halt_simulate(const nd_svc_halt_sim *sim);
+
+/* ------------------------------------------------------------------ *
+ * The format simulation -- TESTS ONLY, for the same reason
+ * ------------------------------------------------------------------ *
+ *
+ * A test suite that can repartition the machine it is running on is not a
+ * test suite either, and this one is worse than the halt: poweroff at least
+ * announces itself. So `run` replaces the spawn-and-wait and NOTHING ELSE --
+ * the validation, the nd_storage_card() read, the absent and non-removable
+ * refusals and the logging are all real, which is what lets a test prove that
+ * the core picks the device rather than assert it.
+ *
+ * `run` is handed the device the CORE resolved, so a test can assert on it,
+ * and returns what the helper would have: 0 for success.
+ *
+ * The clock verb needs no partner to this. nd_clock_set() has honoured
+ * NEODCT_ROOT since it was written -- "leaving the real clock alone" -- so a
+ * test already runs the whole path, bound included, without moving the build
+ * machine's clock.
+ *
+ * Same barriers as the halt hook: set it before nd_svc_server_start(), clear
+ * it after nd_svc_server_stop(). */
+typedef struct {
+    int (*run)(const char *device, void *user);
+    void *user;
+} nd_svc_format_sim;
+
+/* NULL clears it. */
+void nd_svc_format_simulate(const nd_svc_format_sim *sim);
 
 /* ------------------------------------------------------------------ *
  * The client half -- libneodct plumbing, not for apps

@@ -1023,17 +1023,21 @@ static nd_app_entry app_at(const char *path)
 static void t_stock_apps_drop(void)
 {
     nd_app_entry a = app_at(ND_PATH_APPS_DIR "/Calendar");
-    /* Power, Update and Downgrade were on the debt list until reboot and
-     * poweroff became verbs on the service socket. They are ordinary apps
-     * now, and this is the assertion that says the debt was really paid
+    /* All five that were once on the debt list. Each held root for exactly
+     * one privileged operation and each of those is now a verb on the service
+     * socket, so this is the assertion that says the debt was really paid
      * rather than the list merely edited. */
     nd_app_entry power = app_at(ND_PATH_APPS_DIR "/Power");
-    nd_app_entry upd   = app_at(ND_PATH_APPS_DIR "/Update");
-    nd_app_entry down  = app_at(ND_PATH_APPS_DIR "/Downgrade");
+    nd_app_entry upd = app_at(ND_PATH_APPS_DIR "/Update");
+    nd_app_entry down = app_at(ND_PATH_APPS_DIR "/Downgrade");
+    nd_app_entry clk = app_at(ND_PATH_APPS_DIR "/Clock");
+    nd_app_entry set = app_at(ND_PATH_APPS_DIR "/Settings");
 
     CHECK(!nd_proc_app_needs_root(&power, false));
     CHECK(!nd_proc_app_needs_root(&upd, false));
     CHECK(!nd_proc_app_needs_root(&down, false));
+    CHECK(!nd_proc_app_needs_root(&clk, false));
+    CHECK(!nd_proc_app_needs_root(&set, false));
 
     /* The ordinary case, and the one the whole branch is for. Engineering
      * mode must not change it: an engineering-mode phone is still a phone. */
@@ -1052,20 +1056,37 @@ static void t_engineering_apps_keep_root_only_when_the_mode_is_on(void)
     CHECK(!nd_proc_app_needs_root(&a, false));
 }
 
-static void t_the_named_stock_apps_still_hold_root(void)
+static void t_no_stock_app_holds_root(void)
 {
-    /* The debt list. When one of these moves to an nd_svc verb, its line here
-     * flips to CHECK(!...) and the list in nd_proc.c loses a name. */
-    static const char *const owed[] = {"Clock", "Settings"};
+    /* What t_the_named_stock_apps_still_hold_root() became when the debt list
+     * reached zero. It is the same loop over the same directory, asserting
+     * the opposite, and it is deliberately over EVERY app rather than over a
+     * remembered list: a name that reappears in ROOT_STOCK_APPS should fail
+     * this test whether or not anybody thought to add it here.
+     *
+     * The names are STUB_STOCK_APPS from src/Makefile, which is what decides
+     * whether an app is installed into apps/ or engineering/apps/ and is
+     * therefore the real definition of "stock". They are written out rather
+     * than scanned because this test must run on a machine with no phone
+     * image on it. */
+    static const char *const stock[] = {
+        "Browser",  "Calculator",  "Calendar",  "CallLog", "Clock",    "Games", "Koki",
+        "Messages", "MusicPlayer", "PhoneBook", "Power",   "Settings", "Tones", "Update",
+    };
     size_t i;
 
-    for (i = 0u; i < sizeof owed / sizeof owed[0]; i++) {
+    for (i = 0u; i < sizeof stock / sizeof stock[0]; i++) {
         char path[256];
 
-        (void)nd_snprintf(path, sizeof path, "%s/%s", ND_PATH_APPS_DIR, owed[i]);
+        (void)nd_snprintf(path, sizeof path, "%s/%s", ND_PATH_APPS_DIR, stock[i]);
         {
             nd_app_entry a = app_at(path);
-            CHECK(nd_proc_app_needs_root(&a, false));
+
+            /* Both ways round. Engineering mode grants root by LOCATION, and
+             * /NeoDCT/System/apps is not that location -- so turning the mode
+             * on must not move a single stock app. */
+            CHECK(!nd_proc_app_needs_root(&a, false));
+            CHECK(!nd_proc_app_needs_root(&a, true));
         }
     }
 }
@@ -1103,11 +1124,11 @@ static void t_the_stock_name_alone_grants_nothing(void)
      * future user-installed set, the writable partition -- the name is just a
      * name. Nothing today can create any of these; the point is that when
      * something can, it will not quietly be a privilege grant. */
-    nd_app_entry eng  = app_at(ND_PATH_ENG_APPS_DIR "/Clock");
+    nd_app_entry eng = app_at(ND_PATH_ENG_APPS_DIR "/Clock");
     nd_app_entry user = app_at("/NeoDCT/User/apps/Clock");
     nd_app_entry deep = app_at(ND_PATH_APPS_DIR "/Evil/Clock");
     nd_app_entry near = app_at(ND_PATH_APPS_DIR "/Clock2");
-    nd_app_entry pre  = app_at(ND_PATH_APPS_DIR "/ClockX");
+    nd_app_entry pre = app_at(ND_PATH_APPS_DIR "/ClockX");
     nd_app_entry real = app_at(ND_PATH_APPS_DIR "/Clock");
 
     CHECK(!nd_proc_app_needs_root(&eng, false));
@@ -1116,11 +1137,15 @@ static void t_the_stock_name_alone_grants_nothing(void)
     CHECK(!nd_proc_app_needs_root(&deep, false));
     CHECK(!nd_proc_app_needs_root(&near, false));
     CHECK(!nd_proc_app_needs_root(&pre, false));
-    /* ...and the one real Clock still works, or the clock cannot be set. */
-    CHECK(nd_proc_app_needs_root(&real, false));
+    /* ...and neither does the real one, now that the list is empty. This line
+     * used to read CHECK(nd_proc_app_needs_root(&real, false)) and the flip
+     * is the whole of what nd_svc_set_clock() bought. */
+    CHECK(!nd_proc_app_needs_root(&real, false));
 
-    /* An engineering directory called Power gets root when the mode is on,
-     * because it is an engineering app -- by its location, not its name. */
+    /* An engineering directory called Clock gets root when the mode is on,
+     * because it is an engineering app -- by its location, not its name. That
+     * is the one grant left, and it is the one that survives an empty
+     * ROOT_STOCK_APPS, so it is asserted here rather than assumed. */
     CHECK(nd_proc_app_needs_root(&eng, true));
 }
 
@@ -1139,7 +1164,7 @@ int main(void)
      * last thing that should go untested because a fixture was unavailable. */
     t_stock_apps_drop();
     t_engineering_apps_keep_root_only_when_the_mode_is_on();
-    t_the_named_stock_apps_still_hold_root();
+    t_no_stock_app_holds_root();
     t_a_lookalike_directory_gets_nothing();
     t_no_app_is_the_confined_answer();
     t_the_stock_name_alone_grants_nothing();

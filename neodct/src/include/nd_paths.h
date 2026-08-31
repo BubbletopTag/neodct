@@ -32,6 +32,11 @@ extern "C" {
 #define ND_PATH_ENG_APPS_DIR "/NeoDCT/System/engineering/apps"
 #define ND_PATH_VERSION_PROP "/NeoDCT/System/version.prop"
 #define ND_PATH_DISPLAYD     "/NeoDCT/System/hw/neodct_displayd"
+/* The SD-card helper. Lives here rather than in settings_app.h because the
+ * CORE runs it now: formatting a card is a verb on the service socket
+ * (nd_svc.h), and the app that used to spawn it can no longer spawn
+ * anything. settings_app.h still names it, pointing at this. */
+#define ND_PATH_SDCARD_HELPER "/NeoDCT/System/hw/neodct-sdcard"
 
 #define ND_PATH_FONT             "/NeoDCT/System/ui/resources/fonts/font.ttf"
 #define ND_PATH_HOME_LAYOUT      "/NeoDCT/System/ui/resources/ui_home.json"

@@ -43,6 +43,7 @@
 #include <unistd.h>
 
 #include "nd_clock.h"
+#include "nd_svc.h"
 #include "nd_types.h"
 #include "nd_vclock.h"
 #include "platform_test.h"
@@ -102,7 +103,14 @@ static void write_route_v6(bool with_default)
  * ------------------------------------------------------------------ */
 
 static int g_saved_stdout = -1;
+static int g_saved_stderr = -1;
 
+/* BOTH streams, into one file. nd_log.c splits them deliberately -- "everything
+ * on stderr is a failure worth seeing" -- and a case that pins a REFUSAL is
+ * reading the stderr half. Capturing only stdout would have made those cases
+ * assert nothing at all, silently, which is the failure mode a log test exists
+ * to catch. Interleaving is fine: every assertion here is a strstr for one
+ * line. */
 static void capture_begin(void)
 {
     char resolved[ND_PATH_MAX];
@@ -110,12 +118,15 @@ static void capture_begin(void)
 
     pt_write_text("/capture.log", "");
     (void)fflush(stdout);
+    (void)fflush(stderr);
     g_saved_stdout = dup(STDOUT_FILENO);
+    g_saved_stderr = dup(STDERR_FILENO);
     if (nd_path_resolve(resolved, sizeof resolved, "/capture.log") != ND_OK)
         return;
     fd = open(resolved, O_WRONLY | O_TRUNC);
     if (fd >= 0) {
         (void)dup2(fd, STDOUT_FILENO);
+        (void)dup2(fd, STDERR_FILENO);
         (void)close(fd);
     }
 }
@@ -123,10 +134,16 @@ static void capture_begin(void)
 static void capture_end(char *out, size_t out_sz)
 {
     (void)fflush(stdout);
+    (void)fflush(stderr);
     if (g_saved_stdout >= 0) {
         (void)dup2(g_saved_stdout, STDOUT_FILENO);
         (void)close(g_saved_stdout);
         g_saved_stdout = -1;
+    }
+    if (g_saved_stderr >= 0) {
+        (void)dup2(g_saved_stderr, STDERR_FILENO);
+        (void)close(g_saved_stderr);
+        g_saved_stderr = -1;
     }
     if (pt_read_text("/capture.log", out, out_sz) == (size_t)-1)
         out[0] = '\0';
@@ -588,6 +605,99 @@ static void test_setting_the_clock_says_so(void)
 }
 
 /* ================================================================== *
+ * The bound on a clock set by hand -- nd_svc_set_clock()
+ * ================================================================== *
+ *
+ * The rule lives in nd_svc.c and the socket is nd_svc's business, but the
+ * BOUND is a clock question and it is tested here, because this is the file
+ * that can stage a version.prop: nd_svc_set_clock() reads the build epoch out
+ * of it, and with the epoch pinned the accepted window is an exact pair of
+ * numbers rather than "whatever this machine was built on".
+ *
+ * With no channel open -- which is this process -- the client half performs
+ * the operation itself, so these cases run the real policy and the real
+ * nd_clock_set(). Nothing moves: NEODCT_ROOT is set, as the file header says.
+ */
+
+static void test_a_hand_set_clock_inside_the_window_is_taken(void)
+{
+    write_version(BUILD_EPOCH);
+
+    /* The build epoch itself is the earliest acceptable value. An image
+     * cannot legitimately be told a time from before it was built. */
+    CHECK(nd_svc_set_clock((time_t)BUILD_EPOCH));
+    CHECK(nd_svc_set_clock((time_t)BUILD_EPOCH + 86400));
+    CHECK(nd_svc_set_clock((time_t)GOOD_EPOCH));
+    /* And the last second of the window. */
+    CHECK(nd_svc_set_clock((time_t)BUILD_EPOCH + ND_SVC_CLOCK_MAX_SKEW_S));
+}
+
+static void test_a_hand_set_clock_before_the_build_is_refused(void)
+{
+    char log[4096];
+
+    write_version(BUILD_EPOCH);
+
+    capture_begin();
+    CHECK(!nd_svc_set_clock((time_t)BUILD_EPOCH - 1));
+    capture_end(log, sizeof log);
+    CHECK(strstr(log, "refusing to set the clock") != NULL);
+
+    /* VCLOCK_NOW is 2024 and the build is 2026, so "the reading the phone
+     * booted with" is itself outside the window -- which is the point. The
+     * floor moves the clock forward at boot precisely because a reading from
+     * before the build date is not information. */
+    CHECK(!nd_svc_set_clock((time_t)VCLOCK_NOW));
+
+    /* Below ND_CLOCK_SANE_MIN the client half refuses before the record is
+     * even built, so this is a different branch reaching the same answer. */
+    CHECK(!nd_svc_set_clock((time_t)ND_CLOCK_SANE_MIN - 1));
+    CHECK(!nd_svc_set_clock((time_t)0));
+}
+
+static void test_a_hand_set_clock_far_ahead_is_refused(void)
+{
+    write_version(BUILD_EPOCH);
+
+    /* One second past the window. Forward is the direction that matters:
+     * far enough ahead and an EXPIRED certificate reads as current, so a
+     * download could come from a server whose key was revoked. nd_svc.h. */
+    CHECK(!nd_svc_set_clock((time_t)BUILD_EPOCH + ND_SVC_CLOCK_MAX_SKEW_S + 1));
+    CHECK(!nd_svc_set_clock((time_t)ND_CLOCK_SANE_MAX));
+    CHECK(!nd_svc_set_clock((time_t)ND_CLOCK_SANE_MAX + 1));
+}
+
+static void test_without_a_version_prop_the_window_still_has_a_floor(void)
+{
+    /* A build with no version.prop -- a broken image, or a host tree with
+     * nothing staged -- must not mean NO BOUND. It falls back to
+     * ND_CLOCK_SANE_MIN, the same 2020 floor ClockService trusts for an
+     * answer off the network, so the window moves but does not open.
+     *
+     * Nothing is deleted to get here: RUN() gives every case a fresh root and
+     * this one simply does not call write_version(). */
+    time_t epoch = 0;
+
+    CHECK(!nd_clock_build_epoch(&epoch));
+
+    CHECK(!nd_svc_set_clock((time_t)ND_CLOCK_SANE_MIN - 1));
+    CHECK(nd_svc_set_clock((time_t)ND_CLOCK_SANE_MIN));
+    CHECK(nd_svc_set_clock((time_t)ND_CLOCK_SANE_MIN + ND_SVC_CLOCK_MAX_SKEW_S));
+    CHECK(!nd_svc_set_clock((time_t)ND_CLOCK_SANE_MIN + ND_SVC_CLOCK_MAX_SKEW_S + 1));
+}
+
+static void test_a_build_epoch_from_before_2020_does_not_widen_the_window(void)
+{
+    /* A version.prop is machine-written, but it is on the same partition as
+     * everything else the phone reads and a bad one must not be able to lower
+     * the floor -- 1970 in that file would otherwise buy a clock in 1980.
+     * Anything below ND_CLOCK_SANE_MIN is clamped up to it. */
+    write_version(946684800); /* 2000-01-01 */
+    CHECK(!nd_svc_set_clock((time_t)ND_CLOCK_SANE_MIN - 1));
+    CHECK(nd_svc_set_clock((time_t)ND_CLOCK_SANE_MIN));
+}
+
+/* ================================================================== *
  * Is there a network yet
  * ================================================================== */
 
@@ -748,6 +858,12 @@ int main(void)
     RUN(test_the_time_servers_are_the_volunteer_pool_only);
     RUN(test_the_pool_is_asked_by_its_numbered_names);
     RUN(test_setting_the_clock_says_so);
+
+    RUN(test_a_hand_set_clock_inside_the_window_is_taken);
+    RUN(test_a_hand_set_clock_before_the_build_is_refused);
+    RUN(test_a_hand_set_clock_far_ahead_is_refused);
+    RUN(test_without_a_version_prop_the_window_still_has_a_floor);
+    RUN(test_a_build_epoch_from_before_2020_does_not_widen_the_window);
 
     RUN(test_no_proc_files_at_all_means_no_route);
     RUN(test_a_v4_default_route_counts);

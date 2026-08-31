@@ -37,19 +37,29 @@
  * invisible until the app returned, both reference frames stop at a
  * VerticalList well before it, and neither needed re-cutting.
  *
- * ============ THE HELPER IS EXEC'D WITH AN UNRESOLVED PATH ============
+ * ============ THE HELPER IS NO LONGER THIS APP'S TO RUN ============
  *
- * _show_memory_card()'s last resort is subprocess.call([SDCARD_HELPER,
- * "format", card.device]). PathRemap intercepts open(), not execve(), so the
- * Python hands the kernel the literal "/NeoDCT/System/hw/neodct-sdcard" even
- * under the test harness -- and nd_proc.h says the same thing from the other
- * side: "The path is NOT ND_ROOT-resolved: it is an executable". So it is
- * passed through verbatim. See OPEN-QUESTIONS.md ST-3 for the one behaviour
- * that differs when it is missing.
+ * _show_memory_card()'s last resort was subprocess.call([SDCARD_HELPER,
+ * "format", card.device]) -- a fork/exec of a program that repartitions a
+ * disk, made by the app, with the app's privilege. It was the only thing on
+ * any Settings screen that needed privilege at all, and therefore the whole
+ * reason this app was named in nd_proc.c's ROOT_STOCK_APPS.
+ *
+ * It is now nd_svc_format_card(): the CORE runs the helper, on whichever card
+ * the core itself can see. The device is not a parameter, which is the point
+ * -- a verb that took one would let any app on the phone name a block device,
+ * and the two most interesting ones here are the partitions the phone is
+ * running from. nd_svc.h has the argument; spec-app-services.md section 10
+ * has the working.
+ *
+ * What is left of the old note is still true of the core's spawn: the path is
+ * handed to execve verbatim, because PathRemap intercepts open() and not
+ * execve(), and nd_proc.h says an executable path is not ND_ROOT-resolved.
+ * See OPEN-QUESTIONS.md ST-3 for the one behaviour that differs when the
+ * helper is missing.
  */
 
 #include <dirent.h>
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -64,9 +74,9 @@
 #include "nd_keycodes.h"
 #include "nd_log.h"
 #include "nd_paths.h"
-#include "nd_proc.h"
 #include "nd_settings.h"
 #include "nd_storage.h"
+#include "nd_svc.h"
 #include "nd_text.h"
 #include "nd_types.h"
 #include "nd_ui.h"
@@ -1154,58 +1164,6 @@ static void show_about(nd_ui *ui)
  * _show_memory_card()
  * ------------------------------------------------------------------ */
 
-/* The format helper, so app_shutdown() can kill it. subprocess.call() blocks
- * until the child is done, so this is -1 except while a format is running --
- * but an incoming call during a format is exactly the case nd_app.h's
- * teardown contract is written for. */
-static pid_t g_format_pid = -1;
-
-/* subprocess.call([SDCARD_HELPER, "format", device]) -- spawn, wait, return
- * the exit status. See the file header for why the path is not resolved.
- *
- * subprocess.call INHERITS stdin/stdout/stderr; nd_proc_spec closes anything
- * it is not given, so the three are mapped through explicitly. The helper
- * logs to stderr and the serial console is where that has to land. */
-static int sdcard_format(const char *device)
-{
-    const char *argv[4];
-    nd_proc_spec spec;
-    nd_proc_status st;
-    pid_t pid = -1;
-    int fd;
-
-    argv[0] = ND_SETAPP_SDCARD_HELPER;
-    argv[1] = "format";
-    argv[2] = device;
-    argv[3] = NULL;
-
-    memset(&spec, 0, sizeof spec);
-    spec.argv = argv;
-    spec.owner = ND_OWNER_SYSTEM;
-    for (fd = 0; fd <= 2; fd++) {
-        spec.fds[spec.n_fds].child_fd = fd;
-        spec.fds[spec.n_fds].our_fd = fd;
-        spec.n_fds++;
-    }
-
-    if (nd_proc_spawn(ND_SETAPP_SDCARD_HELPER, &spec, &pid) != ND_OK) {
-        nd_log_err(ND_LOG_OS, "cannot run %s: %s", ND_SETAPP_SDCARD_HELPER, strerror(errno));
-        return -1;
-    }
-    g_format_pid = pid;
-
-    memset(&st, 0, sizeof st);
-    if (nd_proc_wait(pid, -1.0, &st) != ND_OK) {
-        g_format_pid = -1;
-        return -1;
-    }
-    g_format_pid = -1;
-    if (st.exited)
-        return st.exit_status;
-    /* subprocess.call returns -signo for a signalled child. */
-    return -st.signo;
-}
-
 /* The destructive one, on both routes to it.
  *
  * It used to be reachable ONLY from the "this card cannot be read" branch,
@@ -1233,7 +1191,16 @@ static void offer_format(nd_ui *ui, const nd_card *card)
         (void)nd_msgdialog_show(&dialog);
         return;
     }
-    if (sdcard_format(card->device) == 0) {
+    /* `card` is read again by the core, which is not a duplicated lookup but
+     * the whole design: the check above is what this SCREEN knows, and the
+     * device the helper is pointed at is what the CORE knows. The app never
+     * names it. nd_svc.h.
+     *
+     * This blocks for as long as the format takes, exactly as the spawn it
+     * replaced did. What it can no longer do is cancel: the pid lives in the
+     * core now, so app_shutdown() has nothing to kill and an incoming call
+     * during a format no longer interrupts an mkfs half way through. */
+    if (nd_svc_format_card()) {
         nd_msgdialog_init(&dialog, ui, "Card formatted and ready.");
         nd_msgdialog_set_button(&dialog, "OK");
     } else {
@@ -1353,14 +1320,13 @@ int app_run(nd_ui *ui)
     }
 }
 
-/* Nothing here holds the sound card. The one child this app can have is the
- * SD-card format helper, and it is running only while sdcard_format() is
- * blocked in nd_proc_wait() -- which is precisely when an incoming call would
- * arrive with a mkfs in flight. */
-void app_shutdown(void)
-{
-    if (g_format_pid > 0) {
-        (void)nd_proc_terminate(g_format_pid, 0.2, NULL);
-        g_format_pid = -1;
-    }
-}
+/* Nothing here holds the sound card, and since the format moved to the core
+ * this app has no children at all -- so there is nothing to tear down.
+ *
+ * It is kept, empty, rather than deleted: nd_app.h makes app_shutdown() part
+ * of the contract every app answers, and an app that answers it with "nothing
+ * to do" is saying something. What it used to do was SIGTERM the SD-card
+ * helper when an incoming call arrived mid-format, and losing that is a real
+ * change -- for the better, since a mkfs killed half way leaves a card that
+ * mounts nowhere, but a change. spec-app-services.md 10.3. */
+void app_shutdown(void) {}

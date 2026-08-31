@@ -79,7 +79,9 @@ extern const char *const nd_clock_app_ntp_is_on;
 extern const char *const nd_clock_app_bad_time;
 extern const char *const nd_clock_app_bad_date;
 
-/* settimeofday() said no, which on this phone means the process is not root. */
+/* The core would not set the clock: either it refused the date (outside what
+ * this build will believe -- nd_svc.h) or the write itself failed. The app
+ * cannot tell them apart and says one sentence for both. */
 extern const char *const nd_clock_app_set_failed;
 
 /* The alarm row exists and does not work yet; it says so rather than opening
