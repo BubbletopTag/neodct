@@ -821,6 +821,24 @@ Two notes on that:
 
 ### 9.12 The API
 
+> **What was actually built differs from this subsection, and the code is the
+> authority.** This design proposes a separate `nd_power.h` module with an
+> `nd_power_action` enum and an arming sink. The implementation put the same
+> mechanism in `nd_svc.h` instead — `nd_svc_reboot()`, `nd_svc_poweroff()`,
+> `nd_svc_halt_which()`, `nd_svc_halt_simulate()` — because the halt has no
+> `nd_ui *` handle to hang a direct path on, so it never needed a module of its
+> own; the candidate tables and the `execvp` walk still moved out of the two
+> `app.so` copies into `libneodct.so`, which was the point.
+>
+> Everything ARGUED for in 9.1 through 9.11 landed unchanged: reply before the
+> act, `sync(2)` between the reply and the spawn, no interlock, the
+> confirmation staying in the app, and the recovery flag still written by the
+> app process because `.ndsys` is `0700 ndusr:ndusr` and a dropped app can
+> write it. The subsection below is kept as the design that was reasoned to,
+> not corrected into a description of the result — 9.13's file list is
+> likewise the plan rather than the diff.
+
+
 **`neodct/src/include/nd_power.h`** — new. The halt, as a library module, so that the two
 copies of the candidate walk that live in `apps/Power/main.c` and `apps/Update/main.c`
 today (`Update`'s header apologises for the duplication: *"It is a copy of
