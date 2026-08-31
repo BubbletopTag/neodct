@@ -270,13 +270,45 @@ XML
 }
 
 # ------------------------------------------------------------------ #
+# Is the display really there?
+# ------------------------------------------------------------------ #
+#
+# NOT `[ -e /tmp/.X11-unix/X1 ]`, which is what every check in here used to
+# be. That socket is an ordinary file in an ordinary directory: it is created
+# by the X server and removed by the X server, and a server that was killed
+# rather than asked to stop -- a container restarted, an OOM, a `docker stop`
+# -- leaves it behind. /tmp/.X1-lock outlives it the same way.
+#
+# The symptom is the worst kind. `start` says "display :1 is already up" and
+# does nothing, then openbox says "Failed to open the display from the
+# DISPLAY environment variable", then qemu says "gtk initialization failed",
+# and `status` cheerfully reports the display as up throughout. Three
+# unrelated-looking errors, none of them naming the cause, and the fix
+# (delete a file) is not one anybody guesses.
+#
+# So: ask the server, do not look for its socket. xdpyinfo opens a real
+# connection and fails if nothing answers.
+display_alive() {
+    xdpyinfo -display "$VNC_DISPLAY" >/dev/null 2>&1
+}
+
+# A socket with no server behind it. Xtigervnc refuses to start while either
+# it or the lock file is there, so a stale pair has to be cleared rather than
+# ignored.
+clear_stale_display() {
+    log "display $VNC_DISPLAY has a socket but nothing behind it -- clearing"
+    rm -f "/tmp/.X11-unix/X${VNC_DISPLAY#:}" "/tmp/.X${VNC_DISPLAY#:}-lock"
+}
+
+# ------------------------------------------------------------------ #
 # start
 # ------------------------------------------------------------------ #
 
 cmd_start() {
-    if [ -e "/tmp/.X11-unix/X${VNC_DISPLAY#:}" ]; then
+    if display_alive; then
         log "display $VNC_DISPLAY is already up"
     else
+        [ -e "/tmp/.X11-unix/X${VNC_DISPLAY#:}" ] && clear_stale_display
         # A password even though the tunnel is the only way in: ngrok URLs are
         # guessable enough to be worth one, and a VNC session with no password
         # is a shell on this container to anyone who finds it.
@@ -298,10 +330,10 @@ cmd_start() {
         # The X socket appears a beat after the process does; everything below
         # fails confusingly without it.
         i=0
-        while [ ! -e "/tmp/.X11-unix/X${VNC_DISPLAY#:}" ] && [ $i -lt 50 ]; do
+        while ! display_alive && [ $i -lt 50 ]; do
             i=$((i + 1)); sleep 0.2
         done
-        [ -e "/tmp/.X11-unix/X${VNC_DISPLAY#:}" ] || die "Xtigervnc did not come up; see $RUNDIR/xvnc.log"
+        display_alive || die "Xtigervnc did not come up; see $RUNDIR/xvnc.log"
     fi
 
     if ! pgrep -x openbox >/dev/null 2>&1; then
@@ -333,7 +365,7 @@ cmd_start() {
 # ------------------------------------------------------------------ #
 
 cmd_qemu() {
-    [ -e "/tmp/.X11-unix/X${VNC_DISPLAY#:}" ] || die "run 'cloud-test.sh start' first"
+    display_alive || die "run 'cloud-test.sh start' first"
     if qemu_pid; then
         log "qemu is already running as pid $(cat "$RUNDIR/qemu.pid")"
         return 0
@@ -399,7 +431,7 @@ for t in d.get("tunnels",[]):
 
 cmd_shot() {
     out="${1:-$RUNDIR/screen.png}"
-    [ -e "/tmp/.X11-unix/X${VNC_DISPLAY#:}" ] || die "no display"
+    display_alive || die "no display"
     DISPLAY="$VNC_DISPLAY" import -window root "$out" 2>/dev/null \
         || DISPLAY="$VNC_DISPLAY" xwd -root -silent 2>/dev/null | convert xwd:- "$out" 2>/dev/null \
         || die "no screenshot tool (install imagemagick)"
@@ -456,7 +488,7 @@ cmd_panel() {
 
 cmd_status() {
     printf 'display   %s  %s\n' "$VNC_DISPLAY" \
-        "$([ -e "/tmp/.X11-unix/X${VNC_DISPLAY#:}" ] && echo up || echo down)"
+        "$(display_alive && echo up || echo down)"
     printf 'vnc       :%s  %s\n' "$VNC_PORT" \
         "$(listening "$VNC_PORT" && echo up || echo down)"
     printf 'openbox        %s\n' "$(pgrep -x openbox >/dev/null && echo up || echo down)"
