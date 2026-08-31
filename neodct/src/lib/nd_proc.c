@@ -676,6 +676,74 @@ static void pump_keys(nd_ui *ui, nd_input_channel *ch)
     }
 }
 
+/* ------------------------------------------------------------------ *
+ * Which user an app runs as -- see nd_proc.h for the reasoning
+ * ------------------------------------------------------------------ */
+
+/* Stock apps that still hold root because their one privileged operation has
+ * no route through nd_svc yet. Matched on the DIRECTORY name, not the
+ * manifest's "name": the directory is on the read-only rootfs and is what the
+ * build put there, while the name is a string a manifest happens to carry.
+ *
+ * Every entry here is a debt. See the header. */
+static const char *const ROOT_STOCK_APPS[] = {
+    "Power",     /* poweroff, reboot */
+    "Update",    /* reboot, to finish installing */
+    "Downgrade", /* reboot */
+    "Clock",     /* settimeofday */
+    "Settings",  /* neodct-sdcard format */
+    NULL,
+};
+
+/* The last path component, without copying. */
+static const char *dir_basename(const char *path)
+{
+    const char *slash;
+
+    if (path == NULL)
+        return "";
+    slash = strrchr(path, '/');
+    return slash != NULL ? slash + 1 : path;
+}
+
+/* Is `path` inside `dir`? A prefix test that stops at a component boundary,
+ * because a plain strncmp would also match /NeoDCT/System/engineering/appsX
+ * -- which nothing creates today, and which would be a privilege grant if
+ * anything ever did. */
+static bool path_under(const char *path, const char *dir)
+{
+    size_t n;
+
+    if (path == NULL || dir == NULL)
+        return false;
+    n = strlen(dir);
+    if (strncmp(path, dir, n) != 0)
+        return false;
+    return path[n] == '/' && path[n + 1u] != '\0';
+}
+
+bool nd_proc_app_needs_root(const nd_app_entry *app, bool engineering_mode)
+{
+    size_t i;
+
+    /* Fail closed. A caller with no app to describe gets the confined answer,
+     * because the alternative is that a bug hands out root. */
+    if (app == NULL)
+        return false;
+
+    /* The second gate goes here: `engineering_mode && nd_boot_engmode() &&`.
+     * See the header on why one of these lives on the writable partition and
+     * the other must not. */
+    if (engineering_mode && path_under(app->path, ND_PATH_ENG_APPS_DIR))
+        return true;
+
+    for (i = 0u; ROOT_STOCK_APPS[i] != NULL; i++) {
+        if (strcmp(dir_basename(app->path), ROOT_STOCK_APPS[i]) == 0)
+            return true;
+    }
+    return false;
+}
+
 nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry, const char *arg,
                           nd_crash_info *crash_out)
 {
@@ -762,6 +830,34 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
     spec.envp = envp;
     spec.owner = ND_OWNER_APP;
     spec.n_fds = 0u;
+
+    /* Become ndusr unless this app is one of the two exceptions in
+     * nd_proc_app_needs_root().
+     *
+     * Nothing an ordinary app needs is lost by this, and that is a property
+     * of the design rather than luck: the framebuffer, the key channel, the
+     * crash pipe and the service socket all arrive as INHERITED DESCRIPTORS,
+     * and an open file keeps the access it was opened with no matter who the
+     * process becomes afterwards. nd_app.h has said so since it was written
+     * -- "the already-open framebuffer, so the child does not need /dev/fb0
+     * permission" -- and this is the line that finally makes that sentence
+     * do something.
+     *
+     * The lookup is here, in the parent, because getpwnam() allocates and
+     * reads files and neither is allowed between fork and execve. An image
+     * built without the users table leaves run_as.valid false, which
+     * nd_priv_become() treats as a documented no-op: the app then runs
+     * exactly as every build before this one did, rather than refusing to
+     * open. */
+    if (!nd_proc_app_needs_root(app, nd_ui_engineering_mode(ui))) {
+        if (!nd_priv_lookup(ND_PRIV_USER, &spec.run_as))
+            nd_log(ND_LOG_OS, "no " ND_PRIV_USER " in this image; %s runs with the "
+                              "core's privileges", app->name);
+        /* Only on the dropped ones. On a root app it would forbid nothing
+         * that root cannot already do, and an engineering app is the one
+         * place something might legitimately want to exec a setuid helper. */
+        spec.no_new_privs = true;
+    }
     /* The three inherited descriptors keep the numbers they already have; the
      * child is told what they are rather than being given fixed slots, which
      * is what nd_app.h means by "the numbers themselves are not fixed". Each

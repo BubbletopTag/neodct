@@ -194,6 +194,73 @@ nd_err nd_proc_terminate(pid_t pid, double grace_s, nd_proc_status *out);
  * Launching an app -- the whole sequence, in one call
  * ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ *
+ * Which user an app runs as
+ * ------------------------------------------------------------------ */
+
+/* True when this app must keep the core's privileges rather than dropping to
+ * ndusr. Pure, and separated from the launcher so that the POLICY can be
+ * tested without forking anything -- the launcher's own behaviour cannot be,
+ * because a test cannot become another user.
+ *
+ * ============ THE TWO REASONS AN APP KEEPS ROOT ============
+ *
+ * 1. IT IS AN ENGINEERING APP AND ENGINEERING MODE IS ON.
+ *
+ *    RemoteShell exists to give a developer a root shell; LinuxShell, Modem,
+ *    KeypadMapperI2C and FuelGauge exist to poke at hardware. Confining them
+ *    would not make the phone safer, it would make them useless, and a
+ *    diagnostic that cannot diagnose is worse than none.
+ *
+ *    "Is it an engineering app" is decided by WHERE IT LIVES:
+ *    /NeoDCT/System/engineering/apps/ rather than /NeoDCT/System/apps/. Both
+ *    are on the read-only, dm-verity'd rootfs, so an app cannot move itself
+ *    into the privileged directory, and nothing in its own manifest -- which
+ *    is also read-only, but is at least app-authored in spirit -- is
+ *    consulted. The path is not ND_ROOT-resolved either: nd_ui_scan_apps()
+ *    stores the virtual prefix it was given, so this comparison means the
+ *    same thing under a test root as on a phone.
+ *
+ * 2. IT IS ONE OF FOUR STOCK APPS WITH A PRIVILEGED OPERATION AND NOWHERE
+ *    YET TO SEND IT. This is a debt, and it is written down as a list rather
+ *    than as a manifest field so that it is uncomfortable to look at:
+ *
+ *      Power     poweroff, reboot
+ *      Update    reboot, to finish installing
+ *      Downgrade reboot
+ *      Clock     settimeofday after the user sets the time by hand
+ *      Settings  neodct-sdcard format
+ *
+ *    None of these belong to the app. Each is a thing the CORE should do on
+ *    the app's behalf, over the nd_svc socket that already exists for sending
+ *    an SMS -- and the core stays root, so it can. Every name removed from
+ *    this list is one verb added to nd_svc.h, and the list reaching zero is
+ *    what "the abstraction is the only path" means in SECURITY-PLAN.md
+ *    section 3.
+ *
+ *    They are NOT dropped in the meantime, because a phone that cannot be
+ *    switched off is a worse phone, and shipping that to buy a boundary
+ *    nobody has finished is the wrong trade.
+ *
+ * ============ WHAT THIS IS NOT ============
+ *
+ * `engineering_mode` comes from system.ui.engineering_mode in settings.prop,
+ * on the WRITABLE partition. AGENTS.md is blunt that this is not a security
+ * gate -- "it lives in settings.prop, on the partition the attacker just
+ * wrote to" -- and it is right. Anything running as ndusr can set that key
+ * and get root back on the next engineering app it opens.
+ *
+ * That is a known and accepted hole while the architecture is being settled,
+ * and the shape of the fix is already decided and already proven elsewhere in
+ * this tree: env.sh had exactly this problem and is now gated on
+ * neodct.devenv=1 on the kernel command line, which the writable partition
+ * cannot set. The same second gate belongs here -- both conditions true, the
+ * settings key for the menu and the cmdline flag for the privilege -- and
+ * when the initramfs recovery lands it is the natural place to set it.
+ *
+ * Written so that adding it is one && in the line below and nothing else. */
+bool nd_proc_app_needs_root(const nd_app_entry *app, bool engineering_mode);
+
 /* 1. open the key channel and the crash pipe
  * 2. spawn nd-apprun with the app's directory, the entry point and its
  *    argument, and the three inherited descriptors in the environment

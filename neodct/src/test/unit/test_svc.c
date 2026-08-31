@@ -42,6 +42,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <pwd.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -53,6 +54,7 @@
 #include "nd_input.h"
 #include "nd_modem.h"
 #include "nd_paths.h"
+#include "nd_priv.h"
 #include "nd_proc.h"
 #include "nd_svc.h"
 #include "nd_types.h"
@@ -191,6 +193,36 @@ static bool stage_app(const char *built, const char *virtual_dir)
     return copy_file(built, resolved);
 }
 
+/* /NeoDCT/User belongs to ndusr on a phone -- S00userdata takes ownership of
+ * it on the first boot -- and nd_proc_launch_app() now drops an ordinary app
+ * to ndusr. A fixture that creates the directory root-owned therefore gives
+ * the app a partition it cannot write, which is not what any phone looks
+ * like, and the failure is indirect: the app exits non-zero and the test
+ * waits for a reply that is never sent.
+ *
+ * Best-effort on purpose. It needs root to chown, and on a machine without
+ * root the drop does not happen either -- so the case where this matters and
+ * the case where it works are the same case. */
+static void stage_user_owner(void)
+{
+    struct passwd *pw;
+    char resolved[ND_PATH_MAX];
+
+    if (geteuid() != 0u)
+        return;
+    pw = getpwnam(ND_PRIV_USER);
+    if (pw == NULL)
+        return;
+    if (nd_path_resolve(resolved, sizeof resolved, ND_PATH_USER) != ND_OK)
+        return;
+    /* Assigned rather than (void)cast: glibc marks chown warn_unused_result
+     * and -Werror rejects the cast. Nothing is done with it -- a fixture
+     * that cannot chown is a fixture on a machine where the drop will not
+     * happen either. */
+    if (chown(resolved, pw->pw_uid, pw->pw_gid) != 0)
+        return;
+}
+
 static bool stage_root(void)
 {
     char overlay[ND_PATH_MAX];
@@ -214,6 +246,14 @@ static bool stage_root(void)
         STAGE_FAIL(4);
     if (mkdtemp(tmpl) == NULL)
         STAGE_FAIL(5);
+    /* 0711, because nd_proc_launch_app() drops an ordinary app to ndusr and
+     * the app it launches lives under here. See test_proc.c's stage_root()
+     * for the long version; the short one is that a 0700 fixture makes the
+     * dropped child unable to reach nd-apprun, and this test then HANGS
+     * rather than failing, because it waits for a reply from a process that
+     * never started. */
+    if (chmod(tmpl, 0711) != 0)
+        STAGE_FAIL(5);
     (void)nd_strlcpy(g_stage, tmpl, sizeof g_stage);
 
     if (nd_snprintf(neodct, sizeof neodct, "%s/NeoDCT", g_stage) != ND_OK)
@@ -229,6 +269,7 @@ static bool stage_root(void)
         STAGE_FAIL(10);
     if (nd_mkdir_p(ND_PATH_USER, 0755u) != ND_OK)
         STAGE_FAIL(11);
+    stage_user_owner();
 
     if (nd_snprintf(built, sizeof built, "%s/../test/apps/SvcApp/app.so", g_bindir) != ND_OK)
         STAGE_FAIL(12);

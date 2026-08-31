@@ -222,6 +222,21 @@ static bool stage_root(void)
         STAGE_FAIL(4);
     if (mkdtemp(tmpl) == NULL)
         STAGE_FAIL(5);
+    /* 0711, not the 0700 mkdtemp gives.
+     *
+     * nd_proc_launch_app() now drops an ordinary app to ndusr, and the
+     * "app" these cases launch lives UNDER THIS DIRECTORY -- so on a machine
+     * that has an ndusr the dropped child cannot resolve the path to
+     * nd-apprun, dies before running anything, and every crash-isolation
+     * assertion below fails for a reason that has nothing to do with
+     * crashes. Thirteen failures, none of them naming a permission.
+     *
+     * 0711 is the phone's own shape: / and /NeoDCT/System are traversable by
+     * everyone, which is exactly how an app process reaches its own app.so
+     * there. It grants traversal and not listing, so the fixture stays as
+     * private as 0700 made it. */
+    if (chmod(tmpl, 0711) != 0)
+        STAGE_FAIL(5);
     (void)nd_strlcpy(g_stage, tmpl, sizeof g_stage);
 
     if (nd_snprintf(neodct, sizeof neodct, "%s/NeoDCT", g_stage) != ND_OK)
@@ -983,6 +998,103 @@ static void test_crash_log_rotates(void)
     CHECK(crash_log_contains("source: rotation"));
 }
 
+
+/* ------------------------------------------------------------------ *
+ * Which user an app runs as
+ * ------------------------------------------------------------------ */
+
+/* The policy is pure, so it can be tested exhaustively -- which matters more
+ * here than for most pure functions, because the thing it decides is whether
+ * a process gets root and the two mistakes are not symmetric. Failing to
+ * grant root breaks a diagnostic and somebody notices in a minute. Granting
+ * it by accident breaks nothing at all, which is why it has to be a test
+ * rather than a careful reading. */
+
+static nd_app_entry app_at(const char *path)
+{
+    nd_app_entry a;
+
+    memset(&a, 0, sizeof a);
+    (void)nd_strlcpy(a.path, path, sizeof a.path);
+    (void)nd_strlcpy(a.name, "Test", sizeof a.name);
+    return a;
+}
+
+static void t_stock_apps_drop(void)
+{
+    nd_app_entry a = app_at(ND_PATH_APPS_DIR "/Calendar");
+
+    /* The ordinary case, and the one the whole branch is for. Engineering
+     * mode must not change it: an engineering-mode phone is still a phone. */
+    CHECK(!nd_proc_app_needs_root(&a, false));
+    CHECK(!nd_proc_app_needs_root(&a, true));
+}
+
+static void t_engineering_apps_keep_root_only_when_the_mode_is_on(void)
+{
+    nd_app_entry a = app_at(ND_PATH_ENG_APPS_DIR "/RemoteShell");
+
+    CHECK(nd_proc_app_needs_root(&a, true));
+    /* With the mode off the app is not in the menu at all, so this branch is
+     * unreachable through the UI. It is asserted anyway: "unreachable today"
+     * is how a privilege grant survives into a release that reaches it. */
+    CHECK(!nd_proc_app_needs_root(&a, false));
+}
+
+static void t_the_named_stock_apps_still_hold_root(void)
+{
+    /* The debt list. When one of these moves to an nd_svc verb, its line here
+     * flips to CHECK(!...) and the list in nd_proc.c loses a name. */
+    static const char *const owed[] = {"Power", "Update", "Downgrade", "Clock", "Settings"};
+    size_t i;
+
+    for (i = 0u; i < sizeof owed / sizeof owed[0]; i++) {
+        char path[256];
+
+        (void)nd_snprintf(path, sizeof path, "%s/%s", ND_PATH_APPS_DIR, owed[i]);
+        {
+            nd_app_entry a = app_at(path);
+            CHECK(nd_proc_app_needs_root(&a, false));
+        }
+    }
+}
+
+static void t_a_lookalike_directory_gets_nothing(void)
+{
+    /* The reason path_under() checks for a component boundary rather than
+     * doing a plain strncmp. Nothing creates these directories; the point is
+     * that if anything ever did, it would not be a privilege grant. */
+    nd_app_entry a = app_at("/NeoDCT/System/engineering/appsX/Evil");
+    nd_app_entry b = app_at("/NeoDCT/System/engineering/apps");        /* no app part */
+    nd_app_entry c = app_at("/NeoDCT/User/browser/engineering/apps/Evil");
+    nd_app_entry d = app_at(ND_PATH_APPS_DIR "/engineering/apps/Evil");
+
+    CHECK(!nd_proc_app_needs_root(&a, true));
+    CHECK(!nd_proc_app_needs_root(&b, true));
+    CHECK(!nd_proc_app_needs_root(&c, true));
+    CHECK(!nd_proc_app_needs_root(&d, true));
+}
+
+static void t_no_app_is_the_confined_answer(void)
+{
+    /* Fail closed. A NULL here is a bug somewhere else, and the two ways of
+     * being wrong about it are not equally bad. */
+    CHECK(!nd_proc_app_needs_root(NULL, true));
+    CHECK(!nd_proc_app_needs_root(NULL, false));
+}
+
+static void t_the_stock_name_is_not_enough_on_its_own(void)
+{
+    /* "Power" as a directory under the engineering tree, with the mode off,
+     * must not pick up root from the stock list by name alone... except that
+     * it does, and deliberately: the list is matched on basename because that
+     * is what the build controls. Asserted so the behaviour is a decision
+     * rather than an accident, and so that changing it is a test change. */
+    nd_app_entry a = app_at(ND_PATH_ENG_APPS_DIR "/Power");
+
+    CHECK(nd_proc_app_needs_root(&a, false));
+}
+
 int main(void)
 {
     /* This test stands in for nd-core, so it has to do what nd-core does at
@@ -992,6 +1104,16 @@ int main(void)
      * cases below deliberately kill their child, so they hit it every time.
      * See the contract on nd_input_channel_send() in nd_input.h. */
     (void)signal(SIGPIPE, SIG_IGN);
+
+    /* Before the staging gate on purpose. These are pure and must run even on
+     * a machine where stage_root() gives up -- the privilege policy is the
+     * last thing that should go untested because a fixture was unavailable. */
+    t_stock_apps_drop();
+    t_engineering_apps_keep_root_only_when_the_mode_is_on();
+    t_the_named_stock_apps_still_hold_root();
+    t_a_lookalike_directory_gets_nothing();
+    t_no_app_is_the_confined_answer();
+    t_the_stock_name_is_not_enough_on_its_own();
 
     if (!stage_root()) {
         fprintf(stderr, "test_proc: cannot stage a root (step %d); skipping\n", g_stage_step);
