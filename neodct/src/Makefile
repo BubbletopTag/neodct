@@ -162,6 +162,14 @@ SHOOT_SRCS  := $(wildcard tools/nd_shoot*.c)
 SELF_SRCS   := $(wildcard tools/nd_selftest*.c)
 VERIFY_SRCS := $(wildcard tools/nd_verify*.c)
 PANIC_SRCS  := $(wildcard tools/nd_panic*.c)
+# The initramfs progress bar. Two layers on purpose (see nd_bootfb.h): the
+# framebuffer primitive, which knows nothing about updates and which the
+# recovery-UI work is welcome to take, and the bar itself.
+BOOTFB_SRCS  := $(wildcard tools/nd_bootfb.c tools/nd_bootfont.c)
+BOOTBAR_SRCS := $(wildcard tools/nd_bootbar.c tools/nd_bootbar_ui.c)
+# A build-host generator, never installed: it renders the real font.ttf into
+# the committed 1-bit tables in tools/nd_bootfont.c.
+GENFONT_SRCS := $(wildcard tools/gen_bootfont.c)
 DISPLAYD_SRCS := $(wildcard displayd/*.c)
 RECUI_SRCS  := $(wildcard recovery/*.c)
 TEST_SRCS   := $(wildcard test/unit/*.c)
@@ -177,6 +185,12 @@ SHOOT_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(SHOOT_SRCS))
 SELF_OBJS   := $(patsubst %.c,$(OBJDIR)/%.o,$(SELF_SRCS))
 VERIFY_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(VERIFY_SRCS))
 PANIC_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(PANIC_SRCS))
+BOOTFB_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(BOOTFB_SRCS))
+BOOTBAR_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(BOOTBAR_SRCS))
+GENFONT_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(GENFONT_SRCS))
+# Everything in nd-bootbar except its main(), which is what test_bootbar
+# links against.
+BOOTBAR_LIB_OBJS := $(filter-out $(OBJDIR)/tools/nd_bootbar.o,$(BOOTBAR_OBJS)) $(BOOTFB_OBJS)
 DISPLAYD_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(DISPLAYD_SRCS))
 RECUI_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(RECUI_SRCS))
 
@@ -205,6 +219,8 @@ TARGETS += $(if $(SHOOT_SRCS),$(BINDIR)/nd-shoot)
 TARGETS += $(if $(SELF_SRCS),$(BINDIR)/nd-selftest)
 TARGETS += $(if $(VERIFY_SRCS),$(BINDIR)/nd-verify)
 TARGETS += $(if $(PANIC_SRCS),$(BINDIR)/nd-panic)
+TARGETS += $(if $(BOOTBAR_SRCS),$(BINDIR)/nd-bootbar)
+TARGETS += $(if $(GENFONT_SRCS),$(BINDIR)/gen-bootfont)
 TARGETS += $(if $(DISPLAYD_SRCS),$(BINDIR)/neodct_displayd)
 TARGETS += $(if $(RECUI_SRCS),$(BINDIR)/nd-recui)
 TARGETS += $(APP_SOS)
@@ -241,6 +257,7 @@ skipped:
 	$(Q)$(if $(VERIFY_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-verify (no tools/nd_verify*.c yet)';)
 	$(Q)$(if $(PANIC_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-panic (no tools/nd_panic*.c yet)';)
 	$(Q)$(if $(RECUI_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-recui (no recovery/*.c yet)';)
+	$(Q)$(if $(BOOTBAR_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-bootbar (no tools/nd_bootbar*.c yet)';)
 	$(Q)$(if $(TEST_SRCS),,printf '  %-7s %s\n' 'SKIP' 'unit tests (no test/unit/*.c yet)';)
 
 $(OBJDIR)/%.o: %.c
@@ -376,6 +393,48 @@ $(BINDIR)/nd-verify: $(VERIFY_OBJS)
 # the boot script -- see the install rule and nd_panic.h.
 $(BINDIR)/nd-panic: $(PANIC_OBJS) $(LIB)
 	$(LINK_BIN)
+
+# ---- nd-bootbar: the initramfs install-progress screen ------------------
+#
+# The second binary here that does NOT link libneodct, and for the same
+# reason nd-verify does not: it runs inside the initramfs, before /NeoDCT
+# exists. libneodct would drag in freetype, sqlite, libpng and libjpeg for a
+# program that draws two rectangles and some 1-bit glyphs.
+#
+# Static is attempted and NOT required, exactly as for nd-verify: a developer
+# host without a static libc still gets a working nd-bootbar for `make test`,
+# it just cannot go in an initramfs. Unlike nd-verify this links nothing but
+# libc, so statically against musl it is tens of kilobytes rather than 4.3 MB.
+$(BINDIR)/nd-bootbar: $(BOOTBAR_OBJS) $(BOOTFB_OBJS)
+	$(Q)mkdir -p $(dir $@)
+	$(say) LINK $@
+	$(Q)if $(CC) -static -o $@.static $^ $(LDFLAGS_ALL) > $@.link.log 2>&1; then \
+	    mv -f $@.static $@; rm -f $@.link.log; \
+	else \
+	    rm -f $@.static; \
+	    printf '  %-7s %s\n' 'NOTE' 'nd-bootbar: static link failed (see $@.link.log); linking dynamically'; \
+	    $(CC) -o $@ $^ $(LDFLAGS_ALL); \
+	fi
+
+# gen-bootfont runs on the BUILD HOST and is never installed. It links
+# libneodct on purpose: the boot screen's glyph metrics have to be the
+# phone's glyph metrics, so they come out of the same nd_font.
+$(BINDIR)/gen-bootfont: $(GENFONT_OBJS) $(LIB)
+	$(LINK_BIN)
+
+# nd_bootbar.h and nd_bootfb.h live in tools/ and NOT in include/, on
+# purpose: nothing in libneodct may depend on the initramfs's private
+# drawing layer. test_bootbar is the one translation unit that needs both
+# sides, so it gets the extra include path and nobody else does.
+$(OBJDIR)/test/unit/test_bootbar.o: CPPFLAGS_ALL += -Itools
+
+# test_bootbar links BOTH libneodct and the boot bar: its whole job is to
+# hold the two against each other, asserting that nd_bootbar's hard-coded
+# boxes are the ones nd_progress_init() derives on a real 240x175 nd_ui.
+$(TESTDIR)/test_bootbar: $(OBJDIR)/test/unit/test_bootbar.o $(BOOTBAR_LIB_OBJS) $(LIB)
+	$(Q)mkdir -p $(dir $@)
+	$(say) LINK $@
+	$(Q)$(CC) $^ -o $@ $(LDFLAGS_ALL) $(PKG_LIBS)
 
 # One binary per test file, each with its own main(). No test framework: a
 # test that needs a framework to express itself is usually testing the
@@ -561,6 +620,8 @@ install-boot: all
 	@# and on the Luckfox this is packed into the kernel image.
 	$(Q)$(if $(RECUI_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-recui $(BOOTDESTDIR)/,:)
 	$(Q)$(if $(RECUI_SRCS),$(STRIP) $(BOOTDESTDIR)/nd-recui 2>/dev/null || true,:)
+	$(Q)$(if $(BOOTBAR_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-bootbar $(BOOTDESTDIR)/,:)
+	$(Q)$(if $(BOOTBAR_SRCS),$(STRIP) $(BOOTDESTDIR)/nd-bootbar 2>/dev/null || true,:)
 
 .PHONY: install-boot
 
@@ -570,11 +631,12 @@ install-boot: all
 
 format:
 	$(Q)command -v clang-format >/dev/null 2>&1 || { echo "clang-format not installed"; exit 1; }
-	@# nd_recfont.h is generated by neodct/tools/mkrecfont.py and byte-compared
-	@# by neodct/tests/test_recui_font.py, so reformatting it would fail that
-	@# test until somebody regenerated it. -not -name keeps it out.
+	@# Two generated sources are excluded. nd_recfont.h (mkrecfont.py) and
+	@# nd_bootfont.c (the boot bar's font) are byte-compared by their tests,
+	@# so reformatting either fails that test until somebody regenerates it.
 	$(Q)clang-format -i $$(find include lib core apprun apps tools test recovery \
-	    -name nd_recfont.h -prune -o \( -name '*.c' -o -name '*.h' \) -print 2>/dev/null)
+	    -name nd_recfont.h -prune -o -name nd_bootfont.c -prune -o \
+	    \( -name '*.c' -o -name '*.h' \) -print 2>/dev/null)
 
 clean:
 	$(Q)rm -rf $(BUILD)

@@ -39,7 +39,11 @@ SHELL_WORDS = {
 }
 
 # Provided as real binaries rather than busybox applets.
-EXTRA_BINARIES = {"dmsetup"}
+#
+# nd-bootbar is reached through "$NDSYS_BOOTBAR" in ndsys-panel.sh, so the
+# scanner below cannot see it -- the same blind spot ubiupdatevol has, and
+# there is a test naming it directly for the same reason.
+EXTRA_BINARIES = {"dmsetup", "nd-bootbar"}
 
 
 def script_paths():
@@ -161,3 +165,50 @@ def test_busybox_is_configured_to_build_the_ubi_writer():
         "..", "buildroot", "board", "qemu", "busybox.fragment")
     text = open(os.path.normpath(fragment)).read()
     assert "CONFIG_UBIUPDATEVOL=y" in text
+
+
+# --- the progress bar, which is also reached through a variable ------------
+
+def test_the_progress_bar_is_shipped_by_the_initramfs_builder():
+    """nd-bootbar is invoked as "$NDSYS_BOOTBAR", so invoked_commands() above
+    cannot see it and would let it go missing without a word.
+
+    It going missing is not dangerous the way a missing ubiupdatevol is -- an
+    update still installs, the screen just says nothing while it does, which
+    is where the phone was before this existed. That is exactly why
+    mkinitramfs only WARNS about it, and exactly why something has to check
+    that the code to ship it is still there.
+    """
+    text = open(os.path.join(SCRIPTS_DIR, "mkinitramfs.py")).read()
+
+    assert "BOOTBAR_CANDIDATES" in text
+    assert 'binaries["bin/nd-bootbar"]' in text
+
+
+def test_the_panel_helpers_are_a_file_of_their_own():
+    """ndsys-panel.sh, and therefore copied into the cpio verbatim: the
+    builder copies every FILE in neodct/initramfs/, so a new .sh needs no
+    build change -- but only as long as it really is a file there."""
+    names = [os.path.basename(path) for path in script_paths()]
+
+    assert "ndsys-panel.sh" in names
+
+
+def test_the_applier_can_be_sourced_without_the_panel_helpers():
+    """ndsys-apply.sh is sourced on its own by the host tests and by
+    neodct/tools/test_update_ubi.sh on a running phone. It must define its own
+    no-ops rather than call functions that are not there -- and the filter's
+    no-op has to be `exec cat`, because it sits in the pipeline carrying the
+    system image to the flash."""
+    text = open(os.path.join(INITRAMFS_DIR, "ndsys-apply.sh")).read()
+
+    assert "command -v progress_filter" in text
+    assert "progress_filter() { exec cat; }" in text
+
+
+def test_recovery_can_be_sourced_without_the_panel_helpers():
+    """Same reason, for the file the helpers used to live in."""
+    text = open(os.path.join(INITRAMFS_DIR, "ndsys-recovery.sh")).read()
+
+    assert "command -v panel_start" in text
+    assert "panel_start() { return 1; }" in text

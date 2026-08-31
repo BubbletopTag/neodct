@@ -5,8 +5,9 @@
 `nd_bootfb.[ch]` + `nd_bootfont.c`, `neodct/src/Makefile`,
 `neodct/scripts/mkinitramfs.py`, and four test files.*
 
-*This is a plan, not a change. Nothing here has been implemented. Numbers that
-were measured are marked as measured; numbers that are estimates say so.*
+*Written as a plan. It has since been implemented; numbers that were measured
+are marked as measured, and numbers that were estimates say so. Section 8
+records what the implementation did differently and why.*
 
 ---
 
@@ -536,3 +537,73 @@ watching an update install is exactly the kind of thing that belongs there.
 Steps 1–4 change nothing an owner can see, and step 5 is the first that does. If
 this has to stop early, it should stop at a step boundary, and every one of them
 leaves the applier installing updates exactly as it does today.
+
+---
+
+## 8. What shipped, and where it differs
+
+Implemented in full. Files: `neodct/initramfs/ndsys-panel.sh` (new),
+`neodct/initramfs/ndsys-apply.sh`, `neodct/initramfs/init`,
+`neodct/initramfs/ndsys-recovery.sh`, `neodct/src/tools/nd_bootfb.[ch]`,
+`nd_bootbar.[ch]` + `nd_bootbar_ui.c`, `nd_bootfont.[ch]`, `gen_bootfont.c`,
+`neodct/src/Makefile`, `neodct/scripts/mkinitramfs.py`,
+`neodct/scripts/post-image-neodct.sh`, `neodct/tools/bootbar_frames.py` (new),
+and five test files.
+
+Six departures, all deliberate:
+
+1. **The font is generated at three sizes, not two.** §2.3 says 14 px and
+   20 px. `nd_progress_draw()` does not pick a size, it picks a *rung*:
+   `nd_font_ladder()` offers 20, 18, 14 and `nd_fit_font()` takes the first
+   that fits. "Checking the update" does not fit at 20 px on a 224 px box, so
+   with only two sizes the boot screen would either overflow or drop to 14
+   where the Update app drops to 18. 18 px costs 1.5 KB more of `.rodata`.
+   `nd_bootfb_ellipsize()` is ported from `nd_text_ellipsize()` for the same
+   reason. `test_bootbar.c` checks the rung against `nd_fit_font()`.
+
+2. **The status detail says the unit once.** §2.2's own example is
+   `24.1 of 51.0 MB`, which is not what `nd_update_size_detail()` produces
+   (`24.1 MB of 51.0 MB`). The spec's shorter form is what shipped, and it had
+   to be: measured at 14 px, the long form is 156 px against `100%`'s 41 in a
+   200 px box, leaving three pixels between them, which reads as one run-on
+   word. The short form measures 126 and the gap is 33.
+
+3. **`nd_bootbar.c` is split in two.** `nd_bootbar_ui.c` holds the layout, the
+   arithmetic and the copy loop; `nd_bootbar.c` holds only `main()`. Otherwise
+   `test_bootbar.c` cannot link the thing it is testing.
+
+4. **`nd_bootfb_open_at()` exists as well as `nd_bootfb_open()`.** A regular
+   file has no `FBIOGET_VSCREENINFO` to answer, and §2.1 property 1 says
+   geometry is read and never assumed -- so rather than let the opener invent
+   a default when the ioctl fails, the geometry is *passed in* by the two
+   callers that have no driver to ask: the host tests and
+   `neodct/tools/bootbar_frames.py`. Nothing on a device uses it.
+
+5. **A seventh failure screen.** §3.3's table has six. `apply_pending` has a
+   seventh dead end -- `gave up after N attempts` -- and the three boots that
+   reach it have each just told the owner "It will try again". Leaving that
+   one silent makes the last screen they saw a lie, so it says
+   `Update not installed / It has been given up on`.
+
+6. **`neodct/tools/bootbar_frames.py` is new and not in the plan.**
+   `nd-shoot` cannot see this screen: it is drawn by a binary with no
+   libneodct in it. This is that screen's equivalent, and it is how
+   `docs/img/bootbar-*.png` were produced.
+
+### What is still not known
+
+Nobody has run this on hardware. QEMU and the host tests confirm the pipeline,
+the arithmetic and the pixels; the SPI NAND write rate, the real duration of
+each phase and how the bar looks on an ST7789 are still unmeasured, exactly as
+§4 said they would be.
+
+### What the recovery-UI work could take
+
+`nd_bootfb.[ch]` is Layer A as described in §2.1, with all five properties, and
+it has nothing about updates in it. If `nd-recui` wants it, take it: the seam
+is one header and the boot bar keeps working. What would be wanted back, if
+recovery writes its own instead, is a primitive that reads geometry rather than
+assuming it, is one bit deep, cannot fail its caller, repaints the whole band,
+and measures text the way `nd_text_size()` does -- that last one is what stops
+the two screens' layouts from drifting. What must not happen is two
+framebuffer openers in one initramfs that disagree about bit depth.

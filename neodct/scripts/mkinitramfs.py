@@ -316,6 +316,21 @@ VERIFIER_CANDIDATES = ("NeoDCT/System/bin/nd-verify", "usr/bin/nd-verify",
 # rather than a broken image.
 RECUI_CANDIDATES = ("NeoDCT/System/bin/nd-recui", "usr/bin/nd-recui",
                     "bin/nd-recui")
+# The install-progress bar (neodct/src/tools/nd_bootbar.c), reached from
+# ndsys-panel.sh as $NDSYS_BOOTBAR. Like nd-verify it comes from
+# BINARIES_DIR rather than the target tree, because nothing in the running
+# system calls it.
+#
+# OPTIONAL, and deliberately not in the same class as dmsetup and nd-verify.
+# Those two make the initramfs unable to do its job SAFELY: without them it
+# cannot verify a root hash or tell a release from something somebody staged,
+# so the build fails rather than ship an image that looks finished. A missing
+# progress bar makes the initramfs silent, which is exactly where the phone is
+# today. Failing an image build over a cosmetic binary is the wrong default.
+# The risk that it then quietly never ships is covered by
+# neodct/tests/test_mkinitramfs.py.
+BOOTBAR_CANDIDATES = ("NeoDCT/System/bin/nd-bootbar", "usr/bin/nd-bootbar",
+                      "bin/nd-bootbar")
 RELEASE_KEY = "NeoDCT/System/keys/neodct-release.pub"
 RELEASE_KEY_TARGET = "neodct-release.pub"
 SPLASH_SOURCE, SPLASH_TARGET = SPLASH_IMAGES[0]
@@ -345,8 +360,19 @@ def find_recui(target_dir, recui=None):
     return None
 
 
+def find_bootbar(target_dir, bootbar=None):
+    """Where nd-bootbar is, or None. `bootbar` is a path from the caller."""
+    if bootbar:
+        return str(bootbar) if os.path.exists(str(bootbar)) else None
+    for candidate in BOOTBAR_CANDIDATES:
+        source = os.path.join(target_dir, candidate)
+        if os.path.exists(source):
+            return source
+    return None
+
+
 def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None,
-          verifier=None, recui=None):
+          verifier=None, recui=None, bootbar=None):
     """Stage and pack the initramfs. Returns the output path."""
     global LAST_STAGING
     target_dir = str(target_dir)
@@ -404,6 +430,26 @@ def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None,
             sys.exit("mkinitramfs: no %s in %s -- the initramfs has nothing "
                      "to check update signatures against" % (RELEASE_KEY, target_dir))
         plain_files[RELEASE_KEY_TARGET] = key
+
+        found = find_bootbar(target_dir, bootbar)
+        if found is None:
+            print("mkinitramfs: no nd-bootbar (looked at %s) -- an update "
+                  "installing at boot will show the logo and nothing else"
+                  % ", ".join(BOOTBAR_CANDIDATES), file=sys.stderr)
+        else:
+            # Same architecture check the panel daemon gets, and for the same
+            # reason: shipping a binary the kernel cannot exec is the failure
+            # this whole file exists to avoid.
+            try:
+                if elf_machine(found) == elf_machine(busybox):
+                    binaries["bin/nd-bootbar"] = found
+                else:
+                    print("mkinitramfs: %s is a different architecture; an "
+                          "update installing at boot will be silent" % found,
+                          file=sys.stderr)
+            except ValueError as exc:
+                print("mkinitramfs: %s unreadable (%s); skipping"
+                      % (found, exc), file=sys.stderr)
 
         panel = os.path.join(target_dir, PANEL_DAEMON)
         if os.path.exists(panel):
@@ -560,10 +606,12 @@ def main(argv=None):
                         help="path to nd-verify (default: search --target-dir)")
     parser.add_argument("--recui",
                         help="path to nd-recui (default: search --target-dir)")
+    parser.add_argument("--bootbar",
+                        help="path to nd-bootbar (default: search --target-dir)")
     args = parser.parse_args(argv)
 
     path = build(args.target_dir, args.init, args.output,
-                 verifier=args.verifier, recui=args.recui)
+                 verifier=args.verifier, recui=args.recui, bootbar=args.bootbar)
     print("mkinitramfs: %s (%.1f KiB)"
           % (path, os.path.getsize(path) / 1024.0))
     return 0

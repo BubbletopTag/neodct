@@ -117,6 +117,14 @@ NDSYS_ALLOW_UNSIGNED="$ALLOW_UNSIGNED"
 export NDSYS_ALLOW_UNSIGNED
 
 # The helpers below need to be available before the devices are resolved.
+#
+# ndsys-panel.sh comes FIRST because both of the others reach for it:
+# ndsys-apply.sh draws install progress on the panel and ndsys-recovery.sh
+# puts the sad face up, and neither should have to know about the other to get
+# at a screen. Optional in the same way the recovery script is -- an older or
+# hand-built initramfs without it still boots, just silently, which is exactly
+# where the phone is today.
+[ -r /ndsys-panel.sh ] && . /ndsys-panel.sh
 . /ndsys-apply.sh
 [ -r /ndsys-recovery.sh ] && . /ndsys-recovery.sh
 

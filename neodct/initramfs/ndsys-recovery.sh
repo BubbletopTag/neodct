@@ -77,98 +77,32 @@ recovery_recui_gone() {
 }
 
 # --- panel output ----------------------------------------------------------
-# The phone's /dev/fb0 is vfb: the framebuffer console draws the menu below
-# into it, but those pixels only reach the ST7789 if something mirrors them
-# over SPI. The running system starts neodct_displayd for that; inside the
-# initramfs it is ours to start -- and only once something has gone wrong.
-# An ordinary boot must not pay for the panel reset, and two daemons must
-# never drive the same SPI bus at once.
 #
-# Absent on QEMU and on any build whose daemon is the wrong architecture
-# (mkinitramfs.py ships it only when it matches), so every step is optional:
-# recovery still runs, just headless, which is what serial is for.
-: "${PANEL_DAEMON:=/bin/neodct_displayd}"
-: "${PANEL_BOOTLOGO:=/bootlogo.raw}"
-: "${PANEL_SPLASH:=/splash.raw}"
-: "${PANEL_FB:=/dev/fb0}"
-: "${PANEL_SETTLE:=2}"
-: "${PANEL_SPLASH_HOLD:=2}"
-: "${PANEL_READY:=/panel.ready}"
-PANEL_PID=""
-PANEL_UP=""
-
-# Bring the panel up.
+# panel_start, panel_show, panel_stop and the PANEL_* defaults moved to
+# ndsys-panel.sh, unchanged. The update applier needs the same panel to draw
+# install progress on, and recovery needing a screen is no reason for the
+# applier to depend on the recovery menu; init sources ndsys-panel.sh before
+# this file, so on a real boot they are already defined by the time anything
+# here runs.
 #
-# This used to start the daemon and then `sleep 2`, because the daemon
-# resets the panel and forces fb0 to 32bpp on startup and anything written
-# before that lands in whatever format the vfb happened to have. Two seconds
-# was a guess, it was the single largest item in the boot, and it was paid
-# on every boot including QEMU's, where there is no SPI bus and no daemon to
-# wait for.
-#
-# The daemon now writes NEODCT_DISPLAYD_READY once it has finished exactly
-# that setup, so this waits for the fact instead of for the guess -- and
-# gives up the moment the daemon exits, which is what happens on QEMU where
-# init_spi() finds no /dev/spidev. PANEL_SETTLE is still the ceiling, so the
-# worst case is the behaviour this replaced.
-#
-# Returning 0 does NOT mean the daemon is running. It means /dev/fb0 is
-# there and worth drawing on, which on QEMU is the whole story: the virtual
-# framebuffer IS the screen, and the boot logo shows on it with no daemon
-# involved at all.
-panel_start() {
-    [ -z "$PANEL_UP" ] || return 0
-    [ -c "$PANEL_FB" ] || return 1
-
-    if [ -x "$PANEL_DAEMON" ]; then
-        rm -f "$PANEL_READY" 2>/dev/null
-        NEODCT_DISPLAYD_READY="$PANEL_READY" "$PANEL_DAEMON" > /dev/null 2>&1 &
-        PANEL_PID=$!
-
-        # PANEL_SETTLE seconds, in 20 ms steps. Integer arithmetic: the shell
-        # has no floats, and PANEL_SETTLE has always been whole seconds.
-        _tries=0
-        _max=$(( ${PANEL_SETTLE%%.*} * 50 ))
-        while [ "$_tries" -lt "$_max" ]; do
-            if [ -e "$PANEL_READY" ]; then
-                PANEL_UP=1
-                return 0
-            fi
-            # The daemon exited: no panel here. Do not sit out the timeout.
-            if ! kill -0 "$PANEL_PID" 2>/dev/null; then
-                PANEL_PID=""
-                break
-            fi
-            sleep 0.02
-            _tries=$((_tries + 1))
-        done
+# This file is also sourced ON ITS OWN, by neodct/tests/
+# test_initramfs_recovery.py, which has no initramfs for /ndsys-panel.sh to be
+# found in. Stub the three calls rather than leave the menu invoking functions
+# that do not exist -- headless is what the real helpers report on a host
+# anyway, since panel_start() begins with [ -c /dev/fb0 ].
+: "${NDSYS_PANEL_SH:=/ndsys-panel.sh}"
+if ! command -v panel_start > /dev/null 2>&1; then
+    if [ -r "$NDSYS_PANEL_SH" ]; then
+        . "$NDSYS_PANEL_SH"
+    else
+        : "${PANEL_SPLASH:=/splash.raw}"
+        : "${PANEL_SPLASH_HOLD:=2}"
+        panel_start() { return 1; }
+        panel_show() { return 1; }
+        panel_stop() { return 0; }
     fi
+fi
 
-    PANEL_UP=1
-    return 0
-}
-
-# panel_show <raw> [hold] -- blit one pre-converted image and optionally
-# sit on it. The blobs are built by mkinitramfs.py from the bitmaps and are
-# already in the daemon's byte order, so this is a copy, not a conversion.
-panel_show() {
-    [ -n "$PANEL_UP" ] || return 1
-    [ -r "$1" ] || return 1
-    cat "$1" > "$PANEL_FB" 2>/dev/null || return 1
-    [ -n "${2:-}" ] && [ "${2:-0}" != "0" ] && sleep "$2"
-    return 0
-}
-
-# Must run before switch_root. The daemon keeps running across it -- its
-# binary is gone but the process is not -- and the real system starts its
-# own, so two of them would drive the same SPI bus at once.
-panel_stop() {
-    PANEL_UP=""
-    [ -n "$PANEL_PID" ] || return 0
-    kill "$PANEL_PID" 2>/dev/null
-    PANEL_PID=""
-    return 0
-}
 # A literal newline: LF=$(printf '\n') would be the empty string, because
 # command substitution strips trailing newlines -- so the Enter-as-LF case
 # could never match and half the Enter presses were swallowed.

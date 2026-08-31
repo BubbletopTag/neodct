@@ -68,11 +68,16 @@ mkdir -p "$SKEL/db" "$SKEL/logs" "$SKEL/.ndsys" \
 # nd-verify for the same reason: its only caller is the initramfs. Unlike the
 # verifier it is optional -- without it recovery falls back to the text menu
 # on tty1, which is what it has always had.
+# --bootbar is the install-progress screen, from the same place and for the
+# same reason. It is NOT required: without it an update installing at boot
+# shows the logo and nothing else, which is where the phone was before it
+# existed, and failing an image build over that would be the wrong trade.
 "$NEODCT_DIR/scripts/mkinitramfs.py" \
     --target-dir "$TARGET_DIR" \
     --init "$NEODCT_DIR/initramfs" \
     --verifier "$BINARIES_DIR/nd-verify" \
     --recui "$BINARIES_DIR/nd-recui" \
+    --bootbar "$BINARIES_DIR/nd-bootbar" \
     --output "$BINARIES_DIR/initramfs.cpio.gz"
 
 # --- userdata.ext4 -------------------------------------------------------

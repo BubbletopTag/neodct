@@ -26,6 +26,25 @@ if ! command -v log > /dev/null 2>&1; then
     }
 fi
 
+# --- the panel -----------------------------------------------------------
+#
+# progress_filter, progress_frame and progress_fail live in ndsys-panel.sh,
+# which init sources before this file. The applier is ALSO sourced on its own
+# -- by neodct/tests/test_initramfs_apply.py, and by
+# neodct/tools/test_update_ubi.sh on a running phone -- so provide no-ops
+# rather than depend on it.
+#
+# progress_filter's no-op is `exec cat`, not `return 0`: it is a pipeline
+# stage, and a stage that is not there would change the shape of the pipeline
+# and the bytes reaching the flash. `cat` changes neither the shape nor the
+# exit status, which is why every existing test in test_initramfs_apply.py
+# keeps passing without being touched.
+if ! command -v progress_filter > /dev/null 2>&1; then
+    progress_filter() { exec cat; }
+    progress_frame() { return 0; }
+    progress_fail() { return 0; }
+fi
+
 # --- finding the right block device --------------------------------------
 #
 # Device names from the kernel cmdline are a hint, nothing more. virtio-mmio
@@ -304,7 +323,18 @@ clear_pending() {
 }
 
 # sha256 of the image inside a .ndsw, read without unpacking it anywhere.
+#
+# package_image_sha PACKAGE [STEP PHASE TOTAL] -- with a step name the bytes
+# are counted through progress_filter on their way to sha256sum, so the bar
+# measures the read that is actually happening. Without one this is what it
+# has always been.
 package_image_sha() {
+    if [ -n "${2:-}" ]; then
+        unzip -p "$1" rootfs.squashfs 2>/dev/null \
+            | progress_filter "$2" "$3" "$4" \
+            | sha256sum | cut -d' ' -f1
+        return 0
+    fi
     unzip -p "$1" rootfs.squashfs 2>/dev/null | sha256sum | cut -d' ' -f1
 }
 
@@ -314,19 +344,39 @@ package_image_size() {
         | awk '$NF == "rootfs.squashfs" {print $1; exit}'
 }
 
-# hash_prefix DEVICE BYTES [FILTER]
+# hash_prefix DEV BYTES [FILTER | STEP PHASE]
 #
 # sha256 of the first $2 bytes of $1, which may be a file or a block device.
 #
-# FILTER is the name of a command or shell function spliced into the pipeline
-# between the read and the hash; it defaults to `cat`, so every existing
-# caller is byte-identical. Recovery uses it to put a progress bar on the
-# read-back pass, which is one of the three long passes of an install. It is a
-# single word rather than a command line because a quoted argument would not
-# be re-parsed here, and word-splitting one would be worse than the limit.
+# Two callers arrived at this needing a bar over the read-back, and they
+# arrived by different routes, so it takes either shape rather than forcing
+# one of them to pretend:
+#
+#   FILTER        one word, the name of a shell function spliced between the
+#                 read and the hash. ndsys-recovery.sh uses it, because
+#                 recovery owns its own screen and meters onto it.
+#   STEP PHASE    ndsys-apply.sh's own boot-time bar, drawn by progress_filter.
+#
+# With neither it is byte-identical to what it was before either of them
+# existed, which is what keeps every other caller unchanged.
+#
+# THE TOTAL IS `blocks * 4096` AND NOT BYTES, and that is not a rounding
+# nicety: dd emits exactly that many, so dividing by image_bytes would leave
+# the read-back bar stuck at 99% on any image whose size is not a multiple of
+# 4096 -- which is most of them.
 hash_prefix() {
     blocks=$((${2} / 4096))
-    dd if="$1" bs=4096 count="$blocks" 2>/dev/null | "${3:-cat}" | sha256sum | cut -d' ' -f1
+    if [ -n "${4:-}" ]; then
+        dd if="$1" bs=4096 count="$blocks" 2>/dev/null \
+            | progress_filter "$3" "$4" "$((blocks * 4096))" \
+            | sha256sum | cut -d' ' -f1
+        return 0
+    fi
+    if [ -n "${3:-}" ]; then
+        dd if="$1" bs=4096 count="$blocks" 2>/dev/null | "$3" | sha256sum | cut -d' ' -f1
+        return 0
+    fi
+    dd if="$1" bs=4096 count="$blocks" 2>/dev/null | sha256sum | cut -d' ' -f1
 }
 
 # --- the release signature -----------------------------------------------
@@ -560,6 +610,7 @@ apply_pending() {
     if [ -z "$image_bytes" ] || [ -z "$want_sha" ]; then
         log "staged update is incomplete; discarding"
         record_result failed "$version" "incomplete staging record"
+        progress_fail "Update not installed" "The update was incomplete" 3
         clear_pending
         return 0
     fi
@@ -582,6 +633,7 @@ apply_pending() {
     elif [ -z "$image" ] || [ ! -f "$image" ]; then
         log "staged update is incomplete; discarding"
         record_result failed "$version" "incomplete staging record"
+        progress_fail "Update not installed" "The update was incomplete" 3
         clear_pending
         return 0
     fi
@@ -589,11 +641,24 @@ apply_pending() {
     if [ "$attempts" -ge "$MAX_ATTEMPTS" ]; then
         log "staged update failed $attempts times; gave up on $version"
         record_result failed "$version" "gave up after $attempts attempts"
+        # Not in spec-boot-progress.md section 3.3's table, and added anyway:
+        # the three boots that got here each ended on "It will try again", and
+        # this is the one where that stops being true. Leaving it silent would
+        # make the last screen the owner saw a lie.
+        progress_fail "Update not installed" "It has been given up on" 3
         clear_pending
         return 0
     fi
     sed "s/^attempts=.*/attempts=$((attempts + 1))/" "$PENDING" > "$PENDING.new" \
         && mv -f "$PENDING.new" "$PENDING" && sync
+
+    # The first pixel change, and it happens BEFORE the signature check, the
+    # size check and the hash -- so something is on the panel within a
+    # fraction of a second of the update starting rather than after the first
+    # megabyte. panel_start is idempotent ([ -z "$PANEL_UP" ] || return 0), so
+    # calling it here costs nothing on a boot where the logo already did.
+    command -v panel_start > /dev/null 2>&1 && panel_start
+    progress_frame "Checking the update" 1 0
 
     # Before the size and the hash, because both of those check the image
     # against the RECORD and the record is the thing being distrusted here.
@@ -610,6 +675,11 @@ apply_pending() {
     else
         log "refusing to install $version: not signed by the release key"
         record_result failed "$version" "not signed by the release key"
+        # The longest hold of the six, because this is the one with a person
+        # behind it: somebody handed this phone a package that is not a NeoDCT
+        # release, and the owner has to be told to their face rather than in
+        # last_result.prop.
+        progress_fail "Update refused" "Not signed by NeoDCT" 5
         umount_card
         clear_pending
         return 0
@@ -623,6 +693,7 @@ apply_pending() {
     if [ "$actual_size" != "$image_bytes" ]; then
         log "staged image is $actual_size bytes, expected $image_bytes"
         record_result failed "$version" "staged image truncated"
+        progress_fail "Update not installed" "The update is damaged" 3
         umount_card
         clear_pending
         return 0
@@ -633,13 +704,14 @@ apply_pending() {
     # written are the ones that was said about. A card swapped between
     # staging and reboot fails here rather than installing.
     if [ -n "$package" ]; then
-        got_sha="$(package_image_sha "$image")"
+        got_sha="$(package_image_sha "$image" "Checking the update" 1 "$image_bytes")"
     else
-        got_sha="$(hash_prefix "$image" "$image_bytes")"
+        got_sha="$(hash_prefix "$image" "$image_bytes" "Checking the update" 1)"
     fi
     if [ "$got_sha" != "$want_sha" ]; then
         log "staged image sha256 mismatch; refusing to install $version"
         record_result failed "$version" "image sha256 mismatch before write"
+        progress_fail "Update not installed" "The update is damaged" 3
         umount_card
         clear_pending
         return 0
@@ -657,15 +729,25 @@ apply_pending() {
     if [ -n "$package" ]; then
         # Straight from the zip to the partition. No copy is made anywhere:
         # there is nowhere on this phone to put one.
-        if ! unzip -p "$image" rootfs.squashfs 2>/dev/null | write_system "$image_bytes"; then
+        # The counting stage goes on write_system's STDIN, so the UBI and dd
+        # branches both get a bar for free and neither knows about one.
+        if ! unzip -p "$image" rootfs.squashfs 2>/dev/null \
+                | progress_filter "Installing" 2 "$image_bytes" \
+                | write_system "$image_bytes"; then
             log "write to ${UBI_VOL:-$SYS_DEV} failed; retrying on the next boot"
+            progress_fail "Install did not finish" "It will try again" 3
             umount_card
             return 0
         fi
-    elif ! write_system "$image_bytes" < "$image"; then
+    elif ! progress_filter "Installing" 2 "$image_bytes" < "$image" \
+            | write_system "$image_bytes"; then
         log "write to ${UBI_VOL:-$SYS_DEV} failed; retrying on the next boot"
+        progress_fail "Install did not finish" "It will try again" 3
         return 0
     fi
+    # Before the sync, not after: flushing 51 MB with the bar sitting at 99%
+    # would look exactly like the hang this feature exists to remove.
+    progress_frame "Installing" 2 100 "$image_bytes"
     sync
     umount_card
 
@@ -686,8 +768,15 @@ apply_pending() {
     #     on a write that was perfectly good.
     #   - Reading the character device is what the write did in reverse, so
     #     the check is over the same bytes through the same path.
-    if [ "$(hash_prefix "${UBI_VOL:-$SYS_DEV}" "$image_bytes")" != "$want_sha" ]; then
+    if [ "$(hash_prefix "${UBI_VOL:-$SYS_DEV}" "$image_bytes" \
+            "Checking the phone" 3)" != "$want_sha" ]; then
         log "read-back mismatch on ${UBI_VOL:-$SYS_DEV}; retrying on the next boot"
+        # "It will try again" is true -- the pending record is kept -- but the
+        # next thing the owner sees is recovery: installed.prop still describes
+        # the OLD image, so setup_verity fails and init calls recovery_or_panic.
+        # That is pre-existing, recovery's own screen takes over, and it is
+        # written down here so nobody wonders later.
+        progress_fail "Install did not finish" "It will try again" 3
         return 0
     fi
 
@@ -705,5 +794,9 @@ EOF
     clear_pending
     record_result ok "$version" "installed"
     log "installed $version"
+    # Nothing is drawn and nothing is held on success. The 100% frame from
+    # before the sync is still on the panel and stays there by itself -- as
+    # init says, "The logo stays on the panel -- nothing clears it -- until
+    # the UI draws over it" -- so a successful update boot gets no slower.
     return 0
 }

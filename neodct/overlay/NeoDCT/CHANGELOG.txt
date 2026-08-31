@@ -36,6 +36,14 @@ Added
 - Settings offers to format a card that already works, not only one it
   cannot read -- otherwise a card made on a computer could never gain the
   second part.
+- The screen shows an update installing. Restarting to finish an update used
+  to put the boot logo up and leave it there for a minute, which is exactly
+  what a phone that has stopped working looks like. There is now a progress
+  bar, in three steps -- checking the update, installing, checking the phone
+  -- and it counts real bytes rather than guessing. An update that is refused
+  now says so on the screen and holds it long enough to read: before this, a
+  package that was not signed by NeoDCT was turned away silently, and all you
+  saw was a phone that restarted and had not changed.
 
 Fixed
 - Updates are checked against the release key before they are written,

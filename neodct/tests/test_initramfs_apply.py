@@ -1098,3 +1098,97 @@ def test_the_real_nd_verify_accepts_what_the_shim_accepts(tmp_path):
 
     assert device.read_bytes()[:len(image)] == image
     assert read_result(state) == "ok"
+
+
+# --- the applier with a progress bar bolted to it -------------------------
+#
+# apply_pending now draws on the panel while it installs. The behaviour of
+# that is neodct/tests/test_initramfs_progress.py's subject; what belongs
+# HERE is the part that is about the applier rather than about the screen:
+# that the counting stages did not change what reaches the flash, and that
+# the signature gate is untouched.
+#
+# Every test above this line already proves the first half -- they run with
+# ndsys-panel.sh unsourced, so progress_filter is the `exec cat` no-op, and
+# they were not edited when the pipeline gained a stage. These make the
+# claim explicitly rather than leaving it implied by silence.
+
+def test_the_counting_stage_does_not_change_the_bytes_written(tmp_path):
+    """The filter sits between unzip and write_system. If it dropped, padded
+    or reordered a single byte, the image on the device would differ from the
+    image in the record -- and the read-back would catch it, but only after
+    the flash had already been overwritten."""
+    state, card, image, _ = stage_a_package(tmp_path)
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\xee" * (len(image) + 8192))
+
+    bar = tmp_path / "bar"
+    bar.write_text("#!/bin/sh\nexec cat\n")
+    bar.chmod(0o755)
+    panel = os.path.join(os.path.dirname(APPLY_SH), "ndsys-panel.sh")
+    user = tmp_path / "user"
+    (user / "logs").mkdir(parents=True, exist_ok=True)
+    script = (
+        'STATE_DIR="%s"; MNT_USER="%s"; SYS_DEV="%s"; USER_MOUNTED=1\n'
+        'MNT_SDCARD="%s"; NDSYS_CARD_PREMOUNTED=1\n'
+        'NDSYS_BOOTBAR="%s"\n'
+        '%s'
+        '. "%s"\nPANEL_UP=1\nPANEL_SPLASH_HOLD=0\n. "%s"\napply_pending\n'
+        % (state, user, device, card, bar, gate_env(tmp_path), panel, APPLY_SH)
+    )
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    # Exactly the image and not a byte more. write_system's dd branch has no
+    # conv=notrunc, so on this regular file the write sets the length -- which
+    # makes a filter that padded the stream show up as extra bytes here rather
+    # than hide behind a slice.
+    assert device.read_bytes() == image
+    assert staging.read_result(state)["result"] == "ok"
+
+
+def test_the_signature_gate_still_refuses_with_the_panel_in_the_picture(tmp_path):
+    """The gate is SECURITY-AUDIT.md section 3, and the progress work runs a
+    frame through the panel immediately before it. Nothing about that may
+    make an unsigned image installable -- so the refusal is asserted again
+    with ndsys-panel.sh sourced and a bar that is happy to draw anything."""
+    state, image, _ = stage_an_update(tmp_path, signature=b"not a signature")
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\0" * len(image))
+
+    bar = tmp_path / "bar"
+    bar.write_text("#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = --at ] && exit 0; "
+                   "[ \"$a\" = --fail ] && exit 0; done\nexec cat\n")
+    bar.chmod(0o755)
+    panel = os.path.join(os.path.dirname(APPLY_SH), "ndsys-panel.sh")
+    user = tmp_path / "user"
+    (user / "logs").mkdir(parents=True, exist_ok=True)
+    script = (
+        'STATE_DIR="%s"; MNT_USER="%s"; SYS_DEV="%s"; USER_MOUNTED=1\n'
+        'NDSYS_BOOTBAR="%s"\n'
+        '%s'
+        '. "%s"\nPANEL_UP=1\nPANEL_SPLASH_HOLD=0\n. "%s"\napply_pending\n'
+        % (state, user, device, bar, gate_env(tmp_path), panel, APPLY_SH)
+    )
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert device.read_bytes() == b"\0" * len(image), "an unsigned image reached the flash"
+    assert staging.read_pending(state) is None
+    assert staging.read_result(state)["reason"] == "not signed by the release key"
+
+
+def test_the_hash_helpers_still_hash_the_same_bytes(tmp_path):
+    """hash_prefix and package_image_sha grew an optional counting stage.
+    Called the old way -- which is how recovery_install_package calls
+    hash_prefix -- they have to be exactly what they were."""
+    state, image, _ = stage_an_update(tmp_path)
+    blob = tmp_path / "blob"
+    blob.write_bytes(image)
+    aligned = (len(image) // 4096) * 4096
+
+    result = run(state, blob, tmp_path,
+                 command='hash_prefix "%s" %d' % (blob, len(image)))
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == hashlib.sha256(image[:aligned]).hexdigest()

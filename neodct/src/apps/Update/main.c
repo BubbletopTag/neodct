@@ -793,9 +793,14 @@ void nd_update_restart_page(nd_ui *ui, const nd_upd_manifest *m, bool backed_up)
         return;
 
     (void)snprintf(subtitle, sizeof subtitle, "NeoDCT %s", m->version);
+    /* It used to say "the screen stays dark for part of it", which was an
+     * apology for the initramfs showing one unchanging logo for the whole of
+     * a 51 MB write. The boot screen now draws the same progress bar this app
+     * does -- see neodct/initramfs/ndsys-panel.sh and tools/nd_bootbar.c --
+     * so the apology is gone and the promise is one somebody can check. */
     (void)snprintf(body, sizeof body,
                    "The phone will restart to finish installing NeoDCT %s. It takes "
-                   "about a minute and the screen stays dark for part of it.",
+                   "about a minute and the screen shows how far along it is.",
                    m->version);
     if (!backed_up)
         (void)nd_strlcat(body,
