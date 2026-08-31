@@ -187,7 +187,7 @@
     },
     {
       "name": "home",
-      "sha256": "d43f70a7b5001c3c0f359cdf8d5973145455f13151b1cab92b6ef7d36c567f59",
+      "sha256": "9c8e628f402cf8ad62be9f92115bb235ca6c0e45da1e6389cf7477a4f26205a5",
       "size": [
         240,
         175
@@ -203,7 +203,7 @@
     },
     {
       "name": "home-nowallpaper",
-      "sha256": "40a7e986668198ef441c43ebb3f3864616eee0827ea53637cfe77b776ac27157",
+      "sha256": "e80c0d1211a4b1481b327d7d3f902b8cbf56f12bb92775f5b288bc38eef0c39b",
       "size": [
         240,
         175
@@ -211,7 +211,7 @@
     },
     {
       "name": "home-panel",
-      "sha256": "3094cf1f29ac382ce156fdf49f874f4ac04edbc454e522d7f6f5ac2716cc5c53",
+      "sha256": "c04d400fa0faec405c35f4918f4836d3edf00d99d36e5d803447f636a96ec058",
       "size": [
         240,
         240
@@ -219,7 +219,7 @@
     },
     {
       "name": "home-simulation",
-      "sha256": "52caaa4baebe53a623ab4fa2089db669e84ead1d0a139dc44fdc57a3cf25e183",
+      "sha256": "8f34ae9cb3aacb313b1586eb4033058a42a19dd353fafde960234394585f960f",
       "size": [
         240,
         175

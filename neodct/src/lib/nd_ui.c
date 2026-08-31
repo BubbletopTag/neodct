@@ -1841,7 +1841,7 @@ void nd_ui_render_home(nd_ui *ui)
             /* THE RED LINE UNDER THE CARRIER, and the two reasons it is
              * skipped.
              *
-             * It says "Engineering Mode" because that mode gives every app
+             * It says "Eng. Mode" because that mode gives every app
              * under /NeoDCT/System/engineering/apps root (nd_proc.h), and a
              * phone handing out root should look different from a phone that
              * is not. So the rule is the plain one: draw it exactly when the

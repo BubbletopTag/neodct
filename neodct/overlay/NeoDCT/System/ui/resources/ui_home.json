@@ -27,7 +27,7 @@
         },
         {
             "type": "text",
-            "text": "Engineering Mode",
+            "text": "Eng. Mode",
             "font_size": 12,
             "anchor": "center_h",
             "x": 120,

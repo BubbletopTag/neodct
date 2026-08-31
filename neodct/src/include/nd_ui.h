@@ -412,7 +412,7 @@ bool nd_ui_engineering_mode(nd_ui *ui);
  * is no marker syntax; these exact strings are the whole mechanism"). A typo
  * in either place does not fail to build -- it silently draws the line
  * always, or never. tests/test_home_layout.py pins the two together. */
-#define ND_UI_ENG_MODE_LABEL "Engineering Mode"
+#define ND_UI_ENG_MODE_LABEL "Eng. Mode"
 /* Returns the scanned list and writes its length to *n_out (which may be
  * NULL). The pointer stays valid until the next nd_ui_refresh_after_app(). */
 const nd_app_entry *nd_ui_app_list(nd_ui *ui, size_t *n_out);
