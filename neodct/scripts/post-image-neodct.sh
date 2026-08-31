@@ -63,10 +63,16 @@ mkdir -p "$SKEL/db" "$SKEL/logs" "$SKEL/.ndsys" \
 # the same signature through libneodct, which is already mapped. mkinitramfs
 # fails the build if it is not there -- an initramfs that cannot check an
 # update signature would install anything staged for it.
+#
+# --recui points at the on-screen recovery UI, which install-boot puts beside
+# nd-verify for the same reason: its only caller is the initramfs. Unlike the
+# verifier it is optional -- without it recovery falls back to the text menu
+# on tty1, which is what it has always had.
 "$NEODCT_DIR/scripts/mkinitramfs.py" \
     --target-dir "$TARGET_DIR" \
     --init "$NEODCT_DIR/initramfs" \
     --verifier "$BINARIES_DIR/nd-verify" \
+    --recui "$BINARIES_DIR/nd-recui" \
     --output "$BINARIES_DIR/initramfs.cpio.gz"
 
 # --- userdata.ext4 -------------------------------------------------------

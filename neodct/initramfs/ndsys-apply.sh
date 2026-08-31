@@ -314,10 +314,19 @@ package_image_size() {
         | awk '$NF == "rootfs.squashfs" {print $1; exit}'
 }
 
+# hash_prefix DEVICE BYTES [FILTER]
+#
 # sha256 of the first $2 bytes of $1, which may be a file or a block device.
+#
+# FILTER is the name of a command or shell function spliced into the pipeline
+# between the read and the hash; it defaults to `cat`, so every existing
+# caller is byte-identical. Recovery uses it to put a progress bar on the
+# read-back pass, which is one of the three long passes of an install. It is a
+# single word rather than a command line because a quoted argument would not
+# be re-parsed here, and word-splitting one would be worse than the limit.
 hash_prefix() {
     blocks=$((${2} / 4096))
-    dd if="$1" bs=4096 count="$blocks" 2>/dev/null | sha256sum | cut -d' ' -f1
+    dd if="$1" bs=4096 count="$blocks" 2>/dev/null | "${3:-cat}" | sha256sum | cut -d' ' -f1
 }
 
 # --- the release signature -----------------------------------------------

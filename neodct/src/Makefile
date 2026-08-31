@@ -163,6 +163,7 @@ SELF_SRCS   := $(wildcard tools/nd_selftest*.c)
 VERIFY_SRCS := $(wildcard tools/nd_verify*.c)
 PANIC_SRCS  := $(wildcard tools/nd_panic*.c)
 DISPLAYD_SRCS := $(wildcard displayd/*.c)
+RECUI_SRCS  := $(wildcard recovery/*.c)
 TEST_SRCS   := $(wildcard test/unit/*.c)
 
 # An app is any directory under apps/ that contains at least one .c file.
@@ -177,6 +178,12 @@ SELF_OBJS   := $(patsubst %.c,$(OBJDIR)/%.o,$(SELF_SRCS))
 VERIFY_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(VERIFY_SRCS))
 PANIC_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(PANIC_SRCS))
 DISPLAYD_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(DISPLAYD_SRCS))
+RECUI_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(RECUI_SRCS))
+
+# The recovery UI's library half, without main(). test_recui links these
+# directly, which is the only way to reach a program that deliberately cannot
+# be linked against libneodct.
+RECUI_LIB_OBJS := $(filter-out $(OBJDIR)/recovery/nd_recui.o,$(RECUI_OBJS))
 
 TEST_BINS := $(patsubst test/unit/%.c,$(TESTDIR)/%,$(TEST_SRCS))
 APP_SOS   := $(foreach d,$(APP_DIRS),$(BUILD)/$(patsubst apps/%/,apps/%,$(d))/app.so)
@@ -199,6 +206,7 @@ TARGETS += $(if $(SELF_SRCS),$(BINDIR)/nd-selftest)
 TARGETS += $(if $(VERIFY_SRCS),$(BINDIR)/nd-verify)
 TARGETS += $(if $(PANIC_SRCS),$(BINDIR)/nd-panic)
 TARGETS += $(if $(DISPLAYD_SRCS),$(BINDIR)/neodct_displayd)
+TARGETS += $(if $(RECUI_SRCS),$(BINDIR)/nd-recui)
 TARGETS += $(APP_SOS)
 
 # ------------------------------------------------------------------ #
@@ -232,6 +240,7 @@ skipped:
 	$(Q)$(if $(SELF_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-selftest (no tools/nd_selftest*.c yet)';)
 	$(Q)$(if $(VERIFY_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-verify (no tools/nd_verify*.c yet)';)
 	$(Q)$(if $(PANIC_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-panic (no tools/nd_panic*.c yet)';)
+	$(Q)$(if $(RECUI_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-recui (no recovery/*.c yet)';)
 	$(Q)$(if $(TEST_SRCS),,printf '  %-7s %s\n' 'SKIP' 'unit tests (no test/unit/*.c yet)';)
 
 $(OBJDIR)/%.o: %.c
@@ -289,6 +298,40 @@ $(BINDIR)/neodct_displayd: $(DISPLAYD_OBJS)
 	$(Q)printf '  %-7s %s\n' 'LINK' '$@'
 	$(Q)$(CC) $(DISPLAYD_OBJS) -o $@ $(LDFLAGS)
 
+# ---- nd-recui: the on-screen recovery UI ---------------------------
+#
+# The second program here that does NOT link libneodct, and for a stronger
+# reason than nd-verify's: it runs inside the initramfs, where /NeoDCT/System
+# -- the squashfs libneodct, font.ttf, the icons and the wallpapers all live
+# on -- is by definition not mounted, because failing to mount it is why
+# recovery is running at all.
+#
+# Built WITHOUT -Iinclude and without $(PKG_CFLAGS), and that is the
+# enforcement mechanism rather than a tidiness preference: a stray
+# `#include "nd_ui.h"` has to fail to compile, not quietly pull in freetype
+# and produce a binary the initramfs cannot run.
+#
+# Dynamic, not static, which is where it differs from nd-verify: musl's
+# libc.so is already in the initramfs for busybox, so a dynamic link costs
+# zero new bytes, while nd-verify is static only to avoid shipping a 5.8 MB
+# libcrypto.so beside it.
+#
+# The full warning set including -Wconversion applies. displayd is exempt
+# because it is a proven hardware driver predating the port; this is new code
+# and has no such claim.
+RECUI_CFLAGS := $(WARNINGS) $(OPTFLAGS) $(SANFLAGS) -D_GNU_SOURCE -MMD -MP \
+	$(NEODCT_CFLAGS) $(CFLAGS)
+
+$(OBJDIR)/recovery/%.o: recovery/%.c
+	$(Q)mkdir -p $(dir $@)
+	$(say) CC $<
+	$(Q)$(CC) $(RECUI_CFLAGS) -c -o $@ $<
+
+$(BINDIR)/nd-recui: $(RECUI_OBJS)
+	$(Q)mkdir -p $(dir $@)
+	$(say) LINK $@
+	$(Q)$(CC) -o $@ $^ $(SANFLAGS) $(NEODCT_LDFLAGS) $(LDFLAGS)
+
 # neodct-play: the MediaWidget CLI. NetSurf execs this by absolute path
 # when a <video> is clicked, so where it installs is part of the contract
 # with the browser -- see the install rule and nd_media.h.
@@ -341,6 +384,16 @@ $(TESTDIR)/%: $(OBJDIR)/test/unit/%.o $(LIB)
 	$(Q)mkdir -p $(dir $@)
 	$(say) LINK $@
 	$(Q)$(CC) -o $@ $< -L$(LIBDIR) -lneodct $(LDFLAGS_ALL) $(PKG_LIBS) -lm
+
+# test_recui is the exception to the rule above, because nd-recui is the
+# exception to the build: it cannot be linked against libneodct, so its
+# objects have to come in directly. nd_recui.o is left out -- it has main().
+# libneodct still comes along, for platform_test.h and for the PNG writer the
+# test dumps its frames through; the two halves never call each other.
+$(TESTDIR)/test_recui: $(OBJDIR)/test/unit/test_recui.o $(RECUI_LIB_OBJS) $(LIB)
+	$(Q)mkdir -p $(dir $@)
+	$(say) LINK $@
+	$(Q)$(CC) -o $@ $(filter %.o,$^) -L$(LIBDIR) -lneodct $(LDFLAGS_ALL) $(PKG_LIBS) -lm
 
 # App shared objects. Each apps/<Name>/ becomes <Name>/app.so, installed
 # beside the manifest.json and icon.png that are already there.
@@ -501,6 +554,13 @@ install-boot: all
 	$(Q)$(INSTALL) -d $(BOOTDESTDIR)
 	$(Q)$(if $(VERIFY_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-verify $(BOOTDESTDIR)/,:)
 	$(Q)$(if $(VERIFY_SRCS),$(STRIP) $(BOOTDESTDIR)/nd-verify 2>/dev/null || true,:)
+	@# nd-recui goes here and NOT into install:, for the same reason. Its
+	@# only caller is ndsys-recovery.sh inside the initramfs; a copy in the
+	@# verity-covered squashfs would be bytes nothing ever runs. Stripped
+	@# for the same reason too -- BINARIES_DIR is not stripped by buildroot,
+	@# and on the Luckfox this is packed into the kernel image.
+	$(Q)$(if $(RECUI_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-recui $(BOOTDESTDIR)/,:)
+	$(Q)$(if $(RECUI_SRCS),$(STRIP) $(BOOTDESTDIR)/nd-recui 2>/dev/null || true,:)
 
 .PHONY: install-boot
 
@@ -510,7 +570,11 @@ install-boot: all
 
 format:
 	$(Q)command -v clang-format >/dev/null 2>&1 || { echo "clang-format not installed"; exit 1; }
-	$(Q)clang-format -i $$(find include lib core apprun apps tools test -name '*.c' -o -name '*.h' 2>/dev/null)
+	@# nd_recfont.h is generated by neodct/tools/mkrecfont.py and byte-compared
+	@# by neodct/tests/test_recui_font.py, so reformatting it would fail that
+	@# test until somebody regenerated it. -not -name keeps it out.
+	$(Q)clang-format -i $$(find include lib core apprun apps tools test recovery \
+	    -name nd_recfont.h -prune -o \( -name '*.c' -o -name '*.h' \) -print 2>/dev/null)
 
 clean:
 	$(Q)rm -rf $(BUILD)

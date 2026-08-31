@@ -538,3 +538,109 @@ def test_the_post_image_hook_passes_the_verifier():
 
     assert "--verifier" in hook
     assert "nd-verify" in hook
+
+
+# --- the on-screen recovery UI -------------------------------------------
+#
+# nd-recui is what makes the sixteen keys reach the recovery menu: they are on
+# a PCF8575 that no kernel driver binds, so without it a phone shows a menu
+# nobody can move. It is nevertheless OPTIONAL here, on the panel-daemon
+# precedent rather than the nd-verify one -- ndsys-recovery.sh falls back to
+# the text menu, which is today's behaviour, so its absence is a regression to
+# the status quo rather than a broken image.
+
+def _recui_tree(tmp_path, recui_source):
+    fake_target = minimal_target(tmp_path)
+    boot_requirements(fake_target)
+    recui = fake_target / "usr" / "bin" / "nd-recui"
+    recui.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(recui_source, recui)
+    return fake_target
+
+
+def test_the_recovery_ui_ships_when_it_matches_the_target(tmp_path):
+    fake_target = _recui_tree(tmp_path, HOST_BINARY)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "out.gz"
+
+    mkinitramfs.build(fake_target, init, out)
+
+    assert "bin/nd-recui" in archive_names(out)
+
+
+def test_a_recovery_ui_of_another_architecture_is_left_out(tmp_path):
+    """install-boot writes into BINARIES_DIR, which is not architecture-tagged,
+    so a stale cross build left over from another board is a real way to ship a
+    binary the kernel cannot exec. This one is reached from the screen a person
+    is standing in front of, where "nothing happened" is the whole failure
+    report."""
+    alien = tmp_path / "alien"
+    data = bytearray(open(HOST_BINARY, "rb").read(64))
+    data[18:20] = (0x28).to_bytes(2, "little")      # EM_ARM
+    alien.write_bytes(bytes(data))
+    fake_target = _recui_tree(tmp_path, alien)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "out.gz"
+
+    mkinitramfs.build(fake_target, init, out)
+
+    assert "bin/nd-recui" not in archive_names(out)
+
+
+def test_a_missing_recovery_ui_does_not_fail_the_build(tmp_path, capsys):
+    """The whole difference from nd-verify. An initramfs without a signature
+    check installs whatever it is handed; an initramfs without a nicer menu
+    still rescues a phone."""
+    fake_target = minimal_target(tmp_path)
+    boot_requirements(fake_target)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "out.gz"
+
+    mkinitramfs.build(fake_target, init, out)
+
+    assert "bin/nd-recui" not in archive_names(out)
+    assert "nd-recui" in capsys.readouterr().err
+
+
+def test_a_recovery_ui_path_that_does_not_exist_is_a_warning_not_an_error(tmp_path, capsys):
+    """post-image passes --recui unconditionally, and a tree built before this
+    existed has no nd-recui in BINARIES_DIR. That must not stop the build."""
+    fake_target = minimal_target(tmp_path)
+    boot_requirements(fake_target)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+
+    mkinitramfs.build(fake_target, init, tmp_path / "out.gz",
+                      recui=str(tmp_path / "not-here"))
+
+    assert "nd-recui" in capsys.readouterr().err
+
+
+def test_the_recovery_ui_can_come_from_outside_the_target_tree(tmp_path):
+    """It comes from BINARIES_DIR, beside nd-verify and for the same reason:
+    nothing in the running system calls it, so a copy in the verity-covered
+    squashfs would be bytes nobody executes."""
+    fake_target = minimal_target(tmp_path)
+    boot_requirements(fake_target)
+    outside = tmp_path / "binaries" / "nd-recui"
+    outside.parent.mkdir(parents=True)
+    shutil.copy(HOST_BINARY, outside)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "out.gz"
+
+    mkinitramfs.build(fake_target, init, out, recui=str(outside))
+
+    assert "bin/nd-recui" in archive_names(out)
+
+
+def test_the_post_image_hook_passes_the_recovery_ui():
+    hook = open(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "scripts", "post-image-neodct.sh")).read()
+
+    assert "--recui" in hook
+    assert "nd-recui" in hook

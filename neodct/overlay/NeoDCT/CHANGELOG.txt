@@ -159,6 +159,32 @@ Fixed
   now, /NeoDCT/User/logs/core.log, kept across a restart loop so the crash
   before the one on screen is still there to read.
 
+--- Recovery mode you can actually use ---
+
+Recovery is the screen the phone shows when it cannot start: the sad face,
+and a menu that installs an update from an SD card. It has always been
+readable on the phone's own screen. It has never been usable on one -- the
+keypad is wired to a chip the phone only talks to once the system is
+running, and recovery runs before that, so every key press went nowhere.
+Recovery worked if you had a USB serial cable and a computer.
+
+The keypad now works in recovery. Up, Down, the NaviKey, C and the number
+keys all do what they do everywhere else on the phone, and the menu is drawn
+in the phone's own typeface rather than the small console lettering.
+
+Added
+- Installing an update from recovery shows a progress bar. It fills three
+  times -- once while the package is checked, once while it is written, and
+  once while what was written is read back and checked again -- with the
+  file name, the percentage and how many megabytes have gone by. Wiping the
+  system is instant and so has no bar; it says what happened instead.
+- The two questions that erase something now open with neither Yes nor No
+  chosen, so a stray press cannot answer them.
+
+Fixed
+- Recovery on a phone with no serial cable attached is no longer a menu you
+  can read and cannot move.
+
 0.4.10a
 Red and blue, the right way round.
 

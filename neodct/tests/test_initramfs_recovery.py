@@ -627,3 +627,236 @@ def test_the_panel_no_longer_claims_signatures_are_unchecked():
     assert "Signature is NOT checked here" not in source
     assert "Signed by the release key" in source
     assert "NOT SIGNED" in source
+
+
+# --- the on-screen UI ----------------------------------------------------
+#
+# Recovery has drawn on the phone's framebuffer console for a long time. What
+# it could not do was be DRIVEN: the sixteen keys are on a PCF8575 that no
+# kernel driver binds, so no byte ever reaches the VT and read_key() is, on a
+# phone, a dead end. nd-recui scans the expander itself and draws in the
+# phone's own typeface.
+#
+# What these cases pin is the SEAM, not the C: that the shell delegates when
+# the panel UI is available, that it falls back to the menu above when it is
+# not, and -- the important one -- that the install pipelines are byte-
+# identical either way. Every case above this line runs with no $RECUI_BIN on
+# disk and exercises exactly the fallback, which is why they still pass.
+
+def fake_recui(tmp_path, body):
+    """A stand-in for nd-recui. RECUI_BIN is a variable precisely so a host
+    test can substitute one."""
+    path = tmp_path / "nd-recui"
+    path.write_text("#!/bin/sh\n%s\n" % body)
+    path.chmod(0o755)
+    return path
+
+
+def panel_env(tmp_path, body):
+    """Preamble that makes recovery_panel_ui() true with the fake in place."""
+    return ('RECUI_BIN="%s"; PANEL_UP=1; RECOVERY_TTY_OVERRIDE=""\n'
+            'RECOVERY_KEYMAP="%s"\n' % (fake_recui(tmp_path, body),
+                                        tmp_path / "keymap.json"))
+
+
+def test_the_panel_ui_is_used_when_the_binary_and_the_panel_are_both_there(tmp_path):
+    body = 'echo "$@" >> "%s"; echo 2' % (tmp_path / "argv")
+    result = run(tmp_path, '%srecovery_menu "pick" alpha beta'
+                 % panel_env(tmp_path, body))
+
+    assert result.stdout.strip() == "2"
+    argv = (tmp_path / "argv").read_text()
+    assert "menu" in argv
+    assert "--keymap" in argv
+    assert "pick alpha beta" in argv
+
+
+def test_no_binary_means_the_text_menu_exactly_as_before(tmp_path):
+    """The predicate has three legs and each of them alone is enough."""
+    for preamble in ('RECUI_BIN=/nope; PANEL_UP=1\n',
+                     'RECUI_BIN=/bin/sh; PANEL_UP=""\n',
+                     'RECUI_BIN=/bin/sh; PANEL_UP=1; '
+                     'RECOVERY_TTY_OVERRIDE=/dev/console\n'):
+        result = run(tmp_path, '%srecovery_panel_ui && echo PANEL || echo TTY'
+                     % preamble)
+        assert result.stdout.strip() == "TTY", preamble
+
+
+def test_the_cmdline_override_still_wins(tmp_path):
+    """neodct.rectty=/dev/console is a deliberate request for a text UI on a
+    cable. A prettier menu on a screen nobody is looking at is not an
+    improvement."""
+    body = 'echo 1'
+    result = run(tmp_path, '%sRECOVERY_TTY_OVERRIDE=/dev/console\n'
+                 'recovery_panel_ui && echo PANEL || echo TTY'
+                 % panel_env(tmp_path, body))
+
+    assert result.stdout.strip() == "TTY"
+
+
+def test_exit_two_falls_through_to_the_text_menu(tmp_path):
+    """"I have no usable input device". Drawing a menu nobody can move is
+    worse than console text that at least works over serial."""
+    keyfile = tmp_path / "keys"
+    keyfile.write_text("DOWN\nENTER\n")
+    stub = ('read_key() { sed -n 1p "%s"; sed -i 1d "%s"; }\n'
+            'TTY=/dev/null; screen_clear() { :; }; say() { :; }\n'
+            'recovery_input_ensure() { :; }\n' % (keyfile, keyfile))
+
+    result = run(tmp_path, '%s%srecovery_menu "" alpha beta gamma'
+                 % (panel_env(tmp_path, "exit 2"), stub))
+
+    assert result.stdout.strip() == "2"
+
+
+def test_a_dead_recui_is_not_asked_again(tmp_path):
+    """One exec per screen to be told the same thing would also leave the
+    panel showing a menu while the tty draws another."""
+    counter = tmp_path / "calls"
+    body = 'echo x >> "%s"; exit 2' % counter
+    keyfile = tmp_path / "keys"
+    keyfile.write_text("ENTER\nENTER\n")
+    stub = ('read_key() { sed -n 1p "%s"; sed -i 1d "%s"; }\n'
+            'TTY=/dev/null; screen_clear() { :; }; say() { :; }\n'
+            'recovery_input_ensure() { :; }\n' % (keyfile, keyfile))
+
+    run(tmp_path, '%s%srecovery_menu "" a; recovery_menu "" a'
+        % (panel_env(tmp_path, body), stub))
+
+    assert counter.read_text().count("x") == 1
+
+
+def test_confirm_maps_yes_and_no_onto_the_exit_status(tmp_path):
+    yes = run(tmp_path, '%srecovery_confirm "erase?" && echo YES || echo NO'
+              % panel_env(tmp_path, "exit 0"))
+    no = run(tmp_path, '%srecovery_confirm "erase?" && echo YES || echo NO'
+             % panel_env(tmp_path, "exit 1"))
+
+    assert yes.stdout.strip() == "YES"
+    assert no.stdout.strip() == "NO"
+
+
+def test_the_meter_is_cat_when_there_is_no_panel(tmp_path):
+    """The pipelines have to be byte-identical on a headless run. A meter that
+    dropped bytes would truncate the image being written to the system
+    partition."""
+    result = subprocess.run(
+        ["sh", "-c", script_for(tmp_path,
+                                'RECUI_BIN=/nope; PANEL_UP=""\n'
+                                'printf "abcdef" | recovery_meter "step" 6')],
+        capture_output=True, env=None)
+
+    assert result.stdout == b"abcdef"
+
+
+def test_the_meter_passes_the_stream_through_the_panel_ui_too(tmp_path):
+    """And with one: nd-recui progress is a pv-style filter, so what comes out
+    of the pipeline is what went in."""
+    result = subprocess.run(
+        ["sh", "-c", script_for(tmp_path,
+                                '%sprintf "abcdef" | recovery_meter "step" 6'
+                                % panel_env(tmp_path, "cat"))],
+        capture_output=True, env=None)
+
+    assert result.stdout == b"abcdef"
+
+
+def test_the_install_still_writes_the_right_bytes_with_a_meter_in_the_way(tmp_path):
+    """The regression that matters. Three pipelines gained a stage each; a
+    stage that dropped or reordered a byte would put a corrupt image on the
+    flash, and the read-back pass is what would catch it."""
+    package, image, _ = make_package(tmp_path)
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\x00" * (len(image) + 4096))
+
+    result = run(tmp_path, '%srecovery_install_package "%s" "%s"'
+                 % (panel_env(tmp_path, "cat"), package, device))
+
+    assert result.returncode == 0, result.stderr
+    assert device.read_bytes()[:len(image)] == image
+
+
+def test_a_meter_that_truncates_is_caught_by_the_read_back(tmp_path):
+    """Why instrumenting these pipelines is safe at all. The pipeline's exit
+    status is dd's, not the meter's, so a short write would go unnoticed there
+    -- but pass 3 hashes image_bytes back off the device and refuses."""
+    package, image, _ = make_package(tmp_path)
+    device = tmp_path / "system.img"
+    device.write_bytes(b"\x00" * (len(image) + 4096))
+
+    # Truncate ONLY the write pass, so passes 1 and 2 both report success and
+    # pass 3 is the thing that has to notice. $3 is the --step value.
+    body = 'case "$3" in "Writing image") head -c 32 ;; *) cat ;; esac'
+    result = run(tmp_path, '%srecovery_install_package "%s" "%s"'
+                 % (panel_env(tmp_path, body), package, device))
+
+    assert result.returncode != 0
+    assert "read-back mismatch" in result.stdout + result.stderr
+    assert not (tmp_path / "state" / "installed.prop").exists()
+
+
+def test_hash_prefix_still_hashes_the_same_thing_with_a_filter(tmp_path):
+    """The one line this change added to ndsys-apply.sh, which the automatic
+    applier also calls. `cat` is the default, so every existing caller is
+    byte-identical."""
+    blob = tmp_path / "blob"
+    blob.write_bytes(b"\xa5" * 8192)
+    want = hashlib.sha256(b"\xa5" * 8192).hexdigest()
+
+    plain = run(tmp_path, 'hash_prefix "%s" 8192' % blob)
+    filtered = run(tmp_path, 'hash_prefix "%s" 8192 cat' % blob)
+
+    assert plain.stdout.strip() == want
+    assert filtered.stdout.strip() == want
+
+
+def test_the_shell_option_survives_never_having_opened_a_descriptor(tmp_path):
+    """recovery_main does not open fd 8 when the panel UI is in use, so the
+    shell option's hand-back has nothing to hand back. It must not fail --
+    dropping to a shell is how somebody checks `ls /dev/i2c-*` on real
+    hardware, which is the one thing this whole change cannot verify."""
+    result = run(tmp_path, 'RECOVERY_INPUT_UP=""; TTY=/dev/null\n'
+                           'recovery_input_stop && echo OK')
+
+    assert result.stdout.strip() == "OK"
+
+
+def test_every_message_screen_goes_through_one_helper(tmp_path):
+    """Seven copies of the same five-line sequence were seven places to get
+    the delegation wrong."""
+    source = open(RECOVERY_SH).read()
+
+    assert source.count("recovery_say ") >= 6
+    # The old spelling survives only inside recovery_say itself and in the
+    # "Installing" screen, which deliberately does not wait for a key.
+    assert source.count('say "Press a key"') == 1
+
+
+def test_no_panel_and_no_terminal_drops_to_a_rescue_shell(tmp_path):
+    """recovery_main used to give up here; the descriptor is now opened on
+    first use, so the giving up moved with it. Returning an empty choice
+    instead would spin recovery_main's loop forever on a phone nobody can
+    talk to. /bin/sh is fed EOF so the exec'd shell exits at once."""
+    script = script_for(tmp_path, 'RECUI_BIN=/nope; PANEL_UP=""\n'
+                                  'TTY=/does/not/exist\n'
+                                  'recovery_menu "" alpha')
+    result = subprocess.run(["sh", "-c", script], capture_output=True,
+                            text=True, stdin=subprocess.DEVNULL)
+
+    assert "cannot open" in result.stdout + result.stderr
+    # And emphatically not a menu index, which the caller would act on.
+    assert result.stdout.strip() in ("", "recovery: cannot open /does/not/exist for input")
+
+
+def test_an_unopenable_terminal_does_not_kill_the_shell(tmp_path):
+    """`exec 8<> "$TTY" || return 1` reads as handled and is not: POSIX makes
+    a redirection error on a special builtin fatal to a non-interactive
+    shell, so both dash and busybox ash killed the initramfs outright and the
+    `exec /bin/sh` rescue path was unreachable. The probe subshell contains
+    it."""
+    result = run(tmp_path, 'TTY=/does/not/exist\n'
+                           'recovery_input_start && echo OPENED || echo REFUSED\n'
+                           'echo STILL_RUNNING')
+
+    assert "REFUSED" in result.stdout
+    assert "STILL_RUNNING" in result.stdout

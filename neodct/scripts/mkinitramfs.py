@@ -301,6 +301,21 @@ SPLASH_IMAGES = (
 # UI can never disagree about which key is the release key.
 VERIFIER_CANDIDATES = ("NeoDCT/System/bin/nd-verify", "usr/bin/nd-verify",
                        "bin/nd-verify")
+
+# The on-screen recovery UI. Like nd-verify it comes from BINARIES_DIR rather
+# than the target tree -- neodct/src/Makefile's install-boot puts it there,
+# and nothing in the running system calls it, so a copy in the verity-covered
+# squashfs would be bytes nobody executes.
+#
+# OPTIONAL, and that is the panel-daemon precedent rather than the
+# dmsetup/nd-verify one: an initramfs without it still recovers a phone,
+# because ndsys-recovery.sh falls back to the tty menu it has always had.
+# Failing the build over a nicer menu would be wrong. It is a close call --
+# on hardware, without it, recovery has no working input at all -- but that
+# is *already* true today, so its absence is a regression to the status quo
+# rather than a broken image.
+RECUI_CANDIDATES = ("NeoDCT/System/bin/nd-recui", "usr/bin/nd-recui",
+                    "bin/nd-recui")
 RELEASE_KEY = "NeoDCT/System/keys/neodct-release.pub"
 RELEASE_KEY_TARGET = "neodct-release.pub"
 SPLASH_SOURCE, SPLASH_TARGET = SPLASH_IMAGES[0]
@@ -319,8 +334,19 @@ def find_verifier(target_dir, verifier=None):
     return None
 
 
+def find_recui(target_dir, recui=None):
+    """Where nd-recui is, or None. `recui` is a path from the caller."""
+    if recui:
+        return str(recui) if os.path.exists(str(recui)) else None
+    for candidate in RECUI_CANDIDATES:
+        source = os.path.join(target_dir, candidate)
+        if os.path.exists(source):
+            return source
+    return None
+
+
 def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None,
-          verifier=None):
+          verifier=None, recui=None):
     """Stage and pack the initramfs. Returns the output path."""
     global LAST_STAGING
     target_dir = str(target_dir)
@@ -391,6 +417,30 @@ def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None,
             except ValueError as exc:
                 print("mkinitramfs: %s unreadable (%s); skipping"
                       % (PANEL_DAEMON, exc), file=sys.stderr)
+
+        # The recovery UI, gated on the SAME architecture check the panel
+        # daemon gets. install-boot writes into BINARIES_DIR, which is not
+        # architecture-tagged, so a stale cross build left over from another
+        # board is a real way to ship a binary the kernel cannot exec -- and
+        # this one is reached from the screen a person is standing in front
+        # of, where "nothing happened" is the whole failure report.
+        found = find_recui(target_dir, recui)
+        if found is None:
+            print("mkinitramfs: no nd-recui (looked at %s%s); recovery will "
+                  "fall back to its text menu"
+                  % ("--recui %s, " % recui if recui else "",
+                     ", ".join(RECUI_CANDIDATES)), file=sys.stderr)
+        else:
+            try:
+                if elf_machine(found) == elf_machine(busybox):
+                    binaries["bin/nd-recui"] = found
+                else:
+                    print("mkinitramfs: %s is a different architecture; "
+                          "recovery will fall back to its text menu"
+                          % found, file=sys.stderr)
+            except ValueError as exc:
+                print("mkinitramfs: %s unreadable (%s); skipping"
+                      % (found, exc), file=sys.stderr)
     else:
         for relative in extra_binaries:
             source = os.path.join(target_dir, relative)
@@ -508,10 +558,12 @@ def main(argv=None):
     parser.add_argument("--output", required=True)
     parser.add_argument("--verifier",
                         help="path to nd-verify (default: search --target-dir)")
+    parser.add_argument("--recui",
+                        help="path to nd-recui (default: search --target-dir)")
     args = parser.parse_args(argv)
 
     path = build(args.target_dir, args.init, args.output,
-                 verifier=args.verifier)
+                 verifier=args.verifier, recui=args.recui)
     print("mkinitramfs: %s (%.1f KiB)"
           % (path, os.path.getsize(path) / 1024.0))
     return 0
