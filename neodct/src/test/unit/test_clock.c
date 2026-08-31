@@ -727,6 +727,49 @@ static void test_the_header_line_is_skipped(void)
     CHECK(!nd_clock_has_route());
 }
 
+/* THE LOOPBACK ENTRY, taken verbatim off a booted phone with no network.
+ *
+ * Every Linux box has this line: the kernel's unreachable ::/0 route out of
+ * lo. It matched "all-zero destination, prefix length 00" exactly, so
+ * nd_clock_has_route() used to answer true on a phone with nothing plugged
+ * in -- which showed up as a full signal meter on the home screen once the
+ * status bar started asking the same question. */
+static void test_a_default_route_out_of_lo_is_not_a_route(void)
+{
+    pt_write_text("/proc/net/ipv6_route",
+                  "00000000000000000000000000000001 80 "
+                  "00000000000000000000000000000000 00 "
+                  "00000000000000000000000000000000 00000000 00000002 00000000 80200001 "
+                  "      lo\n"
+                  "00000000000000000000000000000000 00 "
+                  "00000000000000000000000000000000 00 "
+                  "00000000000000000000000000000000 ffffffff 00000001 00000000 00200200 "
+                  "      lo\n");
+    CHECK(!nd_clock_has_route());
+
+    /* And the same table with one real interface added IS a route -- the
+     * rule is "not lo", not "ignore ipv6". */
+    pt_write_text("/proc/net/ipv6_route",
+                  "00000000000000000000000000000000 00 "
+                  "00000000000000000000000000000000 00 "
+                  "00000000000000000000000000000000 ffffffff 00000001 00000000 00200200 "
+                  "      lo\n"
+                  "00000000000000000000000000000000 00 "
+                  "00000000000000000000000000000000 00 "
+                  "fe800000000000000000000000000001 00000100 00000000 00000001 00000003 "
+                  "      wwan0\n");
+    CHECK(nd_clock_has_route());
+}
+
+/* The v4 twin: a default route whose interface is lo does not count either. */
+static void test_a_v4_default_route_out_of_lo_is_not_a_route(void)
+{
+    pt_write_text("/proc/net/route",
+                  "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\n"
+                  "lo\t00000000\t00000000\t0003\t0\t0\t0\t00000000\n");
+    CHECK(!nd_clock_has_route());
+}
+
 static void test_a_v6_default_route_counts(void)
 {
     /* The phone's data bearer is IPv6-only with NAT64 on some carriers, so
@@ -870,6 +913,8 @@ int main(void)
     RUN(test_a_v4_table_without_a_default_does_not);
     RUN(test_the_header_line_is_skipped);
     RUN(test_a_v6_default_route_counts);
+    RUN(test_a_default_route_out_of_lo_is_not_a_route);
+    RUN(test_a_v4_default_route_out_of_lo_is_not_a_route);
     RUN(test_a_v6_table_without_a_default_does_not);
 
     RUN(test_start_floors_the_clock_then_syncs);

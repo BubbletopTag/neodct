@@ -47,6 +47,7 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include "nd_clock.h"
 #include "nd_log.h"
 #include "nd_modem.h"
 #include "nd_settings.h"
@@ -1503,24 +1504,147 @@ static void test_sim_signal_and_operator_hooks(void)
     if (m == NULL)
         return;
 
-    /* No hook at all is None, which the home screen renders as the layout's
-     * sim_val -- NOT as zero bars. */
-    CHECK_INT(nd_modem_signal_level(m), -1);
-    CHECK(nd_modem_operator_display(m) == NULL);
+    /* NO HOOK AT ALL IS SIMULATION, and it says so.
+     *
+     * This used to be `-1` and `NULL`, which the home screen rendered as the
+     * layout's sim_val -- a FULL four-bar meter -- beside the literal words
+     * "No Service". A phone that will place a call and send a text was
+     * telling its owner it had no service, at full signal. Both halves of
+     * that pair are now answered honestly: see nd_modem.h's nd_modem_link.
+     *
+     * The bar count is derived from whether there is a default route, so it
+     * is asserted against the same predicate the code uses rather than
+     * hard-coded -- a build machine with a network and one without must both
+     * pass, and the interesting claim is "it tracks the route", not "it is 1
+     * here today". */
+    {
+        int32_t want = nd_clock_has_route() ? ND_MODEM_SIM_BARS_ONLINE : ND_MODEM_SIM_BARS_OFFLINE;
 
+        CHECK_INT(nd_modem_signal_level(m), want);
+        /* Whatever it is, it is never the full meter unless there really is a
+         * route, and it is never the "unknown" that let sim_val through. */
+        CHECK(nd_modem_signal_level(m) >= 0);
+    }
+    CHECK_STR(nd_modem_operator_display(m), ND_MODEM_SIM_CARRIER);
+
+    /* An explicit hook still wins over both, so a test or a demo can pin any
+     * reading it likes. */
     pt_write_text(ND_MODEM_SIM_CSQ, "23\n");
     CHECK_INT(nd_modem_signal_level(m), 4);
     pt_write_text(ND_MODEM_SIM_CSQ, "3");
     CHECK_INT(nd_modem_signal_level(m), 1);
     pt_write_text(ND_MODEM_SIM_CSQ, "99");
     CHECK_INT(nd_modem_signal_level(m), 0);
+    /* Garbage in the hook falls back to the route-derived reading rather than
+     * to "unknown" -- a corrupt test file must not resurrect the full-meter
+     * bug it was written to catch. */
     pt_write_text(ND_MODEM_SIM_CSQ, "not a number");
-    CHECK_INT(nd_modem_signal_level(m), -1);
+    CHECK_INT(nd_modem_signal_level(m),
+              nd_clock_has_route() ? ND_MODEM_SIM_BARS_ONLINE : ND_MODEM_SIM_BARS_OFFLINE);
 
     pt_write_text(ND_MODEM_SIM_OPS, "  Tello \n");
     CHECK_STR(nd_modem_operator_display(m), "Tello");
+    /* A blank hook is not an operator name, so it falls back to Simulation --
+     * it used to fall back to NULL, i.e. to "No Service". */
     pt_write_text(ND_MODEM_SIM_OPS, "   ");
+    CHECK_STR(nd_modem_operator_display(m), ND_MODEM_SIM_CARRIER);
+
+    nd_modem__destroy(m);
+}
+
+/* BOTH SIDES OF THE ROUTE RULE, which the harness would otherwise hide.
+ *
+ * nd_clock_has_route() is ND_ROOT-resolved, so under `make test` it reads
+ * $NEODCT_ROOT/proc/net/route -- a file that does not exist, so it always
+ * says "no route" and the ONLINE branch would never run. Writing a real
+ * route table into the staged root is what makes both branches reachable,
+ * and it is the same fixture test_clock.c already uses. */
+static void test_sim_bars_follow_the_default_route(void)
+{
+    nd_modem *m;
+
+    use_scratch_settings("");
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+
+    /* Nothing staged: no route table at all. */
+    nd_modem__sim_route_forget();
+    CHECK_INT(nd_modem_signal_level(m), ND_MODEM_SIM_BARS_OFFLINE);
+    CHECK_STR(nd_modem_operator_display(m), ND_MODEM_SIM_CARRIER);
+
+    /* A table with a default route in it -- destination 00000000, exactly
+     * what QEMU's slirp NIC produces and what nd_clock.c looks for. */
+    pt_write_text("/proc/net/route",
+                  "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\n"
+                  "eth0\t00000000\t0202000A\t0003\t0\t0\t0\t00000000\n");
+    nd_modem__sim_route_forget();
+    CHECK_INT(nd_modem_signal_level(m), ND_MODEM_SIM_BARS_ONLINE);
+    /* The carrier does not change with the route: it is still Simulation,
+     * because a route is not a carrier. Only the meter moves. */
+    CHECK_STR(nd_modem_operator_display(m), ND_MODEM_SIM_CARRIER);
+
+    /* A table with routes but NO default is offline again -- the phone is on
+     * a LAN that goes nowhere, which is exactly the one-bar case. */
+    pt_write_text("/proc/net/route",
+                  "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\n"
+                  "eth0\t0002000A\t00000000\t0001\t0\t0\t0\t00FFFFFF\n");
+    nd_modem__sim_route_forget();
+    CHECK_INT(nd_modem_signal_level(m), ND_MODEM_SIM_BARS_OFFLINE);
+
+    nd_modem__destroy(m);
+}
+
+/* A FAULT IS NOT SIMULATION, and this is the assertion that says so.
+ *
+ * The two used to be one state, and a phone whose radio had died drew a full
+ * meter beside the word "Simulation" -- i.e. it looked exactly like a healthy
+ * QEMU box. */
+static void test_a_fault_is_not_simulation(void)
+{
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+    const char *why;
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+
+    /* Adopted: live, and nothing pending. */
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_LIVE);
+    CHECK(nd_modem_take_pending_fault(m) == NULL);
+
+    /* Yank the descriptor the way a USB unplug does -- the same move
+     * test_a_dead_port_drops_back_to_simulation() makes, because it is the
+     * real path into nd_modem__drop_hardware(): the write fails with a hard
+     * errno and the modem is dropped. */
+    {
+        char final[64];
+
+        (void)close(m->fd);
+        m->fd = open("/dev/null", O_RDONLY);
+        CHECK(m->fd >= 0);
+        (void)nd_modem__transact(m, "AT", 0.2, final, sizeof final, NULL);
+    }
+
+    CHECK(!nd_modem_has_hardware(m));
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_FAULT);
+
+    /* Zero bars and NO carrier -- not the route-derived reading, and not the
+     * word Simulation. A broken radio has nothing truthful to say. */
+    nd_modem__sim_route_forget();
+    CHECK_INT(nd_modem_signal_level(m), 0);
     CHECK(nd_modem_operator_display(m) == NULL);
+
+    /* The latch fires exactly once, and carries the reason. */
+    why = nd_modem_take_pending_fault(m);
+    CHECK(why != NULL);
+    if (why != NULL)
+        CHECK(why[0] != '\0');
+    CHECK(nd_modem_take_pending_fault(m) == NULL);
 
     nd_modem__destroy(m);
 }
@@ -1929,7 +2053,9 @@ static void test_the_thread_runs_and_stops_cleanly(void)
 
     nd_modem_status_snapshot(m, &st);
     CHECK(!st.hardware);
-    CHECK_INT(st.signal_level, -1);
+    /* Simulation, so the route-derived reading rather than "unknown". */
+    CHECK_INT(st.signal_level,
+              nd_clock_has_route() ? ND_MODEM_SIM_BARS_ONLINE : ND_MODEM_SIM_BARS_OFFLINE);
     CHECK_INT(st.state, ND_CALL_IDLE);
 
     /* The ring hook is serviced by the thread, with nobody polling -- which
@@ -2069,6 +2195,8 @@ int main(void)
     RUN(test_a_dead_port_drops_back_to_simulation);
 
     RUN(test_sim_signal_and_operator_hooks);
+    RUN(test_sim_bars_follow_the_default_route);
+    RUN(test_a_fault_is_not_simulation);
     RUN(test_sim_ring_hook_is_edge_triggered);
     RUN(test_sim_sms_hook_delivers_and_consumes);
     RUN(test_sim_dial_pretends_after_two_seconds);

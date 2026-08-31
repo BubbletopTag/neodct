@@ -83,6 +83,8 @@
 #pragma weak nd_modem_close
 #pragma weak nd_modem_signal_level
 #pragma weak nd_modem_operator_display
+#pragma weak nd_modem_link_state
+#pragma weak nd_modem_take_pending_fault
 #pragma weak nd_modem_state
 #pragma weak nd_modem_caller_id
 #pragma weak nd_modem_take_pending_event
@@ -1825,6 +1827,40 @@ void nd_ui_render_home(nd_ui *ui)
              * banner, like on the 3310. */
             if (notify_active && el->type == ND_EL_TEXT && strcmp(el->text, "No Service") == 0)
                 continue;
+
+            /* A FAULTED modem gets no carrier line at all. The element's
+             * authored text is the literal "No Service", and leaving that
+             * standing on a phone whose radio has died would be the most
+             * misleading thing on the screen: "No Service" is what a working
+             * phone says in a tunnel. Nothing is the honest answer, and the
+             * empty meter beside it plus the notice say the rest. */
+            if (el->type == ND_EL_TEXT && strcmp(el->text, "No Service") == 0 &&
+                nd_ui_status_modem_faulted(ui))
+                continue;
+
+            /* THE RED LINE UNDER THE CARRIER, and the two reasons it is
+             * skipped.
+             *
+             * It says "Engineering Mode" because that mode gives every app
+             * under /NeoDCT/System/engineering/apps root (nd_proc.h), and a
+             * phone handing out root should look different from a phone that
+             * is not. So the rule is the plain one: draw it exactly when the
+             * privilege is actually being granted.
+             *
+             * Skipped when the mode is OFF, obviously. Skipped ALSO while the
+             * message banner is up, for the same reason the carrier is: the
+             * banner is drawn at rows 49..96 and this line sits at row 69,
+             * squarely underneath it. Two strings painted over each other is
+             * worse than either alone, and the banner is the more urgent of
+             * the two.
+             *
+             * Matching on el->text is the mechanism nd_layout.c already uses
+             * for the clock and the carrier -- "there is no marker syntax;
+             * these exact strings are the whole mechanism". */
+            if (el->type == ND_EL_TEXT && strcmp(el->text, ND_UI_ENG_MODE_LABEL) == 0 &&
+                (notify_active || !nd_ui_engineering_mode(ui)))
+                continue;
+
             nd_home_render_element(ui, el);
         }
     } else if (ui->font_s != NULL) {
@@ -2282,6 +2318,60 @@ void nd_ui_show_pending_battery_warning(nd_ui *ui)
     nd_msgdialog_init(&dlg, ui, message);
     if (nd_msgdialog_set_title != NULL)
         nd_msgdialog_set_title(&dlg, "Battery");
+    if (nd_msgdialog_set_icon != NULL)
+        nd_msgdialog_set_icon(&dlg, ND_PATH_WARNING_ICON);
+    if (nd_msgdialog_set_button != NULL)
+        nd_msgdialog_set_button(&dlg, "OK");
+    (void)nd_msgdialog_show(&dlg);
+}
+
+/* Is the radio faulted? Used by the home renderer to drop the carrier line.
+ *
+ * Weak-linked like every other modem entry point here, so a build without the
+ * modem module still links; a core with no ModemService reports false, which
+ * is right -- no service is not a broken service. */
+bool nd_ui_status_modem_faulted(nd_ui *ui)
+{
+    if (ui == NULL || ui->modem == NULL || nd_modem_link_state == NULL)
+        return false;
+    return nd_modem_link_state(ui->modem) == ND_MODEM_LINK_FAULT;
+}
+
+/* The modem's fault notice, and it is a copy of the battery one above on
+ * purpose -- same latch, same deferral, same modal, so there is one shape in
+ * this file for "a service needs to tell the user something" rather than two.
+ *
+ * The deferral is the load-bearing part: ModemService discovers the fault on
+ * its own thread, at whatever moment a read() fails, and a modal drawn from
+ * there would land in the middle of somebody else's frame. So the service
+ * only LATCHES, and this runs on the UI thread from the home loop, where
+ * putting a dialog on the screen is safe and where the user is looking. */
+void nd_ui_show_pending_modem_fault(nd_ui *ui)
+{
+    const char *why;
+    nd_msgdialog dlg;
+
+    if (ui == NULL)
+        return;
+    if (ui->state != ND_UI_STATE_HOME && ui->state != ND_UI_STATE_HOME_DIALING)
+        return;
+    if (ui->modem == NULL || nd_modem_take_pending_fault == NULL)
+        return;
+    why = nd_modem_take_pending_fault(ui->modem);
+    if (why == NULL)
+        return;
+
+    /* The reason goes to the console, not to the screen. "port read failed:
+     * Input/output error" is what a developer needs and is no help at all to
+     * somebody holding a phone; the screen gets the sentence that tells them
+     * what to actually do. */
+    nd_log_err(ND_LOG_MODEM, "Modem fault reported to the user: %s", why);
+
+    if (nd_msgdialog_init == NULL || nd_msgdialog_show == NULL)
+        return;
+    nd_msgdialog_init(&dlg, ui, ND_UI_MODEM_FAULT_MESSAGE);
+    if (nd_msgdialog_set_title != NULL)
+        nd_msgdialog_set_title(&dlg, "Modem");
     if (nd_msgdialog_set_icon != NULL)
         nd_msgdialog_set_icon(&dlg, ND_PATH_WARNING_ICON);
     if (nd_msgdialog_set_button != NULL)

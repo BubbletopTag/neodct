@@ -294,6 +294,7 @@ static void core_run(nd_fb *fb, bool idle_measure)
 
         nd_ui_update(&ui);
         nd_ui_show_pending_battery_warning(&ui);
+        nd_ui_show_pending_modem_fault(&ui);
         /* 0.1 s unless an animated wallpaper owes a frame sooner. A still
          * wallpaper, or none, gets exactly the poll this loop always had. */
         key = nd_ui_read_keypress(&ui, nd_ui_frame_timeout(&ui, 0.1));
