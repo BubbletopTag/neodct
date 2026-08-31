@@ -1328,22 +1328,42 @@ PASS is the whole of it. Then set the clock by hand, and format a card.
   `CAP_SYS_ADMIN` to `ndusr` is the boundary. These verbs are the supported route through
   it. SELinux is what turns "the core is allowed to" into "the core is allowed to *this
   much*", and that track is separate.
-- **It does not close the `disk` group, which is now the loudest hole next door.**
-  `configs/users-table.txt` puts `ndusr` in `disk`, and eudev's shipped
-  `50-udev-default.rules` line 70 is `SUBSYSTEM=="block", GROUP="disk"` — with no `MODE`,
-  which udev turns into `0660` whenever a group is set. So **every block device node on
-  the phone is `root:disk 0660`, and every app now running as `ndusr` can open the system
-  and user partitions read-write and rewrite them raw.** That was harmless while stock
-  apps ran as root and it is not harmless now: it goes around the `/NeoDCT/User` mode-bit
-  boundary entirely, and dm-verity turns a rewritten rootfs into a brick rather than into
-  a compromise, which is better but not good.
+- **It does not close the `disk` group, which is now the loudest hole next door — and
+  which was confirmed on a booted phone rather than reasoned about.**
 
-  Nothing in `neodct/src` opens a block device from an app — the card is mounted by
-  `neodct-sdcard`, which runs as root — so `disk` looks removable from `ndusr`'s group
-  list. "Looks removable" is not "was tried on a phone", which is why it is written down
-  here rather than done in this change. It wants: the group dropped from
-  `users-table.txt`, an `nd-selftest` probe that opens each block node as `ndusr` and
-  FAILs if it succeeds, and a boot.
+  `configs/users-table.txt` puts `ndusr` in `disk`, and eudev's shipped
+  `50-udev-default.rules` line 70 is `SUBSYSTEM=="block", GROUP="disk"` with no `MODE`,
+  which udev turns into `0660` whenever a group is set. On the 0.5.0b QEMU image:
+
+  ```
+  # id ndusr
+  uid=1000(ndusr) gid=1000(ndusr) groups=1000(ndusr),18(dialout),1002(i2c),6(disk),...
+  # ls -l /dev/vda /dev/vdb /dev/vdc
+  brw-rw----  1 root disk 254,  0 /dev/vda      <- the system partition
+  brw-rw----  1 root disk 254, 16 /dev/vdb      <- /NeoDCT/User
+  brw-rw----  1 root disk 254, 32 /dev/vdc      <- the card
+  # su -s /bin/sh ndusr -c "dd if=/dev/vda bs=512 count=1 of=/dev/null"
+  1+0 records in
+  1+0 records out
+  ```
+
+  So **every app on this phone can now read and rewrite the system partition, the user
+  partition and the card, raw.** Reading `/dev/vdb` walks straight around the
+  `/NeoDCT/User` mode bits that §1 of `SECURITY-PLAN.md` is built on — the phonebook, the
+  messages and the SSH keys are all in there — and writing `/dev/vda` turns dm-verity
+  into a brick at next boot rather than into a compromise, which is better but not good.
+
+  `ndusr_ut` is **not** in `disk` (verified in the same run), so the browser and the media
+  player are unaffected. This is the trusted-app boundary, not the untrusted one.
+
+  It was harmless while the five apps above ran as root, and it is the binding constraint
+  now that none of them do. Nothing in `neodct/src` opens a block device from an app — the
+  card is mounted by `neodct-sdcard`, which runs as root — so `disk` looks removable from
+  `ndusr`'s group list. "Looks removable" is not "was booted without it", which is why
+  this section records the hole rather than closing it in the same change as the verbs.
+  Closing it wants three things: the group dropped from `users-table.txt`, an
+  `nd-selftest` probe that opens each block node as `ndusr` and FAILs when it succeeds,
+  and a boot that proves the card still mounts.
 - **No hardware has run this.** The host tests prove the bound, the refusals and the wire.
   That `mkfs.vfat` still partitions a real SD card through the core rather than through the
   app has to be seen on a Luckfox.
