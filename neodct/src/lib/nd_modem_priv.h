@@ -63,8 +63,12 @@
  * talking to had died: zero bars, no carrier, and the fault notice. It exists
  * because the fault path is otherwise unreachable without breaking real
  * hardware, and an error screen nobody can make appear is an error screen
- * nobody has ever seen. Delete the file and the next probe recovers. */
-#define ND_MODEM_SIM_FAULT  "/tmp/neodct_sim_fault"
+ * nobody has ever seen. Delete the file and the next TICK undoes it -- not
+ * the next probe, which on a box with no modem never finds anything.
+ *
+ * nd_modem_poll() must test this BEFORE its no-hardware early return, or the
+ * hook is dead on exactly the machines it was written for. It was, once. */
+#define ND_MODEM_SIM_FAULT "/tmp/neodct_sim_fault"
 
 #define ND_MODEM_PCM_FORMAT       "S16_LE"
 #define ND_MODEM_PCM_RATE_DEFAULT 16000
@@ -222,6 +226,10 @@ struct nd_modem {
      * nd_battery_take_pending_warning() -- see nd_modem_take_pending_fault(). */
     bool faulted;
     bool fault_pending;
+    /* This fault came from ND_MODEM_SIM_FAULT rather than from a real modem
+     * dying, so removing the file undoes it. A real fault has no undo short
+     * of adopting a modem again. */
+    bool fault_from_hook;
     char fault_why[ND_MODEM_PROBE_WHY_MAX];
 
     /* When the last AT transaction on a LIVE modem succeeded, for the

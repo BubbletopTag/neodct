@@ -1649,6 +1649,68 @@ static void test_a_fault_is_not_simulation(void)
     nd_modem__destroy(m);
 }
 
+/* THE FAULT HOOK MUST WORK WITH NO HARDWARE, which is the only state QEMU is
+ * ever in and therefore the only state the hook is for.
+ *
+ * It did not. The check sat after nd_modem_poll()'s `if (!m->hardware)
+ * return;`, so on a box with no modem -- every developer box -- touching the
+ * file did nothing at all. The bug survived a code review and a commit
+ * message asserting the opposite, and was caught by looking at a screenshot
+ * of the fault notice that turned out to be the ordinary home screen. */
+static void test_the_fault_hook_works_without_hardware(void)
+{
+    nd_modem *m;
+
+    use_scratch_settings("");
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+
+    /* Simulation, as QEMU always is. */
+    CHECK(!nd_modem_has_hardware(m));
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_SIM);
+
+    pt_write_text(ND_MODEM_SIM_FAULT, "");
+    nd_modem_poll(m);
+
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_FAULT);
+    nd_modem__sim_route_forget();
+    CHECK_INT(nd_modem_signal_level(m), 0);
+    CHECK(nd_modem_operator_display(m) == NULL);
+
+    /* The latch fires once and carries a reason naming the hook. */
+    {
+        const char *why = nd_modem_take_pending_fault(m);
+
+        CHECK(why != NULL);
+        if (why != NULL)
+            CHECK(strstr(why, "simulated") != NULL);
+        CHECK(nd_modem_take_pending_fault(m) == NULL);
+    }
+
+    /* And it does not re-latch on every tick, or the phone would put a modal
+     * in front of the user ten times a second. */
+    nd_modem_poll(m);
+    nd_modem_poll(m);
+    CHECK(nd_modem_take_pending_fault(m) == NULL);
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_FAULT);
+
+    /* Remove the file and the next tick undoes it: back to plain Simulation,
+     * with the carrier and the route-derived meter again. */
+    {
+        char resolved[ND_PATH_MAX];
+
+        CHECK_INT(nd_path_resolve(resolved, sizeof resolved, ND_MODEM_SIM_FAULT), ND_OK);
+        CHECK_INT(remove(resolved), 0);
+    }
+    nd_modem_poll(m);
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_SIM);
+    CHECK_STR(nd_modem_operator_display(m), ND_MODEM_SIM_CARRIER);
+
+    nd_modem__destroy(m);
+}
+
 static void test_sim_ring_hook_is_edge_triggered(void)
 {
     nd_modem *m;
@@ -2197,6 +2259,7 @@ int main(void)
     RUN(test_sim_signal_and_operator_hooks);
     RUN(test_sim_bars_follow_the_default_route);
     RUN(test_a_fault_is_not_simulation);
+    RUN(test_the_fault_hook_works_without_hardware);
     RUN(test_sim_ring_hook_is_edge_triggered);
     RUN(test_sim_sms_hook_delivers_and_consumes);
     RUN(test_sim_dial_pretends_after_two_seconds);

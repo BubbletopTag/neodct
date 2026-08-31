@@ -1108,6 +1108,40 @@ void nd_modem_poll(nd_modem *m)
         queue_simple(m, ND_MEV_CONNECTED, NULL);
     }
 
+    /* THE SIMULATED FAULT, and it is checked BEFORE the no-hardware early
+     * return below rather than after it. That ordering is the whole point:
+     * this hook exists so the fault screen can be seen on QEMU, and QEMU
+     * NEVER HAS HARDWARE -- so a check on the far side of `if (!m->hardware)
+     * return;` could only ever fire on the one platform it was written to
+     * avoid touching. It was on the wrong side of that return until a
+     * screenshot of the fault notice turned out to be a screenshot of the
+     * ordinary home screen.
+     *
+     * The `!m->faulted` guard is what stops it re-dropping, and re-logging,
+     * on every one of the ten ticks a second. */
+    if (nd_path_exists(ND_MODEM_SIM_FAULT)) {
+        if (!m->faulted) {
+            nd_modem__drop_hardware(m, "simulated fault (" ND_MODEM_SIM_FAULT ")");
+            lock_state(m);
+            m->fault_from_hook = true;
+            unlock_state(m);
+        }
+        return;
+    }
+    if (m->fault_from_hook) {
+        /* The file is gone, so undo what it did. A REAL fault is not cleared
+         * here and must not be: it is cleared only by nd_modem__init_modem(),
+         * i.e. by actually adopting a modem again. This branch exists purely
+         * so `touch` then `rm` is a loop a person can run twice. */
+        lock_state(m);
+        m->fault_from_hook = false;
+        m->faulted = false;
+        m->fault_pending = false;
+        m->fault_why[0] = '\0';
+        unlock_state(m);
+        nd_log(ND_LOG_MODEM, "Simulated fault cleared; back to Simulation Mode.");
+    }
+
     if (!m->hardware) {
         nd_modem__poll_sim(m, now); /* NOT rate limited: full tick rate */
         return;
@@ -1128,12 +1162,8 @@ void nd_modem_poll(nd_modem *m)
      * single choke point every transaction passes through. No counter, no
      * per-command state, and nothing to reset in five places.
      *
-     * The simulated fault hook is checked in the same breath: it is the only
-     * way to see this screen without breaking real hardware. */
-    if (nd_path_exists(ND_MODEM_SIM_FAULT)) {
-        nd_modem__drop_hardware(m, "simulated fault (" ND_MODEM_SIM_FAULT ")");
-        return;
-    }
+     * The simulated fault hook is handled above, before the no-hardware
+     * return, for the reason given there. */
     {
         double quiet_since;
 
