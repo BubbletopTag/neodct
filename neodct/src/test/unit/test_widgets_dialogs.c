@@ -681,6 +681,103 @@ static void test_msgdialog_invisible_ellipsis(void)
     fx_free(&fx);
 }
 
+/* ============ THE CLIP IS INVISIBLE, SO SOMETHING HAS TO SEE IT ============
+ *
+ * nd_msgdialog does not fail on an overlong message and does not mark one.
+ * append_ellipsis() adds U+2026, the font has no glyph for it, and the text
+ * simply stops. The modem fault notice shipped that way -- seven lines into a
+ * five-line dialog, ending mid-sentence at "there is" -- and nothing in the
+ * suite noticed, because nothing was looking.
+ *
+ * nd_msgdialog_measure() is what makes it visible, and it reads its numbers
+ * from the same pass that draws. These two tests are the only reason a future
+ * rewrite of a message string cannot quietly reintroduce the bug. */
+static void test_msgdialog_measure_sees_the_clip(void)
+{
+    fixture fx;
+    size_t needed = 0u, fits = 0u;
+
+    /* The message that shipped clipped. Kept verbatim rather than described,
+     * because the point of this test is that THIS string does not fit. */
+    static const char SHIPPED_CLIPPED[] =
+        "Modem ERROR!\n\nYou may need to restart the device. If this does "
+        "not fix the issue, there is a potential hardware fault.";
+
+    if (!fx_init(&fx)) {
+        CHECK(false);
+        return;
+    }
+
+    {
+        nd_msgdialog dlg;
+
+        nd_msgdialog_init(&dlg, &fx.ui, SHIPPED_CLIPPED);
+        nd_msgdialog_set_title(&dlg, "Modem");
+        nd_msgdialog_set_icon(&dlg, ND_PATH_WARNING_ICON);
+        nd_msgdialog_measure(&dlg, &needed, &fits);
+
+        /* 145 content_bottom, a body starting at 38 (clear of the 24 px
+         * triangle plus 6), an 8 px bottom margin and 18 px lines: five. */
+        CHECK_INT((int)fits, 5);
+        /* "Modem ERROR!", a blank the "\n\n" costs in full, and four lines of
+         * prose. Two of them had nowhere to go. */
+        CHECK_INT((int)needed, 7);
+        CHECK(needed > fits);
+    }
+
+    /* And it does not cry wolf: two short lines fit with room over. */
+    {
+        nd_msgdialog dlg;
+
+        nd_msgdialog_init(&dlg, &fx.ui, "LOW BATTERY!");
+        nd_msgdialog_measure(&dlg, &needed, &fits);
+        CHECK(needed <= fits);
+        CHECK_INT((int)needed, 1);
+    }
+
+    fx_free(&fx);
+}
+
+/* The message the phone actually shows, built exactly the way
+ * nd_ui_show_pending_modem_fault() builds it -- same title, same icon. If this
+ * fails, the notice is being cut off on the device again. */
+static void test_the_modem_fault_message_fits(void)
+{
+    fixture fx;
+    nd_msgdialog dlg;
+    size_t needed = 0u, fits = 0u;
+
+    if (!fx_init(&fx)) {
+        CHECK(false);
+        return;
+    }
+
+    nd_msgdialog_init(&dlg, &fx.ui, ND_UI_MODEM_FAULT_MESSAGE);
+    nd_msgdialog_set_title(&dlg, "Modem");
+    nd_msgdialog_set_icon(&dlg, ND_PATH_WARNING_ICON);
+    nd_msgdialog_set_button(&dlg, "OK");
+    nd_msgdialog_measure(&dlg, &needed, &fits);
+
+    CHECK_INT((int)fits, 5);
+    CHECK(needed <= fits); /* THE INVARIANT. Nothing below is as important. */
+    /* A line spare, deliberately. At needed == fits a slightly taller title,
+     * a font with a deeper "Ag" or one more word reclips it with no warning,
+     * and the whole problem with this dialog is that it gives no warning. */
+    CHECK(needed < fits);
+
+    /* Drawn as well as measured, so the string is known to survive a real
+     * render -- but note what this second check does NOT prove. A dark band at
+     * the bottom means the renderer respected max_lines. It says nothing about
+     * whether text was thrown away to achieve that: the older
+     * test_msgdialog_invisible_ellipsis() asserts exactly this band and passed
+     * happily for every day the modem message was being cut off. Only the
+     * needed <= fits check above can tell. */
+    nd_msgdialog_render(&dlg);
+    CHECK_INT(count_lit(fx.canvas, ND_RECT(0, 138, 239, 144)), 0);
+
+    fx_free(&fx);
+}
+
 static void test_msgdialog_keys(void)
 {
     fixture fx;
@@ -1283,6 +1380,8 @@ int main(void)
     test_msgdialog_alert_look();
     test_msgdialog_paragraph_look();
     test_msgdialog_invisible_ellipsis();
+    test_msgdialog_measure_sees_the_clip();
+    test_the_modem_fault_message_fits();
     test_msgdialog_keys();
 
     test_scroller_blank_line_is_a_gap();

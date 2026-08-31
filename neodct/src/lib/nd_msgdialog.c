@@ -174,28 +174,160 @@ static void append_ellipsis(char *line, size_t cap)
     (void)nd_strlcat(line, DOTS, cap);
 }
 
+/* ============ ONE BUDGET, NOT TWO ============
+ *
+ * Steps 2 to 5b of dialog_draw() used to be inline, which meant the only way
+ * to ask "does this message fit?" was to work it out a second time somewhere
+ * else -- and a test that recomputes the renderer's arithmetic tests its own
+ * arithmetic, not the renderer's. So the measuring is factored out here and
+ * both dialog_draw() and nd_msgdialog_measure() go through it.
+ *
+ * That matters because the clip is INVISIBLE. append_ellipsis() adds U+2026,
+ * which this font has no glyph for, so an overlong message does not end in
+ * "..." -- it just stops, mid-sentence, looking deliberate. The modem fault
+ * notice shipped like that: seven lines into a five-line dialog, ending at
+ * "there is". Nothing failed. You had to look at a photograph of the phone.
+ *
+ * It draws NOTHING. The icon it resolves is the cached one dialog_draw() then
+ * blits, and the y it computes is the y dialog_draw() then draws the title
+ * above -- the numbers are shared, not recomputed. */
+typedef struct {
+    const nd_image *icon; /* already cached; dialog_draw blits this one */
+    const nd_font *font_title;
+    const nd_font *font_body;
+    bool centered; /* the 20 px alert look rather than the 14 px paragraph */
+    int32_t y;     /* top of the body, BEFORE the vertical centring of step 6 */
+    int32_t line_h;
+    int32_t max_lines; /* how many lines this dialog can show */
+    size_t needed;     /* how many the message asked for, before any clipping */
+    bool clipped;      /* needed > max_lines, or the wrap itself ran out of buffer */
+} dialog_layout;
+
+/* `lines` comes back holding the body AS DRAWN: clipped to max_lines and with
+ * the invisible ellipsis already appended. out->needed is what it wanted
+ * first. False means there is nothing to draw at all. */
+static bool dialog_layout_of(nd_msgdialog *d, nd_lines *lines, dialog_layout *out)
+{
+    nd_ui *ui = d->ui;
+    const char *icon_path;
+    int32_t max_w;
+    int32_t ag_h = 0;
+    size_t i;
+
+    char alert_store[3][ND_TEXT_LINE_MAX];
+    nd_lines alert;
+
+    memset(out, 0, sizeof *out);
+
+    /* 2. Icon. `icon_path or DEFAULT_WARNING_ICON`: NULL and "" both give the
+     *    triangle, and there is no way to ask for no icon short of a path
+     *    that fails to load. No max_size, so the full-size art is cached. */
+    icon_path =
+        (d->icon_path != NULL && d->icon_path[0] != '\0') ? d->icon_path : ND_PATH_WARNING_ICON;
+    out->icon = nd_ui_get_image(ui, icon_path);
+
+    /* 3. Where the body starts: clear of the title AND of the icon. */
+    out->y = d->margin;
+    out->font_title = title_font_of(ui);
+    if (d->title != NULL && d->title[0] != '\0' && out->font_title != NULL) {
+        int32_t th = 0;
+
+        nd_text_size(out->font_title, d->title, NULL, &th);
+        out->y = nd_max32(out->y, d->margin + th + 6);
+    }
+    if (out->icon != NULL) {
+        /* The body must clear the icon even when the title is shorter than it,
+         * or the first line lands on the triangle. */
+        out->y = nd_max32(out->y, d->margin + out->icon->h + 6);
+    }
+
+    /* 4. Which look. The 20 px wrap only has to answer "more than two lines?",
+     *    so it runs into a three-line buffer: n > 2, or the buffer overflowed,
+     *    both mean the paragraph form. */
+    max_w = nd_ui_width(ui) - (d->margin * 2);
+    {
+        const nd_font *alert_font = (ui->font_n != NULL) ? ui->font_n : body_font_of(ui);
+
+        nd_lines_init(&alert, alert_store, ND_ARRAY_LEN(alert_store));
+        nd_text_wrap_break_pop(&alert, d->message, alert_font, max_w);
+
+        if (alert.n <= 2u && !alert.truncated) {
+            out->font_body = alert_font;
+            out->centered = true;
+            for (i = 0u; i < alert.n; i++)
+                (void)nd_lines_push(lines, nd_lines_at(&alert, i));
+        } else {
+            out->font_body = body_font_of(ui);
+            out->centered = false;
+            nd_text_wrap_break_pop(lines, d->message, out->font_body, max_w);
+        }
+    }
+    if (out->font_body == NULL)
+        return false;
+
+    /* 5. Line height from the INK of "Ag", so the two looks are 24 and 18. */
+    nd_text_size(out->font_body, "Ag", NULL, &ag_h);
+    out->line_h = ag_h + 3;
+
+    /* 5b. Clip, and mark the clip with the invisible ellipsis. int() truncates
+     *     toward zero, which is why this is a double divide and not / . */
+    out->max_lines =
+        nd_max32(1, nd_trunc32((double)(nd_ui_content_bottom(ui) - out->y - d->margin) /
+                               (double)out->line_h));
+    if (out->max_lines > (int32_t)lines->cap)
+        out->max_lines = (int32_t)lines->cap;
+
+    out->needed = lines->n;
+    out->clipped = (lines->n > (size_t)out->max_lines) || lines->truncated;
+    if (out->clipped) {
+        if (lines->n > (size_t)out->max_lines)
+            lines->n = (size_t)out->max_lines;
+        if (lines->n > 0u)
+            append_ellipsis(lines->buf[lines->n - 1u], ND_TEXT_LINE_MAX);
+    }
+    return true;
+}
+
+/* How many lines the message wants, and how many the dialog can show. A
+ * message fits when needed <= fits. Draws nothing and changes nothing.
+ *
+ * This exists so a test can assert that a shipped message fits WITHOUT
+ * re-deriving the budget: the numbers come from the same pass that draws. */
+void nd_msgdialog_measure(nd_msgdialog *d, size_t *needed, size_t *fits)
+{
+    char body_store[DIALOG_MAX_LINES][ND_TEXT_LINE_MAX];
+    nd_lines lines;
+    dialog_layout lay;
+
+    if (needed != NULL)
+        *needed = 0u;
+    if (fits != NULL)
+        *fits = 0u;
+    if (d == NULL || d->ui == NULL)
+        return;
+
+    nd_lines_init(&lines, body_store, ND_ARRAY_LEN(body_store));
+    if (!dialog_layout_of(d, &lines, &lay))
+        return;
+    if (needed != NULL)
+        *needed = lay.needed;
+    if (fits != NULL)
+        *fits = (size_t)nd_max32(0, lay.max_lines);
+}
+
 static void dialog_draw(nd_msgdialog *d)
 {
     nd_ui *ui;
     nd_draw *dr;
     int32_t screen_w;
     int32_t content_bottom;
-    const nd_image *icon = NULL;
-    const nd_font *font_title;
-    const nd_font *font_body;
-    const nd_font *alert_font;
-    const char *icon_path;
     int32_t y;
-    int32_t max_w;
     int32_t line_h;
-    int32_t max_lines;
-    int32_t ag_h = 0;
-    bool centered;
     nd_softkey bar;
     size_t i;
+    bool laid_out;
+    dialog_layout lay;
 
-    char alert_store[3][ND_TEXT_LINE_MAX];
-    nd_lines alert;
     char body_store[DIALOG_MAX_LINES][ND_TEXT_LINE_MAX];
     nd_lines lines;
 
@@ -210,73 +342,35 @@ static void dialog_draw(nd_msgdialog *d)
     /* 1. Full clear -- rows 0..175, softkey strip included. */
     nd_ui_paint_chrome_full(ui);
 
-    /* 2. Icon. `icon_path or DEFAULT_WARNING_ICON`: NULL and "" both give the
-     *    triangle, and there is no way to ask for no icon short of a path
-     *    that fails to load. No max_size, so the full-size art is cached. */
-    icon_path =
-        (d->icon_path != NULL && d->icon_path[0] != '\0') ? d->icon_path : ND_PATH_WARNING_ICON;
-    icon = nd_ui_get_image(ui, icon_path);
-    if (icon != NULL) {
-        if (icon->fmt == ND_PIXFMT_RGBA8888)
-            (void)nd_image_blit_alpha(ui->canvas, icon, d->margin, d->margin);
-        else
-            (void)nd_image_blit(ui->canvas, icon, d->margin, d->margin);
-    }
-
-    /* 3. Title. */
-    y = d->margin;
-    font_title = title_font_of(ui);
-    if (d->title != NULL && d->title[0] != '\0' && font_title != NULL) {
-        int32_t th = 0;
-        int32_t title_x = d->margin + ((icon != NULL) ? icon->w + 6 : 0);
-
-        (void)nd_draw_text(dr, title_x, d->margin, d->title, font_title, ND_WHITE);
-        nd_text_size(font_title, d->title, NULL, &th);
-        y = nd_max32(y, d->margin + th + 6);
-    }
-    if (icon != NULL) {
-        /* The body must clear the icon even when the title is shorter than it,
-         * or the first line lands on the triangle. */
-        y = nd_max32(y, d->margin + icon->h + 6);
-    }
-
-    /* 4. Which look. The 20 px wrap only has to answer "more than two lines?",
-     *    so it runs into a three-line buffer: n > 2, or the buffer overflowed,
-     *    both mean the paragraph form. */
-    max_w = screen_w - (d->margin * 2);
-    alert_font = (ui->font_n != NULL) ? ui->font_n : body_font_of(ui);
-    nd_lines_init(&alert, alert_store, ND_ARRAY_LEN(alert_store));
-    nd_text_wrap_break_pop(&alert, d->message, alert_font, max_w);
-
+    /* 2 to 5b: the icon, the body origin, the look, the wrap and the clip, all
+     *          in the one pass nd_msgdialog_measure() also uses. */
     nd_lines_init(&lines, body_store, ND_ARRAY_LEN(body_store));
-    if (alert.n <= 2u && !alert.truncated) {
-        font_body = alert_font;
-        centered = true;
-        for (i = 0u; i < alert.n; i++)
-            (void)nd_lines_push(&lines, nd_lines_at(&alert, i));
-    } else {
-        font_body = body_font_of(ui);
-        centered = false;
-        nd_text_wrap_break_pop(&lines, d->message, font_body, max_w);
+    laid_out = dialog_layout_of(d, &lines, &lay);
+
+    /* 2b. The icon itself. dialog_layout_of() resolved and cached it; this is
+     *     only the blit, at the fixed margin corner it measured against. */
+    if (lay.icon != NULL) {
+        if (lay.icon->fmt == ND_PIXFMT_RGBA8888)
+            (void)nd_image_blit_alpha(ui->canvas, lay.icon, d->margin, d->margin);
+        else
+            (void)nd_image_blit(ui->canvas, lay.icon, d->margin, d->margin);
     }
-    if (font_body == NULL)
+
+    /* 3b. The title, beside the icon. Its height already went into lay.y. */
+    if (d->title != NULL && d->title[0] != '\0' && lay.font_title != NULL) {
+        int32_t title_x = d->margin + ((lay.icon != NULL) ? lay.icon->w + 6 : 0);
+
+        (void)nd_draw_text(dr, title_x, d->margin, d->title, lay.font_title, ND_WHITE);
+    }
+
+    /* No body face at all -- neither font_s nor font_n loaded. The icon and
+     * title are already down and there is nothing else to draw, no softkey and
+     * no present. Checked HERE, after those two, because that is where the
+     * inline version checked it and a frame is a frame. */
+    if (!laid_out)
         return;
-
-    /* 5. Line height from the INK of "Ag", so the two looks are 24 and 18. */
-    nd_text_size(font_body, "Ag", NULL, &ag_h);
-    line_h = ag_h + 3;
-
-    /* 5b. Clip, and mark the clip with the invisible ellipsis. int() truncates
-     *     toward zero, which is why this is a double divide and not / . */
-    max_lines = nd_max32(1, nd_trunc32((double)(content_bottom - y - d->margin) / (double)line_h));
-    if (max_lines > (int32_t)ND_ARRAY_LEN(body_store))
-        max_lines = (int32_t)ND_ARRAY_LEN(body_store);
-    if (lines.n > (size_t)max_lines || lines.truncated) {
-        if (lines.n > (size_t)max_lines)
-            lines.n = (size_t)max_lines;
-        if (lines.n > 0u)
-            append_ellipsis(body_store[lines.n - 1u], ND_TEXT_LINE_MAX);
-    }
+    y = lay.y;
+    line_h = lay.line_h;
 
     /* 6. Vertically centre the body in the space above the softkey. */
     y += nd_max32(0, floordiv2(content_bottom - d->margin - y - (int32_t)lines.n * line_h));
@@ -286,13 +380,13 @@ static void dialog_draw(nd_msgdialog *d)
         const char *line = nd_lines_at(&lines, i);
         int32_t x = d->margin;
 
-        if (centered) {
+        if (lay.centered) {
             int32_t lw = 0;
 
-            nd_text_size(font_body, line, &lw, NULL);
+            nd_text_size(lay.font_body, line, &lw, NULL);
             x = nd_max32(d->margin, floordiv2(screen_w - lw));
         }
-        (void)nd_draw_text(dr, x, y, line, font_body, ND_WHITE);
+        (void)nd_draw_text(dr, x, y, line, lay.font_body, ND_WHITE);
         y += line_h;
     }
 

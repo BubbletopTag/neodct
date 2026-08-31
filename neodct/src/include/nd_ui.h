@@ -324,12 +324,22 @@ void nd_ui_show_pending_battery_warning(nd_ui *ui);
 void nd_ui_show_pending_modem_fault(nd_ui *ui);
 
 /* What that modal says. Written for somebody holding a phone, not for a
- * developer reading a log: it names the fault, gives the one thing worth
- * trying, and says what it means if that does not work. The reason string
- * from the service goes to the console instead. */
-#define ND_UI_MODEM_FAULT_MESSAGE                                       \
-    "Modem ERROR!\n\nYou may need to restart the device. If this does " \
-    "not fix the issue, there is a potential hardware fault."
+ * developer reading a log: it names the fault, says what it probably is, and
+ * gives the one thing worth trying. The reason string from the service goes
+ * to the console instead.
+ *
+ * IT HAS TO FIT. nd_msgdialog clips a message that does not, and clips it
+ * INVISIBLY -- the " …" it appends is U+2026, which this font has no glyph
+ * for, so an overlong message simply stops mid-sentence with nothing to say
+ * it was cut. The first version of this string did exactly that on a real
+ * phone: seven lines into a five-line dialog, ending at "there is".
+ *
+ * Five lines is the whole budget (see nd_msgdialog_measure), the blank line
+ * costs one of them, and test_the_modem_fault_message_fits() fails if a
+ * rewrite spends more. Two sentences, each short enough to land on its own
+ * line, is what that buys. */
+#define ND_UI_MODEM_FAULT_MESSAGE \
+    "Modem ERROR!\n\nPossible hardware fault. Try rebooting the phone."
 
 /* True when the radio is in ND_MODEM_LINK_FAULT. The home screen drops the
  * carrier line entirely when it is. */
