@@ -4,9 +4,8 @@
 # A cloud agent can build this OS and run its tests, but it cannot LOOK at it.
 # This closes that gap: an X server with no monitor, a window manager, the
 # QEMU window inside it, and two ways in from outside -- a browser (noVNC over
-# an ngrok HTTP tunnel, which needs nothing installed at the far end) and a
-# native VNC client (over an ngrok TCP tunnel, for when the browser is too old
-# or the latency is annoying).
+# a wstunnel reverse tunnel to a VPS you own, which needs nothing installed at
+# the far end) and a native VNC client on the same session.
 #
 # The far end of this is often a machine you would not choose: an old laptop,
 # someone else's desktop, a phone. So the browser path is the one that is kept
@@ -14,7 +13,8 @@
 #
 #   cloud-test.sh start      X + openbox + VNC + noVNC, then print the URLs
 #   cloud-test.sh qemu       boot the NeoDCT image inside that X server
-#   cloud-test.sh tunnel     (re)open the ngrok tunnels and print the URLs
+#   cloud-test.sh tunnel     reverse-tunnel noVNC to your VPS over wss/443
+#   cloud-test.sh vps        print what to run on the VPS to receive it
 #   cloud-test.sh shot FILE  grab the whole desktop to a PNG, for the agent
 #   cloud-test.sh panel FILE grab JUST the phone panel, which is what to look at
 #   cloud-test.sh key K      send one key to the QEMU window (see KEYS below)
@@ -139,26 +139,24 @@
 # not a misconfiguration, and working around it is out of bounds even when
 # the person asking owns the machine.
 #
-# ============ THE CONFIG FILE HOLDS A SECRET ============
+# ============ THE TUNNEL HOLDS A SECRET ============
 #
-# `tunnel` reads $RUNDIR/ngrok.yml, which this script deliberately does NOT
-# create: it carries an account authtoken and RUNDIR is under /tmp so that it
-# cannot be committed by accident. Write it by hand:
+# `tunnel` needs two things and keeps both in $RUNDIR, under /tmp, so that
+# neither can be committed by accident:
 #
-#     mkdir -p /tmp/neodct-cloud && chmod 700 /tmp/neodct-cloud
-#     cat > /tmp/neodct-cloud/ngrok.yml <<'YML'
-#     version: "3"
-#     agent:
-#       authtoken: <yours>
-#     endpoints:
-#       - name: vnc            # a native viewer: TigerVNC, RealVNC, Remmina
-#         url: tcp://
-#         upstream: { url: 5901 }
-#       - name: novnc          # a browser, which is what an old machine has
-#         url: https://
-#         upstream: { url: 6080 }
-#     YML
-#     chmod 600 /tmp/neodct-cloud/ngrok.yml
+#   wstunnel.secret   the --http-upgrade-path-prefix. The SERVER restricts on
+#                     the same string, so it is the only thing between a
+#                     passer-by who finds the port and this container's
+#                     screen. Generated on first use.
+#   wstunnel.host     the VPS, remembered so it is typed once.
+#
+#     NEODCT_TUNNEL_HOST=<a-b-c-d>.sslip.io cloud-test.sh tunnel
+#     cloud-test.sh vps      # prints what to run on the far end
+#
+# The host must be a NAME. See the proxy notes above: the proxy validates the
+# origin certificate itself and does it by name, so an address fails even
+# with a valid certificate. sslip.io turns an address into a name for free
+# and `tunnel` does that conversion rather than let it fail obscurely.
 #
 # ============ WHY A REAL X SERVER AND NOT QEMU'S -vnc ============
 #
@@ -186,6 +184,10 @@ GEOMETRY="${NEODCT_VNC_GEOMETRY:-1024x768}"
 RUNDIR="${NEODCT_CLOUD_RUNDIR:-/tmp/neodct-cloud}"
 PASSFILE="$RUNDIR/vncpasswd"
 PLAINFILE="$RUNDIR/password.txt"
+# The wstunnel upgrade-path prefix. Both ends must carry the same string,
+# and it stays in $RUNDIR rather than the repo -- it is the only thing
+# standing between a passer-by and this container's screen.
+SECRETFILE="$RUNDIR/wstunnel.secret"
 
 mkdir -p "$RUNDIR"
 
@@ -403,26 +405,115 @@ cmd_qemu() {
 # ------------------------------------------------------------------ #
 
 cmd_tunnel() {
-    command -v ngrok >/dev/null 2>&1 || die "ngrok is not installed"
-    pkill -x ngrok 2>/dev/null || true
-    sleep 1
+    # wstunnel, NOT ngrok. This used to run ngrok and that was wrong in a way
+    # that cost a whole session: the measurements are in
+    # .claude/skills/neodct-app/references/cloud-testing.md and they say ngrok
+    # cannot work here. Its free plan refuses to run behind a proxy at all
+    # (ERR_NGROK_9009), and paying would not obviously help, because its agent
+    # speaks TLS to its own edge and would break against this proxy's MITM the
+    # same way a self-signed certificate does.
+    #
+    # The container's egress is one shape of traffic and one only: TLS, on
+    # port 443, to a host with a publicly trusted certificate, ADDRESSED BY
+    # HOSTNAME. wstunnel is the only tunnel of the three that fits, because
+    # you own both ends -- so the origin can have a real certificate -- and
+    # because it is the only one with an --http-proxy flag.
+    #
+    #     NEODCT_TUNNEL_HOST=1-2-3-4.sslip.io cloud-test.sh tunnel
+    #
+    # The host is remembered in $RUNDIR/wstunnel.host, so it is given once.
+    command -v wstunnel >/dev/null 2>&1 || die "wstunnel is not installed
+  curl -L -o /tmp/w.tgz https://github.com/erebe/wstunnel/releases/download/v10.7.0/wstunnel_10.7.0_linux_amd64.tar.gz
+  tar -xzf /tmp/w.tgz -C /usr/local/bin wstunnel"
 
-    log "opening tunnels"
-    nohup ngrok start --all --config "$RUNDIR/ngrok.yml" > "$RUNDIR/ngrok.log" 2>&1 &
-    # ngrok's local API is the only reliable way to learn the public URL.
-    i=0
-    while [ $i -lt 40 ]; do
-        if curl -s --noproxy '*' http://127.0.0.1:4040/api/tunnels 2>/dev/null | grep -q public_url; then
-            break
-        fi
-        i=$((i + 1)); sleep 0.5
-    done
-    curl -s --noproxy '*' http://127.0.0.1:4040/api/tunnels 2>/dev/null \
-        | python3 -c 'import sys,json
-d=json.load(sys.stdin)
-for t in d.get("tunnels",[]):
-    print("  %-8s %s" % (t["name"], t["public_url"]))' 2>/dev/null \
-        || { log "no tunnels yet; see $RUNDIR/ngrok.log"; return 1; }
+    hostfile="$RUNDIR/wstunnel.host"
+    host="${NEODCT_TUNNEL_HOST:-$(cat "$hostfile" 2>/dev/null || true)}"
+    [ -n "$host" ] || die "no tunnel host.
+  Set one: NEODCT_TUNNEL_HOST=<a-b-c-d>.sslip.io cloud-test.sh tunnel
+  See 'cloud-test.sh vps' for what to run on the far end."
+
+    # An IP is the documented way to get this wrong. The proxy validates the
+    # origin certificate itself and it does that by NAME: connecting by
+    # address fails even when the certificate is valid, and the log line that
+    # tells you is SNI IpAddress(...) where it should read SNI DnsName(...).
+    # sslip.io resolves a-b-c-d.sslip.io to a.b.c.d, so an address can always
+    # be turned into a name without buying a domain -- do it here rather than
+    # let it fail in a way that looks like a server problem.
+    case "$host" in
+        *[0-9].[0-9]*.[0-9]*.[0-9]*)
+            case "$host" in
+                *.sslip.io|*.nip.io) : ;;
+                *[a-zA-Z]*) : ;;
+                *)
+                    dashed=$(printf '%s' "$host" | tr '.' '-')
+                    log "$host is an address; using $dashed.sslip.io so the proxy can validate by name"
+                    host="$dashed.sslip.io"
+                    ;;
+            esac
+            ;;
+    esac
+    printf '%s\n' "$host" > "$hostfile"
+
+    if [ ! -f "$SECRETFILE" ]; then
+        tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 48 > "$SECRETFILE"
+        chmod 600 "$SECRETFILE"
+        log "generated a new upgrade-path secret; the server needs the same one"
+    fi
+    secret="$(cat "$SECRETFILE")"
+
+    pkill -f 'wstunnel client' 2>/dev/null || true
+    sleep 1
+    log "tunnelling :$NOVNC_PORT to $host over wss/443"
+    # setsid: a plain & dies with the shell this tool call runs in, and the
+    # tunnel is meant to outlive it.
+    setsid env RUST_LOG=info wstunnel client \
+        -R "tcp://[::]:${NOVNC_PORT}:127.0.0.1:${NOVNC_PORT}" \
+        --http-upgrade-path-prefix "$secret" \
+        --http-proxy "${HTTPS_PROXY:-}" \
+        "wss://${host}:443" >> "$RUNDIR/wstunnel.log" 2>&1 &
+    sleep 4
+
+    if grep -q "SNI IpAddress" "$RUNDIR/wstunnel.log" 2>/dev/null; then
+        log "WARNING: connecting by address, not name -- the proxy will reject this"
+    fi
+    if pgrep -f 'wstunnel client' >/dev/null 2>&1; then
+        log "up:  http://${host%%.sslip.io}:$NOVNC_PORT/vnc.html   (or http://$host:$NOVNC_PORT/vnc.html)"
+        log "vnc password: $(cat "$PLAINFILE" 2>/dev/null || echo '(see '"$PASSFILE"')')"
+        log "it retries on its own, so starting the server end later is fine"
+    else
+        log "wstunnel exited; see $RUNDIR/wstunnel.log"
+        return 1
+    fi
+}
+
+# What to run on the far end. Printed rather than done, because it is somebody
+# else's machine and needs root there.
+cmd_vps() {
+    hostfile="$RUNDIR/wstunnel.host"
+    host="${NEODCT_TUNNEL_HOST:-$(cat "$hostfile" 2>/dev/null || echo '<a-b-c-d>.sslip.io')}"
+    secret="$(cat "$SECRETFILE" 2>/dev/null || echo '<run tunnel once to generate one>')"
+    cat <<VPSEOF
+On the VPS, once:
+
+    sudo certbot certonly --standalone -d $host
+
+Then, to serve (the path prefix must match this container's secret):
+
+    sudo wstunnel server \\
+      --restrict-http-upgrade-path-prefix '$secret' \\
+      --tls-certificate /etc/letsencrypt/live/$host/fullchain.pem \\
+      --tls-private-key  /etc/letsencrypt/live/$host/privkey.pem \\
+      'wss://[::]:443'
+
+Then open, from anything -- a phone, a cheap laptop:
+
+    http://$host:$NOVNC_PORT/vnc.html
+
+A reset from this container means the far end is not answering on 443: either
+wstunnel server is not running or its certificate is not one a public trust
+store accepts. The proxy fabricates "200 Connection Established" for any
+host:port, so a successful CONNECT proves nothing.
+VPSEOF
 }
 
 # ------------------------------------------------------------------ #
@@ -495,15 +586,19 @@ cmd_status() {
     printf 'novnc     :%s  %s\n' "$NOVNC_PORT" \
         "$(listening "$NOVNC_PORT" && echo up || echo down)"
     printf 'qemu           %s\n' "$(qemu_pid && echo up || echo down)"
-    # -x, not -f: `pgrep -f 'ngrok '` also matches the shell that invoked this
-    # script, so status cheerfully reported a tunnel that had already died.
-    printf 'ngrok          %s\n' "$(pgrep -x ngrok >/dev/null && echo up || echo down)"
-    if pgrep -x ngrok >/dev/null 2>&1; then
-        curl -s --noproxy '*' http://127.0.0.1:4040/api/tunnels 2>/dev/null \
-            | python3 -c 'import sys,json
-d=json.load(sys.stdin)
-for t in d.get("tunnels",[]):
-    print("  %-8s %s" % (t["name"], t["public_url"]))' 2>/dev/null || true
+    # A running client is not a connected one: it retries for as long as the
+    # far end is silent, which is the normal state while somebody is still
+    # starting the server. So report both, and separately.
+    if pgrep -f 'wstunnel client' >/dev/null 2>&1; then
+        host="$(cat "$RUNDIR/wstunnel.host" 2>/dev/null || echo '?')"
+        if [ -f "$RUNDIR/wstunnel.log" ] && \
+           tail -40 "$RUNDIR/wstunnel.log" 2>/dev/null | grep -q 'Tunnel created\|Starting TCP server'; then
+            printf 'tunnel         up -> http://%s:%s/vnc.html\n' "$host" "$NOVNC_PORT"
+        else
+            printf 'tunnel         retrying -> %s (is wstunnel server up there?)\n' "$host"
+        fi
+    else
+        printf 'tunnel         down\n'
     fi
     [ -f "$PLAINFILE" ] && printf 'password  %s\n' "$(cat "$PLAINFILE")"
     return 0
@@ -526,10 +621,11 @@ case "${1:-status}" in
             if qemu_pid; then kill "$(cat "$RUNDIR/qemu.pid")" 2>/dev/null || true; fi
             rm -f "$RUNDIR/qemu.pid"; log "qemu stopped" ;;
     tunnel) cmd_tunnel ;;
+    vps)    cmd_vps ;;
     shot)   shift; cmd_shot "$@" ;;
     key)    shift; cmd_key "$@" ;;
     panel)  shift; cmd_panel "$@" ;;
     status) cmd_status ;;
     stop)   cmd_stop ;;
-    *)      die "usage: cloud-test.sh {start|qemu|stop-qemu|tunnel|shot|panel|key|status|stop}" ;;
+    *)      die "usage: cloud-test.sh {start|qemu|stop-qemu|tunnel|vps|shot|panel|key|status|stop}" ;;
 esac
