@@ -598,8 +598,9 @@ cards. Gate `env.sh`. Remove the dead packages in §4. None of this needs a user
 to exist.
 
 **Phase 1 — the two users, DAC only.**
-`ndusr` and `ndusr_ut` exist; the mode-bit layout of §1; the core drops to
-`ndusr` after opening the framebuffer; udev rules and group membership for the
+`ndusr` and `ndusr_ut` exist; the mode-bit layout of §1; ~~the core drops to
+`ndusr` after opening the framebuffer~~ **the APPS drop to `ndusr`, and the core
+does not — see §8**; udev rules and group membership for the
 devices the audit tabulates. `/NeoDCT/User/browser` is the untrusted directory
 for now, because it is the one that works without a namespace. Stop here and the
 browser still has `/dev/fb0`, but `ndusr_ut` can no longer read the SMS
@@ -854,3 +855,86 @@ kernel actually gave it.
 every defconfig" first under Gotchas and the advice was to remember to diff
 them by hand; section 4 then asks for four package removals in four commits,
 which is eight edits across four files. It is a guard, not a feature.
+
+---
+
+## 8. The deviation: the core stays root
+
+This document said the core drops to `ndusr` after opening the framebuffer.
+It does not, and will not. The decision was taken deliberately after Phase 1
+was built and booted, and this section is the record of why, because a plan
+that quietly stops being followed is worse than one that says where it turned.
+
+### What forced it
+
+Five operations need privilege the core cannot get any other way:
+`clock_settime` for SNTP, reboot and poweroff, starting `sshd`, formatting a
+card, and `unshare(CLONE_NEWNS)`.
+
+The fifth is the one that decides it, and it is structural rather than a
+matter of taste. `nd_proc.c` unshares the mount namespace and mounts a tmpfs
+over each of the browser's hidden paths **in the child, before the privilege
+drop**, because both need `CAP_SYS_ADMIN` — the comment there says so. A core
+that has already dropped to `ndusr` cannot do that, so dropping it costs
+Phase 2 outright. The alternatives are all worse:
+
+| instead | why not |
+| --- | --- |
+| `CAP_SYS_ADMIN` on the core | very nearly root; the drop buys almost nothing |
+| `CLONE_NEWUSER` first | needs `CONFIG_USER_NS`, unverified on the 5.10 BSP and not in the kernel fragment |
+| a setuid launcher | a new setuid-root binary is precisely the class of thing this work exists to avoid |
+
+The other four would each have wanted a setuid helper too, and a helper only
+moves *one* capability out of the core: a compromised core still reads
+`/NeoDCT/User/.remote`, still opens the modem, still executes what it
+downloaded.
+
+### What replaces it
+
+**SELinux**, which is a better fit than the drop ever was and which §6 now
+covers in detail. Type enforcement does not consult the uid, so a root process
+in `neodct_core_t` gets only what policy grants — it constrains the core
+*while* it holds `CAP_SYS_TIME`, which no helper can. And unlike Landlock, the
+kernel version is not the obstacle: SELinux has been in mainline since 2.6, so
+this is a config question, not a version question.
+
+The cost is honest and it is a sequencing cost, not a technical one: SELinux
+needs a kernel rebuild and a reflash, and until the policy is *enforcing* it
+buys nothing at all. The two tracks therefore sit on different delivery
+channels — the DAC work ships in a `.ndsw` today; SELinux needs hardware in
+hand — and the rule is not to trade the shippable one for the one that is not.
+
+### What the apps do instead
+
+Apps drop to `ndusr`. That was never blocked by any of the five operations,
+and it is where almost all the value was: an app is 26 processes' worth of
+attack surface and the core is one.
+
+Two exceptions, both in `nd_proc_app_needs_root()`:
+
+- **Engineering apps, when engineering mode is on.** RemoteShell exists to
+  hand out a root shell and LinuxShell, Modem, KeypadMapperI2C and FuelGauge
+  exist to poke at hardware; confining them makes them useless rather than
+  making the phone safer. Decided by *where the app lives* — under
+  `/NeoDCT/System/engineering/apps/` — which is on the read-only, dm-verity'd
+  rootfs and therefore cannot be forged.
+- **A shrinking list of stock apps** whose one privileged operation has no
+  route through `nd_svc` yet. Written as whole paths, not names, so that a
+  directory called `Power` somewhere else is just a directory. Every name
+  removed from that list is one verb added to `nd_svc.h`.
+
+### The gate, stated plainly because it is a hole
+
+Engineering mode is `system.ui.engineering_mode` in `settings.prop`, on the
+**writable** partition. `AGENTS.md` already says this is not a security gate —
+*"it lives in `settings.prop`, on the partition the attacker just wrote to"* —
+and it is right. Anything running as `ndusr` can set that key and get root
+back through the next engineering app it opens.
+
+This is known and accepted while the architecture is being settled. The fix is
+already proven elsewhere in this tree: `env.sh` had exactly this problem and
+is now gated on `neodct.devenv=1` on the kernel command line, which the
+writable partition cannot set. The second gate belongs here too — the settings
+key for the menu, the cmdline flag for the privilege, both required — and the
+code is written so that adding it is one `&&`. When the initramfs recovery
+work lands it is the natural place to set that flag.

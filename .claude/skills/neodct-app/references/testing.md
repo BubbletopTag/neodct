@@ -114,3 +114,49 @@ at 14 px has 13 rows of ink, not 10, and a marker placed on the assumption of
 10 draws a line through the glyph. That bug survived a clean build, a clean
 test run, and a confident description of the design -- and died the moment
 someone looked at a 4x zoom of the grid.
+
+
+## Fixtures and the privilege drop
+
+Apps no longer run as root. `nd_proc_launch_app()` drops an ordinary app to
+`ndusr` (see `nd_proc_app_needs_root()`), and that quietly changed what a test
+fixture has to look like. It has now cost three separate debugging sessions,
+so it is written down.
+
+**A fixture stands in for `/NeoDCT`, so it has to be shaped like `/NeoDCT`.**
+Two properties matter and neither is obvious:
+
+1. **The staged root must be traversable — 0711, not `mkdtemp`'s 0700.** The
+   app the test launches lives *under* the fixture, so a dropped child cannot
+   resolve the path to `nd-apprun` and dies before running anything. On the
+   phone this never happens because `/` and `/NeoDCT/System` are 0755.
+   `platform_test.h`'s `pt_new_case()` does this for you; a test that stages
+   its own root with `mkdtemp` must do it itself.
+
+2. **`/NeoDCT/User` must be owned by `ndusr`.** `S00userdata` takes ownership
+   on the first boot, so on a phone an app can write its own partition. A
+   fixture that creates the directory root-owned gives the app a partition it
+   cannot write. `test_svc.c` and `test_t9_app.c` have a `stage_user_owner()`
+   helper; copy it.
+
+**How it fails is the reason this is worth reading.** None of these produce an
+error mentioning permissions:
+
+- `test_proc` gave thirteen assertion failures about crash reports and exit
+  codes.
+- `test_svc` and `test_t9_app` **hung**, because the parent waited for a reply
+  from a child that had already exited 1.
+- `test_browser` reported "console does not contain [Browser] ..." fourteen
+  times — the browser had produced no output at all.
+
+**And it only bites on some machines.** A build host normally has no `ndusr`,
+so `run_as.valid` is false, the drop is a documented no-op, and everything
+passes. Create the users to run `nd-selftest` and the same commit starts
+failing. If a test suddenly breaks or hangs after you touched nothing relevant,
+check `getent passwd ndusr` before looking anywhere else.
+
+The flip side is worth knowing too: **on a machine that does have the users and
+is running as root, those tests exercise the real drop** — a real `fork`, a
+real `nd_priv_become()`, a real `execve`. That is the only way to cover the
+privilege path from a host at all, and `test_browser`'s
+`t_run_with_the_untrusted_user_really_drops` exists for exactly that.
