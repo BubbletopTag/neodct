@@ -33,6 +33,9 @@
 #   NEODCT_DISPLAY=none ...                   no panel at all (the UI cannot
 #                                             boot; serial/recovery only)
 #   NEODCT_DISPLAY=offscreen ...              panel present, no window
+#   NEODCT_DISPLAY=vnc ...                    panel over VNC, no desktop needed
+#                                             (127.0.0.1:5901; NEODCT_VNC to move it)
+#   NEODCT_MONITOR=/tmp/ndmon ...             QEMU monitor socket -- screendump
 #
 # Persistence matters for update testing: SystemUpdate stages an update, the
 # phone reboots and the initramfs applies it. With NEODCT_SNAPSHOT=1 that
@@ -50,6 +53,10 @@ DISPLAY_MODE="${NEODCT_DISPLAY:-gtk}"
 AUDIO="${NEODCT_AUDIO:-pa}"
 SHARE_DIR="${NEODCT_SHARE:-$HOME/neodct-sdcard}"
 MONITOR="${NEODCT_MONITOR:-}"
+
+# Where a vnc display listens. See the `vnc` case below for why the default
+# is a loopback address and not a bare ":1".
+VNC_ADDR="${NEODCT_VNC:-127.0.0.1:1}"
 EXTRA="${NEODCT_QEMU_EXTRA:-}"
 
 # SIM7600 as seen on the USB bus.
@@ -160,6 +167,43 @@ case "$DISPLAY_MODE" in
             -device virtio-gpu-pci \
             -device virtio-keyboard-pci \
             -display none \
+            -serial stdio
+        APPEND="$APPEND video=Virtual-1:240x175M"
+        ;;
+    vnc)
+        # The panel over the wire: a real, clickable phone with no desktop on
+        # the machine running it. What `offscreen` is for smoke tests, this is
+        # for actually using the thing -- over ssh, in a container, on a build
+        # box.
+        #
+        #     NEODCT_DISPLAY=vnc neodct/tools/run_qemu.sh
+        #     vncviewer localhost:5901          (display :1 is port 5901)
+        #
+        # THE ADDRESS DEFAULTS TO LOOPBACK, DELIBERATELY. `-vnc :1` on its own
+        # binds every interface, and a QEMU VNC server has no password unless
+        # one is configured -- so the bare form publishes an interactive
+        # console, as root, to the whole network. For a remote box the right
+        # move is an ssh tunnel to the loopback listener:
+        #
+        #     ssh -L 5901:127.0.0.1:5901 the-box
+        #
+        # NEODCT_VNC overrides it if you really do want to listen wider; it is
+        # passed to -vnc verbatim, so NEODCT_VNC="0.0.0.0:1,password=on" and
+        # the like work.
+        #
+        # virtio-tablet-pci matters here in a way it does not for gtk: VNC
+        # sends absolute pointer positions, and without a tablet QEMU has to
+        # guess at relative motion, which puts the cursor nowhere near where
+        # you clicked.
+        #
+        # -serial stdio still applies, so the console is in the terminal you
+        # started it from while the panel is in the viewer. That combination
+        # is the reason to prefer this over gtk even where a desktop exists.
+        set -- "$@" \
+            -device virtio-gpu-pci \
+            -device virtio-keyboard-pci \
+            -device virtio-tablet-pci \
+            -vnc "$VNC_ADDR" \
             -serial stdio
         APPEND="$APPEND video=Virtual-1:240x175M"
         ;;

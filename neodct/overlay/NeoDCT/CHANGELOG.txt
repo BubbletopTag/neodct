@@ -1,6 +1,6 @@
 # NeoDCT OS Changelog
 
-Unreleased
+0.5.0b
 The browser stops being the phone.
 
 Until now every process on this phone was root, which meant the security
