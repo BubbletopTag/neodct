@@ -1,7 +1,8 @@
 # NeoDCT OS Changelog
 
 0.5.0b
-The browser stops being the phone, and the phone keeps a diary.
+The browser stops being the phone, the phone keeps a diary, and the phone
+says so when it falls over.
 
 --- The browser stops being the phone ---
 
@@ -122,6 +123,41 @@ Changed
   same thing while a text was the only thing a banner could be about.
 - Banner lines are fitted to the screen before they are drawn. A message
   count could never reach the signal meter; an event's name can.
+
+--- A crash screen for the phone itself, and a way back from it ---
+
+When an app crashed you got the sick Nokia and a way back to the menu. When
+the operating system crashed you got a red block of text on a console and the
+phone sat there until the battery came out -- the boot script printed
+"CRITICAL SYSTEM FAILURE" and then ended, and inittab starts that script
+`once`, so nothing was ever going to bring the UI back.
+
+The same artwork now appears for a core crash, pinned to the left with live
+text beside it: "Core System Crashed!", what killed it, which attempt this
+was, and "Restarting in 3... 2... 1...". Then the phone brings the UI back.
+
+Crash, restart, crash, restart forever would be worse than the frozen screen
+it replaces, so consecutive crashes are counted. Three in a row without the
+phone ever working in between and it stops, says so, and leaves the message
+up. "Working in between" means the UI ran for two minutes, measured from
+/proc/uptime rather than from the clock -- this phone boots at 1970 and may
+have its time corrected halfway through the run being measured.
+
+Added
+- A core crash shows a real screen and restarts the UI by itself. The screen
+  is drawn by a separate small program, so almost nothing it needs is code
+  that could have died with the core; if even that will not run, the old red
+  banner still appears and the phone still restarts.
+- The screen says which try this was, and the crash log records it.
+
+Fixed
+- Application crash history survives a reboot. The boot script was sending
+  the UI's error output to /NeoDCT/User/logs/crash.log with a truncating
+  redirect -- the same file the crash handler appends its reports to -- so
+  every boot wiped every crash that had ever been recorded, and afterwards
+  the two writers overwrote each other. The UI's output has its own file
+  now, /NeoDCT/User/logs/core.log, kept across a restart loop so the crash
+  before the one on screen is still there to read.
 
 0.4.10a
 Red and blue, the right way round.

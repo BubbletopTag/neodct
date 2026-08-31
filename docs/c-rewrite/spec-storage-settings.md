@@ -111,9 +111,11 @@ operating system (via `waitpid()`) *that* it died and *how* — which signal kil
 The core then draws exactly the same screen. The picture on screen must be
 pixel-identical; only the plumbing behind it is different.
 
-**The whole UI breaks.** Then the shell script that launched it paints a red screen on
-the text console saying `CRITICAL SYSTEM FAILURE / CODE: <n>`. That script does not
-change.
+**The whole UI breaks.** Then the shell script that launched it used to paint a red
+screen on the text console saying `CRITICAL SYSTEM FAILURE / CODE: <n>`, and end. It
+now draws the same sick-Nokia artwork as an app crash, counts up to three consecutive
+failures, and restarts the UI in between. See `spec-core-panic.md`; the tty0 banner
+survives as the fallback for when the program that draws the real screen cannot run.
 
 ### 5. Remote Shell — getting into the phone over the internet
 
@@ -149,7 +151,7 @@ process IDs, and be very careful about killing the right thing.
 | `System/core/logstyle.py` | 256-colour serial log tags | `libneodct.so`: `nd_log.c` / `nd_log.h` |
 | `System/engineering/apps/RemoteShell/main.py` | the on-phone switch/address book | app: `apps/RemoteShell/app.so` — `app_remoteshell.c` |
 | `System/hw/neodct-sdcard` (shell) | mounts cards, publishes state | **unchanged**, stays a busybox `ash` script |
-| `bin/run_neodct.sh` (shell) | launches the UI, paints the tty0 death screen | **unchanged** apart from `python3 /NeoDCT/launcher.py` → `/NeoDCT/System/bin/nd-core` |
+| `bin/run_neodct.sh` (shell) | launches the UI, paints the tty0 death screen | stays a busybox `ash` script, but no longer *only* that: `python3 /NeoDCT/launcher.py` → `/NeoDCT/System/bin/nd-core`, and the death screen moved into `bin/nd-crashguard.sh` + `bin/nd-panic`. `spec-core-panic.md` |
 | `scripts/post-build-system-metadata.sh` | writes `version.prop` at build time | **unchanged** |
 | `etc/neodct-colors.sh` | the same palette for shell scripts | **unchanged** |
 
@@ -834,14 +836,14 @@ The non-engineering dialog uses `MessageDialog`'s own defaults: `title=None`,
 | `core/main.py:948` `render_menu()` `except BaseException` | prints `[OS] Menu crashed`, traceback, `log_crash("menu", …)`; `finally: self.state = "HOME"`. **No crash screen.** | explicit error returns in the menu code, funnelled to `nd_crash_log("menu", …)`; state forced back to `HOME`. |
 | `core/main.py:1312` main loop `except BaseException` | prints `[CORE] Unhandled exception in main loop`, traceback, `log_crash("core-main-loop", …)`, `sleep(0.1)`. **No crash screen.** | error returns from `nd_core_tick()`; log and sleep 100 ms. A genuine `SIGSEGV` in the core is not survivable and falls through to the shell handler below. |
 | `core/main.py:1146` `_open_notification()` `except BaseException` | prints `[NOTIFY] Read flow crashed`, traceback. **No `log_crash`, no screen.** | same: log to serial only. |
-| `bin/run_neodct.sh:42` | UI process exited: red `\033[41m\033[1;97m` on `/dev/tty0`, `clear`, three `=`-rules and `CODE: $EXIT_CODE` | **unchanged shell script**; the `python3 /NeoDCT/launcher.py` line becomes the C core binary |
+| `bin/run_neodct.sh:42` | UI process exited: red `\033[41m\033[1;97m` on `/dev/tty0`, `clear`, three `=`-rules and `CODE: $EXIT_CODE` | superseded by `spec-core-panic.md`: `nd-panic` draws the real screen on the framebuffer and the loop in `nd-crashguard.sh` restarts the core up to three times. The ANSI banner is kept as `guard_banner`, for when `nd-panic` cannot reach the panel |
 | `apps/Crash` engineering app (`engineering/apps/Crash/main.py`, 17 lines) | deliberately raises, to exercise the path | port as an app that deliberately dereferences NULL, so the whole `waitpid` path is testable on-device |
 
 `IncomingCall` and `KeyboardInterrupt` are re-raised, never treated as crashes
 (`core/main.py:925`). In C the equivalent is: a child exiting with a reserved status
 code meaning "the phone rang" / "the user cancelled" is not a crash.
 
-#### F-8. The crash-log truncation bug — **must be flagged, must be reproduced**
+#### F-8. The crash-log truncation bug — **fixed, not reproduced**
 
 `bin/run_neodct.sh:29` runs the UI as:
 ```sh
@@ -858,7 +860,12 @@ script uses `/tmp/crash.log` instead — but `CrashHandler` always uses
 `/NeoDCT/User/logs/crash.log` regardless, so the two diverge on a read-only user
 partition.
 
-Reproduce as-is; entry filed in `OPEN-QUESTIONS.md`.
+**Fixed** when the core crash screen landed; `spec-core-panic.md` §4.1 has the full
+account. `2>>` alone would not have been enough -- two writers sharing one file with
+independent offsets still overwrite each other -- so nd-core's stderr moved to
+`/NeoDCT/User/logs/core.log`, which it now has to itself. The `/tmp` divergence noted
+above went with it: the fallback path names `core.log` too, and `nd_crash_log()` is
+the only writer of `crash.log` again.
 
 ---
 
@@ -1639,7 +1646,7 @@ Module placement:
 | # | Risk | Severity | Mitigation |
 | --- | --- | --- | --- |
 | R-1 | **W-1: every `get_setting()` rewrites `settings.prop` with an `fsync`.** A 1:1 port carries this onto NAND, where it is real flash wear and a real latency cost in the modem and notify paths. | **high** | Reproduce exactly, but funnel the write through one function. Filed in `OPEN-QUESTIONS.md`; the fix (compare the formatted bytes against what is on disk and skip the write when identical) is a five-line change once approved, and is observationally identical apart from mtime. |
-| R-2 | **The crash log is truncated at every boot** by `run_neodct.sh`'s `2> "$CRASH_LOG"`, destroying the record `CrashHandler` `fsync`ed. The one artefact you need after a bad boot is the one the next boot deletes. | **high** | Reproduce (the script is unchanged), but flag prominently. The fix is `2>>` — one character. Filed in `OPEN-QUESTIONS.md`. |
+| R-2 | **The crash log is truncated at every boot** by `run_neodct.sh`'s `2> "$CRASH_LOG"`, destroying the record `CrashHandler` `fsync`ed. The one artefact you need after a bad boot is the one the next boot deletes. | **high** | **FIXED** in `spec-core-panic.md` §4.1. It needed more than the `2>>` predicted here: the two writers were sharing one file with independent offsets, so nd-core's stderr moved to its own `/NeoDCT/User/logs/core.log`, appended and rotated once per boot. `neodct/tests/test_crashguard.py` pins that the boot script cannot name `crash.log` again. |
 | R-3 | **`nd_crash_info.detail` cannot reproduce a Python traceback.** A C backtrace gives addresses, not file/line/locals. Debuggability genuinely regresses, exactly as `ARCHITECTURE.md` predicts. | **high** | Keep unstripped `.so` files with a separate `.debug` (or at minimum `-funwind-tables` + symbol names) so `backtrace_symbols` produces function names; record the signal, `si_code`, faulting address and the app name; ship an `addr2line` recipe in the docs. |
 | R-4 | **Strict-UTF-8 rejection of `version.prop` is easy to miss in C**, because C code naturally treats a file as bytes. Missing it changes the observable result of `test_a_corrupt_version_prop_does_not_break_settings`. | medium | The UTF-8 validator is a named function with its own unit test that feeds it the exact bytes from the pytest (`b"\x00\xff not a prop file"`). |
 | R-5 | **The three prop dialects will get "helpfully" merged into one.** The differences (strip-before-`#`, `errors="replace"`, whole-file vs line-at-a-time) are each load-bearing in at least one test. | medium | Three separate functions with three separate unit tests and a comment on each saying which Python function it mirrors and which test pins it. |

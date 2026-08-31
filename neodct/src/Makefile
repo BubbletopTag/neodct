@@ -161,6 +161,7 @@ MEDIA_SRCS  := $(wildcard mediawidget/*.c)
 SHOOT_SRCS  := $(wildcard tools/nd_shoot*.c)
 SELF_SRCS   := $(wildcard tools/nd_selftest*.c)
 VERIFY_SRCS := $(wildcard tools/nd_verify*.c)
+PANIC_SRCS  := $(wildcard tools/nd_panic*.c)
 DISPLAYD_SRCS := $(wildcard displayd/*.c)
 TEST_SRCS   := $(wildcard test/unit/*.c)
 
@@ -174,6 +175,7 @@ MEDIA_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(MEDIA_SRCS))
 SHOOT_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(SHOOT_SRCS))
 SELF_OBJS   := $(patsubst %.c,$(OBJDIR)/%.o,$(SELF_SRCS))
 VERIFY_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(VERIFY_SRCS))
+PANIC_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(PANIC_SRCS))
 DISPLAYD_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(DISPLAYD_SRCS))
 
 TEST_BINS := $(patsubst test/unit/%.c,$(TESTDIR)/%,$(TEST_SRCS))
@@ -195,6 +197,7 @@ TARGETS += $(if $(MEDIA_SRCS),$(BINDIR)/neodct-play)
 TARGETS += $(if $(SHOOT_SRCS),$(BINDIR)/nd-shoot)
 TARGETS += $(if $(SELF_SRCS),$(BINDIR)/nd-selftest)
 TARGETS += $(if $(VERIFY_SRCS),$(BINDIR)/nd-verify)
+TARGETS += $(if $(PANIC_SRCS),$(BINDIR)/nd-panic)
 TARGETS += $(if $(DISPLAYD_SRCS),$(BINDIR)/neodct_displayd)
 TARGETS += $(APP_SOS)
 
@@ -228,6 +231,7 @@ skipped:
 	$(Q)$(if $(SHOOT_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-shoot (no tools/nd_shoot*.c yet)';)
 	$(Q)$(if $(SELF_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-selftest (no tools/nd_selftest*.c yet)';)
 	$(Q)$(if $(VERIFY_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-verify (no tools/nd_verify*.c yet)';)
+	$(Q)$(if $(PANIC_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-panic (no tools/nd_panic*.c yet)';)
 	$(Q)$(if $(TEST_SRCS),,printf '  %-7s %s\n' 'SKIP' 'unit tests (no test/unit/*.c yet)';)
 
 $(OBJDIR)/%.o: %.c
@@ -324,6 +328,11 @@ $(BINDIR)/nd-verify: $(VERIFY_OBJS)
 	    printf '  %-7s %s\n' 'NOTE' 'nd-verify: static link failed (see $@.link.log); linking dynamically'; \
 	    $(CC) -o $@ $^ $(LDFLAGS_ALL) $(VERIFY_LIBS); \
 	fi
+# nd-panic: the core-crash screen. /bin/run_neodct.sh runs it by absolute
+# path after nd-core dies, so where it installs is part of the contract with
+# the boot script -- see the install rule and nd_panic.h.
+$(BINDIR)/nd-panic: $(PANIC_OBJS) $(LIB)
+	$(LINK_BIN)
 
 # One binary per test file, each with its own main(). No test framework: a
 # test that needs a framework to express itself is usually testing the
@@ -427,6 +436,12 @@ install: all
 	@# really shut out of the databases. It is ~65 kB against libneodct,
 	@# which is already mapped, and it only reads.
 	$(Q)$(if $(SELF_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-selftest $(DESTDIR)$(PREFIX)/bin/,:)
+	@# nd-panic ships. It is the only part of the UI that runs when nd-core
+	@# is dead, and /bin/run_neodct.sh names it as
+	@#   /NeoDCT/System/bin/nd-panic
+	@# so this install is the whole reason the crash screen exists on a
+	@# phone rather than only on a developer's host.
+	$(Q)$(if $(PANIC_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-panic $(DESTDIR)$(PREFIX)/bin/,:)
 	@# The panel daemon keeps its historical path: /NeoDCT/System/hw/. Both
 	@# etc/init.d/S90display and mkinitramfs.py's PANEL_DAEMON hardcode it,
 	@# and mkinitramfs reads the built target tree rather than the overlay,

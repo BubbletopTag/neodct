@@ -32,16 +32,28 @@ stty -F /dev/tty0 -echo -tostop
 printf "\033[?25l" > /dev/tty0
 clear > /dev/tty0
 
-# 4. Run the UI
+# 4. Where the logs go
 #
-# /NeoDCT is inside the read-only squashfs, so the crash log goes to the
-# user-data partition.
+# /NeoDCT is inside the read-only squashfs, so both logs go to the user-data
+# partition.
+#
+# CORE_LOG is nd-core's stderr. It used to be /NeoDCT/User/logs/crash.log,
+# opened with a truncating `>`, and that was wrong twice over: nd_crash.c
+# APPENDS app crash reports to that same file, so every boot destroyed the
+# history of every application crash, and for the whole session afterwards the
+# two writers held file offsets that overwrote each other. They are separate
+# files now, and this one is appended to so that a restart loop keeps the
+# evidence from the crash BEFORE the one on screen -- which is the crash you
+# actually want when the phone is going round in circles.
+#
+# One boot's worth is rotated aside at startup; the crash log rotates itself.
 #
 # PYTHONPYCACHEPREFIX used to be exported here, for apps that shelled out
 # to python while the port was in progress. python has left the defconfigs
 # and there is no interpreter on the phone to read it.
-CRASH_LOG=/NeoDCT/User/logs/crash.log
-mkdir -p /NeoDCT/User/logs 2>/dev/null || CRASH_LOG=/tmp/crash.log
+CORE_LOG=/NeoDCT/User/logs/core.log
+mkdir -p /NeoDCT/User/logs 2>/dev/null || CORE_LOG=/tmp/core.log
+[ -f "$CORE_LOG" ] && mv -f "$CORE_LOG" "$CORE_LOG.1" 2>/dev/null
 
 # Optional developer environment, on the WRITABLE partition. The rootfs is a
 # read-only squashfs, so without this the only way to set a variable for
@@ -102,43 +114,69 @@ if [ -r /NeoDCT/User/env.sh ]; then
   fi
 fi
 
+# ==========================================================
+#    THE CRASH GUARD
+# ==========================================================
+#
+# The policy -- how long counts as a healthy run, how many consecutive crashes
+# are allowed, what gets drawn and what waits -- lives in nd-crashguard.sh, so
+# that the host test suite can drive it without crashing a phone. Read that
+# file before changing any of it; the reasoning is all there.
+#
+# It is SOURCED, not run, so the crash count is an ordinary shell variable in
+# this process. A counter in a file could be defeated by the very thing that
+# crashed the core: a /NeoDCT/User that is full, read-only, or never mounted.
+NDGUARD_LOG=$CORE_LOG
+NDGUARD_CORE=/NeoDCT/System/bin/nd-core
+
+# 5. Run the UI, and keep running it
+#
 # nd-core replaces `python3 /NeoDCT/launcher.py`. It is the same program:
 # nd_main.c is launcher.py's main() followed by System/core/main.py's run().
 # No LD_LIBRARY_PATH is needed -- the binary carries an RPATH of
 # /NeoDCT/System/lib, which is deliberate: the rootfs is a read-only squashfs
 # and ldconfig cannot rebuild its cache at runtime.
+#
+# The boot is announced on tty0 exactly once. tty0 IS the panel -- the
+# framebuffer console draws on the same pixels nd-panic paints -- so saying it
+# again after a crash would put a line of white text across the sick Nokia for
+# the second it takes nd-core to reach its first frame. Every later attempt
+# goes to the log instead.
 echo "[NeoDCT] Booting..." > /dev/tty0
-/NeoDCT/System/bin/nd-core 2> "$CRASH_LOG"
-EXIT_CODE=$?
+
+if [ -r /bin/nd-crashguard.sh ]; then
+  . /bin/nd-crashguard.sh
+  guard_supervise && exit 0
+else
+  # Without the policy there is no guard, and an unguarded loop is worse than
+  # no loop: it would spin forever on a core that cannot start. So this runs
+  # the UI exactly once and then says why nothing came back.
+  echo "[NeoDCT] nd-crashguard.sh missing; the UI will not be restarted" > /dev/tty0
+  "$NDGUARD_CORE" 2>> "$CORE_LOG"
+  echo "[NeoDCT] nd-core exited $?; no crash guard, so nothing will restart it" \
+    > /dev/tty0
+fi
 
 # ==========================================================
-#    CRASH HANDLER
+#    HALTED
 # ==========================================================
-
-# 5. RE-ENABLE ECHO (If you uncomment these later, make sure to target tty0)
-# stty -F /dev/tty0 echo tostop
-# printf "\033[?25h" > /dev/tty0
-
-# 6. Draw the Crash Screen ONLY to tty0
-# Wrapping the commands in { } lets us redirect the whole block at once
-{
-  printf "\033[41m\033[1;97m"
-  clear
-  echo "=============================="
-  echo "   CRITICAL SYSTEM FAILURE    "
-  echo "=============================="
-  echo " CODE: $EXIT_CODE"
-  echo "=============================="
-} > /dev/tty0
+#
+# The screen the guard left up is the message, and it stays up: nothing below
+# writes to tty0, because that would draw over it.
+#
+# inittab runs this script `once`, so returning from here would leave the halt
+# screen on the panel anyway -- but it would also let init reap the script.
+# Sitting here is the honest expression of "this phone is not coming back on
+# its own", and it costs nothing: the serial gettys on ttyFIQ0 and ttyAMA0 are
+# respawned by init and are still there, so a developer has a shell, the core
+# log and the crash log the whole time.
+echo "[NeoDCT] halted; the crash screen stays up" >> "$CORE_LOG"
+while :; do
+  sleep 3600
+done
 
 # If you want the dev shell to show up on tty0 later:
 # printf "\033[0m" > /dev/tty0
-# {
-#   echo ""
-#   echo "Just kidding :)"
-#   echo "Dev Shell Active!"
-#   echo "------------------------------"
-# } > /dev/tty0
-
+# stty -F /dev/tty0 echo tostop
 # export PS1="(CRASH)# "
 # exec /bin/sh < /dev/tty0 > /dev/tty0 2>&1
