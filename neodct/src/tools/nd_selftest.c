@@ -789,6 +789,47 @@ static void section_kernel(void)
                    "for this kernel");
     }
 
+    /* SELinux, which SECURITY-PLAN.md section 8 makes the answer to the core
+     * staying root. Three distinguishable states and they mean quite
+     * different things, so none of them is reported as a plain pass or fail:
+     *
+     *   no /sys/fs/selinux    not built into this kernel. On QEMU that is a
+     *                         config to add; on the Luckfox it is section 6's
+     *                         open question and the reason this check exists.
+     *   present, permissive   built in, policy loaded, DENYING NOTHING. This
+     *                         is the state policy authoring happens in, and
+     *                         it takes no power off root -- so it must never
+     *                         read as a pass.
+     *   present, enforcing    the policy is in effect.
+     *
+     * Reported and not judged, because which of the three is CORRECT depends
+     * on how far the policy work has got, and a check that fails for being
+     * early is a check people learn to ignore. */
+    {
+        FILE *f = fopen("/sys/fs/selinux/enforce", "re");
+
+        if (f == NULL) {
+            if (access("/sys/fs/selinux", F_OK) == 0)
+                report(R_INFO, "SELinux", "present, but no policy is loaded -- "
+                                          "denying nothing");
+            else
+                report(R_INFO, "SELinux", "not in this kernel (CONFIG_SECURITY_SELINUX)");
+        } else {
+            int mode = -1;
+
+            if (fscanf(f, "%d", &mode) != 1)
+                mode = -1;
+            (void)fclose(f);
+            if (mode == 1)
+                report(R_INFO, "SELinux", "ENFORCING");
+            else if (mode == 0)
+                report(R_INFO, "SELinux", "permissive -- logging denials, allowing "
+                                          "them; this takes no power off root");
+            else
+                report(R_INFO, "SELinux", "present, mode unreadable");
+        }
+    }
+
     /* The signing key the initramfs verifies a release against. Its absence
      * does not fail a boot; it fails an UPDATE, months later, in a place
      * nobody is watching. */
