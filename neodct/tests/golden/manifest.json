@@ -235,7 +235,7 @@
     },
     {
       "name": "menu-browser",
-      "sha256": "a5102ee4e9b740801da40bcc79ed68f0be14d35925998193f1e19674b85c7280",
+      "sha256": "ff3e5edbb2c5bcda491408779914a321bbb303b4d54373071a369d42c5dc0ca3",
       "size": [
         240,
         175
@@ -243,7 +243,7 @@
     },
     {
       "name": "menu-calculator",
-      "sha256": "e0bea80057d8d5b0baf481bb9b7a4094d52a9bc84af550a18f780eb2d1a37eb7",
+      "sha256": "2601b7ab891a489f87c9431ee1705c0851ea3312ab58837f64778c6fd159a2cf",
       "size": [
         240,
         175
@@ -251,7 +251,7 @@
     },
     {
       "name": "menu-games",
-      "sha256": "90cd31cb91c8ddb3142e3dd75cb80e4360505e7dcff8b78eaefd410fbe3bbe75",
+      "sha256": "1588b5b95273c3c25b00fc5ef6ed2a8c9a03b81b1082cb51f570d347dd2a3082",
       "size": [
         240,
         175
@@ -259,7 +259,7 @@
     },
     {
       "name": "menu-koki-mobile",
-      "sha256": "5c61eebfe0fead01a8f032da8086fa568368d64ba65130f59d2b9f585e6ae70b",
+      "sha256": "b60f9a412ce828fbb353a21c7887aea4a16be68d7ec5691c51604acbb035ae8c",
       "size": [
         240,
         175
@@ -267,7 +267,7 @@
     },
     {
       "name": "menu-messages",
-      "sha256": "371b0d84bda370ed6b144efee9b9aed00b0adbb51c3ca333f1223c4639c50138",
+      "sha256": "2ece42079e511130aaf6621c825bfccc5effbdd6c4475ad242a0d5e6baf47311",
       "size": [
         240,
         175
@@ -275,7 +275,7 @@
     },
     {
       "name": "menu-music",
-      "sha256": "aecbf9f42fecf138c1bb46b6c8aef74b7aba2e44224a993a5d8c034e0b8077b0",
+      "sha256": "d667362b17f51e59a6a0bf70cd74e1dcffaafc8b4128706dfec8eef179310279",
       "size": [
         240,
         175
@@ -299,7 +299,7 @@
     },
     {
       "name": "menu-settings",
-      "sha256": "150a8b630012cf395b2e1d0400880266b249d6818d725854c3f9d626768b98d2",
+      "sha256": "f321b27780b3139f6ba7c951fe254ebab576c6eafb863788d64c657ac776fd4c",
       "size": [
         240,
         175

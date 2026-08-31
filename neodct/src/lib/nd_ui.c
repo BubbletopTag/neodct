@@ -49,6 +49,7 @@
 #include "nd_app.h"
 #include "nd_battery.h"
 #include "nd_bench.h"
+#include "nd_calendar.h"
 #include "nd_crash.h"
 #include "nd_db.h"
 #include "nd_draw.h"
@@ -67,6 +68,7 @@
 #include "nd_proc.h"
 #include "nd_settings.h"
 #include "nd_svc.h"
+#include "nd_text.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_ui_sim.h"
@@ -108,9 +110,16 @@
 #pragma weak nd_notify_kind
 #pragma weak nd_notify_latest_data
 #pragma weak nd_notify_post_sms
+#pragma weak nd_notify_post_event
 #pragma weak nd_notify_start_ring
 #pragma weak nd_notify_stop_ring
 #pragma weak nd_notify_play_tone
+
+/* The calendar store. Weak for the same reason everything else here is: the
+ * core is linked in configurations that do not carry every module, and a
+ * phone with no calendar simply never notices one. */
+#pragma weak nd_cal_due
+#pragma weak nd_cal_mark_notified
 
 #pragma weak nd_appsel_init
 #pragma weak nd_appsel_show
@@ -266,6 +275,29 @@ bool nd_ui_status_notify_active(const nd_ui *ui)
     if (ui != NULL && ui->notify != NULL && nd_notify_active != NULL)
         return nd_notify_active(ui->notify);
     return g_sim.banner_active;
+}
+
+/* Which kind of banner is up, NULL for none. Not in nd_ui_sim.h because
+ * nothing outside this file asks: the home screen needs it to decide between
+ * an envelope and no envelope, the softkey needs it to decide between "Read"
+ * and "View", and _open_notification needs it to decide which app to launch.
+ *
+ * The simulation hook only ever stands in for a TEXT banner -- it is
+ * nd_ui_sim_sms_banner() and the golden frames it captures are message
+ * banners -- so the fallback says "sms" and the reference frames are
+ * untouched by any of this. */
+static const char *banner_kind(const nd_ui *ui)
+{
+    if (ui != NULL && ui->notify != NULL && nd_notify_kind != NULL)
+        return nd_notify_kind(ui->notify);
+    return g_sim.banner_active ? ND_NOTIFY_KIND_SMS : NULL;
+}
+
+static bool banner_is(const nd_ui *ui, const char *kind)
+{
+    const char *k = banner_kind(ui);
+
+    return k != NULL && strcmp(k, kind) == 0;
 }
 
 size_t nd_ui_status_banner_lines(const nd_ui *ui, char l1[ND_NOTIFY_LINE_MAX],
@@ -1567,6 +1599,52 @@ static void modem_tick(nd_ui *ui)
     }
 }
 
+/* The calendar's own tick. There is no Python equivalent -- the diary is new
+ * -- so the shape follows the two above rather than a port: cheap, silent,
+ * and safe to call from the key-read path on every frame.
+ *
+ * ============ WHY THE CORE POLLS INSTEAD OF THE APP TELLING IT ============
+ *
+ * A reminder has to arrive while the Calendar app is closed, which is almost
+ * always. The app is a separate process that has usually already exited by
+ * the time an appointment comes round, so there is nobody to send the
+ * message; the core is the only thing still running, and it is also the only
+ * thing that owns NotifyService (nd_app.h). So the core reads the table.
+ *
+ * ============ AND WHY IT IS RATE-LIMITED HERE, NOT INSIDE ============
+ *
+ * The battery service rate-limits its own poll because the i2c read is the
+ * expensive part and every caller wants the cached answer. Here the
+ * expensive part is opening sqlite, which nothing else wants, so the clock
+ * lives at the one call site. ND_CAL_POLL_S is 15 s; a phone with no
+ * calendar.db pays one stat() for each of them. */
+static void calendar_tick(nd_ui *ui)
+{
+    static double next_poll; /* monotonic; 0.0 means "the first frame" */
+    nd_cal_event ev;
+    int64_t occurrence = 0;
+    double now;
+
+    if (ui->shutting_down || ui->notify == NULL || nd_cal_due == NULL ||
+        nd_notify_post_event == NULL)
+        return;
+
+    now = nd_time_monotonic();
+    if (next_poll != 0.0 && now < next_poll)
+        return;
+    next_poll = now + ND_CAL_POLL_S;
+
+    /* One per poll. A phone catching up on several missed reminders shows
+     * the earliest first (nd_cal_due picks it), and the rest arrive over the
+     * following polls -- which is what the banner's own counter is for. */
+    if (!nd_cal_due(nd_time_now(), &ev, &occurrence))
+        return;
+
+    nd_notify_post_event(ui->notify, ev.id, ev.title, ev.start, true);
+    if (nd_cal_mark_notified != NULL)
+        nd_cal_mark_notified(ev.id, occurrence);
+}
+
 /* _ring_tick. Returns true when the Python would have raised IncomingCall. */
 static bool ring_tick(nd_ui *ui)
 {
@@ -1657,6 +1735,7 @@ int32_t nd_ui_read_keypress(nd_ui *ui, double timeout_s)
      * promises. */
     battery_tick(ui);
     modem_tick(ui);
+    calendar_tick(ui);
     if (ring_tick(ui))
         return ND_KEY_INCOMING_CALL;
 
@@ -1755,8 +1834,14 @@ void nd_ui_render_home(nd_ui *ui)
     }
 
     /* --- 3. notification layer: a flashing envelope while unread mail
-     * exists, a banner while it is undismissed --- */
-    if (notify_active || nd_ui_unread_sms(ui) > 0) {
+     * exists, a banner while it is undismissed ---
+     *
+     * The envelope is the INBOX's icon and follows the text banner only. A
+     * reminder gets the two lines and nothing else: an envelope over an
+     * appointment would be saying the wrong thing, and the phone has no
+     * calendar glyph in ui/resources to say the right one with. The banner
+     * names itself, which on two lines of 20 px type is enough. */
+    if (banner_is(ui, ND_NOTIFY_KIND_SMS) || nd_ui_unread_sms(ui) > 0) {
         /* 500 ms on, 500 ms off. */
         if (((int64_t)(nd_time_now() * 2.0)) % 2 == 0) {
             double icon_scale = (double)h / 240.0;
@@ -1774,11 +1859,24 @@ void nd_ui_render_home(nd_ui *ui)
         size_t n = nd_ui_status_banner_lines(ui, l1, l2);
         const char *lines[2];
         int32_t y = nd_max32(46, nd_trunc32((double)nd_ui_content_bottom(ui) * 0.34));
+        /* The banner shares its rows with the signal meter, which
+         * ui_home.json puts at x = 210 -- thirty in from the right edge,
+         * mirroring the banner's own left margin. Four more for a gap.
+         *
+         * "10 messages" is 130 px at 20 px and could never have reached it,
+         * which is why the Python drew the lines unmeasured. AN EVENT'S NAME
+         * CAN: "Parents evening at school" runs straight through the bars. So
+         * the lines are fitted now -- which changes nothing for a message
+         * banner, and is why home-sms-banner still matches. */
+        int32_t max_w = nd_ui_width(ui) - 30 - 34;
 
         lines[0] = l1;
         lines[1] = l2;
         for (i = 0u; i < n && i < 2u; i++) {
-            (void)nd_draw_text(ui->draw, 30, y, lines[i], ui->font_n, ND_WHITE);
+            char fitted[ND_TEXT_LINE_MAX];
+
+            (void)nd_text_ellipsize(fitted, sizeof fitted, lines[i], ui->font_n, max_w);
+            (void)nd_draw_text(ui->draw, 30, y, fitted, ui->font_n, ND_WHITE);
             y += 24;
         }
     }
@@ -1867,7 +1965,13 @@ void nd_ui_update(nd_ui *ui)
         nd_ui_render_home(ui);
         /* present=false: the softkey bar's own flush is suppressed so exactly
          * ONE framebuffer write happens per home frame. */
-        nd_softkey_update(ui->softkey, nd_ui_status_notify_active(ui) ? "Read" : "Menu", false);
+        /* "Read" is what you do to a message and "View" is what you do to an
+         * appointment. One word each, because the strip has room for one. */
+        nd_softkey_update(ui->softkey,
+                          !nd_ui_status_notify_active(ui)       ? "Menu"
+                          : banner_is(ui, ND_NOTIFY_KIND_EVENT) ? "View"
+                                                                : "Read",
+                          false);
         (void)nd_ui_present(ui);
         break;
     case ND_UI_STATE_HOME_DIALING:
@@ -1911,40 +2015,45 @@ static void play_dtmf(nd_ui *ui, char ch)
     (void)nd_notify_play_tone(ui->notify, path);
 }
 
+/* The installed app of that name, or NULL.
+ *
+ * ============ IT ASKS FOR THE LIST RATHER THAN READING THE FIELD ============
+ *
+ * _open_notification read ui->home_.apps directly, and that field is EMPTY
+ * until something has called nd_ui_app_list() -- which, since the app list
+ * became lazy, is only nd_ui_render_menu(). The home screen does not need it,
+ * so it does not load it.
+ *
+ * On a phone that had booted and never had its menu opened, the count was
+ * therefore zero, "Messages" was not found, and pressing Read dismissed the
+ * banner and opened nothing. Going through the accessor loads the list at the
+ * one moment it is wanted, which is the same directory scan the menu would
+ * have paid for anyway. */
+static const nd_app_entry *find_app(nd_ui *ui, const char *name)
+{
+    size_t n = 0u;
+    const nd_app_entry *apps = nd_ui_app_list(ui, &n);
+    size_t i;
+
+    if (apps == NULL)
+        return NULL;
+    for (i = 0u; i < n; i++) {
+        if (strcmp(apps[i].name, name) == 0)
+            return &apps[i];
+    }
+    return NULL;
+}
+
 /* NotifyService "Read" softkey: jump to the new message, or the inbox.
  *
  * _open_notification reads kind, count and latest_data BEFORE dismissing --
  * dismiss() zeroes all three -- and only then decides which of Messages' two
  * entry points to call. Keep that order. */
-static void open_notification(nd_ui *ui)
+static void open_sms_notification(nd_ui *ui, int32_t count, int64_t target)
 {
-    const nd_app_entry *messages = NULL;
-    const char *kind = ND_NOTIFY_KIND_SMS;
-    int32_t count = 1;
-    int64_t target = -1;
+    const nd_app_entry *messages = find_app(ui, "Messages");
     char arg[32];
-    size_t i;
 
-    if (ui->notify != NULL) {
-        kind = nd_notify_kind != NULL ? nd_notify_kind(ui->notify) : NULL;
-        count = nd_notify_count != NULL ? nd_notify_count(ui->notify) : 0;
-        target = nd_notify_latest_data != NULL ? nd_notify_latest_data(ui->notify) : -1;
-        if (nd_notify_dismiss != NULL)
-            nd_notify_dismiss(ui->notify);
-    } else {
-        nd_ui_sim_sms_banner(ui, 0);
-    }
-
-    /* `if kind != "sms": return` -- the banner is dismissed either way. */
-    if (kind == NULL || strcmp(kind, ND_NOTIFY_KIND_SMS) != 0)
-        return;
-
-    for (i = 0u; i < ui->home_.n_apps; i++) {
-        if (strcmp(ui->home_.apps[i].name, "Messages") == 0) {
-            messages = &ui->home_.apps[i];
-            break;
-        }
-    }
     if (messages == NULL || nd_proc_launch_app == NULL) {
         /* The Python falls back to the hard-coded Messages path here; with
          * process-per-app there is nothing to fall back to, so all that is
@@ -1962,6 +2071,56 @@ static void open_notification(nd_ui *ui)
         (void)nd_proc_launch_app(ui, messages, ND_APP_ENTRY_OPEN_INBOX, NULL, NULL);
     }
     ui->home_.unread_sms_ready = false;
+}
+
+/* The same shape one level down for a reminder: the event that came due when
+ * there is exactly one, and the diary itself when there are several -- which
+ * is the same "the one thing, or the list" decision Messages makes, and the
+ * reason app_open_event() takes an id at all.
+ *
+ * A phone with no Calendar app installed simply loses the banner, which is
+ * already what happens to a text banner with no Messages app. */
+static void open_event_notification(nd_ui *ui, int32_t count, int64_t target)
+{
+    const nd_app_entry *calendar = find_app(ui, "Calendar");
+    char arg[32];
+
+    if (calendar == NULL || nd_proc_launch_app == NULL)
+        return;
+
+    if (count == 1 && target >= 0 &&
+        nd_snprintf(arg, sizeof arg, "%lld", (long long)target) == ND_OK)
+        (void)nd_proc_launch_app(ui, calendar, ND_APP_ENTRY_OPEN_EVENT, arg, NULL);
+    else
+        (void)nd_proc_launch_app(ui, calendar, ND_APP_ENTRY_RUN, NULL, NULL);
+}
+
+static void open_notification(nd_ui *ui)
+{
+    const char *kind = ND_NOTIFY_KIND_SMS;
+    int32_t count = 1;
+    int64_t target = -1;
+
+    if (ui->notify != NULL) {
+        kind = nd_notify_kind != NULL ? nd_notify_kind(ui->notify) : NULL;
+        count = nd_notify_count != NULL ? nd_notify_count(ui->notify) : 0;
+        target = nd_notify_latest_data != NULL ? nd_notify_latest_data(ui->notify) : -1;
+        if (nd_notify_dismiss != NULL)
+            nd_notify_dismiss(ui->notify);
+    } else {
+        nd_ui_sim_sms_banner(ui, 0);
+    }
+
+    /* `if kind != "sms": return` was the whole of the Python's dispatch,
+     * because "sms" was the only kind. The banner is still dismissed either
+     * way, whatever the kind turns out to be -- including one this build has
+     * never heard of. */
+    if (kind == NULL)
+        return;
+    if (strcmp(kind, ND_NOTIFY_KIND_SMS) == 0)
+        open_sms_notification(ui, count, target);
+    else if (strcmp(kind, ND_NOTIFY_KIND_EVENT) == 0)
+        open_event_notification(ui, count, target);
 }
 
 void nd_ui_handle_input(nd_ui *ui, int32_t code)

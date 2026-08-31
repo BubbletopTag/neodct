@@ -7,7 +7,7 @@
  * value. The kernel enforces the boundary in hardware, so a null dereference
  * in an app kills the app and nothing else.
  *
- * ============ THE FOUR EXPORTED SYMBOLS ============
+ * ============ THE FIVE EXPORTED SYMBOLS ============
  *
  *     int  app_run(nd_ui *ui);          MANDATORY. The C equivalent of the
  *                                       Python's run(ui). Return 0 for a
@@ -22,12 +22,19 @@
  *
  *     int  app_open_message(nd_ui *ui, int64_t message_id);   Messages only.
  *     int  app_open_inbox(nd_ui *ui);                         Messages only.
+ *     int  app_open_event(nd_ui *ui, int64_t event_id);        Calendar only.
+ *
+ * The fifth exists for the same reason the third does: a banner on the home
+ * screen names ONE thing, and pressing it has to arrive at that thing rather
+ * than at the app's front door. A reminder's banner carries the event's
+ * rowid exactly as a text's carries the inbox rowid.
  *
  * nd-apprun picks the entry point from argv[2], defaulting to "run":
  *
  *     nd-apprun <app-dir> [entry] [arg]
  *     nd-apprun /NeoDCT/System/apps/Koki
  *     nd-apprun /NeoDCT/System/apps/Messages open_message 41
+ *     nd-apprun /NeoDCT/System/apps/Calendar open_event 3
  *
  * ============ THE SIGTERM TEARDOWN CONTRACT ============
  *
@@ -120,6 +127,7 @@ extern "C" {
 #define ND_APP_ENTRY_RUN          "run"
 #define ND_APP_ENTRY_OPEN_MESSAGE "open_message"
 #define ND_APP_ENTRY_OPEN_INBOX   "open_inbox"
+#define ND_APP_ENTRY_OPEN_EVENT   "open_event"
 
 /* manifest.json's key, spelled camelCase because that is how it is written in
  * the manifests and JSON keys are not C identifiers. */
@@ -129,6 +137,7 @@ extern "C" {
 #define ND_APP_SYM_SHUTDOWN     "app_shutdown"
 #define ND_APP_SYM_OPEN_MESSAGE "app_open_message"
 #define ND_APP_SYM_OPEN_INBOX   "app_open_inbox"
+#define ND_APP_SYM_OPEN_EVENT   "app_open_event"
 
 #define ND_ENV_KEYPAD_FD  "NEODCT_KEYPAD_FD"
 #define ND_ENV_CRASH_FD   "NEODCT_CRASH_FD"
@@ -161,6 +170,9 @@ void app_shutdown(void);
 /* Messages only; nd-apprun tolerates their absence in every other app. */
 int app_open_message(nd_ui *ui, int64_t message_id);
 int app_open_inbox(nd_ui *ui);
+
+/* Calendar only, and tolerated absent in the same way. */
+int app_open_event(nd_ui *ui, int64_t event_id);
 
 /* ------------------------------------------------------------------ *
  * What an app CALLS, from libneodct

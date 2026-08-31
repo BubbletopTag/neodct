@@ -73,6 +73,7 @@ extern "C" {
 #define ND_PATH_DB_SMS_INBOX  "/NeoDCT/User/db/sms_inbox.db"
 #define ND_PATH_DB_SMS_OUTBOX "/NeoDCT/User/db/sms_outbox.db"
 #define ND_PATH_DB_CALL_LOG   "/NeoDCT/User/db/call_log.db"
+#define ND_PATH_DB_CALENDAR   "/NeoDCT/User/db/calendar.db"
 #define ND_PATH_LOG_DIR       "/NeoDCT/User/logs"
 #define ND_PATH_CRASH_LOG     "/NeoDCT/User/logs/crash.log"
 #define ND_PATH_CRASH_LOG_1   "/NeoDCT/User/logs/crash.log.1"
