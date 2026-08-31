@@ -1091,6 +1091,57 @@ static void t_no_stock_app_holds_root(void)
     }
 }
 
+/* THE BROWSER RUNS AS LESS THAN ndusr, AND ONLY THE BROWSER.
+ *
+ * This is the mirror of the root policy and it is asserted the same way,
+ * because the failure modes are mirror images too. Getting it wrong upward
+ * hands out root; getting it wrong downward confines something that was
+ * never built to be confined -- and the browser proves how quietly that can
+ * go: for several commits it simply did not start, because the drop was
+ * being attempted by a process that had already lost the privilege to do it. */
+static void t_only_the_browser_is_untrusted(void)
+{
+    static const char *const stock[] = {
+        "Browser",   "Calculator",  "Calendar",  "CallLog", "Clock",  "Games", "Koki",
+        "Messages",  "MusicPlayer", "PhoneBook", "Power",   "Settings", "Tones", "Update",
+    };
+    size_t i;
+
+    for (i = 0u; i < sizeof stock / sizeof stock[0]; i++) {
+        char path[256];
+
+        (void)nd_snprintf(path, sizeof path, "%s/%s", ND_PATH_APPS_DIR, stock[i]);
+        {
+            nd_app_entry a = app_at(path);
+            bool want = strcmp(stock[i], "Browser") == 0;
+
+            CHECK_INT(nd_proc_app_is_untrusted(&a) ? 1 : 0, want ? 1 : 0);
+            /* And nothing is both. An app cannot be root and untrusted. */
+            CHECK(!(nd_proc_app_is_untrusted(&a) && nd_proc_app_needs_root(&a, true)));
+        }
+    }
+}
+
+/* The same spoofing rule as the root list, in the other direction. A
+ * directory called Browser somewhere else must not inherit ndusr_ut -- which
+ * is not root, but IS the owner of the browser profile and of the untrusted
+ * half of the SD card. */
+static void t_the_browser_name_alone_confines_nothing(void)
+{
+    nd_app_entry eng  = app_at(ND_PATH_ENG_APPS_DIR "/Browser");
+    nd_app_entry user = app_at("/NeoDCT/User/apps/Browser");
+    nd_app_entry deep = app_at(ND_PATH_APPS_DIR "/Evil/Browser");
+    nd_app_entry near = app_at(ND_PATH_APPS_DIR "/Browser2");
+    nd_app_entry real = app_at(ND_PATH_APPS_DIR "/Browser");
+
+    CHECK(!nd_proc_app_is_untrusted(&eng));
+    CHECK(!nd_proc_app_is_untrusted(&user));
+    CHECK(!nd_proc_app_is_untrusted(&deep));
+    CHECK(!nd_proc_app_is_untrusted(&near));
+    CHECK(!nd_proc_app_is_untrusted(NULL));
+    CHECK(nd_proc_app_is_untrusted(&real));
+}
+
 static void t_a_lookalike_directory_gets_nothing(void)
 {
     /* The reason path_under() checks for a component boundary rather than
@@ -1165,6 +1216,8 @@ int main(void)
     t_stock_apps_drop();
     t_engineering_apps_keep_root_only_when_the_mode_is_on();
     t_no_stock_app_holds_root();
+    t_only_the_browser_is_untrusted();
+    t_the_browser_name_alone_confines_nothing();
     t_a_lookalike_directory_gets_nothing();
     t_no_app_is_the_confined_answer();
     t_the_stock_name_alone_grants_nothing();

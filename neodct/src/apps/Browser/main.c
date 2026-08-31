@@ -1055,7 +1055,16 @@ int app_run(nd_ui *ui)
     }
 
     argv[0] = ND_BROWSER_BIN;
-    argv[1] = ND_BROWSER_HOME;
+    {
+        /* See ND_BROWSER_HOME_ENV. An empty value is treated as unset, so
+         * exporting the variable blank cannot leave netsurf with no URL. */
+        const char *want = getenv(ND_BROWSER_HOME_ENV);
+        bool overridden = want != NULL && want[0] != '\0';
+
+        argv[1] = overridden ? want : ND_BROWSER_HOME;
+        if (overridden)
+            nd_log(ND_LOG_BROWSER, "start URL overridden by " ND_BROWSER_HOME_ENV ": %s", argv[1]);
+    }
     argv[2] = NULL;
 
     memset(&spec, 0, sizeof spec);
@@ -1087,33 +1096,26 @@ int app_run(nd_ui *ui)
      * neodct-play is exec'd BY netsurf when a <video> is clicked, so the
      * media player -- the other half of the plan's untrusted set, and the
      * one an MMS attachment will reach -- is confined by the same line. */
-    if (!nd_priv_lookup(ND_PRIV_USER_UT, &spec.run_as))
-        nd_log(ND_LOG_BROWSER, "no " ND_PRIV_USER_UT " in this image; "
-                               "the browser runs with the core's privileges");
-    /* Independent of the drop, and set even when it does not happen: nothing
-     * netsurf execs should be able to regain privilege through a setuid
-     * binary. */
-    spec.no_new_privs = true;
-
-    /* And a mount namespace, which is what covers the half DAC cannot:
-     * /NeoDCT/System is world-readable by design, so `file:///` enumerates
-     * the system tree however low the browser's uid is. browser.h lists what
-     * is hidden and why each entry is safe to hide.
+    /* THIS APP NO LONGER DOES THE CONFINING, AND CANNOT.
      *
-     * Fails open: CONFIG_MNT_NS is a vendor kernel question SECURITY-PLAN.md
-     * section 6 lists as unverified on the phone, and a kernel without it
-     * still has to open the browser. Said out loud once, because a
-     * confinement that quietly did not happen is exactly what this work is
-     * against. */
-    {
-        static const char *const hide[] = ND_BROWSER_HIDE_PATHS;
-
-        spec.private_mounts = true;
-        spec.hide_paths = hide;
-        if (!nd_proc_namespaces_available())
-            nd_log(ND_LOG_BROWSER, "no mount namespaces in this kernel; the "
-                                   "browser can still read /NeoDCT/System");
-    }
+     * It used to call nd_priv_lookup(ND_PRIV_USER_UT) here and ask for a
+     * mount namespace, back when apps were root. Apps are ndusr now, and both
+     * of those need capabilities ndusr does not have -- so the drop failed
+     * with EPERM inside nd_priv_become() and the child _exit(122)d BEFORE
+     * execve. netsurf did not start at all, and the phone said "no mount
+     * namespaces in this kernel" on a kernel that has them.
+     *
+     * The core does it instead, when it launches THIS app: nd_proc.c's
+     * UNTRUSTED_APPS runs /NeoDCT/System/apps/Browser as ndusr_ut, inside a
+     * namespace with ND_PROC_UNTRUSTED_HIDE_PATHS emptied, and with no
+     * service socket. So by the time this code runs the whole process is
+     * already the untrusted one, and netsurf inherits all of it across the
+     * plain fork below -- uid, namespace, no_new_privs -- with nothing left
+     * here to ask for or to get wrong.
+     *
+     * spec.run_as is deliberately left invalid: nd_priv_become() treats that
+     * as a documented no-op, which is exactly right when there is nobody left
+     * to become. */
 
     if (devnull >= 0) {
         spec.fds[spec.n_fds].child_fd = 1; /* stdout=DEVNULL */

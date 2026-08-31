@@ -36,6 +36,25 @@ extern "C" {
  * and neither has a cage or webkit package. */
 #define ND_BROWSER_BIN  "/usr/bin/netsurf-fb"
 #define ND_BROWSER_HOME "file:///NeoDCT/System/apps/Browser/home.html"
+
+/* Where the browser starts, overridable FOR TESTING ONLY.
+ *
+ * The browser's address bar takes phone-keypad multi-tap, which no automated
+ * harness can drive, so there was no way to point netsurf at a chosen URL and
+ * watch what it did. That made the one question worth asking about an
+ * untrusted renderer -- "what happens when it reaches for file:///" --
+ * answerable only by reading code.
+ *
+ * This is the same kind of seam as the modem's /tmp/neodct_sim_* hooks: it
+ * changes nothing about what netsurf is ALLOWED to do, only which URL it is
+ * handed first. The confinement is applied by the core before this app runs
+ * (nd_proc.h's UNTRUSTED_APPS), so a URL chosen here is fetched as ndusr_ut,
+ * inside the mount namespace, with the hidden paths blanked -- exactly as a
+ * URL typed by a user would be.
+ *
+ * Setting it needs write access to the core's environment, which is root, so
+ * it grants nothing to anybody who does not already have everything. */
+#define ND_BROWSER_HOME_ENV "NEODCT_BROWSER_URL"
 #define ND_BROWSER_TAG  "Browser"
 
 /* CONSOLE in main.py. The browser's stderr goes to the serial console so

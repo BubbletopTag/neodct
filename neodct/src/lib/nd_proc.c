@@ -747,6 +747,39 @@ static bool path_under(const char *path, const char *dir)
     return path[n] == '/' && path[n + 1u] != '\0';
 }
 
+/* Apps that run as ndusr_ut inside a mount namespace. See nd_proc.h for why
+ * this is the core's job and not the app's, and for why it is whole paths.
+ *
+ * One entry, and it is the browser. The media player is not listed because it
+ * is not an app -- netsurf exec's neodct-play when a <video> is clicked, and
+ * it inherits both the uid and the namespace from its parent, which is the
+ * whole point of confining the parent. */
+static const char *const UNTRUSTED_APPS[] = {
+    ND_PATH_APPS_DIR "/Browser",
+    NULL,
+};
+
+bool nd_proc_app_is_untrusted(const nd_app_entry *app)
+{
+    size_t i;
+
+    /* Fail closed means something DIFFERENT here from what it means in
+     * nd_proc_app_needs_root(), and the asymmetry is deliberate. There, an
+     * unknown app must not get root, so the safe answer is false. Here, an
+     * unknown app is a normal app: answering true would confine something
+     * that was never meant to be confined and break it in ways nobody
+     * predicted. Both defaults are "an app we cannot identify is an ordinary
+     * ndusr app". */
+    if (app == NULL)
+        return false;
+
+    for (i = 0u; UNTRUSTED_APPS[i] != NULL; i++) {
+        if (strcmp(app->path, UNTRUSTED_APPS[i]) == 0)
+            return true;
+    }
+    return false;
+}
+
 bool nd_proc_app_needs_root(const nd_app_entry *app, bool engineering_mode)
 {
     size_t i;
@@ -786,6 +819,7 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
     int crash_pipe[2] = {-1, -1};
     nd_svc_server *svc = NULL;
     int svc_fd = -1;
+    bool untrusted;
     int fb_fd = -1;
     nd_proc_spec spec;
     nd_proc_status st;
@@ -797,6 +831,12 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
         return ND_ERR_INVAL;
     if (crash_out != NULL)
         memset(crash_out, 0, sizeof *crash_out);
+
+    /* Decided once, up here, because it changes two things far apart: whether
+     * a service socket is created at all (below) and which user the child
+     * becomes (further below). Reading the policy twice would let the two
+     * drift. */
+    untrusted = nd_proc_app_is_untrusted(app);
 
     if (nd_input_channel_open(&ch) != ND_OK) {
         nd_log_err(ND_LOG_OS, "App load failed: no key channel for %s", app->name);
@@ -825,7 +865,21 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
      * A failure is not fatal: the app runs without a channel and every
      * nd_svc_* call answers "not present", which is the sentence Messages
      * and the Modem app drew before this existed. */
-    if (nd_svc_server_open(&svc) == ND_OK)
+    /* ...and an UNTRUSTED app gets none at all.
+     *
+     * nd_svc validates the RECORD, never the SENDER -- there is no
+     * SO_PEERCRED, no SCM_CREDENTIALS, nothing (spec-app-services.md 5). So
+     * the socket is a straight line from whoever holds the descriptor to a
+     * root thread that will send an SMS, format the card or power the phone
+     * off on their behalf. Handing one to the process whose job is to render
+     * whatever the internet sends it would make every one of those verbs
+     * reachable from a web page.
+     *
+     * Withholding it is not a check that can be got round: an fd that was
+     * never created cannot be inherited, and netsurf inherits its whole
+     * environment from this app -- NEODCT_SERVICE_FD included -- so anything
+     * short of "there is no socket" would have leaked it one level down. */
+    if (!untrusted && nd_svc_server_open(&svc) == ND_OK)
         svc_fd = nd_svc_server_child_fd(svc);
 
     path = apprun_path(runner, sizeof runner);
@@ -874,7 +928,20 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
      * nd_priv_become() treats as a documented no-op: the app then runs
      * exactly as every build before this one did, rather than refusing to
      * open. */
-    if (!nd_proc_app_needs_root(app, nd_ui_engineering_mode(ui))) {
+    if (untrusted) {
+        /* The browser, confined by the core because only the core still has
+         * the privilege to do it. nd_proc.h carries the whole argument. */
+        static const char *const hide[] = ND_PROC_UNTRUSTED_HIDE_PATHS;
+
+        if (!nd_priv_lookup(ND_PRIV_USER_UT, &spec.run_as))
+            nd_log_err(ND_LOG_OS,
+                       "no " ND_PRIV_USER_UT " in this image; %s runs with the "
+                       "core's privileges",
+                       app->name);
+        spec.no_new_privs = true;
+        spec.private_mounts = true;
+        spec.hide_paths = hide;
+    } else if (!nd_proc_app_needs_root(app, nd_ui_engineering_mode(ui))) {
         if (!nd_priv_lookup(ND_PRIV_USER, &spec.run_as))
             nd_log(ND_LOG_OS, "no " ND_PRIV_USER " in this image; %s runs with the "
                               "core's privileges", app->name);

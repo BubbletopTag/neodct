@@ -987,27 +987,35 @@ static void t_run_without_the_untrusted_user_still_starts(void)
  * neither -- so where it cannot, it says so rather than passing. nd-selftest
  * asks the same question on the phone, where the answer is always available.
  */
-static void t_run_with_the_untrusted_user_really_drops(void)
+/* THE DROP MOVED, AND THIS TEST MOVED WITH IT.
+ *
+ * It used to assert that app_run() dropped netsurf to ndusr_ut, because the
+ * app did that itself. It cannot any anymore and must not: apps run as ndusr,
+ * and setgroups()/unshare() need capabilities ndusr does not have. When that
+ * changed, the app's drop began failing with EPERM inside nd_priv_become(),
+ * the child _exit(122)d BEFORE execve, and NETSURF STOPPED STARTING AT ALL --
+ * on a real phone, silently, for several commits.
+ *
+ * The confinement now happens one level up: nd_proc.c's UNTRUSTED_APPS makes
+ * the CORE launch /NeoDCT/System/apps/Browser as ndusr_ut inside a mount
+ * namespace with no service socket, and netsurf inherits all of it across the
+ * plain fork this app does.
+ *
+ * So what is asserted here is the new contract, which is the inverse of the
+ * old one: THIS APP CHANGES NOBODY'S UID. Whatever it is launched as, netsurf
+ * gets. The old assertion has two replacements, and both are stronger than
+ * what it could check:
+ *
+ *   test_proc.c  t_only_the_browser_is_untrusted() pins the policy, whole
+ *                path, both directions, with no root needed.
+ *   nd-selftest  reports FAIL on the phone when a running netsurf is not
+ *                ndusr_ut -- the end-to-end answer, on the machine where it
+ *                actually matters. */
+static void t_run_does_not_change_the_uid_itself(void)
 {
     const char *out;
     bool was = nd_log_colour_enabled();
-    nd_priv_id id;
     char expect[64];
-
-    if (!nd_priv_lookup(ND_PRIV_USER_UT, &id)) {
-        /* No such user here. t_run_without_the_untrusted_user_still_starts
-         * covers this machine instead. */
-        return;
-    }
-    if (geteuid() != 0u) {
-        /* The user exists but we cannot become anybody: setgroups() needs
-         * privilege, so the child would _exit(122) and the only thing left
-         * to assert is that a browser fails to start -- true, and not worth
-         * a test. */
-        printf("  SKIP  the browser really drops -- " ND_PRIV_USER_UT
-               " exists but this is uid %lu, not root\n", (unsigned long)geteuid());
-        return;
-    }
 
     nd_log_set_colour(false);
     make_devices();
@@ -1016,15 +1024,12 @@ static void t_run_with_the_untrusted_user_really_drops(void)
     CHECK_INT(g_api.app_run(bare_ui()), 0);
 
     out = console_text();
-    /* The uid the child reports is the kernel's answer, not the launcher's:
-     * this is a real fork, a real nd_priv_become() and a real execve. */
+    /* Whatever WE are, the child is. On a root CI runner that is uid 0; as an
+     * ordinary developer it is theirs. Either way it is unchanged, and that
+     * is the claim. */
     (void)nd_snprintf(expect, sizeof expect, "[Browser] uid=%lu\r\n",
-                      (unsigned long)id.uid);
+                      (unsigned long)geteuid());
     check_has(out, expect);
-    /* And say what it must NOT be, so that a drop which silently did not
-     * happen fails here rather than passing on a coincidence. */
-    if (id.uid != 0u)
-        check_lacks(out, "[Browser] uid=0\r\n");
     nd_log_set_colour(was);
 }
 
@@ -1135,7 +1140,7 @@ int main(void)
     RUN(t_run_keeps_existing_home);
     RUN(t_home_is_a_directory_of_its_own);
     RUN(t_run_without_the_untrusted_user_still_starts);
-    RUN(t_run_with_the_untrusted_user_really_drops);
+    RUN(t_run_does_not_change_the_uid_itself);
     RUN(t_run_nonzero_exit);
     RUN(t_run_killed_dumps_dmesg);
     RUN(t_run_without_a_console);

@@ -261,6 +261,68 @@ nd_err nd_proc_terminate(pid_t pid, double grace_s, nd_proc_status *out);
  * Written so that adding it is one && in the line below and nothing else. */
 bool nd_proc_app_needs_root(const nd_app_entry *app, bool engineering_mode);
 
+/* ------------------------------------------------------------------ *
+ * The other direction: apps that run as LESS than ndusr
+ * ------------------------------------------------------------------ *
+ *
+ * ============ WHY THIS HAD TO MOVE INTO THE CORE ============
+ *
+ * The Browser app is a launcher: its whole job is to start netsurf and pump
+ * its stderr. netsurf is the untrusted half of this phone -- it renders
+ * whatever the internet sends it -- so apps/Browser used to do the confining
+ * itself, calling nd_priv_lookup(ND_PRIV_USER_UT) and asking nd_proc_spawn()
+ * for a mount namespace.
+ *
+ * THAT STOPPED WORKING THE DAY APPS STOPPED BEING ROOT, and it stopped
+ * working silently, in the worst possible direction:
+ *
+ *   setgroups() needs CAP_SETGID. As ndusr it fails, so nd_priv_become()
+ *   returns a step code and the child _exit(122)s BEFORE execve -- netsurf
+ *   never starts. The Browser app draws nothing and returns to the home
+ *   screen, so the phone looks like the browser simply did not open.
+ *
+ *   unshare(CLONE_NEWNS) needs CAP_SYS_ADMIN. As ndusr it fails too, and
+ *   because the code treats that as "this kernel has no namespaces" the
+ *   phone printed "no mount namespaces in this kernel" on a kernel that has
+ *   them -- nd-selftest reports CONFIG_MNT_NS PASS from the root core on the
+ *   very same boot.
+ *
+ * Both were verified on a booted phone, not reasoned about.
+ *
+ * The privilege being asked for is "become a LESS privileged user, and drop
+ * a namespace" -- which Linux still gates behind CAP_SETGID/CAP_SETUID and
+ * CAP_SYS_ADMIN. Only one process on this phone has those and should keep
+ * them: the core. So the confinement moves here, where it works, and the app
+ * is left with nothing to get wrong.
+ *
+ * ============ WHAT THE APP GETS INSTEAD ============
+ *
+ * An app named here is launched as ndusr_ut with private_mounts and the hide
+ * list below, AND WITHOUT A SERVICE SOCKET -- see nd_proc_launch_app(). That
+ * last part is not tidiness. nd_svc has no peer credential check of any kind
+ * (spec-app-services.md 5), so the socket is a straight line from any process
+ * holding it to a root thread that will send an SMS on its behalf. An
+ * untrusted app must not hold one, and neither must anything it forks.
+ *
+ * WHOLE PATHS, for the reason ROOT_STOCK_APPS' comment gives at length: a
+ * name is not safe to match on. The direction of the grant is different here
+ * -- this one only ever takes privilege away -- but a future user-installed
+ * directory called Browser must not be able to claim the browser's profile
+ * directory or the untrusted half of the SD card, both of which ndusr_ut owns
+ * and ndusr does not. */
+bool nd_proc_app_is_untrusted(const nd_app_entry *app);
+
+/* Emptied over the untrusted app's view of the filesystem: each becomes a
+ * read-only, mode-0000 tmpfs, so the directory still exists and is simply
+ * unreadable. Moved here from apps/Browser/browser.h, which is where it lived
+ * when the app did its own confining.
+ *
+ * These are the things ndusr_ut has no business reading even though the DAC
+ * bits alone might let it: the engineering apps, the release signing keys,
+ * the owner's tones and wallpapers, the databases, the SSH keys, the update
+ * records and the RNG seed. */
+#define ND_PROC_UNTRUSTED_HIDE_PATHS                                              {                                                                                 "/NeoDCT/System/engineering", "/NeoDCT/System/keys",                               "/NeoDCT/System/tones", "/NeoDCT/System/wallpapers",                           "/NeoDCT/User/db", "/NeoDCT/User/.remote", "/NeoDCT/User/.ndsys",              "/NeoDCT/User/.seedrng", NULL                                          }
+
 /* 1. open the key channel and the crash pipe
  * 2. spawn nd-apprun with the app's directory, the entry point and its
  *    argument, and the three inherited descriptors in the environment

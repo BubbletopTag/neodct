@@ -1585,6 +1585,107 @@ static void test_a_format_over_the_wire(core_fixture *fx)
     nd_storage_set_paths(NULL, NULL);
 }
 
+/* ---- 5e. what an UNTRUSTED process can do with this socket ---- */
+
+/* THE UID IS NOT THE BOUNDARY. THE SOCKET IS.
+ *
+ * nd_svc validates the RECORD and never the SENDER: there is no SO_PEERCRED,
+ * no SCM_CREDENTIALS, no peer-uid check anywhere in nd_svc.c. So a process
+ * that holds the descriptor is served, whoever it has become -- and the
+ * descriptor survives a uid change, because an open file keeps the access it
+ * was opened with.
+ *
+ * This case proves that, deliberately, so that the fact is written down as an
+ * assertion rather than as an assumption. It is the reason nd_proc.c gives an
+ * UNTRUSTED app NO SERVICE SOCKET AT ALL rather than trying to check who is
+ * calling: a check the caller can be on the wrong side of is not a boundary,
+ * and an fd that was never created cannot be inherited.
+ *
+ * It needs root (to become somebody else) and an ndusr_ut in /etc/passwd, so
+ * it announces itself as skipped when it cannot run rather than passing
+ * quietly -- a confinement test that silently did not run is the failure mode
+ * this whole file exists against. */
+static void test_an_untrusted_uid_is_still_served(core_fixture *fx)
+{
+    nd_priv_id ut;
+    nd_svc_server *s = NULL;
+    int child_fd;
+    int pipefd[2];
+    pid_t pid;
+
+    if (geteuid() != 0u || !nd_priv_lookup(ND_PRIV_USER_UT, &ut) || !ut.valid) {
+        fprintf(stderr, "SKIP an untrusted uid on the service socket: "
+                        "needs root and " ND_PRIV_USER_UT "\n");
+        return;
+    }
+
+    CHECK_INT(nd_svc_server_open(&s), ND_OK);
+    if (s == NULL)
+        return;
+    child_fd = dup(nd_svc_server_child_fd(s));
+    CHECK(child_fd >= 0);
+    if (child_fd < 0) {
+        nd_svc_server_free(s);
+        return;
+    }
+    CHECK_INT(nd_svc_server_start(s, &fx->ui), ND_OK);
+
+    if (pipe(pipefd) != 0) {
+        CHECK(false);
+        nd_svc_server_stop(s);
+        (void)close(child_fd);
+        return;
+    }
+
+    pid = fork();
+    if (pid == 0) {
+        /* The child: become ndusr_ut, then use the socket it inherited. This
+         * is exactly what netsurf would have been able to do while the
+         * Browser app still had a channel to leak to it. */
+        char detail[ND_MODEM_DETAIL_MAX];
+        nd_ui app;
+        uint8_t ok = 0u;
+
+        (void)close(pipefd[0]);
+        memset(&app, 0, sizeof app);
+        if (nd_priv_become(&ut) != 0)
+            _exit(70);
+        if (getuid() != ut.uid)
+            _exit(71);
+        if (!client_from_fd(child_fd))
+            _exit(72);
+        detail[0] = '\0';
+        ok = nd_svc_send_sms(&app, "0871234567", "Test", detail, sizeof detail) ? 1u : 0u;
+        if (write(pipefd[1], &ok, 1u) != 1)
+            _exit(73);
+        (void)close(pipefd[1]);
+        _exit(0);
+    }
+    CHECK(pid > 0);
+    (void)close(pipefd[1]);
+
+    if (pid > 0) {
+        uint8_t ok = 0xFFu;
+        ssize_t n = read(pipefd[0], &ok, 1u);
+        nd_proc_status st;
+
+        memset(&st, 0, sizeof st);
+        (void)nd_proc_wait(pid, 10.0, &st);
+
+        CHECK_INT((int)n, 1);
+        /* THE ASSERTION, and it is deliberately the uncomfortable one: an
+         * ndusr_ut process holding this descriptor gets its text sent, by the
+         * root core, through the real ModemService. Nothing about the uid
+         * stopped it, because nothing about the uid was ever consulted. */
+        CHECK_INT((int)ok, 1);
+    }
+    (void)close(pipefd[0]);
+
+    nd_svc_client_close();
+    nd_svc_server_stop(s);
+    (void)close(child_fd);
+}
+
 /* ------------------------------------------------------------------ *
  * 6. A real child process, launched by the real launcher
  * ------------------------------------------------------------------ */
@@ -1737,6 +1838,7 @@ int main(void)
     test_a_halt_with_nothing_to_spawn(&fx);
     test_the_clock_over_the_wire(&fx);
     test_a_format_over_the_wire(&fx);
+    test_an_untrusted_uid_is_still_served(&fx);
 
     /* SvcApp asks for a poweroff, and the launcher's own server thread is
      * the one that serves it -- so the fake has to be installed around the
