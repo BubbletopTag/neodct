@@ -591,12 +591,28 @@ cmd_status() {
     # starting the server. So report both, and separately.
     if pgrep -f 'wstunnel client' >/dev/null 2>&1; then
         host="$(cat "$RUNDIR/wstunnel.host" 2>/dev/null || echo '?')"
-        if [ -f "$RUNDIR/wstunnel.log" ] && \
-           tail -40 "$RUNDIR/wstunnel.log" 2>/dev/null | grep -q 'Tunnel created\|Starting TCP server'; then
-            printf 'tunnel         up -> http://%s:%s/vnc.html\n' "$host" "$NOVNC_PORT"
-        else
-            printf 'tunnel         retrying -> %s (is wstunnel server up there?)\n' "$host"
-        fi
+        # Which of two things happened LAST decides it.
+        #
+        # A TLS handshake line proves nothing -- the client logs one on every
+        # attempt, including the ones that then reset -- and the first version
+        # of this check looked for a "Tunnel created" line wstunnel does not
+        # emit, so it reported "retrying" over a tunnel that was carrying
+        # traffic.
+        #
+        # `Opening TCP connection to 127.0.0.1:$NOVNC_PORT` is the honest
+        # signal: the client only dials the LOCAL noVNC port when the far end
+        # has handed it a real connection to forward. That is end-to-end
+        # traffic and nothing else produces it.
+        last=$(grep -aE "Opening TCP connection to 127\.0\.0\.1:$NOVNC_PORT|cannot connect to remote server" \
+                    "$RUNDIR/wstunnel.log" 2>/dev/null | tail -1)
+        case "$last" in
+            *"cannot connect"*)
+                printf 'tunnel         retrying -> %s (is wstunnel server up there?)\n' "$host" ;;
+            *"Opening TCP"*)
+                printf 'tunnel         up -> http://%s:%s/vnc.html\n' "$host" "$NOVNC_PORT" ;;
+            *)
+                printf 'tunnel         connecting -> %s\n' "$host" ;;
+        esac
     else
         printf 'tunnel         down\n'
     fi
