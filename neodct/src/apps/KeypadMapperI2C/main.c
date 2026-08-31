@@ -130,7 +130,7 @@ const char *const nd_kmi2c_i2c_required_msg =
     "This app requires I2C. No /dev/i2c-* devices found. This application can not run in QEMU.";
 
 const char *const nd_kmi2c_intro_msg =
-    "This tool captures PCF8575 I2C keypad presses and writes JSON to /NeoDCT/User/keymap.json.";
+    "Captures PCF8575 keypad presses to /NeoDCT/User/keymap.json.";
 
 const char *const nd_kmi2c_cancel_msg = "Calibration canceled. Keymap not saved.";
 

@@ -112,7 +112,6 @@ static struct {
     const char *const *softkey_text;
 } i2c;
 
-
 static bool i2c_api_open(void *h)
 {
     *(void **)&i2c.run = sa_sym(h, "app_run");
@@ -150,7 +149,6 @@ static bool i2c_api_open(void *h)
            i2c.intro_msg != NULL && i2c.cancel_msg != NULL && i2c.title != NULL &&
            i2c.format != NULL && i2c.driver != NULL && i2c.softkey_text != NULL;
 }
-
 
 /* ------------------------------------------------------------------ *
  * A scratch ND_ROOT, so /dev can be invented
@@ -239,9 +237,7 @@ static void test_constants(void)
               "This app requires I2C. No /dev/i2c-* devices found. "
               "This application can not run in QEMU.",
               "I2C_REQUIRED_MSG");
-    CHECK_STR(*i2c.intro_msg,
-              "This tool captures PCF8575 I2C keypad presses and writes JSON to "
-              "/NeoDCT/User/keymap.json.",
+    CHECK_STR(*i2c.intro_msg, "Captures PCF8575 keypad presses to /NeoDCT/User/keymap.json.",
               "run()'s first dialog");
     CHECK_STR(*i2c.cancel_msg, "Calibration canceled. Keymap not saved.", "the MENU dialog");
     CHECK_STR(*i2c.title, "Keypad Mapper I2C", "title");
@@ -258,7 +254,6 @@ static void test_constants(void)
     CHECK_INT(i2c.default_cols[3], 7, "DEFAULT_COL_PINS[3]");
     CHECK_INT(ND_I2C_BUS_DEFAULT, 3, "DEFAULT_BUS");
     CHECK_INT(ND_I2C_ADDR_DEFAULT, 0x20, "DEFAULT_ADDR");
-
 }
 
 /* ------------------------------------------------------------------ *

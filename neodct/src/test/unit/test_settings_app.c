@@ -231,24 +231,36 @@ static void test_strings(void)
               "\n"
               "A card the phone formats gets a second, separate area for downloads and "
               "picture messages. Things that arrive on their own go there and cannot "
-              "reach your music, and nothing there can run. A card you make on a "
+              "reach your music, and nothing there can run. Both parts are FAT32, so "
+              "both still read on a computer -- which is why the card is split rather "
+              "than reformatted as ext. A card you make on a "
               "computer works for everything above, but has nowhere for downloads to "
               "go.",
               "SDCARD_HELP");
 
-    /* The destructive confirmation. It has to say the card is erased, which
-     * it always did, and that it is REPARTITIONED, which is new. What it
-     * does NOT have to say is that the card will stop reading on a PC --
-     * and that is the whole reason section 1 chose two FAT partitions over
-     * reformatting the card as ext. */
-    CHECK(api.format_warning != NULL && *api.format_warning != NULL,
-          "FORMAT_WARNING exists");
+    /* The destructive confirmation. It has to say the card is erased -- and
+     * now that is ALL it says, because the longer version did not fit.
+     *
+     * It ran to nine lines in a dialog that shows five, so the phone asked
+     * "Format this card?", shouted that everything would be erased, and then
+     * cut its own explanation mid-sentence at "It is split in two: one part"
+     * with no ellipsis to show for it. On the one screen in this app that
+     * destroys data.
+     *
+     * The repartitioning and the still-reads-on-a-PC point did not go away;
+     * they moved to sdcard_help, which is an nd_scroller and therefore PAGES
+     * instead of clipping. Asserted THERE, below, rather than deleted here --
+     * the facts are still owed to the owner, just not on the confirmation. */
+    CHECK(api.format_warning != NULL && *api.format_warning != NULL, "FORMAT_WARNING exists");
     if (api.format_warning != NULL && *api.format_warning != NULL) {
-        CHECK(strstr(*api.format_warning, "ERASED") != NULL,
-              "it says the card is erased");
-        CHECK(strstr(*api.format_warning, "split in two") != NULL,
-              "and that the card is repartitioned");
-        CHECK(strstr(*api.format_warning, "read on a computer") != NULL,
+        CHECK(strstr(*api.format_warning, "ERASED") != NULL, "it says the card is erased");
+        CHECK(strstr(*api.format_warning, "split in two") == NULL,
+              "and no longer explains the layout, which did not fit");
+    }
+    if (api.sdcard_help != NULL && *api.sdcard_help != NULL) {
+        CHECK(strstr(*api.sdcard_help, "separate area for downloads") != NULL,
+              "the help says the card is repartitioned");
+        CHECK(strstr(*api.sdcard_help, "read on a computer") != NULL,
               "and that it still reads on a PC, which is the point of FAT");
     }
 

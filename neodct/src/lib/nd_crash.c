@@ -571,6 +571,40 @@ void nd_crash_show_app(struct nd_ui *ui, const char *message, const char *app_na
             (void)nd_strlcpy(text, message, sizeof text);
 
         nd_msgdialog_init(&dlg, ui, text);
+
+        /* ============ TRIM THE SUMMARY UNTIL IT ACTUALLY FITS ============
+         *
+         * The summary is a crash detail from the child, up to 90 characters,
+         * and "An application has crashed." already spends two of the five
+         * lines nd_msgdialog can show. A long one therefore ran off the
+         * bottom -- invisibly, because the ellipsis the widget appends is a
+         * codepoint this font cannot draw, so the notice simply stopped
+         * partway through the exception text and looked deliberate.
+         *
+         * Trimmed by MEASURING rather than by a character constant, because
+         * the limit is a pixel budget: it depends on the font, the icon
+         * height, the margin and the panel, and a number tuned to today's
+         * font silently becomes wrong when any of those move. Whole words,
+         * so it does not stop mid-token, and the full summary is in the crash
+         * log and on the engineering screen either way.
+         *
+         * The loop runs at most as many times as the summary has words, and
+         * only on a crash. nd_msgdialog_measure() draws nothing. */
+        if (summary[0] != '\0') {
+            size_t needed = 0u, fits = 0u;
+
+            nd_msgdialog_measure(&dlg, &needed, &fits);
+            while (needed > fits && fits > 0u) {
+                char *cut = strrchr(summary, ' ');
+
+                if (cut == NULL)
+                    break;
+                *cut = '\0';
+                (void)nd_snprintf(text, sizeof text, "%s\n%s...", message, summary);
+                nd_msgdialog_init(&dlg, ui, text);
+                nd_msgdialog_measure(&dlg, &needed, &fits);
+            }
+        }
         (void)nd_msgdialog_show(&dlg);
     }
 }

@@ -63,6 +63,7 @@
 #include "nd_bt.h"
 #include "nd_draw.h"
 #include "nd_keycodes.h"
+#include "nd_log.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
@@ -81,13 +82,14 @@
 
 const char *const nd_btapp_menu[ND_BTAPP_MENU_N] = {"Adapter", "Scan", "Self test"};
 
-const char *const nd_btapp_no_kernel_msg =
-    "This kernel has no Bluetooth core. CONFIG_BT and CONFIG_BT_HCIBTUSB have "
-    "to be built in, which needs a reflash -- an update carries no kernel.";
+/* The CONFIG_BT symbol names used to be in here and are now in the log line
+ * beside the call site: they are 18 characters of kernel trivia that a person
+ * holding a phone cannot act on, and keeping them cost the sentence that says
+ * a reflash is needed -- which was being cut off. 4 lines of 5. */
+const char *const nd_btapp_no_kernel_msg = "No Bluetooth here.\n\nEnabling it needs a reflash.";
 
 const char *const nd_btapp_no_adapter_msg =
-    "No Bluetooth controller. Either nothing is plugged into USB, or btusb "
-    "bound it and the rtl_bt firmware did not load.";
+    "No Bluetooth controller.\n\nNothing on USB, or no rtl_bt firmware.";
 
 /* ------------------------------------------------------------------ *
  * Rows -- pure, and everything that decides what is on screen
@@ -590,6 +592,10 @@ int app_run(nd_ui *ui)
     if (!nd_bt_available()) {
         nd_msgdialog dlg;
 
+        /* The detail the dialog no longer has room for. A reflash is the fix
+         * either way; the symbol names only help whoever is doing it. */
+        nd_log_err(ND_LOG_BLUETOOTH, "No Bluetooth core: CONFIG_BT and CONFIG_BT_HCIBTUSB "
+                                     "have to be built in, and an update carries no kernel.");
         nd_msgdialog_init(&dlg, ui, nd_btapp_no_kernel_msg);
         (void)nd_msgdialog_show(&dlg);
         return 0;

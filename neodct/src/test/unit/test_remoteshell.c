@@ -359,12 +359,21 @@ static void test_dialog_strings(void)
     CHECK_STR(*api.now_off, "Remote Shell is off.", "turned off");
 
     /* A literal double hyphen, not an em dash: this font would draw one
-     * wrong and the Python has the two characters. */
+     * wrong and the Python has the two characters.
+     *
+     * THE FILENAMES ARE GONE FROM THE DIALOG ON PURPOSE. Interpolating them
+     * made the length of a security warning depend on how many keys were on
+     * the card: with these three it ran to seven lines in a dialog that shows
+     * five, and the half that fell off the bottom was "anyone who takes the
+     * card out can read them" -- the entire reason for the message. The names
+     * go to the log instead. So this now asserts that the text is FIXED: the
+     * same whatever it is handed. */
     api.copied_message(out, sizeof out, "authorized_keys, id_ed25519, known_hosts");
-    CHECK_STR(out,
-              "Copied: authorized_keys, id_ed25519, known_hosts.\n\nDelete them from the card now "
-              "-- anyone who takes the card out can read them.",
+    CHECK_STR(out, "Keys copied. Delete them from the card -- anyone can read them.",
               "the Copied dialog");
+    api.copied_message(out, sizeof out, "a");
+    CHECK_STR(out, "Keys copied. Delete them from the card -- anyone can read them.",
+              "and it does not vary with what was copied");
 
     api.fingerprint_message(out, sizeof out, "256 SHA256:abc root@phone (ED25519)");
     CHECK_STR(out, "This phone:\n256 SHA256:abc root@phone (ED25519)", "the fingerprint dialog");

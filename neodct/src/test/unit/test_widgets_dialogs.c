@@ -778,6 +778,33 @@ static void test_the_modem_fault_message_fits(void)
     fx_free(&fx);
 }
 
+/* The other shipped message, same invariant. This one is shown when an
+ * untrusted app is REFUSED because the image cannot confine it, so it is read
+ * by somebody whose browser just did not open -- the one moment they need the
+ * whole sentence. */
+static void test_the_cannot_confine_message_fits(void)
+{
+    fixture fx;
+    nd_msgdialog dlg;
+    size_t needed = 0u, fits = 0u;
+
+    if (!fx_init(&fx)) {
+        CHECK(false);
+        return;
+    }
+
+    nd_msgdialog_init(&dlg, &fx.ui, ND_UI_CANNOT_CONFINE_MESSAGE);
+    nd_msgdialog_set_title(&dlg, "Blocked");
+    nd_msgdialog_set_icon(&dlg, ND_PATH_WARNING_ICON);
+    nd_msgdialog_measure(&dlg, &needed, &fits);
+
+    CHECK_INT((int)fits, 5);
+    CHECK(needed <= fits);
+    CHECK(needed < fits);
+
+    fx_free(&fx);
+}
+
 static void test_msgdialog_keys(void)
 {
     fixture fx;
@@ -1382,6 +1409,7 @@ int main(void)
     test_msgdialog_invisible_ellipsis();
     test_msgdialog_measure_sees_the_clip();
     test_the_modem_fault_message_fits();
+    test_the_cannot_confine_message_fits();
     test_msgdialog_keys();
 
     test_scroller_blank_line_is_a_gap();

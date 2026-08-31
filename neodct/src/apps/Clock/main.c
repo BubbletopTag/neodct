@@ -79,7 +79,7 @@ const char *const nd_clock_app_bad_date = "Not a date.\n\nEight digits, day firs
  * write. One sentence covers both because they are the same instruction to
  * the person holding the phone. */
 const char *const nd_clock_app_set_failed =
-    "The clock would not take it.\n\nCheck the date and try again.";
+    "The clock would not take it.\n\nCheck it and try again.";
 const char *const nd_clock_app_no_alarms = "No alarms yet.\n\nThis row is not built.";
 
 /* ------------------------------------------------------------------ *

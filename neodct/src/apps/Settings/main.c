@@ -130,12 +130,23 @@ const char *const nd_setapp_get_more_help_with_card =
  *   PC. It will not. Both partitions are FAT32 and any computer opens the
  *   first one.
  */
-const char *const nd_setapp_format_warning =
-    "Format this card?\n"
-    "EVERYTHING ON IT WILL BE ERASED!\n"
-    "\n"
-    "It is split in two: one part for your music and pictures, one for "
-    "downloads. Both still read on a computer.";
+/* ============ A CONFIRMATION HAS TO FIT, MORE THAN MOST ============
+ *
+ * This one did not. It ran to nine lines in a dialog that shows five, so the
+ * phone asked "Format this card? EVERYTHING ON IT WILL BE ERASED!" and then
+ * cut its own explanation mid-sentence at "It is split in two: one part" --
+ * with no ellipsis, because nd_msgdialog's is a codepoint this font cannot
+ * draw. A truncated sentence on the screen that destroys somebody's photos is
+ * the worst place in this tree for that bug to have been.
+ *
+ * What the card ends up looking like is not what a person needs while their
+ * thumb is over the key. It is in the SD card help, which is an
+ * nd_scroller_init() and therefore PAGES rather than clipping -- the right
+ * widget for text that will not fit, and the reason this could be cut down
+ * rather than crammed in. 4 lines of 5. */
+const char *const nd_setapp_format_warning = "Format this card?\n"
+                                             "\n"
+                                             "EVERYTHING ON IT WILL BE ERASED!";
 
 const char *const nd_setapp_sdcard_help =
     "A NeoDCT memory card is a FAT32 card with these folders on it:\n"
@@ -151,9 +162,10 @@ const char *const nd_setapp_sdcard_help =
     "\n"
     "A card the phone formats gets a second, separate area for downloads and "
     "picture messages. Things that arrive on their own go there and cannot "
-    "reach your music, and nothing there can run. A card you make on a "
-    "computer works for everything above, but has nowhere for downloads to "
-    "go.";
+    "reach your music, and nothing there can run. Both parts are FAT32, so "
+    "both still read on a computer -- which is why the card is split rather "
+    "than reformatted as ext. A card you make on a computer works for "
+    "everything above, but has nowhere for downloads to go.";
 
 size_t nd_setapp_bt_lines(char lines[][ND_SETAPP_BT_LINE_MAX], size_t max, bool enabled,
                           bool connected)

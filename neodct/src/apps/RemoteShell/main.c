@@ -43,6 +43,7 @@
 
 #include "nd_app.h"
 #include "nd_keycodes.h"
+#include "nd_log.h"
 #include "nd_paths.h"
 #include "nd_storage.h"
 #include "nd_t9.h"
@@ -50,8 +51,8 @@
 #include "nd_ui.h"
 #include "nd_widgets.h"
 
-#include "remote_app.h"
 #include "nd_remoteshell.h"
+#include "remote_app.h"
 
 /* ------------------------------------------------------------------ *
  * The strings
@@ -197,10 +198,14 @@ void nd_rsapp_copied_message(char *out, size_t n, const char *taken)
 {
     if (out == NULL || n == 0u)
         return;
-    (void)snprintf(out, n,
-                   "Copied: %s.\n\nDelete them from the card now -- anyone who "
-                   "takes the card out can read them.",
-                   (taken != NULL) ? taken : "");
+    /* The list of filenames used to be interpolated here, which made the
+     * length of this message depend on how many keys were on the card -- two
+     * of them and the sentence that matters ("anyone holding it can read
+     * them") was the part that got cut. The names go to the log; the warning
+     * gets the dialog. 5 lines of 5, and it no longer varies. */
+    (void)n;
+    (void)nd_strlcpy(out, "Keys copied. Delete them from the card -- anyone can read them.", n);
+    nd_log(ND_LOG_RSHELL, "Copied from the card: %s", (taken != NULL) ? taken : "");
 }
 
 /* "Take the operator's keys off the card." */

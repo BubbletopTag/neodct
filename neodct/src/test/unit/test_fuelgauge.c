@@ -320,9 +320,7 @@ static void test_refuses_without_the_hook(void)
 
 static void test_strings(void)
 {
-    CHECK_STR(*api.hw_required,
-              "No MAX1704x fuel gauge found, so BatteryService is running its QEMU "
-              "simulation stub. This app needs real hardware.",
+    CHECK_STR(*api.hw_required, "No MAX1704x fuel gauge.\n\nThis app needs real hardware.",
               "HW_REQUIRED_MSG");
     CHECK_DBL(ND_FG_REFRESH_S, 1.0, "REFRESH_S");
     CHECK_DBL(ND_FG_FLASH_S, 2.0, "the two-second flash dwell");

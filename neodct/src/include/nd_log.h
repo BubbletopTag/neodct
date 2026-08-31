@@ -81,6 +81,7 @@ extern "C" {
 #define ND_LOG_CALENDAR   "Calendar"
 #define ND_LOG_CALCULATOR "Calculator"
 #define ND_LOG_POWER      "Power"
+#define ND_LOG_BLUETOOTH  "Bluetooth"
 
 /* The colour every line on stderr is painted, tag or no tag. */
 #define ND_LOG_ERROR_COLOUR 196

@@ -1081,11 +1081,16 @@ bool nd_update_check_online(nd_ui *ui, char *out, size_t out_sz)
          * and a 60MB download is a long time to hold a weak bearer. Say that
          * the progress is kept -- otherwise trying again looks like starting
          * again, and nobody presses a button for that twice. */
-        (void)snprintf(body, sizeof body,
-                       "Download failed.\n%s\n\nWhat has downloaded so far "
-                       "is kept on the card. Choosing it again carries on "
-                       "from there.",
-                       why);
+        /* `why` is a network error string of unbounded length and it used to
+         * be interpolated into the dialog, which is what pushed the sentence
+         * about resuming off the bottom -- the one thing the message exists to
+         * say. It goes to the log instead; the dialog is now fixed at 4 of the
+         * 5 lines nd_msgdialog can show. */
+        nd_log_err(ND_LOG_UPDATE, "download failed: %s", why);
+        (void)nd_strlcpy(body,
+                         "Download failed.\n\nWhat downloaded is kept. Choosing it "
+                         "carries on.",
+                         sizeof body);
         nd_update_refuse(ui, body);
         out[0] = '\0';
         return false;
