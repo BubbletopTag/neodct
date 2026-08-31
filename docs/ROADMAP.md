@@ -91,6 +91,17 @@ Together they are what would make the jump to 0.4 mean something.
 - **Know when it is charging.** The phone reads the fuel gauge but cannot
   tell a charge from a discharge, so it cannot show a charging indicator
   or stop worrying about a low battery that is already on the cable.
+- **A dev kit.** A second unit on a Luckfox Pico Mini A, which boots from
+  an SD card instead of NAND: same RV1103, same 64 MB, a generic 4x4
+  keypad on a PCF8575, a larger ST7789, USB ethernet, breadboarded flat.
+  It runs the shipping armv7/musl binaries on the shipping silicon, which
+  nothing except the bench phone does, and it cannot be bricked -- a bad
+  kernel or initramfs costs a card reader instead of a maskrom session.
+  That is what would unblock the changes currently gated on "needs a full
+  reflash". It tests nothing about NAND, UBI or the enclosure, so it is a
+  third rung and not a replacement for either end. `docs/DEVKIT.md` has
+  the reasoning, the five changes the OS would need, and the hardware
+  questions to settle first.
 - **A Clock app, with alarms.** There is a Clock in the app list already;
   alarms are the part that is missing, and they need something to run
   while the UI is not the thing in front. Overlaps with power states: an
