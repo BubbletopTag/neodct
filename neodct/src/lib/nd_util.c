@@ -38,6 +38,8 @@ const char *nd_strerror(nd_err err)
         return "malformed";
     case ND_ERR_UNSUPPORTED:
         return "unsupported";
+    case ND_ERR_PERM:
+        return "refused: cannot be done without privilege this must not have";
     }
 
     /* Not a default: label, so -Wswitch still catches a new enumerator. */

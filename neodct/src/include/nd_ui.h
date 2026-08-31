@@ -341,6 +341,16 @@ void nd_ui_show_pending_modem_fault(nd_ui *ui);
 #define ND_UI_MODEM_FAULT_MESSAGE \
     "Modem ERROR!\n\nPossible hardware fault. Try rebooting the phone."
 
+/* Shown when nd_proc_launch_app() returns ND_ERR_PERM: an untrusted app could
+ * not be confined, so it was not started. Deliberately says what it means
+ * rather than why -- "there is no ndusr_ut in this image" is a sentence for
+ * the console, not for somebody holding a phone.
+ *
+ * 4 lines against nd_msgdialog's 5. Checked by
+ * test_the_cannot_confine_message_fits(), for the reason the modem one is. */
+#define ND_UI_CANNOT_CONFINE_MESSAGE \
+    "Cannot confine this app.\n\nIt is not run at all rather than run as root."
+
 /* True when the radio is in ND_MODEM_LINK_FAULT. The home screen drops the
  * carrier line entirely when it is. */
 bool nd_ui_status_modem_faulted(nd_ui *ui);

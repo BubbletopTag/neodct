@@ -450,8 +450,7 @@ nd_err nd_proc_spawn(const char *path, const nd_proc_spec *spec, pid_t *pid_out)
                 /* An empty, read-only, mode-0000 tmpfs. The directory still
                  * exists and is empty, which is a quieter failure inside the
                  * child than a missing path and just as final. */
-                if (mount("none", hide[h], "tmpfs",
-                          MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC,
+                if (mount("none", hide[h], "tmpfs", MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC,
                           "size=0k,mode=0000") != 0)
                     _exit(124);
             }
@@ -933,18 +932,50 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
          * the privilege to do it. nd_proc.h carries the whole argument. */
         static const char *const hide[] = ND_PROC_UNTRUSTED_HIDE_PATHS;
 
-        if (!nd_priv_lookup(ND_PRIV_USER_UT, &spec.run_as))
+        /* ============ THIS ONE REFUSES ============
+         *
+         * It used to log and carry on, which meant an image without the users
+         * table ran NETSURF AS ROOT -- the single process on this phone that
+         * most needs not to be, parsing HTML off the network with every
+         * capability the core has. One nd_log_err line in a boot log is not a
+         * fair warning for that; it was missed for exactly as long as you
+         * would expect, and the first anyone knew was a `top` on a real build
+         * showing `root ... /usr/bin/netsurf-fb file:///NeoDCT/...`.
+         *
+         * An untrusted app that cannot be confined does not run. Not opening
+         * is a bad outcome; opening with root is a worse one, and unlike the
+         * first it is invisible. The log line says what to do about it,
+         * because the cause is nearly always a buildroot output/ tree older
+         * than the users table -- .config is generated from the defconfig
+         * ONCE, so a stale one never grows the BR2_ROOTFS_USERS_TABLES line
+         * no matter how many times it is rebuilt. */
+        if (!nd_priv_lookup(ND_PRIV_USER_UT, &spec.run_as)) {
             nd_log_err(ND_LOG_OS,
-                       "no " ND_PRIV_USER_UT " in this image; %s runs with the "
-                       "core's privileges",
+                       "REFUSING to launch %s: there is no " ND_PRIV_USER_UT
+                       " in this image, so it cannot be confined, and an "
+                       "untrusted app is not run with the core's privileges. "
+                       "Rebuild with the users table: cd buildroot && make "
+                       "neodct_qemu_defconfig && make. nd-selftest reports the "
+                       "same thing.",
                        app->name);
+            rc = ND_ERR_PERM;
+            goto done;
+        }
         spec.no_new_privs = true;
         spec.private_mounts = true;
         spec.hide_paths = hide;
     } else if (!nd_proc_app_needs_root(app, nd_ui_engineering_mode(ui))) {
+        /* A trusted app still runs -- refusing here would brick every app on
+         * the phone rather than confine anything -- but it is an ERROR and it
+         * says so. It was nd_log(), an ordinary informational line, which is
+         * how a whole phone came to be running every app as root with nothing
+         * in the log that looked like a problem. */
         if (!nd_priv_lookup(ND_PRIV_USER, &spec.run_as))
-            nd_log(ND_LOG_OS, "no " ND_PRIV_USER " in this image; %s runs with the "
-                              "core's privileges", app->name);
+            nd_log_err(ND_LOG_OS,
+                       "SECURITY: no " ND_PRIV_USER " in this image, so %s runs "
+                       "as ROOT. Every app does. Rebuild with the users table: "
+                       "cd buildroot && make neodct_qemu_defconfig && make.",
+                       app->name);
         /* Only on the dropped ones. On a root app it would forbid nothing
          * that root cannot already do, and an engineering app is the one
          * place something might legitimately want to exec a setuid helper. */

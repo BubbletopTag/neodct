@@ -58,16 +58,17 @@ extern "C" {
  * seven flatten together; adding to the tail cannot renumber anything. */
 typedef enum {
     ND_OK = 0,
-    ND_ERR_NOMEM,      /* allocation failed -- a normal condition on 53 MB   */
-    ND_ERR_IO,         /* open/read/write/ioctl failed; errno is meaningful  */
-    ND_ERR_INVAL,      /* the caller passed something impossible             */
-    ND_ERR_NOTFOUND,   /* the named thing does not exist                     */
-    ND_ERR_TOOLONG,    /* would not fit the caller's buffer (snprintf rule)  */
-    ND_ERR_HARDWARE,   /* the device answered, but wrongly, or not at all    */
-    ND_ERR_BUSY,       /* try again later; the modem is mid-transaction      */
-    ND_ERR_TIMEOUT,    /* waited the stated time and nothing arrived         */
-    ND_ERR_PARSE,      /* a file or wire message was malformed               */
-    ND_ERR_UNSUPPORTED /* understood, deliberately not implemented           */
+    ND_ERR_NOMEM,       /* allocation failed -- a normal condition on 53 MB   */
+    ND_ERR_IO,          /* open/read/write/ioctl failed; errno is meaningful  */
+    ND_ERR_INVAL,       /* the caller passed something impossible             */
+    ND_ERR_NOTFOUND,    /* the named thing does not exist                     */
+    ND_ERR_TOOLONG,     /* would not fit the caller's buffer (snprintf rule)  */
+    ND_ERR_HARDWARE,    /* the device answered, but wrongly, or not at all    */
+    ND_ERR_BUSY,        /* try again later; the modem is mid-transaction      */
+    ND_ERR_TIMEOUT,     /* waited the stated time and nothing arrived         */
+    ND_ERR_PARSE,       /* a file or wire message was malformed               */
+    ND_ERR_UNSUPPORTED, /* understood, deliberately not implemented           */
+    ND_ERR_PERM         /* refused: doing it would need privilege we must not */
 } nd_err;
 
 /* A short, stable, English description. Never NULL, never allocated -- the

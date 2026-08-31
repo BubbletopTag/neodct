@@ -1169,9 +1169,11 @@ void nd_ui_paint_chrome_content(nd_ui *ui)
  * Construction step 13 -- the alpha security notice
  * ------------------------------------------------------------------ */
 
-#define ALPHA_NOTICE                                                        \
-    "This is alpha software. Consider it extremely insecure and unstable. " \
-    "Don't store important data on this device."
+/* Exactly 5 lines of 5 before, which is to say one word from being cut off
+ * without saying so. 4 now. */
+#define ALPHA_NOTICE                                                  \
+    "This is alpha software. Extremely insecure and unstable. Don't " \
+    "store important data on it."
 
 /* ErrorScreen.show_alpha_security_notice_once(). Returns true when it showed.
  * The ack file is written ONLY after the dialog was actually displayed -- if
@@ -1783,6 +1785,36 @@ int32_t nd_ui_wait_for_key(nd_ui *ui)
     }
 }
 
+/* Why an app did not open, when the reason is that the core would have had to
+ * hand it root. See nd_proc_launch_app(): an image with no ndusr_ut cannot
+ * confine the browser, and the answer to that is not to run it.
+ *
+ * The wording says what happened and what it means, and stops. The cause --
+ * a buildroot tree older than the users table -- is a developer's problem and
+ * goes to the console, where the log line names the exact rebuild command.
+ *
+ * It fits: 4 lines against nd_msgdialog's budget of 5. Measured with
+ * nd_msgdialog_measure() rather than guessed, which is the whole reason that
+ * accessor exists. */
+static void show_cannot_confine(nd_ui *ui, const char *app_name)
+{
+    nd_msgdialog dlg;
+
+    nd_log_err(ND_LOG_OS, "%s was not launched: it cannot be confined on this image.",
+               (app_name != NULL) ? app_name : "an app");
+
+    if (nd_msgdialog_init == NULL || nd_msgdialog_show == NULL)
+        return;
+    nd_msgdialog_init(&dlg, ui, ND_UI_CANNOT_CONFINE_MESSAGE);
+    if (nd_msgdialog_set_title != NULL)
+        nd_msgdialog_set_title(&dlg, "Blocked");
+    if (nd_msgdialog_set_icon != NULL)
+        nd_msgdialog_set_icon(&dlg, ND_PATH_WARNING_ICON);
+    if (nd_msgdialog_set_button != NULL)
+        nd_msgdialog_set_button(&dlg, "OK");
+    (void)nd_msgdialog_show(&dlg);
+}
+
 /* ------------------------------------------------------------------ *
  * The home screen
  * ------------------------------------------------------------------ */
@@ -1977,7 +2009,15 @@ void nd_ui_render_menu(nd_ui *ui)
          * shipped manifest still says "main.py". See U-6 in
          * OPEN-QUESTIONS.md. */
         if (nd_proc_launch_app != NULL) {
-            (void)nd_proc_launch_app(ui, &apps[choice], NULL, NULL, NULL);
+            /* ND_ERR_PERM is the ONE launch failure the owner has to be told
+             * about, because it means an untrusted app was refused rather
+             * than run with the core's privileges. Every other failure leaves
+             * the app not running, which is its own message; this one leaves
+             * the phone SAFER than it would otherwise be and looks identical
+             * from the outside. A screen that flashes and returns home is
+             * what hid the browser being broken once already. */
+            if (nd_proc_launch_app(ui, &apps[choice], NULL, NULL, NULL) == ND_ERR_PERM)
+                show_cannot_confine(ui, apps[choice].name);
         } else {
             nd_log_err(ND_LOG_OS, "App launcher not linked; ignoring %s", apps[choice].name);
         }
