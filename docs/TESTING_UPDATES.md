@@ -15,7 +15,7 @@ document is for.
 
 ```sh
 cd buildroot
-make neodct_qemu_defconfig      # first time only; overwrites .config
+make neodct_qemu_defconfig      # after ANY pull that touches the defconfig
 make                            # produces the whole image set
 NEODCT_SIGN_KEY=$PWD/../neodct/tools/devkey/neodct-dev.key make update
 ```

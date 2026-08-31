@@ -34,10 +34,23 @@ current image design.
 
 ```sh
 cd buildroot
-make neodct_qemu_defconfig      # first time only; overwrites .config
+make neodct_qemu_defconfig      # see the note below before skipping this
 make                            # full image set
 neodct/tools/run_qemu.sh        # from the repo root
 ```
+
+`.config` IS GENERATED FROM THE DEFCONFIG ONCE. It used to say "first time
+only" here, and that was the bug: a tree whose `output/` predates a defconfig
+change keeps its old `.config` through every rebuild and `make` never mentions
+it. That is how images came to be built with no `ndusr` in them, so
+`nd_priv_lookup()` found nothing and every app ran as root -- found with `top`
+on a real build, not by anything in the tree.
+
+The users specifically are now also declared in `package/neodct/neodct.mk`,
+which reaches a stale `.config` because PACKAGES_USERS is collected whatever
+the rootfs settings say. Nothing else is covered that way. Re-run the
+defconfig after pulling anything that touches
+`neodct/configs/neodct_qemu_defconfig`.
 
 Build an installable update on an already-built tree (no rebuild):
 

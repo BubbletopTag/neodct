@@ -182,6 +182,39 @@ def test_both_defconfigs_ask_for_the_table(defconfig):
     assert 'BR2_ROOTFS_USERS_TABLES="../neodct/configs/users-table.txt"' in body
 
 
+NEODCT_MK = os.path.join(REPO, "buildroot", "package", "neodct", "neodct.mk")
+
+
+@pytest.mark.skipif(not os.path.exists(NEODCT_MK), reason="buildroot not vendored")
+def test_the_package_supplies_the_users_when_the_config_does_not():
+    """The defconfig alone is not enough, and this is the line that covers it.
+
+    Buildroot generates output/.config from the defconfig ONCE. A checkout made
+    before the users table was added keeps its old .config through every
+    rebuild, never gains BR2_ROOTFS_USERS_TABLES, and produces images with no
+    ndusr in them -- so nd_priv_lookup() finds nothing and EVERY APP RUNS AS
+    ROOT. That is not hypothetical: it was found with `top` on a real build,
+    showing netsurf as root.
+
+    PACKAGES_USERS is collected from enabled packages regardless of the
+    .config's rootfs settings, so declaring the users in neodct.mk reaches a
+    stale tree that the defconfig cannot. Guarded by ifeq on
+    BR2_ROOTFS_USERS_TABLES so a current .config uses the normal path and the
+    users are never declared twice."""
+    body = open(NEODCT_MK).read()
+
+    assert "NEODCT_USERS" in body, "the package no longer supplies the users"
+    assert "ifeq ($(call qstrip,$(BR2_ROOTFS_USERS_TABLES)),)" in body, (
+        "the fallback must be guarded, or a current .config declares the "
+        "users twice"
+    )
+    assert "$(file <$(NEODCT_USERS_TABLE))" in body, (
+        "read with $(file <), not $(shell cat): mkusers parses on newlines "
+        "and $(shell) collapses them to spaces"
+    )
+    assert "users-table.txt" in body, "and it must read THE table, not a copy"
+
+
 @pytest.mark.skipif(not os.path.exists(MKUSERS), reason="buildroot not vendored")
 def test_buildroot_accepts_the_table(tmp_path):
     """The real script, against a real skeleton. The format has traps that

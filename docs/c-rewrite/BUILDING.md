@@ -204,7 +204,7 @@ driver. The QEMU target below is fine on 24.04.
 
 ```sh
 cd buildroot
-make neodct_qemu_defconfig     # first time only; overwrites .config
+make neodct_qemu_defconfig     # after ANY pull that touches the defconfig
 make                           # hours on a cold tree
 ```
 

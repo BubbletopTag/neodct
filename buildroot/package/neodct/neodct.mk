@@ -30,6 +30,39 @@ define NEODCT_COPY_LICENSE
 endef
 NEODCT_POST_RSYNC_HOOKS += NEODCT_COPY_LICENSE
 
+# ============ THE USERS, AND WHY THEY ARE ALSO DECLARED HERE ============
+#
+# ndusr and ndusr_ut are what the whole privilege split rests on: without them
+# nd_priv_lookup() finds nothing, nd_priv_become() is a documented no-op, and
+# EVERY APP RUNS AS ROOT. Not a degraded mode -- the entire boundary, absent.
+#
+# They are configured the normal way, through BR2_ROOTFS_USERS_TABLES in the
+# defconfig. That was not enough, and the way it failed is worth writing down
+# because it will happen again to something else:
+#
+#   Buildroot generates output/.config from the defconfig ONCE. Adding a line
+#   to the defconfig does nothing to a tree that already has a .config, and
+#   `make` never mentions it. So a checkout that predates the users table
+#   keeps building images with no ndusr in them, forever, and the only signal
+#   is one line in a boot log. It was found with `top` on a real build,
+#   showing netsurf running as root.
+#
+# PACKAGES_USERS is collected from every enabled package regardless of the
+# .config's rootfs settings (fs/common.mk:80 unconditionally prints it into
+# full_users_table.txt; the configured table on line 82 is the conditional
+# one). Declaring the users at the package level therefore reaches a stale
+# .config, which the defconfig cannot.
+#
+# GUARDED so the two cannot both fire: with the table configured this is
+# empty and buildroot's own path runs, exactly as before. It is a fallback for
+# an out-of-date tree, not a second source of truth -- the file below stays
+# the only place the users are written down, and $(file <) is used rather than
+# $(shell cat) because it preserves the newlines mkusers parses on.
+NEODCT_USERS_TABLE = $(TOPDIR)/../neodct/configs/users-table.txt
+ifeq ($(call qstrip,$(BR2_ROOTFS_USERS_TABLES)),)
+NEODCT_USERS = $(file <$(NEODCT_USERS_TABLE))
+endif
+
 # rsync -au, which is what buildroot's local-site step runs, has NO --delete.
 # It copies files in and never takes one out. So a file that is deleted from
 # neodct/src -- or that belongs to a branch you are no longer on -- stays in
