@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pwd.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -121,6 +122,26 @@ ND_UNUSED_FN static void pt_new_case(void)
     if (chmod(tmpl, 0711) != 0) {
         fprintf(stderr, "chmod 0711 %s: %s\n", tmpl, strerror(errno));
         exit(1);
+    }
+
+    /* And give it to ndusr, where there is one and we are root.
+     *
+     * Traversal alone is not enough. The case root stands in for the phone's
+     * WRITABLE storage -- fixtures put a fake aplay's output, a settings file,
+     * a database in it -- and on a phone that storage belongs to ndusr,
+     * because S00userdata hands /NeoDCT/User over on the first boot. A
+     * root-owned 0711 fixture lets a dropped child walk in and write nothing,
+     * which is not a state any phone is ever in.
+     *
+     * Best-effort, and the two conditions line up exactly: it needs root to
+     * chown, and without root nothing drops privilege in the first place. */
+    {
+        struct passwd *pw = geteuid() == 0u ? getpwnam("ndusr") : NULL;
+
+        if (pw != NULL && chown(tmpl, pw->pw_uid, pw->pw_gid) != 0) {
+            fprintf(stderr, "chown %s to ndusr: %s\n", tmpl, strerror(errno));
+            exit(1);
+        }
     }
 
     (void)nd_strlcpy(g_case_root, tmpl, sizeof g_case_root);

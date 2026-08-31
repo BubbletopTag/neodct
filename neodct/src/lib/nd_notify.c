@@ -85,6 +85,7 @@
 #include "nd_log.h"
 #include "nd_notify.h"
 #include "nd_paths.h"
+#include "nd_priv.h"
 #include "nd_proc.h"
 #include "nd_settings.h"
 #include "nd_timeset.h"
@@ -468,6 +469,29 @@ static bool spawn_quiet(const char *const *argv, int stdin_fd, nd_proc_owner own
     spec.argv = argv;
     spec.owner = owner;
     spec.n_fds = 0u;
+
+    /* The ringer runs as ndusr, not as the core.
+     *
+     * Everything spawned here is a MEDIA PARSER handed a file the owner put on
+     * the phone: mpv or aplay, given a ringtone out of /NeoDCT/User/tones. The
+     * core is root and stays root (SECURITY-PLAN.md section 8), so without
+     * this the phone decodes an arbitrary mp3 as uid 0 every time a call
+     * comes in -- and a decoder is the last thing that should have that.
+     *
+     * mpv's other three callers already drop for free: neodct-play is exec'd
+     * by netsurf, which is ndusr_ut, and Koki and MusicPlayer run under
+     * nd-apprun, which is ndusr since apps stopped being root. This was the
+     * one path left, precisely because the core launches it directly.
+     *
+     * ndusr rather than ndusr_ut: /NeoDCT/User/tones is 0750 ndusr:ndusr, so
+     * the untrusted user cannot read the file it is being asked to play. The
+     * tighter uid would be a ringer that never rings.
+     *
+     * No route lost. ndusr is in `audio`, so /dev/snd is open to it, and both
+     * /NeoDCT/System/tones and /NeoDCT/User/tones are readable. */
+    (void)nd_priv_lookup(ND_PRIV_USER, &spec.run_as);
+    spec.no_new_privs = true;
+
     if (stdin_fd >= 0) {
         spec.fds[spec.n_fds].child_fd = 0;
         spec.fds[spec.n_fds].our_fd = stdin_fd;
