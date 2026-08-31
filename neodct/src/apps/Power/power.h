@@ -8,15 +8,33 @@
  * test/unit/test_power.c dlopen()s the BUILT app.so and dlsym()s these, the
  * way test_cubebench.c and test_phonebook.c do.
  *
+ * ============ THE HALT MOVED OUT OF THIS APP ============
+ *
+ * nd_power_which(), nd_power_spawn_first(), nd_power_halt_commands and
+ * nd_power_reboot_commands are gone. Resolving a program name along $PATH
+ * and fork/exec'ing it was the widest thing any app on this phone did, and
+ * the only reason this one needed privilege the others do not, so it now
+ * happens in the CORE: nd_power_go_down() sends ND_SVC_OP_REBOOT or
+ * ND_SVC_OP_POWEROFF over the service channel and the core resolves, syncs
+ * and spawns. The tables and the lookup live in nd_svc.h as
+ * nd_svc_reboot_commands / nd_svc_poweroff_commands / nd_svc_halt_which(),
+ * with test/unit/test_svc.c the place their tests moved to.
+ * docs/c-rewrite/spec-app-services.md section 9.
+ *
+ * This app now spawns nothing at all, and `sync` with it: the core syncs
+ * between answering and spawning, which is closer to the halt than either of
+ * the two syncs this app used to run.
+ *
  * ============ WHAT THE TEST DELIBERATELY DOES NOT CALL ============
  *
- * nd_power_go_down(). It runs `sync` and then the first of `poweroff`,
- * `/sbin/poweroff`, `busybox poweroff` that exists -- on a developer's
+ * nd_power_go_down(). In a process with no service channel -- which a unit
+ * test is -- nd_svc_reboot() does the halt itself, because a process with no
+ * core to ask IS the core as far as that library can tell. On a developer's
  * machine that is a real poweroff, and a test suite that can switch off the
- * machine it is running on is not a test suite. The pieces underneath it
- * (nd_power_which, nd_power_request_recovery) are reachable and are tested;
- * the composition is not, and that is a deliberate hole named here rather
- * than left for someone to discover.
+ * machine it is running on is not a test suite. What is reachable and is
+ * tested here is nd_power_request_recovery_flag(); the composition is not,
+ * and that is a deliberate hole named here rather than left for someone to
+ * discover. test_svc.c reaches the same code with the spawn injected out.
  */
 
 #ifndef ND_POWER_H_INCLUDED
@@ -49,17 +67,6 @@ extern const char *const nd_power_menu[ND_POWER_MENU_ITEMS];
 #define ND_POWER_REBOOT   1
 #define ND_POWER_RECOVERY 2
 
-/* _HALT_COMMANDS and _REBOOT_COMMANDS, flattened.
- *
- * "Same shape as Update/main.py _reboot: which binary exists, and where,
- * differs between the qemu and luckfox images, so try in order." Each entry
- * is a NULL-terminated argv; the ORDER IS THE PYTHON'S and is load-bearing,
- * because `poweroff` on the PATH and `/sbin/poweroff` are different programs
- * on an image that has both. */
-#define ND_POWER_CANDIDATES 3
-extern const char *const *const nd_power_halt_commands[ND_POWER_CANDIDATES];
-extern const char *const *const nd_power_reboot_commands[ND_POWER_CANDIDATES];
-
 /* The two confirmation questions and the three failure messages, so a test
  * can pin the strings a user reads without driving the widgets. */
 extern const char *const nd_power_ask_off;
@@ -71,24 +78,6 @@ extern const char *const nd_power_fail_reboot;
 /* ------------------------------------------------------------------ *
  * The pieces underneath
  * ------------------------------------------------------------------ */
-
-/* What subprocess.Popen(["name", ...]) resolves argv[0] to.
- *
- * Popen uses execvp semantics: a name containing '/' is used as given, and
- * anything else is looked up along $PATH, with the OSError that Python turns
- * into `continue` raised when nothing is found or nothing is executable.
- * nd_proc_spawn() takes a path and not a name, so the lookup has to happen
- * on this side of it.
- *
- * Returns false when no executable of that name exists; `out` is untouched.
- * The path is NOT ND_ROOT-resolved -- it is an executable, and nd_proc.h is
- * explicit that executables are not. */
-bool nd_power_which(const char *name, char *out, size_t out_sz);
-
-/* _spawn_first(candidates): run whichever of these commands the image
- * actually has. Returns true as soon as one is spawned. `n` is
- * ND_POWER_CANDIDATES for both shipped tables. */
-bool nd_power_spawn_first(const char *const *const *candidates, size_t n);
 
 /* _request_recovery()'s filesystem half: mkdir -p the state directory and
  * create the one-shot flag. ND_OK on success; on failure the caller shows
@@ -110,11 +99,12 @@ bool nd_power_confirm(nd_ui *ui, const char *question);
 /* _tell(ui, message): the same dialog with an "OK" button, answer ignored. */
 void nd_power_tell(nd_ui *ui, const char *message);
 
-/* _go_down(ui, candidates, failure). See the header comment: NOT called by
- * any test. sync, then the first candidate that exists, then thirty seconds
- * of sitting still so the key does not look like it did nothing. */
-void nd_power_go_down(nd_ui *ui, const char *const *const *candidates, size_t n,
-                      const char *failure);
+/* _go_down(ui, reboot, failure). See the header comment: NOT called by any
+ * test. Asks the core for a halt -- `reboot` picks which of the two verbs --
+ * and on false draws `failure`. On true it sits still for thirty seconds, so
+ * the key does not look like it did nothing while init brings the phone
+ * down. The sync the Python did here is the core's now. */
+void nd_power_go_down(nd_ui *ui, bool reboot, const char *failure);
 
 #ifdef __cplusplus
 }

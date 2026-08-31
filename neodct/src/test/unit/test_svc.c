@@ -44,6 +44,7 @@
 #include <sys/socket.h>
 #include <pwd.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "nd_app.h"
@@ -985,7 +986,388 @@ static void test_hardware_true_survives_the_wire(void)
 }
 
 /* ------------------------------------------------------------------ *
- * 5. A real child process, launched by the real launcher
+ * 5. The two verbs that end the session
+ * ------------------------------------------------------------------ *
+ *
+ * A reboot verb cannot be tested by rebooting. So the simulation below
+ * replaces STEP 5 of the core's sequence -- the spawn -- and nothing else:
+ * the record is really validated, the binary is really resolved, the reply
+ * is really sent, and sync(2) really runs. What is left out is the one line
+ * whose success would be that this process stopped existing.
+ *
+ * That is enough to prove the thing section 9 is actually about, which is
+ * the ORDER -- everything reportable before the reply, the unbounded sync
+ * after it. See halt_fake_spawn().
+ */
+
+typedef struct {
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    int32_t calls;
+    bool reboot; /* which verb the last call was for */
+    char exe[ND_PATH_MAX];
+
+    /* The ordering proof. With `want_reply_first` set, the fake refuses to
+     * return until the CLIENT says its answer is already in. So if the core
+     * ever halted BEFORE replying, the client would still be sitting in
+     * recv(), the fake would never be released, and `saw_reply_first` would
+     * come back false when the deadline expired -- a failed case rather than
+     * a hung suite. Same trick as test_loopback_over_a_live_server(). */
+    bool want_reply_first;
+    bool reply_seen;
+    bool saw_reply_first;
+} halt_fake;
+
+#define HALT_FAKE_WAIT_S 2
+
+static void halt_fake_init(halt_fake *f)
+{
+    memset(f, 0, sizeof *f);
+    (void)pthread_mutex_init(&f->mu, NULL);
+    (void)pthread_cond_init(&f->cv, NULL);
+}
+
+static void halt_fake_free(halt_fake *f)
+{
+    (void)pthread_cond_destroy(&f->cv);
+    (void)pthread_mutex_destroy(&f->mu);
+}
+
+/* Runs on the CORE's serving thread, in place of nd_proc_spawn(). */
+static void halt_fake_spawn(bool reboot, const char *exe, void *user)
+{
+    halt_fake *f = user;
+
+    (void)pthread_mutex_lock(&f->mu);
+    f->calls++;
+    f->reboot = reboot;
+    (void)nd_strlcpy(f->exe, (exe != NULL) ? exe : "", sizeof f->exe);
+
+    if (f->want_reply_first) {
+        struct timespec deadline;
+
+        (void)clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec += HALT_FAKE_WAIT_S;
+        while (!f->reply_seen) {
+            if (pthread_cond_timedwait(&f->cv, &f->mu, &deadline) != 0)
+                break;
+        }
+        f->saw_reply_first = f->reply_seen;
+    }
+    (void)pthread_cond_broadcast(&f->cv);
+    (void)pthread_mutex_unlock(&f->mu);
+}
+
+/* The client half of that handshake: "my answer is in". */
+static void halt_fake_reply_landed(halt_fake *f)
+{
+    (void)pthread_mutex_lock(&f->mu);
+    f->reply_seen = true;
+    (void)pthread_cond_broadcast(&f->cv);
+    (void)pthread_mutex_unlock(&f->mu);
+}
+
+/* Wait for the serving thread to have finished its fake spawn, so the
+ * assertions read settled fields instead of racing them. */
+static bool halt_fake_wait_called(halt_fake *f)
+{
+    struct timespec deadline;
+    bool called;
+
+    (void)clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += HALT_FAKE_WAIT_S;
+    (void)pthread_mutex_lock(&f->mu);
+    while (f->calls == 0) {
+        if (pthread_cond_timedwait(&f->cv, &f->mu, &deadline) != 0)
+            break;
+    }
+    called = f->calls > 0;
+    (void)pthread_mutex_unlock(&f->mu);
+    return called;
+}
+
+/* ---- 5a. the tables and the lookup, moved here out of test_power.c ---- */
+
+static void test_the_halt_tables_are_the_pythons(void)
+{
+    /* THE ORDER DECIDES WHICH OF TWO PROGRAMS RUNS on an image carrying both
+     * `poweroff` and `/sbin/poweroff`, so it is asserted rather than assumed.
+     * These were nd_power_halt_commands, nd_power_reboot_commands and
+     * nd_update_reboot_commands -- three tables in two shared objects that
+     * could not see each other -- until the halt moved into the core. */
+    CHECK_STR(nd_svc_poweroff_commands[0][0], "poweroff");
+    CHECK(nd_svc_poweroff_commands[0][1] == NULL);
+    CHECK_STR(nd_svc_poweroff_commands[1][0], "/sbin/poweroff");
+    CHECK_STR(nd_svc_poweroff_commands[2][0], "busybox");
+    CHECK_STR(nd_svc_poweroff_commands[2][1], "poweroff");
+    CHECK(nd_svc_poweroff_commands[2][2] == NULL);
+
+    CHECK_STR(nd_svc_reboot_commands[0][0], "reboot");
+    CHECK(nd_svc_reboot_commands[0][1] == NULL);
+    CHECK_STR(nd_svc_reboot_commands[1][0], "/sbin/reboot");
+    CHECK_STR(nd_svc_reboot_commands[2][0], "busybox");
+    CHECK_STR(nd_svc_reboot_commands[2][1], "reboot");
+    CHECK(nd_svc_reboot_commands[2][2] == NULL);
+}
+
+/* An executable that does nothing, so a lookup can succeed without anything
+ * being spawned even if it were. */
+static bool make_stub_program(const char *dir, const char *name, char *out, size_t out_sz)
+{
+    FILE *f;
+
+    if (nd_snprintf(out, out_sz, "%s/%s", dir, name) != ND_OK)
+        return false;
+    f = fopen(out, "w");
+    if (f == NULL)
+        return false;
+    (void)fputs("#!/bin/sh\nexit 0\n", f);
+    (void)fclose(f);
+    return chmod(out, 0755) == 0;
+}
+
+/* <stage>/halt-bin, made once and used by both of the cases below. */
+static char g_haltbin[ND_PATH_MAX];
+
+static bool halt_bin_dir(void)
+{
+    if (g_haltbin[0] != '\0')
+        return true;
+    if (nd_snprintf(g_haltbin, sizeof g_haltbin, "%s/halt-bin", g_stage) != ND_OK)
+        return false;
+    if (mkdir(g_haltbin, 0755) != 0 && errno != EEXIST) {
+        g_haltbin[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
+static void test_the_halt_lookup_is_execvps(void)
+{
+    char out[ND_PATH_MAX];
+    char expect[ND_PATH_MAX];
+    char keep[ND_PATH_MAX];
+    const char *saved = getenv("PATH");
+
+    CHECK(halt_bin_dir());
+    if (g_haltbin[0] == '\0')
+        return;
+
+    (void)nd_strlcpy(keep, (saved != NULL) ? saved : "", sizeof keep);
+    CHECK(make_stub_program(g_haltbin, "nd-fake-halt", expect, sizeof expect));
+    (void)setenv("PATH", g_haltbin, 1);
+
+    CHECK(nd_svc_halt_which("nd-fake-halt", out, sizeof out));
+    CHECK_STR(out, expect);
+
+    /* Python's `except OSError: continue`, which is what walks the table on
+     * to the next candidate. */
+    CHECK(!nd_svc_halt_which("nd-there-is-no-such-program", out, sizeof out));
+
+    /* A name containing a slash is a path, not a name -- execvp's rule, and
+     * the reason /sbin/poweroff can be a candidate at all. */
+    CHECK(nd_svc_halt_which(expect, out, sizeof out));
+    CHECK_STR(out, expect);
+    CHECK(!nd_svc_halt_which("/nd/no/such/path", out, sizeof out));
+
+    /* A file that is not executable does not count, which is what stops a
+     * README called `reboot` being run. */
+    {
+        char plain[ND_PATH_MAX];
+        FILE *f;
+
+        if (nd_snprintf(plain, sizeof plain, "%s/nd-not-exec", g_haltbin) == ND_OK) {
+            f = fopen(plain, "w");
+            if (f != NULL) {
+                (void)fputs("not a program\n", f);
+                (void)fclose(f);
+                (void)chmod(plain, 0644);
+            }
+        }
+        CHECK(!nd_svc_halt_which("nd-not-exec", out, sizeof out));
+    }
+
+    CHECK(!nd_svc_halt_which(NULL, out, sizeof out));
+    CHECK(!nd_svc_halt_which("", out, sizeof out));
+
+    (void)setenv("PATH", keep, 1);
+}
+
+/* ---- 5b. the wire, with the consequence injected out ---- */
+
+/* Two candidate tables of one entry each, pointing at stub programs this
+ * test writes. Substituted for the shipped tables so that the case does not
+ * depend on the host having a real /sbin/reboot -- a container often does
+ * not -- and so that the path the core resolves is one this file knows
+ * exactly. The shipped tables are asserted separately above; what is under
+ * test here is the sequence, not the spelling. */
+static char g_stub_reboot[ND_PATH_MAX];
+static char g_stub_poweroff[ND_PATH_MAX];
+static const char *g_stub_reboot_argv[2];
+static const char *g_stub_poweroff_argv[2];
+static const char *const *const g_stub_reboot_tab[1] = {g_stub_reboot_argv};
+static const char *const *const g_stub_poweroff_tab[1] = {g_stub_poweroff_argv};
+
+static bool stub_halt_programs(void)
+{
+    if (!halt_bin_dir())
+        return false;
+    if (!make_stub_program(g_haltbin, "nd-stub-reboot", g_stub_reboot, sizeof g_stub_reboot))
+        return false;
+    if (!make_stub_program(g_haltbin, "nd-stub-poweroff", g_stub_poweroff, sizeof g_stub_poweroff))
+        return false;
+    g_stub_reboot_argv[0] = g_stub_reboot;
+    g_stub_reboot_argv[1] = NULL;
+    g_stub_poweroff_argv[0] = g_stub_poweroff;
+    g_stub_poweroff_argv[1] = NULL;
+    return true;
+}
+
+/* The fake the two LAUNCH cases share, so that SvcApp's poweroff request is
+ * caught by the launcher's own serving thread. Lives here rather than in
+ * main() so halt_fake_spawn() can reach it by address. */
+static halt_fake g_child_halt;
+
+/* Candidates that certainly do not exist, so "nothing resolved" is reachable
+ * on a host where /sbin/poweroff really does. */
+static const char *const NOHALT_A[] = {"nd-no-such-halt-a", NULL};
+static const char *const NOHALT_B[] = {"/nd/no/such/halt-b", NULL};
+static const char *const NOHALT_C[] = {"nd-no-such-halt-c", "poweroff", NULL};
+static const char *const *const NOHALT[3] = {NOHALT_A, NOHALT_B, NOHALT_C};
+
+static void test_a_halt_over_the_wire(core_fixture *fx)
+{
+    nd_svc_halt_sim sim;
+    halt_fake fake;
+    nd_svc_server *s = NULL;
+    nd_ui app; /* an APP's context: no handles, as nd_app.h says */
+    int child_fd;
+
+    memset(&app, 0, sizeof app);
+    CHECK(stub_halt_programs());
+    if (g_stub_reboot[0] == '\0')
+        return;
+
+    halt_fake_init(&fake);
+    memset(&sim, 0, sizeof sim);
+    sim.spawn = halt_fake_spawn;
+    sim.user = &fake;
+    sim.reboot = g_stub_reboot_tab;
+    sim.poweroff = g_stub_poweroff_tab;
+    sim.n = 1u;
+
+    CHECK_INT(nd_svc_server_open(&s), ND_OK);
+    if (s == NULL) {
+        halt_fake_free(&fake);
+        return;
+    }
+    child_fd = dup(nd_svc_server_child_fd(s));
+    CHECK(child_fd >= 0);
+    if (child_fd < 0) {
+        nd_svc_server_free(s);
+        halt_fake_free(&fake);
+        return;
+    }
+    CHECK(client_from_fd(child_fd));
+
+    /* Installed BEFORE the thread exists and cleared after it is joined.
+     * pthread_create() and pthread_join() are what make a plain global safe
+     * to read from the serving thread; nd_svc.h says so. */
+    fake.want_reply_first = true;
+    nd_svc_halt_simulate(&sim);
+    CHECK_INT(nd_svc_server_start(s, &fx->ui), ND_OK);
+
+    /* The call returns when the REPLY lands -- by which time the core has
+     * already committed: it has resolved a binary and is about to sync and
+     * spawn. There is nothing left to un-ask. */
+    CHECK(nd_svc_reboot());
+    halt_fake_reply_landed(&fake);
+
+    CHECK(halt_fake_wait_called(&fake));
+    CHECK_INT(fake.calls, 1);
+    CHECK(fake.reboot);
+    CHECK_STR(fake.exe, g_stub_reboot);
+    /* THE ORDERING CLAIM. False here means the core halted before it
+     * answered, which on a tired flash is the screen that says "Reboot
+     * failed." and then reboots. spec-app-services.md 9.4. */
+    CHECK(fake.saw_reply_first);
+
+    /* The other verb, over the same live channel, with the handshake off so
+     * that this half is a plain round trip. */
+    (void)pthread_mutex_lock(&fake.mu);
+    fake.want_reply_first = false;
+    fake.calls = 0;
+    (void)pthread_mutex_unlock(&fake.mu);
+
+    CHECK(nd_svc_poweroff());
+    CHECK(halt_fake_wait_called(&fake));
+    CHECK(!fake.reboot);
+    CHECK_STR(fake.exe, g_stub_poweroff);
+
+    /* Neither verb is a service that can be absent, so neither can answer
+     * "no such service": the channel is still good for anything else. */
+    CHECK(nd_svc_modem_present(&app));
+
+    nd_svc_client_close();
+    nd_svc_server_stop(s);
+    nd_svc_halt_simulate(NULL);
+    (void)close(child_fd);
+    halt_fake_free(&fake);
+}
+
+/* The other branch: an image with no halt binary on it anywhere. The app is
+ * told false -- which is what Power turns into "Reboot failed." -- and
+ * NOTHING is spawned, faked or otherwise. */
+static void test_a_halt_with_nothing_to_spawn(core_fixture *fx)
+{
+    nd_svc_halt_sim sim;
+    halt_fake fake;
+    nd_svc_server *s = NULL;
+    nd_ui app;
+    int child_fd;
+
+    memset(&app, 0, sizeof app);
+    halt_fake_init(&fake);
+    memset(&sim, 0, sizeof sim);
+    sim.spawn = halt_fake_spawn;
+    sim.user = &fake;
+    sim.poweroff = NOHALT;
+    sim.reboot = NOHALT;
+    sim.n = 3u;
+
+    CHECK_INT(nd_svc_server_open(&s), ND_OK);
+    if (s == NULL) {
+        halt_fake_free(&fake);
+        return;
+    }
+    child_fd = dup(nd_svc_server_child_fd(s));
+    CHECK(child_fd >= 0);
+    if (child_fd < 0) {
+        nd_svc_server_free(s);
+        halt_fake_free(&fake);
+        return;
+    }
+    CHECK(client_from_fd(child_fd));
+    nd_svc_halt_simulate(&sim);
+    CHECK_INT(nd_svc_server_start(s, &fx->ui), ND_OK);
+
+    CHECK(!nd_svc_reboot());
+    CHECK(!nd_svc_poweroff());
+    CHECK_INT(fake.calls, 0);
+
+    /* A refused halt leaves the channel open, exactly as a refused SEND_SMS
+     * does: this is a failed operation, not a protocol error. */
+    CHECK(nd_svc_modem_present(&app));
+
+    nd_svc_client_close();
+    nd_svc_server_stop(s);
+    nd_svc_halt_simulate(NULL);
+    (void)close(child_fd);
+    halt_fake_free(&fake);
+}
+
+/* ------------------------------------------------------------------ *
+ * 6. A real child process, launched by the real launcher
  * ------------------------------------------------------------------ */
 
 static void app_entry_for(nd_app_entry *e, const char *dir, const char *name)
@@ -1066,6 +1448,17 @@ static void test_a_real_child_reaches_the_core(core_fixture *fx)
      * having travelled to the core and back to say it. */
     check_kv(report, "batt_ok", "0");
     check_kv(report, "quickstart", "0");
+
+    /* AND THE VERB THAT ENDS THE SESSION. A real child process asked this
+     * core to switch the phone off; the core validated it, resolved a
+     * binary, answered, synced, and reached the spawn -- which the fake
+     * installed around this launch caught instead of performing. Both halves
+     * are checked: the child was told yes, and this side really was asked.
+     * spec-app-services.md 9.9. */
+    check_kv(report, "poweroff", "1");
+    CHECK(halt_fake_wait_called(&g_child_halt));
+    CHECK(!g_child_halt.reboot);
+    CHECK_STR(g_child_halt.exe, g_stub_poweroff);
 }
 
 /* Launching twice must work: the socketpair and the thread are per launch,
@@ -1119,8 +1512,36 @@ int main(void)
     test_loopback_over_a_live_server(&fx);
     test_garbage_does_not_take_the_core_down(&fx);
     test_hardware_true_survives_the_wire();
-    test_a_real_child_reaches_the_core(&fx);
-    test_two_launches_in_a_row(&fx);
+    test_the_halt_tables_are_the_pythons();
+    test_the_halt_lookup_is_execvps();
+    test_a_halt_over_the_wire(&fx);
+    test_a_halt_with_nothing_to_spawn(&fx);
+
+    /* SvcApp asks for a poweroff, and the launcher's own server thread is
+     * the one that serves it -- so the fake has to be installed around the
+     * launch and not around a server this file opened. Non-blocking: the
+     * ordering handshake belongs to the loopback case, which can hold both
+     * ends; here the child is a separate process and there is nobody to
+     * release it. */
+    {
+        nd_svc_halt_sim sim;
+
+        halt_fake_init(&g_child_halt);
+        memset(&sim, 0, sizeof sim);
+        sim.spawn = halt_fake_spawn;
+        sim.user = &g_child_halt;
+        sim.reboot = g_stub_reboot_tab;
+        sim.poweroff = g_stub_poweroff_tab;
+        sim.n = 1u;
+        if (g_stub_poweroff[0] != '\0')
+            nd_svc_halt_simulate(&sim);
+
+        test_a_real_child_reaches_the_core(&fx);
+        test_two_launches_in_a_row(&fx);
+
+        nd_svc_halt_simulate(NULL);
+        halt_fake_free(&g_child_halt);
+    }
 
     /* Whatever the cases did, the client must be shut before the process
      * ends -- an app's nd_ui_teardown() is what does this on the phone. */

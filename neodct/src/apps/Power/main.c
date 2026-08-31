@@ -30,24 +30,44 @@
  * cursor is on "Power off" again rather than where you left it. That is
  * visible on screen and it is the Python's.
  *
- * ============ THREE PLACES THE C HAD TO SAY SOMETHING ============
+ * ============ THIS APP NO LONGER SWITCHES THE PHONE OFF ITSELF ============
  *
- * 1. subprocess.Popen(["poweroff"]) LOOKS ALONG $PATH. nd_proc_spawn() takes
- *    a path, so nd_power_which() does the execvp lookup first and its failure
- *    is the OSError the Python's `except OSError: continue` catches.
+ * The Python resolved "poweroff" along $PATH and Popen'd it, and so did the
+ * first C port. That was the widest thing any app on this phone did, and the
+ * only reason this one, Update and Downgrade needed privilege the other
+ * twenty-two do not -- reboot(8) is reboot(2) with a wrapper, and reboot(2)
+ * wants CAP_SYS_BOOT.
  *
- * 2. subprocess.call(["sync"]) WAITS. nd_proc_wait() with a blocking timeout,
- *    and -- unlike the Python -- a `sync` that cannot be found is not fatal:
- *    Python's subprocess.call would raise FileNotFoundError straight out of
- *    _go_down and reach the crash screen. Reproducing that would mean an
- *    image without /bin/sync showing a stack trace instead of switching off,
- *    which is worse in every way; the C logs it and carries on to the halt.
- *    OPEN-QUESTIONS.md PW-2.
+ * So _go_down() now ASKS THE CORE, over the service channel every app child
+ * already has (nd_svc.h). The request carries no arguments, so there is no
+ * program name for this process to choose and no $PATH for anything to
+ * poison; the candidate tables and the execvp lookup that used to live here
+ * are in lib/nd_svc.c, where the core is the only thing that reads them.
+ * spec-app-services.md section 9.
  *
- * 3. str(OSError) IS NOT REPRODUCIBLE. "Cannot ask for recovery: %s" % exc
- *    prints "[Errno 30] Read-only file system: '/NeoDCT/User/.ndsys'". The C
- *    prints strerror(errno) after the same colon. Same message, same place,
- *    different words for the same failure. OPEN-QUESTIONS.md PW-3.
+ * What that costs, and what it does not:
+ *
+ *   - The two failure dialogs are unchanged, and false still means the same
+ *     thing it always did: the halt did not start. It now covers "no
+ *     poweroff on this image", "the core refused" and "no answer from the
+ *     core", which are honestly one sentence.
+ *   - subprocess.call(["sync"]) IS GONE FROM THIS FILE, both copies of it.
+ *     The core syncs between answering and spawning, which is strictly
+ *     closer to the halt than either of ours was, and it is sync(2) rather
+ *     than a spawned `sync` -- so OPEN-QUESTIONS.md PW-2, "what if the image
+ *     has no /bin/sync", stops being a question here. 9.5.
+ *   - THE RECOVERY FLAG IS STILL WRITTEN BY THIS PROCESS. It is an ordinary
+ *     empty file on the one writable partition, which every app may write; a
+ *     "create this file" verb on that channel would be a wider hole than the
+ *     one being closed. 9.6.
+ *   - This app now spawns nothing at all.
+ *
+ * ============ ONE PLACE THE C STILL HAD TO SAY SOMETHING ============
+ *
+ * str(OSError) IS NOT REPRODUCIBLE. "Cannot ask for recovery: %s" % exc
+ * prints "[Errno 30] Read-only file system: '/NeoDCT/User/.ndsys'". The C
+ * prints strerror(errno) after the same colon. Same message, same place,
+ * different words for the same failure. OPEN-QUESTIONS.md PW-3.
  */
 
 #include <errno.h>
@@ -63,7 +83,7 @@
 #include "nd_keycodes.h"
 #include "nd_log.h"
 #include "nd_paths.h"
-#include "nd_proc.h"
+#include "nd_svc.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
@@ -76,17 +96,6 @@
  * ------------------------------------------------------------------ */
 
 const char *const nd_power_menu[ND_POWER_MENU_ITEMS] = {"Power off", "Reboot", "Recovery"};
-
-static const char *const HALT_0[] = {"poweroff", NULL};
-static const char *const HALT_1[] = {"/sbin/poweroff", NULL};
-static const char *const HALT_2[] = {"busybox", "poweroff", NULL};
-static const char *const REBOOT_0[] = {"reboot", NULL};
-static const char *const REBOOT_1[] = {"/sbin/reboot", NULL};
-static const char *const REBOOT_2[] = {"busybox", "reboot", NULL};
-
-const char *const *const nd_power_halt_commands[ND_POWER_CANDIDATES] = {HALT_0, HALT_1, HALT_2};
-const char *const *const nd_power_reboot_commands[ND_POWER_CANDIDATES] = {REBOOT_0, REBOOT_1,
-                                                                          REBOOT_2};
 
 const char *const nd_power_ask_off = "Switch the phone off?";
 const char *const nd_power_ask_reboot = "Restart the phone?";
@@ -101,86 +110,6 @@ static const char *const POWER_TITLE = "Power";
  * instead of returning to the launcher, which would look like the key did
  * nothing." */
 #define POWER_DOWN_DWELL 30.0
-
-/* ------------------------------------------------------------------ *
- * execvp's half of subprocess.Popen
- * ------------------------------------------------------------------ */
-
-bool nd_power_which(const char *name, char *out, size_t out_sz)
-{
-    const char *path;
-    const char *seg;
-
-    if (name == NULL || name[0] == '\0' || out == NULL || out_sz == 0u)
-        return false;
-
-    /* execvp: a name containing a slash is a path, not a name. */
-    if (strchr(name, '/') != NULL) {
-        if (access(name, X_OK) != 0)
-            return false;
-        return (size_t)snprintf(out, out_sz, "%s", name) < out_sz;
-    }
-
-    path = getenv("PATH");
-    /* execvp's own fallback when PATH is unset is confstr(_CS_PATH), which is
-     * this on every libc the phone or the test host uses. */
-    if (path == NULL || path[0] == '\0')
-        path = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
-
-    for (seg = path; seg != NULL;) {
-        const char *colon = strchr(seg, ':');
-        size_t len = (colon != NULL) ? (size_t)(colon - seg) : strlen(seg);
-        int n;
-
-        /* An empty element means the current directory, as it does to the
-         * shell and to execvp. */
-        if (len == 0u)
-            n = snprintf(out, out_sz, "./%s", name);
-        else
-            n = snprintf(out, out_sz, "%.*s/%s", (int)len, seg, name);
-
-        if (n > 0 && (size_t)n < out_sz && access(out, X_OK) == 0)
-            return true;
-
-        seg = (colon != NULL) ? colon + 1 : NULL;
-    }
-
-    out[0] = '\0';
-    return false;
-}
-
-/* subprocess.Popen(command): no descriptor plan, so the child keeps this
- * process's stdout and stderr exactly as Popen's defaults do. */
-static bool spawn_inherit(const char *const *argv, pid_t *pid_out)
-{
-    char exe[ND_PATH_MAX];
-    nd_proc_spec spec;
-
-    if (!nd_power_which(argv[0], exe, sizeof exe))
-        return false;
-
-    memset(&spec, 0, sizeof spec);
-    spec.argv = argv;
-    spec.owner = ND_OWNER_SYSTEM;
-    spec.n_fds = 0u;
-    return nd_proc_spawn(exe, &spec, pid_out) == ND_OK;
-}
-
-bool nd_power_spawn_first(const char *const *const *candidates, size_t n)
-{
-    size_t i;
-
-    if (candidates == NULL)
-        return false;
-    for (i = 0u; i < n; i++) {
-        pid_t pid = -1;
-
-        if (spawn_inherit(candidates[i], &pid))
-            return true;
-        /* `except OSError: continue` */
-    }
-    return false;
-}
 
 /* ------------------------------------------------------------------ *
  * The recovery flag
@@ -263,27 +192,14 @@ static void dwell(double seconds)
     }
 }
 
-/* ["sync"], the one command both _go_down and _request_recovery run. */
-static const char *const SYNC_CMD[] = {"sync", NULL};
-
-/* subprocess.call(["sync"]): spawn and block. A missing `sync` is logged and
- * survived; see the header comment. */
-static void run_sync(void)
+void nd_power_go_down(nd_ui *ui, bool reboot, const char *failure)
 {
-    pid_t pid = -1;
-
-    if (spawn_inherit(SYNC_CMD, &pid))
-        (void)nd_proc_wait(pid, -1.0, NULL);
-    else
-        nd_log_err(ND_LOG_POWER, "cannot run sync: %s", strerror(errno));
-}
-
-void nd_power_go_down(nd_ui *ui, const char *const *const *candidates, size_t n,
-                      const char *failure)
-{
-    run_sync();
-
-    if (!nd_power_spawn_first(candidates, n)) {
+    /* The whole of _go_down's body, in one line, in another process. The
+     * core resolves the binary, ANSWERS, syncs and only then spawns -- which
+     * is why waiting the ordinary five seconds for that answer is safe, and
+     * why the two sync() calls that used to be in this file are not missed.
+     * spec-app-services.md 9.4 and 9.5. */
+    if (!(reboot ? nd_svc_reboot() : nd_svc_poweroff())) {
         nd_power_tell(ui, failure);
         return;
     }
@@ -305,13 +221,14 @@ static void request_recovery(nd_ui *ui)
         return;
     }
 
-    /* The Python's subprocess.call(["sync"]) inside the try block, which
-     * _go_down then runs a SECOND time. Both are reproduced: the flag has to
-     * reach the disk before the reboot is asked for, and _go_down does not
-     * know it was already synced. */
-    run_sync();
-
-    nd_power_go_down(ui, nd_power_reboot_commands, ND_POWER_CANDIDATES, nd_power_fail_reboot);
+    /* The Python ran subprocess.call(["sync"]) here and _go_down ran it a
+     * SECOND time, because neither knew about the other. Neither is
+     * reproduced. The flag was written and CLOSED above, so its bytes are
+     * already in the kernel; the core's sync(2) -- which happens after it
+     * answers and before it spawns -- is what puts them on the flash. One
+     * sync instead of two, and later, and closer to the halt than either of
+     * ours could be. spec-app-services.md 9.5. */
+    nd_power_go_down(ui, true, nd_power_fail_reboot);
 }
 
 /* ------------------------------------------------------------------ *
@@ -340,12 +257,10 @@ int app_run(nd_ui *ui)
             return 0;
         if (choice == ND_POWER_OFF) {
             if (nd_power_confirm(ui, nd_power_ask_off))
-                nd_power_go_down(ui, nd_power_halt_commands, ND_POWER_CANDIDATES,
-                                 nd_power_fail_off);
+                nd_power_go_down(ui, false, nd_power_fail_off);
         } else if (choice == ND_POWER_REBOOT) {
             if (nd_power_confirm(ui, nd_power_ask_reboot))
-                nd_power_go_down(ui, nd_power_reboot_commands, ND_POWER_CANDIDATES,
-                                 nd_power_fail_reboot);
+                nd_power_go_down(ui, true, nd_power_fail_reboot);
         } else if (choice == ND_POWER_RECOVERY) {
             if (nd_power_confirm(ui, nd_power_ask_recovery))
                 request_recovery(ui);
@@ -358,8 +273,9 @@ int app_run(nd_ui *ui)
     }
 }
 
-/* The children this app spawns are `sync` (already waited for) and the halt
- * command itself, which must NOT be killed on the way out -- it is the thing
- * that is switching the phone off. So there is nothing to release, and the
- * symbol exists because nd_app.h requires every app to export one. */
+/* This app spawns nothing at all now -- the halt is the CORE's child, not
+ * ours, which is the whole point of section 9 -- and it holds no file, no
+ * socket and no allocation that outlives a screen. So there is nothing to
+ * release, and the symbol exists because nd_app.h requires every app to
+ * export one. */
 void app_shutdown(void) {}

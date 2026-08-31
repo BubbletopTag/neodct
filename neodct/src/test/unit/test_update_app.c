@@ -20,11 +20,13 @@
  *    are driven directly instead.
  *
  * 2. nd_update_reboot() AND nd_update_restart_page() ARE NEVER CALLED. The
- *    first runs `sync` and then the first of `reboot`, `/sbin/reboot`,
- *    `busybox reboot` that exists; on a developer's machine and on a CI
- *    runner that is a real reboot. The second ends by calling the first. Same
- *    deliberate hole as nd_power_go_down(), named in update_app.h as well as
- *    here rather than left to be discovered.
+ *    first asks the core to restart the phone -- and in a process with no
+ *    service channel, which this test is, nd_svc_reboot() does the halt
+ *    itself, so on a developer's machine and on a CI runner that is still a
+ *    real reboot. The second ends by calling the first. Same deliberate hole
+ *    as nd_power_go_down(), named in update_app.h as well as here rather
+ *    than left to be discovered. test_svc.c reaches the same code with the
+ *    spawn injected out; docs/c-rewrite/spec-app-services.md section 9.9.
  *
  * 3. "CLEAR does not dismiss a refusal" is NOT asserted. _refuse() passes
  *    cancel_keys=(), so a MessageDialog driven with a held CLEAR would loop
@@ -102,7 +104,6 @@ static struct {
     const char *const *msg_cannot_write_prefix;
     const char *const *msg_cannot_stage_prefix;
     const char *const *msg_no_reader;
-    const char *const *const *reboot_commands;
 } api;
 
 static bool api_open(void *h)
@@ -149,7 +150,6 @@ static bool api_open(void *h)
     api.msg_cannot_write_prefix = dlsym(h, "nd_update_msg_cannot_write_prefix");
     api.msg_cannot_stage_prefix = dlsym(h, "nd_update_msg_cannot_stage_prefix");
     api.msg_no_reader = dlsym(h, "nd_update_msg_no_reader");
-    api.reboot_commands = dlsym(h, "nd_update_reboot_commands");
 
     return api.run != NULL && api.shutdown != NULL && api.format_size != NULL &&
            api.format_date != NULL && api.size_detail != NULL && api.engineering_mode != NULL &&
@@ -165,7 +165,7 @@ static bool api_open(void *h)
            api.msg_wrong_prefix != NULL && api.msg_install_anyway != NULL &&
            api.msg_no_update_folder != NULL && api.msg_no_release_notes != NULL &&
            api.msg_cannot_write_prefix != NULL && api.msg_cannot_stage_prefix != NULL &&
-           api.msg_no_reader != NULL && api.reboot_commands != NULL;
+           api.msg_no_reader != NULL;
 }
 
 /* ------------------------------------------------------------------ *
@@ -356,17 +356,11 @@ static void test_help_strings(void)
     CHECK(strstr(*api.msg_no_reader, "reader") != NULL, "and it says what is missing");
 }
 
-static void test_reboot_table(void)
-{
-    /* The order is the Python's and is load-bearing: `reboot` on the PATH and
-     * `/sbin/reboot` are different programs on an image that has both. */
-    CHECK_STR(api.reboot_commands[0][0], "reboot", "candidate 0");
-    CHECK(api.reboot_commands[0][1] == NULL, "candidate 0 is one word");
-    CHECK_STR(api.reboot_commands[1][0], "/sbin/reboot", "candidate 1");
-    CHECK_STR(api.reboot_commands[2][0], "busybox", "candidate 2 argv[0]");
-    CHECK_STR(api.reboot_commands[2][1], "reboot", "candidate 2 argv[1]");
-    CHECK(api.reboot_commands[2][2] == NULL, "candidate 2 is two words");
-}
+/* nd_update_reboot_commands is gone: the candidate table moved to
+ * lib/nd_svc.c when the halt moved into the core, and its assertions moved
+ * with it to test_svc.c's test_the_halt_tables_are_the_pythons(). This app
+ * no longer knows what a reboot binary is called.
+ * docs/c-rewrite/spec-app-services.md section 9. */
 
 /* ------------------------------------------------------------------ *
  * 2. Formatting
@@ -728,9 +722,11 @@ static void test_which(void)
 {
     char out[ND_PATH_MAX];
 
-    /* The same function as nd_power_which(), duplicated because two app
-     * shared objects cannot share one -- exactly as the two Python modules
-     * each carry their own copy. */
+    /* Still this app's own copy, but no longer for the old reason: there IS
+     * one in libneodct now, nd_svc_halt_which(), which arrived when the halt
+     * moved into the core. It is named for the halt tables, and this call
+     * site looks up `sync` during staging -- so collapsing the two is a
+     * rename in a frozen header and belongs in its own change. */
     CHECK(api.which("/bin/sh", out, sizeof out) || api.which("sh", out, sizeof out),
           "a shell is found one way or the other");
     CHECK(!api.which("nd-there-is-no-such-program", out, sizeof out),
@@ -1213,7 +1209,6 @@ int main(void)
 
     RUN(test_constants);
     RUN(test_help_strings);
-    RUN(test_reboot_table);
     RUN(test_format_size);
     RUN(test_format_date);
     RUN(test_size_detail);

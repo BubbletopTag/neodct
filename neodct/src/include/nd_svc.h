@@ -30,7 +30,7 @@
  * Only an app process -- handle NULL, NEODCT_SERVICE_FD present -- goes to
  * the wire.
  *
- * ============ FOUR OPERATIONS, AND DELIBERATELY NO MORE ============
+ * ============ FOUR SERVICE OPERATIONS, AND DELIBERATELY NO MORE ============
  *
  * Send an SMS, snapshot the modem, snapshot the battery, quick-start the
  * gauge. nd_modem.h's dial, answer, HANGUP, fetch_sms, read_stored_sms and
@@ -38,6 +38,19 @@
  * same argument being made again: an app must not be able to hang up a live
  * call by accident, and must not be able to type ATH at the modem on
  * purpose. See spec-app-services.md section 4.
+ *
+ * ============ AND TWO VERBS THAT ARE NOT SERVICES AT ALL ============
+ *
+ * nd_svc_reboot() and nd_svc_poweroff() are here for the opposite reason to
+ * the four above. Those four ADDED something an app could not do; these two
+ * TAKE AWAY something three apps could -- resolving a program name along
+ * $PATH and fork/exec'ing it with the privilege to power-cycle the machine.
+ * Power, Update and Downgrade did exactly that, and it was the only reason
+ * any app needed privilege the other twenty-two do not.
+ *
+ * The verbs carry no arguments, on purpose: the moment the app chooses the
+ * string, the core is running a program of the app's choosing as root, which
+ * is the thing being removed. See spec-app-services.md section 9.
  *
  * ============ EVERY CALL CAN FAIL, INCLUDING THE TRANSPORT ============
  *
@@ -159,6 +172,104 @@ bool nd_svc_battery_read(const nd_ui *ui, nd_svc_battery *out);
  * one i2c device, which cannot reach the modem and cannot touch a call.
  * See spec-app-services.md section 4 for why it is here at all. */
 bool nd_svc_battery_quickstart(const nd_ui *ui);
+
+/* ------------------------------------------------------------------ *
+ * Ending the session
+ * ------------------------------------------------------------------ *
+ *
+ * ============ WHY THESE TWO TAKE NO nd_ui * ============
+ *
+ * Every call above takes a context because A DIRECT HANDLE ALWAYS WINS:
+ * ui->modem decides whether the socket is touched at all. There is no ui->
+ * handle for a halt -- the phone is not a service the core holds a pointer
+ * to -- so the rule is the same sentence with the handle removed:
+ *
+ *     THE CORE DOES IT; AN APP ASKS THE CORE.
+ *
+ * and the predicate is "is there a channel". A context that went unused
+ * would be a parameter lying about what the function reads.
+ *
+ * In an app process the channel is open and the request goes out. In any
+ * process WITHOUT one -- nd-core itself, a hand-launched nd-apprun,
+ * nd-shoot, a unit test -- there is no core to ask, so the resolve-and-spawn
+ * happens right here, which is byte for byte what the three apps did before
+ * this existed.
+ *
+ * ============ WHAT false MEANS ============
+ *
+ * The halt did not start. Three things produce it and Power draws the same
+ * sentence for all three, honestly: no candidate exists on this image, the
+ * core refused the record, or no answer came back. A true means the core has
+ * committed -- it has already resolved the binary, and it syncs and spawns
+ * after answering. There is nothing to un-ask.
+ *
+ * ============ THE ORDER THE CORE WORKS IN, WHICH IS THE DESIGN ============
+ *
+ *   1. validate           2. resolve the binary       3. SEND THE REPLY
+ *   4. sync(2)            5. spawn
+ *
+ * Everything that can fail AND BE REPORTED happens before the reply;
+ * everything that cannot be undone happens after it. That is why no new
+ * timeout constant exists: ND_SVC_TIMEOUT_S covers steps 1-3, and step 4 --
+ * the only unbounded one -- is on the far side of the answer. Syncing first
+ * would let a tired flash time the app out at five seconds, draw "Reboot
+ * failed." and then reboot underneath it. spec-app-services.md 9.4.
+ */
+
+/* reboot(8) / poweroff(8), performed by the core. */
+bool nd_svc_reboot(void);
+bool nd_svc_poweroff(void);
+
+/* _HALT_COMMANDS and _REBOOT_COMMANDS, flattened, moved here out of the
+ * Power and Update apps -- two shared objects that could not see each other
+ * and therefore each carried a copy. Each entry is a NULL-terminated argv.
+ *
+ * THE ORDER IS THE PYTHON'S AND IS LOAD-BEARING: `poweroff` on the PATH and
+ * `/sbin/poweroff` are different programs on an image that carries both. */
+#define ND_SVC_HALT_CANDIDATES 3
+extern const char *const *const nd_svc_poweroff_commands[ND_SVC_HALT_CANDIDATES];
+extern const char *const *const nd_svc_reboot_commands[ND_SVC_HALT_CANDIDATES];
+
+/* What subprocess.Popen(["name", ...]) resolves argv[0] to: execvp's rule,
+ * which nd_proc_spawn() deliberately does not implement (it takes a path).
+ * A name containing '/' is used as given; anything else is looked up along
+ * $PATH, with false standing in for the OSError Python raises when nothing
+ * executable is found. `out` is left empty on failure.
+ *
+ * NOT ND_ROOT-resolved -- it is an executable, and nd_proc.h is explicit
+ * that executables are not. */
+bool nd_svc_halt_which(const char *name, char *out, size_t out_sz);
+
+/* ------------------------------------------------------------------ *
+ * The halt simulation -- TESTS ONLY, in the sense nd_ui_sim.h means it
+ * ------------------------------------------------------------------ *
+ *
+ * power.h already says the honest thing: a test suite that can switch off
+ * the machine it is running on is not a test suite. So the CONSEQUENCE is
+ * injected out and everything else is real -- validation, resolution, the
+ * reply, and the sync(2) all still happen, which is what lets a test prove
+ * the ordering above rather than assert it.
+ *
+ * `spawn` replaces step 5 and nothing else. `poweroff`/`reboot`/`n` replace
+ * the tables, which is the only way to reach the "nothing resolved" branch
+ * on a host where /sbin/poweroff really does exist. Any of them may be NULL.
+ *
+ * Set it BEFORE nd_svc_server_start() and clear it AFTER
+ * nd_svc_server_stop(): pthread_create() and pthread_join() are the barriers
+ * that make a plain global safe to read from the serving thread. Nothing on
+ * the phone calls this. An app may -- it links the same library -- and gains
+ * nothing by it: the hook it would set is the one in its own address space,
+ * on the branch an app process never takes. */
+typedef struct {
+    void (*spawn)(bool reboot, const char *exe, void *user);
+    const char *const *const *poweroff;
+    const char *const *const *reboot;
+    size_t n;
+    void *user;
+} nd_svc_halt_sim;
+
+/* NULL clears it. */
+void nd_svc_halt_simulate(const nd_svc_halt_sim *sim);
 
 /* ------------------------------------------------------------------ *
  * The client half -- libneodct plumbing, not for apps

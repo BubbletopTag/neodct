@@ -61,6 +61,8 @@
 #include "nd_battery.h"
 #include "nd_log.h"
 #include "nd_modem.h"
+#include "nd_paths.h"
+#include "nd_proc.h"
 #include "nd_svc.h"
 #include "nd_types.h"
 #include "nd_ui.h"
@@ -76,7 +78,10 @@ typedef enum {
     SVC_OP_SEND_SMS = 1,
     SVC_OP_MODEM_STATUS = 2,
     SVC_OP_BATTERY = 3,
-    SVC_OP_BATTERY_QUICKSTART = 4
+    SVC_OP_BATTERY_QUICKSTART = 4,
+    /* Appended, so no number an existing build sends changes meaning. */
+    SVC_OP_REBOOT = 5,
+    SVC_OP_POWEROFF = 6
 } svc_op;
 
 /* Outcome of the exchange, as opposed to the outcome of the operation. */
@@ -366,10 +371,185 @@ static bool valid_request(const svc_req *r)
     case SVC_OP_MODEM_STATUS:
     case SVC_OP_BATTERY:
     case SVC_OP_BATTERY_QUICKSTART:
+    /* The two verbs carry no arguments, so there is nothing left to check
+     * once the record itself is sound -- which is the shape of the win, not
+     * an omission. spec-app-services.md 9.7. */
+    case SVC_OP_REBOOT:
+    case SVC_OP_POWEROFF:
         return true;
     default:
         return false;
     }
+}
+
+/* ------------------------------------------------------------------ *
+ * Ending the session
+ * ------------------------------------------------------------------ *
+ *
+ * ============ WHY THIS LIVES HERE AND NOT IN THE THREE APPS ============
+ *
+ * Power, Update and Downgrade each ended the session by resolving a program
+ * name along $PATH and fork/exec'ing it. That is the widest thing any app on
+ * this phone did, and the only reason any of them needed privilege the other
+ * twenty-two do not. Moving it to the core leaves the apps with a request
+ * that carries no arguments -- so there is no string for the app to choose
+ * and no lookup for a poisoned $PATH to steer. spec-app-services.md 9.1.
+ *
+ * ============ THE ORDER IS THE DESIGN ============
+ *
+ *   1. validate   2. resolve   3. SEND THE REPLY   4. sync(2)   5. spawn
+ *
+ * Steps 1-3 are bounded and are the only ones that can be reported; step 4
+ * is unbounded and is deliberately after the answer. Sync first and a tired
+ * flash times the app out at five seconds, draws "Reboot failed." and then
+ * reboots underneath it -- a lie in both directions at once. 9.4.
+ */
+
+static const char *const HALT_0[] = {"poweroff", NULL};
+static const char *const HALT_1[] = {"/sbin/poweroff", NULL};
+static const char *const HALT_2[] = {"busybox", "poweroff", NULL};
+static const char *const REBOOT_0[] = {"reboot", NULL};
+static const char *const REBOOT_1[] = {"/sbin/reboot", NULL};
+static const char *const REBOOT_2[] = {"busybox", "reboot", NULL};
+
+const char *const *const nd_svc_poweroff_commands[ND_SVC_HALT_CANDIDATES] = {HALT_0, HALT_1,
+                                                                             HALT_2};
+const char *const *const nd_svc_reboot_commands[ND_SVC_HALT_CANDIDATES] = {REBOOT_0, REBOOT_1,
+                                                                           REBOOT_2};
+
+/* Set only by nd_svc_halt_simulate(), only by a test, and only outside the
+ * window in which the serving thread exists -- pthread_create() and
+ * pthread_join() are the barriers. See nd_svc.h. */
+static nd_svc_halt_sim g_halt_sim;
+static bool g_halt_sim_on;
+
+void nd_svc_halt_simulate(const nd_svc_halt_sim *sim)
+{
+    if (sim == NULL) {
+        memset(&g_halt_sim, 0, sizeof g_halt_sim);
+        g_halt_sim_on = false;
+        return;
+    }
+    g_halt_sim = *sim;
+    g_halt_sim_on = true;
+}
+
+bool nd_svc_halt_which(const char *name, char *out, size_t out_sz)
+{
+    const char *path;
+    const char *seg;
+
+    if (name == NULL || name[0] == '\0' || out == NULL || out_sz == 0u)
+        return false;
+    out[0] = '\0';
+
+    /* execvp: a name containing a slash is a path, not a name. */
+    if (strchr(name, '/') != NULL) {
+        if (access(name, X_OK) != 0)
+            return false;
+        return nd_snprintf(out, out_sz, "%s", name) == ND_OK;
+    }
+
+    path = getenv("PATH");
+    /* execvp's own fallback when PATH is unset is confstr(_CS_PATH), which is
+     * this on every libc the phone or the test host uses. */
+    if (path == NULL || path[0] == '\0')
+        path = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+
+    for (seg = path; seg != NULL;) {
+        const char *colon = strchr(seg, ':');
+        size_t len = (colon != NULL) ? (size_t)(colon - seg) : strlen(seg);
+        nd_err rc;
+
+        /* An empty element means the current directory, as it does to the
+         * shell and to execvp. */
+        if (len == 0u)
+            rc = nd_snprintf(out, out_sz, "./%s", name);
+        else
+            rc = nd_snprintf(out, out_sz, "%.*s/%s", (int)len, seg, name);
+
+        if (rc == ND_OK && access(out, X_OK) == 0)
+            return true;
+
+        seg = (colon != NULL) ? colon + 1 : NULL;
+    }
+
+    out[0] = '\0';
+    return false;
+}
+
+/* Step 2's answer, carried from before the reply to after it. */
+typedef struct {
+    bool pending;
+    bool reboot;
+    const char *const *argv; /* the candidate that resolved */
+    char exe[ND_PATH_MAX];
+} svc_halt_plan;
+
+/* Step 2. False is the only failure the app is ever told about, and it means
+ * one thing: this image has no halt binary anywhere the lookup can see. */
+static bool halt_resolve(bool reboot, svc_halt_plan *plan)
+{
+    const char *const *const *tab;
+    size_t n;
+    size_t i;
+
+    memset(plan, 0, sizeof *plan);
+
+    if (g_halt_sim_on && g_halt_sim.poweroff != NULL && g_halt_sim.reboot != NULL) {
+        tab = reboot ? g_halt_sim.reboot : g_halt_sim.poweroff;
+        n = g_halt_sim.n;
+    } else {
+        tab = reboot ? nd_svc_reboot_commands : nd_svc_poweroff_commands;
+        n = (size_t)ND_SVC_HALT_CANDIDATES;
+    }
+
+    for (i = 0u; i < n; i++) {
+        if (tab[i] == NULL || tab[i][0] == NULL)
+            continue;
+        if (nd_svc_halt_which(tab[i][0], plan->exe, sizeof plan->exe)) {
+            plan->pending = true;
+            plan->reboot = reboot;
+            plan->argv = tab[i];
+            return true;
+        }
+        /* `except OSError: continue` */
+    }
+    return false;
+}
+
+/* Steps 4 and 5, and nothing may be added between them.
+ *
+ * sync(2) rather than a spawned `sync`: the Python shelled out and therefore
+ * had to survive an image with no /bin/sync on it (OPEN-QUESTIONS.md PW-2).
+ * A syscall cannot be missing, and this one flushes every mounted
+ * filesystem, so the app's own writes -- which returned before it sent the
+ * request -- are on the flash whatever the core has been writing.
+ *
+ * The fork here happens on the SERVING thread of a process that also runs
+ * the modem and clock threads, which is exactly the situation
+ * CODING-STANDARDS.md 1.1 exists for; nd_proc_spawn() is the function that
+ * satisfies it, and it is why nothing is done between the fork and the
+ * execve. ND_OWNER_SYSTEM is nd_proc.h's own tag for this child: its
+ * documentation for that tag begins with the word "poweroff". */
+static void halt_perform(const svc_halt_plan *plan)
+{
+    nd_proc_spec spec;
+    pid_t pid = -1;
+
+    sync();
+
+    if (g_halt_sim_on && g_halt_sim.spawn != NULL) {
+        g_halt_sim.spawn(plan->reboot, plan->exe, g_halt_sim.user);
+        return;
+    }
+
+    memset(&spec, 0, sizeof spec);
+    spec.argv = plan->argv;
+    spec.owner = ND_OWNER_SYSTEM;
+    spec.n_fds = 0u;
+    if (nd_proc_spawn(plan->exe, &spec, &pid) != ND_OK)
+        nd_log_err(ND_LOG_POWER, "cannot start %s: %s", plan->exe, strerror(errno));
 }
 
 /* ------------------------------------------------------------------ *
@@ -395,12 +575,37 @@ static void resp_init(svc_resp *out, uint32_t op)
 
 /* CALLED ONLY AFTER valid_request(). Every string in `req` is NUL-terminated
  * inside its array and the number is drawn from [0-9*#+] alone, which is what
- * makes the log line below safe to print and the AT command safe to build. */
-static void serve(nd_ui *ui, const svc_req *req, svc_resp *out)
+ * makes the log line below safe to print and the AT command safe to build.
+ *
+ * `halt` comes back with pending set when the caller must run halt_perform()
+ * AFTER sending the response. Splitting it out is not tidiness: it is the
+ * ordering the whole design of the two verbs rests on, and a serve() that
+ * halted where it stood would put the unbounded sync(2) in front of the
+ * reply. spec-app-services.md 9.4. */
+static void serve(nd_ui *ui, const svc_req *req, svc_resp *out, svc_halt_plan *halt)
 {
     resp_init(out, req->op);
+    memset(halt, 0, sizeof *halt);
 
     switch (req->op) {
+    case SVC_OP_REBOOT:
+    case SVC_OP_POWEROFF: {
+        bool reboot = req->op == SVC_OP_REBOOT;
+
+        /* There is no service object to be absent: the phone is not a
+         * pointer the core holds. It is always "present"; whether the halt
+         * can start is `ok`. */
+        out->present = 1u;
+        out->ok = halt_resolve(reboot, halt) ? 1u : 0u;
+        if (out->ok != 0u)
+            nd_log(ND_LOG_POWER, "App service: %s, via %s", reboot ? "reboot" : "power off",
+                   halt->exe);
+        else
+            nd_log_err(ND_LOG_POWER, "App service: %s asked for, but this image has no %s",
+                       reboot ? "reboot" : "power off", reboot ? "reboot" : "poweroff");
+        return;
+    }
+
     case SVC_OP_SEND_SMS:
         if (ui->modem == NULL) {
             out->status = SVC_ST_NO_SERVICE;
@@ -499,8 +704,10 @@ static void *svc_thread(void *arg)
         char buf[REQ_BUF_SZ];
         svc_req req;
         svc_resp resp;
+        svc_halt_plan halt;
         svc_rx rx;
         bool stop;
+        bool sent;
 
         (void)pthread_mutex_lock(&s->mu);
         stop = s->quit;
@@ -517,15 +724,25 @@ static void *svc_thread(void *arg)
             break; /* the child has gone, or sent something malformed */
 
         memcpy(&req, buf, sizeof req);
+        memset(&halt, 0, sizeof halt);
         if (!valid_request(&req)) {
             nd_log_err(ND_LOG_OS, "App service: refused a malformed request (op %u)",
                        (unsigned)req.op);
             resp_init(&resp, req.op);
             resp.status = SVC_ST_BAD_REQUEST;
         } else {
-            serve(s->ui, &req, &resp);
+            serve(s->ui, &req, &resp, &halt);
         }
-        if (!svc_send(s->fd, &resp, sizeof resp, svc_now() + ND_SVC_TIMEOUT_S))
+        sent = svc_send(s->fd, &resp, sizeof resp, svc_now() + ND_SVC_TIMEOUT_S);
+
+        /* AFTER the reply, and whether or not the reply landed. The decision
+         * was taken in serve(), before anything could fail; an app that died
+         * waiting for its answer is not a reason to keep running a phone
+         * whose owner asked for it to stop. spec-app-services.md 9.4. */
+        if (halt.pending)
+            halt_perform(&halt);
+
+        if (!sent)
             break; /* the app stopped listening; waitpid will say why */
     }
 
@@ -612,9 +829,10 @@ nd_err nd_svc_server_start(nd_svc_server *s, nd_ui *ui)
          * reason: musl's default thread stack is 128 KB against glibc's
          * 8 MB (MUSL.md), and a difference that large must never be able to
          * become a confusing crash on the target only. One iteration of the
-         * loop holds a request, a response and a receive buffer -- about
-         * 2.6 KB -- and the deepest thing below it is one nd_log() line
-         * buffer, so 128 KB is more than an order of magnitude of slack. */
+         * loop holds a request, a response, a receive buffer and a halt plan
+         * -- about 3.2 KB -- and the deepest thing below it is one nd_log()
+         * line buffer, so 128 KB is more than an order of magnitude of
+         * slack. */
         if (have_attr)
             (void)pthread_attr_setstacksize(&attr, ND_SVC_STACK_BYTES);
         rc = pthread_create(&s->tid, have_attr ? &attr : NULL, svc_thread, s);
@@ -960,4 +1178,48 @@ bool nd_svc_battery_quickstart(const nd_ui *ui)
     if (svc_call(SVC_OP_BATTERY_QUICKSTART, NULL, NULL, &resp, ND_SVC_TIMEOUT_S) != SVC_ST_OK)
         return false;
     return resp.ok != 0u;
+}
+
+/* ------------------------------------------------------------------ *
+ * The two verbs
+ * ------------------------------------------------------------------ */
+
+/* No nd_ui * to consult, so the rule "a direct handle always wins" becomes
+ * "the core does it; an app asks the core", and the predicate is whether
+ * there is a channel. A process with none IS the core as far as this library
+ * can tell -- nd-core itself, a hand-launched nd-apprun, nd-shoot, a unit
+ * test -- and does here exactly what the three apps used to do for
+ * themselves. See nd_svc.h. */
+static bool svc_halt(bool reboot)
+{
+    svc_halt_plan plan;
+    svc_resp resp;
+
+    if (g_client_fd < 0) {
+        if (!halt_resolve(reboot, &plan)) {
+            nd_log_err(ND_LOG_POWER, "no %s on this image", reboot ? "reboot" : "poweroff");
+            return false;
+        }
+        nd_log(ND_LOG_POWER, "%s, via %s", reboot ? "Rebooting" : "Powering off", plan.exe);
+        halt_perform(&plan);
+        return true;
+    }
+
+    /* ND_SVC_TIMEOUT_S and not a constant of its own: everything the core
+     * does before it answers is bounded, and the one unbounded step is on
+     * the far side of the answer. spec-app-services.md 9.4. */
+    if (svc_call(reboot ? (uint32_t)SVC_OP_REBOOT : (uint32_t)SVC_OP_POWEROFF, NULL, NULL, &resp,
+                 ND_SVC_TIMEOUT_S) != SVC_ST_OK)
+        return false;
+    return resp.ok != 0u;
+}
+
+bool nd_svc_reboot(void)
+{
+    return svc_halt(true);
+}
+
+bool nd_svc_poweroff(void)
+{
+    return svc_halt(false);
 }

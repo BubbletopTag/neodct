@@ -68,10 +68,20 @@
  * 3. subprocess.Popen(["reboot"]) LOOKS ALONG $PATH and nd_proc_spawn() takes
  *    a path, so nd_update_which() does the execvp lookup first and its
  *    failure is the OSError the Python's `except OSError: continue` catches.
- *    It is a copy of nd_power_which(); the two apps are separate shared
- *    objects and cannot share it, which is the same reason the two Python
- *    modules each have their own candidate list. power.h already says "Same
- *    shape as Update/main.py _reboot".
+ *
+ *    THE REBOOT NO LONGER USES IT. Resolving a program name along $PATH and
+ *    fork/exec'ing it with the privilege to power-cycle the machine was the
+ *    only reason this app, Power and Downgrade needed privilege the other
+ *    twenty-two do not, so nd_update_reboot() asks the core instead --
+ *    nd_svc_reboot(), one request with no arguments at all, over the service
+ *    channel every app child already has. The candidate list and the lookup
+ *    are in lib/nd_svc.c now, where the core is the only reader.
+ *    spec-app-services.md section 9.
+ *
+ *    nd_update_which() stays because STAGING still spawns `sync`, and that
+ *    is a different call site: it runs long before a reboot is in sight, it
+ *    has to complete before the staging record is written, and a `sync` that
+ *    is missing is survivable in a way a missing `reboot` is not.
  *
  * 4. _thumbnail() decodes the package's PNG IN MEMORY and hands the Image
  *    object to DetailPage. nd_detailpage_init() takes a path and nothing
@@ -101,6 +111,7 @@
 #include "nd_proc.h"
 #include "nd_settings.h"
 #include "nd_storage.h"
+#include "nd_svc.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
@@ -159,15 +170,10 @@ const char *const nd_update_msg_cannot_stage_prefix = "Could not stage the updat
 const char *const nd_update_msg_no_reader =
     "CANNOT OPEN UPDATES!\nThis build has no package reader.";
 
-/* _reboot's candidate list, in the Python's order. Which binary exists, and
- * where, differs between the qemu and luckfox images. */
-static const char *const REBOOT_0[] = {"reboot", NULL};
-static const char *const REBOOT_1[] = {"/sbin/reboot", NULL};
-static const char *const REBOOT_2[] = {"busybox", "reboot", NULL};
-
-const char *const *const nd_update_reboot_commands[ND_UPDATE_REBOOT_CANDIDATES] = {
-    REBOOT_0, REBOOT_1, REBOOT_2};
-
+/* _reboot's candidate list is gone from this file. It, and the $PATH lookup
+ * that walked it, are in lib/nd_svc.c now -- see the header comment and
+ * spec-app-services.md section 9. `sync` stays, because STAGING still spawns
+ * it, which is a different call site with a different argument. */
 static const char *const SYNC_CMD[] = {"sync", NULL};
 
 /* time.sleep(30): "init takes a moment to bring things down; sit here rather
@@ -421,22 +427,19 @@ static void dwell(double seconds)
 
 void nd_update_reboot(nd_ui *ui)
 {
-    size_t i;
-
     ND_UNUSED(ui); /* the Python takes it and never uses it either */
 
-    run_sync();
-    for (i = 0u; i < ND_UPDATE_REBOOT_CANDIDATES; i++) {
-        pid_t pid = -1;
+    /* The candidate walk and the sync that preceded it are the core's now.
+     * It resolves the binary, ANSWERS, syncs and only then spawns, which is
+     * why the ordinary five-second wait for that answer cannot abort a
+     * reboot that was about to happen. spec-app-services.md 9.4 and 9.5. */
+    (void)nd_svc_reboot();
 
-        if (spawn_inherit(nd_update_reboot_commands[i], &pid))
-            break;
-        /* `except OSError: continue` */
-    }
-    /* Note there is no failure dialog: unlike the Power app, _reboot() does
-     * not tell anybody when nothing could be spawned. It sits for thirty
-     * seconds either way. That is the Python's, and it is what a phone with
-     * no reboot binary looks like today. */
+    /* Note there is still no failure dialog: unlike the Power app, _reboot()
+     * does not tell anybody when nothing could be started, which is why the
+     * return is discarded rather than acted on. It sits for thirty seconds
+     * either way. That is the Python's, and it is what a phone with no
+     * reboot binary looks like today. */
     dwell(UPDATE_REBOOT_DWELL);
 }
 

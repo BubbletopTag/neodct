@@ -378,25 +378,34 @@ bool nd_update_check_online(nd_ui *ui, char *out, size_t out_sz);
  * NOT called by any test
  * ------------------------------------------------------------------ */
 
-/* _reboot(ui): sync, then the first of `reboot`, `/sbin/reboot`,
- * `busybox reboot` that exists, then thirty seconds of sitting still.
+/* _reboot(ui): ask the CORE to restart the phone (nd_svc_reboot()), then sit
+ * still for thirty seconds.
  *
+ * The candidate list this used to walk -- `reboot`, `/sbin/reboot`,
+ * `busybox reboot` -- and the sync that preceded it are in lib/nd_svc.c now,
+ * as nd_svc_reboot_commands. An app process resolving a program name along
+ * $PATH and fork/exec'ing it with the privilege to power-cycle the machine
+ * was the only reason this app needed privilege the others do not.
+ * docs/c-rewrite/spec-app-services.md section 9.
+ *
+ * Still not called by any test: in a process with no service channel -- and
+ * a unit test is one -- nd_svc_reboot() does the halt itself, because a
+ * process with no core to ask IS the core as far as that library can tell.
  * On a developer's machine and on a CI runner that is a real reboot, so
  * test_update_app.c never calls it, never calls _restart_page and never
  * reaches the end of _install. The same deliberate hole as
- * nd_power_go_down(); power.h says so in the same words. */
+ * nd_power_go_down(); power.h says so in the same words, and test_svc.c
+ * reaches the same code with the spawn injected out. */
 void nd_update_reboot(nd_ui *ui);
 
 /* _restart_page(): the last screen before the reboot. Ends by calling
  * nd_update_reboot(), so it is not called by any test either. */
 void nd_update_restart_page(nd_ui *ui, const nd_upd_manifest *m, bool backed_up);
 
-#define ND_UPDATE_REBOOT_CANDIDATES 3
-extern const char *const *const nd_update_reboot_commands[ND_UPDATE_REBOOT_CANDIDATES];
-
-/* execvp's argv[0] lookup, which nd_proc_spawn() does not do for us. The same
- * function as nd_power_which(); the two apps are separate shared objects and
- * cannot share it, exactly as the two Python modules could not. */
+/* execvp's argv[0] lookup, which nd_proc_spawn() does not do for us. STAGING
+ * still spawns `sync`, so this stays even though the reboot no longer needs
+ * it -- and staging is a different call site with a different argument, run
+ * long before a reboot is in sight. */
 bool nd_update_which(const char *name, char *out, size_t out_sz);
 
 #ifdef __cplusplus

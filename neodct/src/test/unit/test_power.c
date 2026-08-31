@@ -1,43 +1,44 @@
 /* test_power.c -- the Power app, app id 971.
  *
+ * ============ THE HALT MOVED OUT OF THIS APP ============
+ *
+ * nd_power_which() and nd_power_spawn_first() are gone, with the two command
+ * tables, because resolving a program name along $PATH and fork/exec'ing it
+ * was the only reason this app needed privilege the other twenty-two do not.
+ * They are lib/nd_svc.c's now and their cases moved to test_svc.c, which
+ * additionally drives the halt end to end with the spawn injected out --
+ * something this file never could. docs/c-rewrite/spec-app-services.md
+ * section 9.
+ *
  * ============ WHAT THIS TEST WILL NOT DO ============
  *
- * IT NEVER CALLS nd_power_go_down(). That function runs `sync` and then the
- * first of `poweroff`, `/sbin/poweroff`, `busybox poweroff` that exists. On a
- * developer's machine, and on a CI runner, that is a real poweroff. A test
- * suite that can switch off the machine it is running on is not a test suite,
- * so the composition is left alone and the three pieces underneath it are
- * tested instead -- the PATH lookup, the candidate walk over commands that do
- * not exist, and the recovery flag. power.h says the same thing, so the hole
- * is named in both places rather than discovered.
+ * IT STILL NEVER CALLS nd_power_go_down(). It asks the core for the halt
+ * now, but a process with no service channel -- and this test is one -- IS
+ * the core as far as nd_svc.h can tell, so nd_svc_poweroff() would resolve
+ * and spawn it here. On a developer's machine, and on a CI runner, that is a
+ * real poweroff. A test suite that can switch off the machine it is running
+ * on is not a test suite, so the composition is left alone and what remains
+ * underneath it -- the recovery flag -- is tested instead. power.h says the
+ * same thing, so the hole is named in both places rather than discovered.
  *
  * For the same reason app_run() is only ever driven with Back on the first
  * screen. Choosing a menu item and confirming it would reach _go_down.
  *
  * ============ WHAT IT CLAIMS ============
  *
- *  1. MENU, the two command tables and the five user-facing strings are the
- *     Python's, in the Python's order. `poweroff` before `/sbin/poweroff` is
- *     load-bearing: an image with both has two different programs there.
+ *  1. MENU and the five user-facing strings are the Python's, in the
+ *     Python's order.
  *
- *  2. nd_power_which() is execvp's lookup -- $PATH for a bare name, the path
- *     itself when it contains a slash, and false (Python's OSError) when
- *     nothing executable is found.
- *
- *  3. nd_power_spawn_first() returns false when NO candidate exists, which is
- *     the branch that puts "Power off failed." on the screen. Driven with a
- *     table of invented names so nothing is ever spawned.
- *
- *  4. The recovery flag lands at /NeoDCT/User/.ndsys/boot_recovery, is
+ *  2. The recovery flag lands at /NeoDCT/User/.ndsys/boot_recovery, is
  *     created empty, and is created again over an existing one -- the
  *     initramfs deletes it as it reads it, so a second request has to be able
  *     to write a second flag. When the directory cannot be made, the failure
  *     is reported with a reason rather than silently rebooting into an
  *     ordinary boot.
  *
- *  5. _confirm() is Yes only on ENTER: the dialog's cancel key returns false.
+ *  3. _confirm() is Yes only on ENTER: the dialog's cancel key returns false.
  *
- *  6. Back on the menu returns 0 from app_run().
+ *  4. Back on the menu returns 0 from app_run().
  *
  * Runs with no arguments. NEODCT_GOLDEN names the reference set (for the
  * font); the scratch root is this test's own.
@@ -57,14 +58,10 @@
 static struct {
     int (*run)(nd_ui *);
     void (*shutdown)(void);
-    bool (*which)(const char *, char *, size_t);
-    bool (*spawn_first)(const char *const *const *, size_t);
     nd_err (*recovery_flag)(char *, size_t);
     bool (*confirm)(nd_ui *, const char *);
     void (*tell)(nd_ui *, const char *);
     const char *const *menu;
-    const char *const *const *halt;
-    const char *const *const *reboot;
     const char *const *ask_off;
     const char *const *ask_reboot;
     const char *const *ask_recovery;
@@ -76,25 +73,20 @@ static bool api_open(void *h)
 {
     *(void **)&api.run = sa_sym(h, "app_run");
     *(void **)&api.shutdown = sa_sym(h, "app_shutdown");
-    *(void **)&api.which = sa_sym(h, "nd_power_which");
-    *(void **)&api.spawn_first = sa_sym(h, "nd_power_spawn_first");
     *(void **)&api.recovery_flag = sa_sym(h, "nd_power_request_recovery_flag");
     *(void **)&api.confirm = sa_sym(h, "nd_power_confirm");
     *(void **)&api.tell = sa_sym(h, "nd_power_tell");
     api.menu = dlsym(h, "nd_power_menu");
-    api.halt = dlsym(h, "nd_power_halt_commands");
-    api.reboot = dlsym(h, "nd_power_reboot_commands");
     api.ask_off = dlsym(h, "nd_power_ask_off");
     api.ask_reboot = dlsym(h, "nd_power_ask_reboot");
     api.ask_recovery = dlsym(h, "nd_power_ask_recovery");
     api.fail_off = dlsym(h, "nd_power_fail_off");
     api.fail_reboot = dlsym(h, "nd_power_fail_reboot");
 
-    return api.run != NULL && api.shutdown != NULL && api.which != NULL &&
-           api.spawn_first != NULL && api.recovery_flag != NULL && api.confirm != NULL &&
-           api.tell != NULL && api.menu != NULL && api.halt != NULL && api.reboot != NULL &&
-           api.ask_off != NULL && api.ask_reboot != NULL && api.ask_recovery != NULL &&
-           api.fail_off != NULL && api.fail_reboot != NULL;
+    return api.run != NULL && api.shutdown != NULL && api.recovery_flag != NULL &&
+           api.confirm != NULL && api.tell != NULL && api.menu != NULL && api.ask_off != NULL &&
+           api.ask_reboot != NULL && api.ask_recovery != NULL && api.fail_off != NULL &&
+           api.fail_reboot != NULL;
 }
 
 /* ------------------------------------------------------------------ *
@@ -111,19 +103,10 @@ static void test_tables(void)
     CHECK_INT(ND_POWER_RECOVERY, 2, "RECOVERY");
     CHECK_INT(ND_POWER_APP_ID, 971, "APP_ID");
 
-    /* _HALT_COMMANDS, in order. The order is what decides which of two
-     * different programs runs on an image that has both. */
-    CHECK_STR(api.halt[0][0], "poweroff", "halt 0");
-    CHECK(api.halt[0][1] == NULL, "halt 0 is one word");
-    CHECK_STR(api.halt[1][0], "/sbin/poweroff", "halt 1");
-    CHECK_STR(api.halt[2][0], "busybox", "halt 2 argv[0]");
-    CHECK_STR(api.halt[2][1], "poweroff", "halt 2 argv[1]");
-    CHECK(api.halt[2][2] == NULL, "halt 2 is two words");
-
-    CHECK_STR(api.reboot[0][0], "reboot", "reboot 0");
-    CHECK_STR(api.reboot[1][0], "/sbin/reboot", "reboot 1");
-    CHECK_STR(api.reboot[2][0], "busybox", "reboot 2 argv[0]");
-    CHECK_STR(api.reboot[2][1], "reboot", "reboot 2 argv[1]");
+    /* _HALT_COMMANDS and _REBOOT_COMMANDS are no longer this app's: they
+     * moved to lib/nd_svc.c with the halt itself, and their assertions moved
+     * with them to test_svc.c. This app no longer knows what a poweroff
+     * binary is called. spec-app-services.md section 9. */
 
     CHECK_STR(*api.ask_off, "Switch the phone off?", "_confirm text, Power off");
     CHECK_STR(*api.ask_reboot, "Restart the phone?", "_confirm text, Reboot");
@@ -137,97 +120,16 @@ static void test_tables(void)
 }
 
 /* ------------------------------------------------------------------ *
- * 2. nd_power_which()
- * ------------------------------------------------------------------ */
-
-static char g_bindir[ND_PATH_MAX];
-
-/* An executable that does nothing, so a lookup can succeed without anything
- * being spawned. */
-static bool make_stub_program(const char *dir, const char *name)
-{
-    char path[ND_PATH_MAX];
-    FILE *f;
-
-    if (nd_snprintf(path, sizeof path, "%s/%s", dir, name) != ND_OK)
-        return false;
-    f = fopen(path, "w");
-    if (f == NULL)
-        return false;
-    (void)fputs("#!/bin/sh\nexit 0\n", f);
-    (void)fclose(f);
-    return chmod(path, 0755) == 0;
-}
-
-static void test_which(void)
-{
-    char out[ND_PATH_MAX];
-    char expect[ND_PATH_MAX];
-    char abs_path[ND_PATH_MAX];
-    const char *saved_path = getenv("PATH");
-    char keep[ND_PATH_MAX];
-
-    (void)nd_strlcpy(keep, (saved_path != NULL) ? saved_path : "", sizeof keep);
-
-    CHECK(make_stub_program(g_bindir, "nd-fake-halt"), "stub program written");
-    (void)setenv("PATH", g_bindir, 1);
-
-    CHECK(api.which("nd-fake-halt", out, sizeof out), "a bare name is found along $PATH");
-    (void)nd_snprintf(expect, sizeof expect, "%s/nd-fake-halt", g_bindir);
-    CHECK_STR(out, expect, "and the answer is the full path");
-
-    CHECK(!api.which("nd-there-is-no-such-program", out, sizeof out),
-          "a missing name is Python's OSError");
-
-    /* A name containing a slash is a path, not a name -- execvp's rule. */
-    (void)nd_snprintf(abs_path, sizeof abs_path, "%s/nd-fake-halt", g_bindir);
-    CHECK(api.which(abs_path, out, sizeof out), "an absolute path is used as given");
-    CHECK_STR(out, abs_path, "unchanged");
-    CHECK(!api.which("/nd/no/such/path", out, sizeof out), "a missing absolute path is refused");
-
-    /* A file that is not executable does not count, which is what stops a
-     * README called `reboot` being run. */
-    {
-        char plain[ND_PATH_MAX];
-        FILE *f;
-
-        (void)nd_snprintf(plain, sizeof plain, "%s/nd-not-exec", g_bindir);
-        f = fopen(plain, "w");
-        if (f != NULL) {
-            (void)fputs("not a program\n", f);
-            (void)fclose(f);
-            (void)chmod(plain, 0644);
-        }
-        CHECK(!api.which("nd-not-exec", out, sizeof out), "a non-executable file is not a program");
-    }
-
-    CHECK(!api.which(NULL, out, sizeof out), "NULL is refused");
-    CHECK(!api.which("", out, sizeof out), "the empty name is refused");
-
-    (void)setenv("PATH", keep, 1);
-}
-
-/* ------------------------------------------------------------------ *
- * 3. nd_power_spawn_first()
- * ------------------------------------------------------------------ */
-
-static void test_spawn_first_with_nothing_to_spawn(void)
-{
-    static const char *const A[] = {"nd-no-such-halt-a", NULL};
-    static const char *const B[] = {"/nd/no/such/halt-b", NULL};
-    static const char *const C[] = {"nd-no-such-halt-c", "poweroff", NULL};
-    static const char *const *const NONE[3] = {A, B, C};
-
-    /* Every candidate is invented, so nothing is spawned and the answer is
-     * the false that puts "Power off failed." on the screen. */
-    CHECK(!api.spawn_first(NONE, 3u), "no candidate exists -> false");
-    CHECK(!api.spawn_first(NULL, 3u), "NULL table -> false");
-    CHECK(!api.spawn_first(NONE, 0u), "an empty table -> false");
-}
-
-/* ------------------------------------------------------------------ *
- * 4. The recovery flag
- * ------------------------------------------------------------------ */
+ * 2. The recovery flag
+ * ------------------------------------------------------------------ *
+ *
+ * nd_power_which() and nd_power_spawn_first() used to be sections 2 and 3.
+ * Both are gone from this app -- the $PATH walk and the candidate table are
+ * lib/nd_svc.c's now, because an app process resolving a program name and
+ * fork/exec'ing it was the only reason this app needed privilege the others
+ * do not. Their cases moved to test_svc.c verbatim, against
+ * nd_svc_halt_which(). spec-app-services.md section 9.
+ */
 
 static char g_root[ND_PATH_MAX];
 static char g_saved_root[ND_PATH_MAX];
@@ -395,15 +297,12 @@ int main(void)
         (void)dlclose(h);
         return 1;
     }
-    if (!sa_tmpdir("ndpower-root", g_root, sizeof g_root) ||
-        !sa_tmpdir("ndpower-bin", g_bindir, sizeof g_bindir)) {
+    if (!sa_tmpdir("ndpower-root", g_root, sizeof g_root)) {
         (void)dlclose(h);
         return 1;
     }
 
     RUN(test_tables);
-    RUN(test_which);
-    RUN(test_spawn_first_with_nothing_to_spawn);
     RUN(test_recovery_flag);
     RUN(test_recovery_flag_failure);
     RUN(test_confirm);
@@ -412,6 +311,5 @@ int main(void)
 
     rc = sa_end(h, "test_power");
     sa_rmtree(g_root);
-    sa_rmtree(g_bindir);
     return rc;
 }
