@@ -869,6 +869,37 @@ static int proc_ruid(const char *pid, uid_t *out)
     return found;
 }
 
+/* An nd-apprun's argv[1] is the app's directory (nd_app.h: "nd-apprun
+ * <app-dir> [entry] [arg]"), so /proc/<pid>/cmdline says WHICH app a given
+ * process is running -- which is what turns "some app is root" into a
+ * verdict. Without it the uid alone cannot be judged: root is correct for a
+ * diagnostic and wrong for everything else. */
+static int proc_argv1(const char *pid, char *out, size_t out_sz)
+{
+    char path[280];
+    char buf[1024];
+    FILE *f;
+    size_t n, i, start;
+
+    (void)snprintf(path, sizeof path, "/proc/%s/cmdline", pid);
+    f = fopen(path, "re");
+    if (f == NULL)
+        return 0;
+    n = fread(buf, 1u, sizeof buf - 1u, f);
+    (void)fclose(f);
+    if (n == 0u)
+        return 0;
+    buf[n] = '\0';
+    /* NUL-separated. Skip argv[0]. */
+    for (i = 0u; i < n && buf[i] != '\0'; i++)
+        ;
+    start = i + 1u;
+    if (start >= n)
+        return 0;
+    (void)snprintf(out, out_sz, "%s", buf + start);
+    return 1;
+}
+
 static const char *user_name_of(uid_t uid, const nd_priv_id *usr, const nd_priv_id *ut)
 {
     if (uid == 0u)
@@ -913,6 +944,34 @@ static void section_processes(const nd_priv_id *usr, const nd_priv_id *ut)
             if (!proc_ruid(e->d_name, &uid))
                 break;
             seen_any = 1;
+            if (strcmp(WATCH[i], "nd-apprun") == 0) {
+                char appdir[256];
+                int eng;
+
+                if (!proc_argv1(e->d_name, appdir, sizeof appdir)) {
+                    report(R_INFO, comm, "pid %s, running as %s (uid %ld)", e->d_name,
+                           user_name_of(uid, usr, ut), (long)uid);
+                    break;
+                }
+                eng = strncmp(appdir, ND_PATH_ENG_APPS_DIR "/",
+                              sizeof(ND_PATH_ENG_APPS_DIR "/") - 1u) == 0;
+                if (eng) {
+                    /* A diagnostic is SUPPOSED to be root -- see
+                     * nd_proc_app_needs_root(). Reported, not judged: if it
+                     * is not root that is a broken engineering app rather
+                     * than a broken boundary, and the two want different
+                     * sentences. */
+                    report(R_INFO, appdir, "engineering app, running as %s (uid %ld)",
+                           user_name_of(uid, usr, ut), (long)uid);
+                } else if (usr->valid && uid == usr->uid) {
+                    report(R_PASS, appdir, "running as " ND_PRIV_USER);
+                } else {
+                    report(R_FAIL, appdir,
+                           "a stock app is running as %s (uid %ld) -- it did not drop",
+                           user_name_of(uid, usr, ut), (long)uid);
+                }
+                break;
+            }
             if (strcmp(WATCH[i], "netsurf") == 0) {
                 seen_netsurf = 1;
                 if (ut->valid && uid == ut->uid)
