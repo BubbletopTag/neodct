@@ -1023,6 +1023,17 @@ static nd_app_entry app_at(const char *path)
 static void t_stock_apps_drop(void)
 {
     nd_app_entry a = app_at(ND_PATH_APPS_DIR "/Calendar");
+    /* Power, Update and Downgrade were on the debt list until reboot and
+     * poweroff became verbs on the service socket. They are ordinary apps
+     * now, and this is the assertion that says the debt was really paid
+     * rather than the list merely edited. */
+    nd_app_entry power = app_at(ND_PATH_APPS_DIR "/Power");
+    nd_app_entry upd   = app_at(ND_PATH_APPS_DIR "/Update");
+    nd_app_entry down  = app_at(ND_PATH_APPS_DIR "/Downgrade");
+
+    CHECK(!nd_proc_app_needs_root(&power, false));
+    CHECK(!nd_proc_app_needs_root(&upd, false));
+    CHECK(!nd_proc_app_needs_root(&down, false));
 
     /* The ordinary case, and the one the whole branch is for. Engineering
      * mode must not change it: an engineering-mode phone is still a phone. */
@@ -1045,7 +1056,7 @@ static void t_the_named_stock_apps_still_hold_root(void)
 {
     /* The debt list. When one of these moves to an nd_svc verb, its line here
      * flips to CHECK(!...) and the list in nd_proc.c loses a name. */
-    static const char *const owed[] = {"Power", "Update", "Downgrade", "Clock", "Settings"};
+    static const char *const owed[] = {"Clock", "Settings"};
     size_t i;
 
     for (i = 0u; i < sizeof owed / sizeof owed[0]; i++) {
@@ -1092,12 +1103,12 @@ static void t_the_stock_name_alone_grants_nothing(void)
      * future user-installed set, the writable partition -- the name is just a
      * name. Nothing today can create any of these; the point is that when
      * something can, it will not quietly be a privilege grant. */
-    nd_app_entry eng  = app_at(ND_PATH_ENG_APPS_DIR "/Power");
-    nd_app_entry user = app_at("/NeoDCT/User/apps/Power");
-    nd_app_entry deep = app_at(ND_PATH_APPS_DIR "/Evil/Power");
-    nd_app_entry near = app_at(ND_PATH_APPS_DIR "/Power2");
-    nd_app_entry pre  = app_at(ND_PATH_APPS_DIR "/PowerX");
-    nd_app_entry real = app_at(ND_PATH_APPS_DIR "/Power");
+    nd_app_entry eng  = app_at(ND_PATH_ENG_APPS_DIR "/Clock");
+    nd_app_entry user = app_at("/NeoDCT/User/apps/Clock");
+    nd_app_entry deep = app_at(ND_PATH_APPS_DIR "/Evil/Clock");
+    nd_app_entry near = app_at(ND_PATH_APPS_DIR "/Clock2");
+    nd_app_entry pre  = app_at(ND_PATH_APPS_DIR "/ClockX");
+    nd_app_entry real = app_at(ND_PATH_APPS_DIR "/Clock");
 
     CHECK(!nd_proc_app_needs_root(&eng, false));
     CHECK(!nd_proc_app_needs_root(&user, false));
@@ -1105,7 +1116,7 @@ static void t_the_stock_name_alone_grants_nothing(void)
     CHECK(!nd_proc_app_needs_root(&deep, false));
     CHECK(!nd_proc_app_needs_root(&near, false));
     CHECK(!nd_proc_app_needs_root(&pre, false));
-    /* ...and the one real Power still works, or the phone cannot switch off. */
+    /* ...and the one real Clock still works, or the clock cannot be set. */
     CHECK(nd_proc_app_needs_root(&real, false));
 
     /* An engineering directory called Power gets root when the mode is on,

@@ -698,13 +698,21 @@ static void pump_keys(nd_ui *ui, nd_input_channel *ch)
  *
  * Every entry here is a debt. See the header. */
 static const char *const ROOT_STOCK_APPS[] = {
-    ND_PATH_APPS_DIR "/Power",     /* poweroff, reboot */
-    ND_PATH_APPS_DIR "/Update",    /* reboot, to finish installing */
-    ND_PATH_APPS_DIR "/Downgrade", /* reboot */
-    ND_PATH_APPS_DIR "/Clock",     /* settimeofday */
-    ND_PATH_APPS_DIR "/Settings",  /* neodct-sdcard format */
+    ND_PATH_APPS_DIR "/Clock",    /* settimeofday */
+    ND_PATH_APPS_DIR "/Settings", /* neodct-sdcard format */
     NULL,
 };
+
+/* Paid off, and left here as the record of what paying one off looks like:
+ *
+ *   Power, Update, Downgrade   all three wanted only reboot and poweroff, and
+ *                              both are now verbs on the service socket
+ *                              (spec-app-services.md section 9). Downgrade
+ *                              cost nothing extra -- it has no halt code of
+ *                              its own and reaches Update's through dlopen.
+ *
+ * Two left. Each needs the same treatment: a verb on the socket, served by
+ * the core, and then a name deleted from here. */
 
 /* Is `path` inside `dir`? A prefix test that stops at a component boundary,
  * because a plain strncmp would also match /NeoDCT/System/engineering/appsX
