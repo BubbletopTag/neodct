@@ -61,10 +61,25 @@ def test_the_generated_file_says_it_is_generated():
 
 def test_the_generator_is_kept_out_of_the_format_target():
     """clang-format would fight the generator every time, and the file would
-    then never match its own output again."""
+    then never match its own output again.
+
+    Asserted as the PROPERTY -- the format target names this file as something
+    it skips -- and not as one spelling of it. There are now two generated
+    sources to exclude (nd_bootfont.c here, nd_recfont.h from the recovery UI)
+    and find has more than one way to say it; `! -name X` and `-name X -prune`
+    both work, and pinning the exact bytes of one of them made this test fail
+    when the two exclusions were merged into a single find, for no reason a
+    reader could act on."""
     makefile = open(os.path.join(SRC, "Makefile")).read()
 
-    assert "! -name 'nd_bootfont.c'" in makefile
+    fmt = [l for l in makefile.splitlines() if "clang-format" in l or "nd_bootfont.c" in l]
+    joined = "\n".join(fmt)
+    assert "nd_bootfont.c" in joined, (
+        "the format target does not mention nd_bootfont.c at all:\n" + joined)
+    assert ("! -name 'nd_bootfont.c'" in joined
+            or "-name nd_bootfont.c -prune" in joined
+            or "-name 'nd_bootfont.c' -prune" in joined), (
+        "nd_bootfont.c is named near clang-format but not as an exclusion:\n" + joined)
 
 
 def test_the_generator_is_never_installed():

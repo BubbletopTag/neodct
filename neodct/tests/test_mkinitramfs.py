@@ -560,34 +560,6 @@ def _recui_tree(tmp_path, recui_source):
 
 def test_the_recovery_ui_ships_when_it_matches_the_target(tmp_path):
     fake_target = _recui_tree(tmp_path, HOST_BINARY)
-# --- the install-progress bar --------------------------------------------
-#
-# nd-bootbar is OPTIONAL, and deliberately not in dmsetup's and nd-verify's
-# class: those two make the initramfs unable to do its job safely, so a build
-# without them fails. A missing progress bar makes it silent, which is where
-# the phone was before the bar existed -- failing an image build over that
-# would be the wrong default.
-#
-# The risk that it then quietly never ships at all is what these are for.
-
-def _bootbar_tree(tmp_path, bootbar_source=None):
-    fake_target = tmp_path / "target"
-    (fake_target / "bin").mkdir(parents=True)
-    (fake_target / "usr" / "sbin").mkdir(parents=True)
-    (fake_target / "usr" / "bin").mkdir(parents=True)
-    (fake_target / "usr" / "lib").mkdir(parents=True)
-    shutil.copy(HOST_BINARY, fake_target / "bin" / "busybox")
-    shutil.copy(HOST_BINARY, fake_target / "usr" / "sbin" / "dmsetup")
-    boot_requirements(fake_target)
-    if bootbar_source is not None:
-        shutil.copy(bootbar_source, fake_target / "usr" / "bin" / "nd-bootbar")
-    for source in mkinitramfs.resolve_libs([HOST_BINARY], HOST_LIB_DIRS).values():
-        shutil.copy(source, fake_target / "usr" / "lib" / os.path.basename(source))
-    return fake_target
-
-
-def test_the_progress_bar_ships_when_it_is_there(tmp_path):
-    fake_target = _bootbar_tree(tmp_path, HOST_BINARY)
     init = tmp_path / "init"
     init.write_text("#!/bin/sh\n")
     out = tmp_path / "out.gz"
@@ -603,34 +575,11 @@ def test_a_recovery_ui_of_another_architecture_is_left_out(tmp_path):
     binary the kernel cannot exec. This one is reached from the screen a person
     is standing in front of, where "nothing happened" is the whole failure
     report."""
-    assert "bin/nd-bootbar" in _names_in(out)
-
-
-def test_a_missing_progress_bar_warns_but_still_builds(tmp_path, capsys):
-    """The whole point of it being optional. An image with no bar installs
-    updates exactly as it did before there was one."""
-    fake_target = _bootbar_tree(tmp_path, None)
-    init = tmp_path / "init"
-    init.write_text("#!/bin/sh\n")
-    out = tmp_path / "out.gz"
-
-    mkinitramfs.build(fake_target, init, out)
-
-    assert "bin/nd-bootbar" not in _names_in(out)
-    assert "nd-bootbar" in capsys.readouterr().err
-
-
-def test_a_progress_bar_of_another_architecture_is_left_out(tmp_path):
-    """Shipping a binary the kernel cannot exec is the failure this whole
-    file exists to avoid -- and here it would be worse than useless, because
-    the applier would exec it in the middle of the pipeline that carries the
-    system image."""
     alien = tmp_path / "alien"
     data = bytearray(open(HOST_BINARY, "rb").read(64))
     data[18:20] = (0x28).to_bytes(2, "little")      # EM_ARM
     alien.write_bytes(bytes(data))
     fake_target = _recui_tree(tmp_path, alien)
-    fake_target = _bootbar_tree(tmp_path, alien)
     init = tmp_path / "init"
     init.write_text("#!/bin/sh\n")
     out = tmp_path / "out.gz"
@@ -646,16 +595,6 @@ def test_a_missing_recovery_ui_does_not_fail_the_build(tmp_path, capsys):
     still rescues a phone."""
     fake_target = minimal_target(tmp_path)
     boot_requirements(fake_target)
-    assert "bin/nd-bootbar" not in _names_in(out)
-
-
-def test_the_progress_bar_can_come_from_outside_the_target_tree(tmp_path):
-    """Same as nd-verify: install-boot puts it in BINARIES_DIR, not in the
-    rootfs, because nothing in the running system calls it."""
-    fake_target = _bootbar_tree(tmp_path, None)
-    elsewhere = tmp_path / "images" / "nd-bootbar"
-    elsewhere.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(HOST_BINARY, elsewhere)
     init = tmp_path / "init"
     init.write_text("#!/bin/sh\n")
     out = tmp_path / "out.gz"
@@ -699,6 +638,95 @@ def test_the_recovery_ui_can_come_from_outside_the_target_tree(tmp_path):
 
 
 def test_the_post_image_hook_passes_the_recovery_ui():
+    hook = open(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "scripts", "post-image-neodct.sh")).read()
+
+    assert "--recui" in hook
+    assert "nd-recui" in hook
+
+
+# --- the install-progress bar --------------------------------------------
+#
+# nd-bootbar is OPTIONAL, and deliberately not in dmsetup's and nd-verify's
+# class: those two make the initramfs unable to do its job safely, so a build
+# without them fails. A missing progress bar makes it silent, which is where
+# the phone was before the bar existed -- failing an image build over that
+# would be the wrong default.
+#
+# The risk that it then quietly never ships at all is what these are for.
+
+def _bootbar_tree(tmp_path, bootbar_source=None):
+    fake_target = tmp_path / "target"
+    (fake_target / "bin").mkdir(parents=True)
+    (fake_target / "usr" / "sbin").mkdir(parents=True)
+    (fake_target / "usr" / "bin").mkdir(parents=True)
+    (fake_target / "usr" / "lib").mkdir(parents=True)
+    shutil.copy(HOST_BINARY, fake_target / "bin" / "busybox")
+    shutil.copy(HOST_BINARY, fake_target / "usr" / "sbin" / "dmsetup")
+    boot_requirements(fake_target)
+    if bootbar_source is not None:
+        shutil.copy(bootbar_source, fake_target / "usr" / "bin" / "nd-bootbar")
+    for source in mkinitramfs.resolve_libs([HOST_BINARY], HOST_LIB_DIRS).values():
+        shutil.copy(source, fake_target / "usr" / "lib" / os.path.basename(source))
+    return fake_target
+
+
+def test_the_progress_bar_ships_when_it_is_there(tmp_path):
+    fake_target = _bootbar_tree(tmp_path, HOST_BINARY)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "out.gz"
+
+    mkinitramfs.build(fake_target, init, out)
+
+    assert "bin/nd-bootbar" in _names_in(out)
+
+
+def test_a_missing_progress_bar_warns_but_still_builds(tmp_path, capsys):
+    """The whole point of it being optional. An image with no bar installs
+    updates exactly as it did before there was one."""
+    fake_target = _bootbar_tree(tmp_path, None)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "out.gz"
+
+    mkinitramfs.build(fake_target, init, out)
+
+    assert "bin/nd-bootbar" not in _names_in(out)
+    assert "nd-bootbar" in capsys.readouterr().err
+
+
+def test_a_progress_bar_of_another_architecture_is_left_out(tmp_path):
+    """Shipping a binary the kernel cannot exec is the failure this whole
+    file exists to avoid -- and here it would be worse than useless, because
+    the applier would exec it in the middle of the pipeline that carries the
+    system image."""
+    alien = tmp_path / "alien"
+    data = bytearray(open(HOST_BINARY, "rb").read(64))
+    data[18:20] = (0x28).to_bytes(2, "little")      # EM_ARM
+    alien.write_bytes(bytes(data))
+    fake_target = _bootbar_tree(tmp_path, alien)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "out.gz"
+
+    mkinitramfs.build(fake_target, init, out)
+
+    assert "bin/nd-bootbar" not in _names_in(out)
+
+
+def test_the_progress_bar_can_come_from_outside_the_target_tree(tmp_path):
+    """Same as nd-verify: install-boot puts it in BINARIES_DIR, not in the
+    rootfs, because nothing in the running system calls it."""
+    fake_target = _bootbar_tree(tmp_path, None)
+    elsewhere = tmp_path / "images" / "nd-bootbar"
+    elsewhere.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(HOST_BINARY, elsewhere)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "out.gz"
+
     mkinitramfs.build(fake_target, init, out, bootbar=elsewhere)
 
     assert "bin/nd-bootbar" in _names_in(out)
@@ -709,8 +737,6 @@ def test_the_post_image_hook_passes_the_progress_bar():
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "scripts", "post-image-neodct.sh")).read()
 
-    assert "--recui" in hook
-    assert "nd-recui" in hook
     assert "--bootbar" in hook
 
 
