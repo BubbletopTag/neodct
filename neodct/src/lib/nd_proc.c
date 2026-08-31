@@ -681,30 +681,30 @@ static void pump_keys(nd_ui *ui, nd_input_channel *ch)
  * ------------------------------------------------------------------ */
 
 /* Stock apps that still hold root because their one privileged operation has
- * no route through nd_svc yet. Matched on the DIRECTORY name, not the
- * manifest's "name": the directory is on the read-only rootfs and is what the
- * build put there, while the name is a string a manifest happens to carry.
+ * no route through nd_svc yet, written as WHOLE PATHS rather than names.
+ *
+ * The name alone is not safe to match on, and the difference is the whole of
+ * this comment. "Does this app's directory end in /Power" grants root to a
+ * directory called Power ANYWHERE -- and while nothing today can create one
+ * outside the two read-only directories the scanner reads, the moment a third
+ * app directory exists (a user-installed set is the obvious one) a folder
+ * named Power in it inherits reboot. That is a privilege grant arriving as a
+ * side effect of a feature nobody connected to privilege, which is exactly
+ * how this kind of hole gets made.
+ *
+ * A full-path match cannot do that. /NeoDCT/System/apps/Power is a specific
+ * directory on a dm-verity'd squashfs, and being called Power buys nothing at
+ * all anywhere else.
  *
  * Every entry here is a debt. See the header. */
 static const char *const ROOT_STOCK_APPS[] = {
-    "Power",     /* poweroff, reboot */
-    "Update",    /* reboot, to finish installing */
-    "Downgrade", /* reboot */
-    "Clock",     /* settimeofday */
-    "Settings",  /* neodct-sdcard format */
+    ND_PATH_APPS_DIR "/Power",     /* poweroff, reboot */
+    ND_PATH_APPS_DIR "/Update",    /* reboot, to finish installing */
+    ND_PATH_APPS_DIR "/Downgrade", /* reboot */
+    ND_PATH_APPS_DIR "/Clock",     /* settimeofday */
+    ND_PATH_APPS_DIR "/Settings",  /* neodct-sdcard format */
     NULL,
 };
-
-/* The last path component, without copying. */
-static const char *dir_basename(const char *path)
-{
-    const char *slash;
-
-    if (path == NULL)
-        return "";
-    slash = strrchr(path, '/');
-    return slash != NULL ? slash + 1 : path;
-}
 
 /* Is `path` inside `dir`? A prefix test that stops at a component boundary,
  * because a plain strncmp would also match /NeoDCT/System/engineering/appsX
@@ -738,7 +738,7 @@ bool nd_proc_app_needs_root(const nd_app_entry *app, bool engineering_mode)
         return true;
 
     for (i = 0u; ROOT_STOCK_APPS[i] != NULL; i++) {
-        if (strcmp(dir_basename(app->path), ROOT_STOCK_APPS[i]) == 0)
+        if (strcmp(app->path, ROOT_STOCK_APPS[i]) == 0)
             return true;
     }
     return false;

@@ -1083,16 +1083,34 @@ static void t_no_app_is_the_confined_answer(void)
     CHECK(!nd_proc_app_needs_root(NULL, false));
 }
 
-static void t_the_stock_name_is_not_enough_on_its_own(void)
+static void t_the_stock_name_alone_grants_nothing(void)
 {
-    /* "Power" as a directory under the engineering tree, with the mode off,
-     * must not pick up root from the stock list by name alone... except that
-     * it does, and deliberately: the list is matched on basename because that
-     * is what the build controls. Asserted so the behaviour is a decision
-     * rather than an accident, and so that changing it is a test change. */
-    nd_app_entry a = app_at(ND_PATH_ENG_APPS_DIR "/Power");
+    /* The spoofing case, and the reason ROOT_STOCK_APPS holds whole paths.
+     *
+     * A directory called Power grants reboot ONLY at
+     * /NeoDCT/System/apps/Power. Anywhere else -- the engineering tree, a
+     * future user-installed set, the writable partition -- the name is just a
+     * name. Nothing today can create any of these; the point is that when
+     * something can, it will not quietly be a privilege grant. */
+    nd_app_entry eng  = app_at(ND_PATH_ENG_APPS_DIR "/Power");
+    nd_app_entry user = app_at("/NeoDCT/User/apps/Power");
+    nd_app_entry deep = app_at(ND_PATH_APPS_DIR "/Evil/Power");
+    nd_app_entry near = app_at(ND_PATH_APPS_DIR "/Power2");
+    nd_app_entry pre  = app_at(ND_PATH_APPS_DIR "/PowerX");
+    nd_app_entry real = app_at(ND_PATH_APPS_DIR "/Power");
 
-    CHECK(nd_proc_app_needs_root(&a, false));
+    CHECK(!nd_proc_app_needs_root(&eng, false));
+    CHECK(!nd_proc_app_needs_root(&user, false));
+    CHECK(!nd_proc_app_needs_root(&user, true));
+    CHECK(!nd_proc_app_needs_root(&deep, false));
+    CHECK(!nd_proc_app_needs_root(&near, false));
+    CHECK(!nd_proc_app_needs_root(&pre, false));
+    /* ...and the one real Power still works, or the phone cannot switch off. */
+    CHECK(nd_proc_app_needs_root(&real, false));
+
+    /* An engineering directory called Power gets root when the mode is on,
+     * because it is an engineering app -- by its location, not its name. */
+    CHECK(nd_proc_app_needs_root(&eng, true));
 }
 
 int main(void)
@@ -1113,7 +1131,7 @@ int main(void)
     t_the_named_stock_apps_still_hold_root();
     t_a_lookalike_directory_gets_nothing();
     t_no_app_is_the_confined_answer();
-    t_the_stock_name_is_not_enough_on_its_own();
+    t_the_stock_name_alone_grants_nothing();
 
     if (!stage_root()) {
         fprintf(stderr, "test_proc: cannot stage a root (step %d); skipping\n", g_stage_step);
