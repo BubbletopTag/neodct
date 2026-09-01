@@ -51,6 +51,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "nd_broker.h"
 #include "nd_clock.h"
 #include "nd_crash.h"
 #include "nd_db.h"
@@ -62,6 +63,7 @@
 #include "nd_keypadsetup.h"
 #include "nd_log.h"
 #include "nd_paths.h"
+#include "nd_priv.h"
 #include "nd_proc.h"
 #include "nd_settings.h"
 #include "nd_types.h"
@@ -326,6 +328,7 @@ static void usage(FILE *out)
 
 int main(int argc, char **argv)
 {
+    nd_broker *broker = NULL;
     bool headless = false;
     bool idle_measure = false;
     nd_fb *fb = NULL;
@@ -355,6 +358,15 @@ int main(int argc, char **argv)
     install_signals();
     (void)nd_proc_reaper_start();
 
+    /* 1b. The broker, BEFORE any thread exists.
+     *
+     *     Forking a process that has threads gives the child locks no thread
+     *     will ever release -- malloc's among them -- and the broker
+     *     allocates. The clock service below starts a thread, so the fork
+     *     goes above it, not beside the drop it enables. */
+    broker = nd_broker_start();
+    nd_broker_set_default(broker);
+
     /* 2. The clock floor, before anything can reach the network. */
     if (nd_clock_start != NULL)
         nd_clock_start(true, ND_NTP_SERVERS,
@@ -381,12 +393,56 @@ int main(int argc, char **argv)
         nd_log(ND_LOG_FB, "headless: no panel will be written");
     }
 
+    /* 4b. AND NOW STOP BEING ROOT.
+     *
+     *     What nd-core actually needed uid 0 for was measured rather than
+     *     reasoned about: it was made to become ndusr at startup and run on a
+     *     booted phone. The panel, the keypad, the modem, the battery, the
+     *     settings, the fonts and the wallpaper all came up unchanged --
+     *     everything the UI touches is group-reachable to ndusr already, by
+     *     the layout in 61-neodct-devices.rules. Exactly one thing broke:
+     *     launching an app, exit 122, ND_PRIV_STEP_SETGROUPS, because
+     *     setgroups() needs CAP_SETGID.
+     *
+     *     So the privilege that kept the whole UI at uid 0 was one syscall
+     *     between fork and execve. The broker forked above holds it. This is
+     *     where the rest of the phone gives it up.
+     *
+     *     ONLY WITH A BROKER. Without one there would be nothing left that
+     *     can launch an app, and a phone whose apps do not open is worse than
+     *     a phone whose UI is privileged. NEODCT_NO_DROP=1 keeps the old
+     *     behaviour for a developer bisecting something. */
+    if (broker == NULL) {
+        nd_log_err(ND_LOG_CORE, "no broker: the UI stays root, because nothing "
+                                "else could launch an app");
+    } else if (getenv("NEODCT_NO_DROP") != NULL) {
+        nd_log(ND_LOG_CORE, "NEODCT_NO_DROP: staying root by request");
+    } else {
+        nd_priv_id id;
+
+        if (!nd_priv_lookup(ND_PRIV_USER, &id)) {
+            nd_log_err(ND_LOG_CORE, "no " ND_PRIV_USER " in this image; the UI stays root");
+        } else {
+            int step = nd_priv_become(&id);
+
+            if (step != 0)
+                nd_log_err(ND_LOG_CORE,
+                           "could not become " ND_PRIV_USER " (step %d: %s); the UI stays root",
+                           step, strerror(errno));
+            else
+                nd_log(ND_LOG_CORE, "UI is now uid %ld; privilege lives in the broker only",
+                       (long)getuid());
+        }
+    }
+
     /* 5. The UI. Nothing between the framebuffer and here: see the header
      *    comment for what used to be, and why it is not. */
     nd_log(ND_LOG_LAUNCHER, "Starting UI...");
     core_run(fb, idle_measure);
 
     nd_proc_reaper_stop();
+    nd_broker_set_default(NULL);
+    nd_broker_stop(broker);
     if (fb != NULL)
         nd_fb_close(fb);
     return 0;

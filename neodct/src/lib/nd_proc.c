@@ -43,6 +43,7 @@
 #include <unistd.h>
 
 #include "nd_app.h"
+#include "nd_broker.h"
 #include "nd_crash.h"
 #include "nd_fb_priv.h"
 #include "nd_input.h"
@@ -819,6 +820,10 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
     nd_svc_server *svc = NULL;
     int svc_fd = -1;
     bool untrusted;
+    /* Which user the child becomes, by NAME. The broker looks the uid up on
+     * its own side rather than being handed one: nd-core is unprivileged, so a
+     * uid on that wire would be a uid the caller chose. NULL means no drop. */
+    const char *run_user = NULL;
     int fb_fd = -1;
     nd_proc_spec spec;
     nd_proc_status st;
@@ -932,6 +937,8 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
          * the privilege to do it. nd_proc.h carries the whole argument. */
         static const char *const hide[] = ND_PROC_UNTRUSTED_HIDE_PATHS;
 
+        run_user = ND_PRIV_USER_UT;
+
         /* ============ THIS ONE REFUSES ============
          *
          * It used to log and carry on, which meant an image without the users
@@ -965,6 +972,7 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
         spec.private_mounts = true;
         spec.hide_paths = hide;
     } else if (!nd_proc_app_needs_root(app, nd_ui_engineering_mode(ui))) {
+        run_user = ND_PRIV_USER;
         /* A trusted app still runs -- refusing here would brick every app on
          * the phone rather than confine anything -- but it is an ERROR and it
          * says so. It was nd_log(), an ordinary informational line, which is
@@ -1005,7 +1013,17 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
 
     nd_log(ND_LOG_OS, "Launching %s: %s %s %s", app->name, path, app->path, argv[2]);
 
-    rc = nd_proc_spawn(path, &spec, &pid);
+    /* THE ONE OPERATION THE UI CANNOT DO ANY MORE.
+     *
+     * setgroups() needs CAP_SETGID, and an ndusr nd-core has none -- measured,
+     * not assumed: dropping the core and launching an app fails at exit 122,
+     * ND_PRIV_STEP_SETGROUPS, before execve. Everything else on this path the
+     * unprivileged core still does itself, which is why only the fork and the
+     * reap cross the socket. */
+    if (nd_broker_default() != NULL)
+        rc = nd_broker_spawn(nd_broker_default(), path, &spec, run_user, &pid);
+    else
+        rc = nd_proc_spawn(path, &spec, &pid);
     if (rc != ND_OK)
         goto done;
 
@@ -1042,7 +1060,18 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
         restore = sigaction(SIGPIPE, &ign, &prev) == 0;
 
         for (;;) {
-            if (nd_proc_wait(pid, 0.0, &st) == ND_OK)
+            /* The app is the BROKER's child when there is one, so only the
+             * broker can reap it -- waitpid() here would return ECHILD for a
+             * process this one never forked. */
+            nd_err w = (nd_broker_default() != NULL)
+                           ? nd_broker_wait(nd_broker_default(), pid, 0.0, &st)
+                           : nd_proc_wait(pid, 0.0, &st);
+
+            if (w == ND_OK)
+                break;
+            /* A broker that has died takes the app's exit status with it.
+             * Stop rather than spin: the child is unreachable either way. */
+            if (nd_broker_default() != NULL && w != ND_ERR_TIMEOUT)
                 break;
             pump_keys(ui, &ch);
         }

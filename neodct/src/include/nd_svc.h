@@ -485,4 +485,9 @@ void nd_svc_server_free(nd_svc_server *s);
 }
 #endif
 
+/* Resolve and run poweroff/reboot with THIS process's privilege. The core
+ * decides; the broker performs, because /sbin/poweroff needs CAP_SYS_BOOT and
+ * an unprivileged nd-core has none. See nd_broker.h. */
+bool nd_svc_halt_now(bool reboot);
+
 #endif /* ND_SVC_H_INCLUDED */

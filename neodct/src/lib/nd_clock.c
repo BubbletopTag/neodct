@@ -65,6 +65,7 @@
 
 #include <linux/rtc.h>
 
+#include "nd_broker.h"
 #include "nd_clock.h"
 #include "nd_log.h"
 #include "nd_paths.h"
@@ -361,6 +362,22 @@ bool nd_clock_set(time_t when, const char *reason)
         return true;
     }
 
+    /* clock_settime(CLOCK_REALTIME) needs CAP_SYS_TIME, which nd-core gave up
+     * when it stopped being root. The decision above -- the bounds, the log,
+     * the sandbox check -- stays here; only the syscall crosses. */
+    {
+        nd_broker *b = nd_broker_default();
+
+        if (b != NULL) {
+            if (!nd_broker_set_clock(b, (int64_t)when)) {
+                nd_log_err(ND_LOG_CLOCK, "the broker would not set the clock");
+                return false;
+            }
+            write_rtc(when);
+            return true;
+        }
+    }
+
     ts.tv_sec = when;
     ts.tv_nsec = 0;
     if (clock_settime(CLOCK_REALTIME, &ts) != 0) {
@@ -593,8 +610,8 @@ static bool v6_line_is_loopback(const char *line)
     size_t end = strlen(line);
     size_t start;
 
-    while (end > 0u && (line[end - 1u] == '\n' || line[end - 1u] == '\r' ||
-                        line[end - 1u] == ' ' || line[end - 1u] == '\t'))
+    while (end > 0u && (line[end - 1u] == '\n' || line[end - 1u] == '\r' || line[end - 1u] == ' ' ||
+                        line[end - 1u] == '\t'))
         end--;
     start = end;
     while (start > 0u && line[start - 1u] != ' ' && line[start - 1u] != '\t')

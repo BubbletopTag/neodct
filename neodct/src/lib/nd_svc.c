@@ -59,6 +59,7 @@
 
 #include "nd_app.h"
 #include "nd_battery.h"
+#include "nd_broker.h"
 #include "nd_clock.h"
 #include "nd_log.h"
 #include "nd_modem.h"
@@ -940,8 +941,22 @@ static void *svc_thread(void *arg)
          * was taken in serve(), before anything could fail; an app that died
          * waiting for its answer is not a reason to keep running a phone
          * whose owner asked for it to stop. spec-app-services.md 9.4. */
-        if (halt.pending)
-            halt_perform(&halt);
+        if (halt.pending) {
+            /* The SERVER's halt, which is the one the Power app actually
+             * takes: the app has a service socket, so it asks the core rather
+             * than doing it itself, and this is where the core obliges.
+             *
+             * It was left behind when svc_halt() was routed to the broker, and
+             * the phone said so: "Power off failed." on the panel, with the
+             * core at uid 1000 and /sbin/poweroff needing CAP_SYS_BOOT. Two
+             * paths reach halt_perform() and only one had been moved. */
+            nd_broker *b = nd_broker_default();
+
+            if (b != NULL)
+                (void)nd_broker_halt(b, halt.reboot);
+            else
+                halt_perform(&halt);
+        }
 
         if (!sent)
             break; /* the app stopped listening; waitpid will say why */
@@ -1401,19 +1416,36 @@ bool nd_svc_battery_quickstart(const nd_ui *ui)
  * can tell -- nd-core itself, a hand-launched nd-apprun, nd-shoot, a unit
  * test -- and does here exactly what the three apps used to do for
  * themselves. See nd_svc.h. */
-static bool svc_halt(bool reboot)
+/* Resolve and run it, here, with whatever privilege this process has. Public
+ * because the broker calls it: /sbin/poweroff needs CAP_SYS_BOOT and an
+ * unprivileged nd-core has none, so the core decides and the broker performs.
+ * See nd_broker.h. */
+bool nd_svc_halt_now(bool reboot)
 {
     svc_halt_plan plan;
+
+    if (!halt_resolve(reboot, &plan)) {
+        nd_log_err(ND_LOG_POWER, "no %s on this image", reboot ? "reboot" : "poweroff");
+        return false;
+    }
+    nd_log(ND_LOG_POWER, "%s, via %s", reboot ? "Rebooting" : "Powering off", plan.exe);
+    halt_perform(&plan);
+    return true;
+}
+
+static bool svc_halt(bool reboot)
+{
     svc_resp resp;
 
     if (g_client_fd < 0) {
-        if (!halt_resolve(reboot, &plan)) {
-            nd_log_err(ND_LOG_POWER, "no %s on this image", reboot ? "reboot" : "poweroff");
-            return false;
-        }
-        nd_log(ND_LOG_POWER, "%s, via %s", reboot ? "Rebooting" : "Powering off", plan.exe);
-        halt_perform(&plan);
-        return true;
+        /* THE CORE'S OWN PATH, and since the core stopped being root it can no
+         * longer take it alone: halt_perform() execs /sbin/poweroff, which
+         * needs CAP_SYS_BOOT. The broker has it. */
+        nd_broker *b = nd_broker_default();
+
+        if (b != NULL)
+            return nd_broker_halt(b, reboot);
+        return nd_svc_halt_now(reboot);
     }
 
     /* ND_SVC_TIMEOUT_S and not a constant of its own: everything the core

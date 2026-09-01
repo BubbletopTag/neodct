@@ -321,7 +321,12 @@ bool nd_proc_app_is_untrusted(const nd_app_entry *app);
  * bits alone might let it: the engineering apps, the release signing keys,
  * the owner's tones and wallpapers, the databases, the SSH keys, the update
  * records and the RNG seed. */
-#define ND_PROC_UNTRUSTED_HIDE_PATHS                                              {                                                                                 "/NeoDCT/System/engineering", "/NeoDCT/System/keys",                               "/NeoDCT/System/tones", "/NeoDCT/System/wallpapers",                           "/NeoDCT/User/db", "/NeoDCT/User/.remote", "/NeoDCT/User/.ndsys",              "/NeoDCT/User/.seedrng", NULL                                          }
+#define ND_PROC_UNTRUSTED_HIDE_PATHS                                                 \
+    {                                                                                \
+        "/NeoDCT/System/engineering", "/NeoDCT/System/keys", "/NeoDCT/System/tones", \
+            "/NeoDCT/System/wallpapers", "/NeoDCT/User/db", "/NeoDCT/User/.remote",  \
+            "/NeoDCT/User/.ndsys", "/NeoDCT/User/.seedrng", NULL                     \
+    }
 
 /* 1. open the key channel and the crash pipe
  * 2. spawn nd-apprun with the app's directory, the entry point and its
