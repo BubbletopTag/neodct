@@ -178,6 +178,142 @@ static void test_apprun_as_root_is_only_for_engineering_apps(void)
     nd_broker_stop(b);
 }
 
+/* ============ THE ENVIRONMENT IS THE PROGRAM ============
+ *
+ * The path allow-list above was, for a while, the whole of the root-spawn
+ * defence -- and it was worth nothing, because both executables on it are
+ * steered by their environment rather than by their arguments. A #!/bin/sh
+ * helper with a chosen PATH runs the chooser's binaries; nd-apprun with a
+ * chosen NEODCT_ROOT dlopens the chooser's library. Neither is setuid, so the
+ * loader honours LD_PRELOAD from anyone who can set it.
+ *
+ * This is the test the earlier ones did not think to write: not "is the path
+ * checked" but "does the checked path still do what the caller says". */
+static void test_a_root_child_does_not_get_the_callers_environment(void)
+{
+    const char *in[8];
+    const char *out[8];
+    size_t i;
+    bool saw_path = false;
+    bool saw_fb = false;
+
+    in[0] = "LD_PRELOAD=/NeoDCT/User/apps/x/evil.so";
+    in[1] = "PATH=/NeoDCT/User/apps/x/bin";
+    in[2] = "NEODCT_ROOT=/NeoDCT/User/apps/x";
+    in[3] = "NEODCT_FB_FD=7";      /* legitimate: a descriptor just remapped */
+    in[4] = "LD_AUDIT=/tmp/a.so";
+    in[5] = "NEODCT_FB_FD_EVIL=1"; /* a prefix of a kept name is not that name */
+    in[6] = "NEODCT_SERVICE_FD";   /* a kept name with no '=' is not an entry */
+    in[7] = NULL;
+
+    memset(out, 0, sizeof out);
+    nd_broker__root_env_filter(in, 7u, out, ND_ARRAY_LEN(out));
+
+    for (i = 0u; out[i] != NULL; i++) {
+        CHECK(strncmp(out[i], "LD_", 3u) != 0);
+        CHECK(strncmp(out[i], "NEODCT_ROOT=", 12u) != 0);
+        CHECK(strcmp(out[i], "NEODCT_FB_FD_EVIL=1") != 0);
+        CHECK(strcmp(out[i], "NEODCT_SERVICE_FD") != 0);
+        if (strcmp(out[i], ND_BROKER_ROOT_PATH) == 0)
+            saw_path = true;
+        if (strcmp(out[i], "NEODCT_FB_FD=7") == 0)
+            saw_fb = true;
+    }
+
+    /* A PATH the caller did not choose, and it is not the caller's. */
+    CHECK(saw_path);
+    for (i = 0u; out[i] != NULL; i++)
+        CHECK(strcmp(out[i], "PATH=/NeoDCT/User/apps/x/bin") != 0);
+
+    /* And the one thing a launch genuinely cannot do without survives. */
+    CHECK(saw_fb);
+}
+
+/* neodct-sdcard is the other name on the list, and it had no argument check at
+ * all -- so "the path is pinned" meant `format` could be `add`, against any
+ * device, at any mountpoint. The core asks for exactly one thing. */
+static void test_the_sdcard_helper_may_only_be_asked_to_format_a_device(void)
+{
+    const char *argv[5];
+
+    /* What nd_svc_format_card() actually sends. */
+    argv[0] = ND_PATH_SDCARD_HELPER;
+    argv[1] = "format";
+    argv[2] = "/dev/mmcblk0";
+    argv[3] = NULL;
+    CHECK(nd_broker__root_exec_allowed(ND_PATH_SDCARD_HELPER, argv, 3u));
+
+    /* Every other verb the helper implements. */
+    argv[1] = "add";
+    CHECK(!nd_broker__root_exec_allowed(ND_PATH_SDCARD_HELPER, argv, 3u));
+    argv[1] = "remove";
+    CHECK(!nd_broker__root_exec_allowed(ND_PATH_SDCARD_HELPER, argv, 3u));
+    argv[1] = "scan";
+    CHECK(!nd_broker__root_exec_allowed(ND_PATH_SDCARD_HELPER, argv, 3u));
+
+    /* A "device" that is not one. */
+    argv[1] = "format";
+    argv[2] = "/NeoDCT/User/browser/loop.img";
+    CHECK(!nd_broker__root_exec_allowed(ND_PATH_SDCARD_HELPER, argv, 3u));
+    argv[2] = "/dev/../NeoDCT/User/x";
+    CHECK(!nd_broker__root_exec_allowed(ND_PATH_SDCARD_HELPER, argv, 3u));
+    argv[2] = "/dev/mapper/../../etc/x";
+    CHECK(!nd_broker__root_exec_allowed(ND_PATH_SDCARD_HELPER, argv, 3u));
+
+    /* And the shapes that are not a format request at all. */
+    argv[2] = "/dev/mmcblk0";
+    argv[3] = "extra";
+    argv[4] = NULL;
+    CHECK(!nd_broker__root_exec_allowed(ND_PATH_SDCARD_HELPER, argv, 4u));
+    CHECK(!nd_broker__root_exec_allowed(ND_PATH_SDCARD_HELPER, argv, 2u));
+    CHECK(!nd_broker__root_exec_allowed(ND_PATH_SDCARD_HELPER, NULL, 3u));
+}
+
+/* ============ THE THIRD SPELLING ============
+ *
+ * "root" was refused. Then no name at all was refused. This is the one that
+ * was left: a name that IS on the list but does not exist in the image. The
+ * lookup failed, the broker logged and carried on, and nd_priv_become() on a
+ * zeroed id is a documented no-op -- so the child ran as root, having never
+ * passed the root-exec list, because that gate only fires on an EMPTY name.
+ *
+ * The host is the image in question here: unit tests run somewhere with no
+ * ndusr, so this is the ordinary case rather than a contrived one. */
+static void test_a_user_that_does_not_resolve_is_not_a_way_to_stay_root(void)
+{
+    /* Enumerated rather than spawned, and that is the point of the shape.
+     *
+     * The end-to-end version of this test would need a host that is MISSING
+     * an ndusr, so on a host that has one it would skip -- silently, and pass.
+     * That is precisely how the first root-shell hole survived its own test:
+     * the test asserted the case the author had in mind and never reached the
+     * one that mattered. A pure predicate has no host to depend on. */
+    CHECK(nd_broker__spawn_stays_root(NULL, true));
+    CHECK(nd_broker__spawn_stays_root(NULL, false));
+    CHECK(nd_broker__spawn_stays_root("", true));
+    CHECK(nd_broker__spawn_stays_root("", false));
+
+    /* The one that was missed: an allowed NAME, absent from the image. */
+    CHECK(nd_broker__spawn_stays_root(ND_PRIV_USER, false));
+    CHECK(nd_broker__spawn_stays_root(ND_PRIV_USER_UT, false));
+
+    /* And the only shape that drops. */
+    CHECK(!nd_broker__spawn_stays_root(ND_PRIV_USER, true));
+    CHECK(!nd_broker__spawn_stays_root(ND_PRIV_USER_UT, true));
+
+    /* Which the broker then refuses unless the path is on the root-exec list
+     * -- and /bin/true is not, however the staying-root was spelled. */
+    {
+        const char *argv[2];
+
+        argv[0] = "/bin/true";
+        argv[1] = NULL;
+        CHECK(!nd_broker__root_exec_allowed("/bin/true", argv, 1u));
+        CHECK(!nd_broker__root_exec_allowed("/bin/sh", argv, 1u));
+        CHECK(!nd_broker__root_exec_allowed(NULL, argv, 1u));
+    }
+}
+
 /* And it still spawns what it should. A refusal that refuses everything is not
  * a boundary, it is a broken phone -- which is what the first attempt at this
  * produced, since a build failure left a stale image and the UI never dropped
@@ -291,6 +427,9 @@ int main(void)
     RUN(test_the_broker_refuses_to_spawn_as_root);
     RUN(test_a_nameless_user_is_not_a_way_to_stay_root);
     RUN(test_apprun_as_root_is_only_for_engineering_apps);
+    RUN(test_a_root_child_does_not_get_the_callers_environment);
+    RUN(test_the_sdcard_helper_may_only_be_asked_to_format_a_device);
+    RUN(test_a_user_that_does_not_resolve_is_not_a_way_to_stay_root);
     RUN(test_the_broker_spawns_and_reaps);
     RUN(test_an_oversized_request_is_refused_not_trimmed);
     return pt_report("test_broker");

@@ -1229,6 +1229,24 @@ void nd_svc_client_open_from_env(void)
         nd_log_err(ND_LOG_OS, "%s=%d is not a descriptor", ND_ENV_SERVICE_FD, fd);
         return;
     }
+    /* Close-on-exec, which it arrives WITHOUT: the core deliberately clears
+     * the flag so the descriptor survives the execve into nd-apprun, and
+     * nothing has put it back since.
+     *
+     * This socket is a straight line to a thread in the core that will send
+     * an SMS or power the phone off, and nd_svc validates the RECORD, never
+     * the SENDER -- possession of the descriptor IS the authorisation. So it
+     * must reach the app and stop there. Without this, every helper a trusted
+     * app exec's (aplay, the browser, anything) inherits the same
+     * authorisation, and NEODCT_SERVICE_FD is in their environment telling
+     * them the number.
+     *
+     * Re-armed here rather than in the core, because the core is the one that
+     * had to clear it. This is the first moment the app owns the descriptor
+     * and the last moment before it might exec something. */
+    if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0)
+        nd_log_err(ND_LOG_OS, "%s=%d: cannot set close-on-exec: %s", ND_ENV_SERVICE_FD, fd,
+                   strerror(errno));
     g_client_fd = fd;
 }
 

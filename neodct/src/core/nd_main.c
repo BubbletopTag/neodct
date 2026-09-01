@@ -365,7 +365,14 @@ int main(int argc, char **argv)
      *     allocates. The clock service below starts a thread, so the fork
      *     goes above it, not beside the drop it enables. */
     broker = nd_broker_start();
-    nd_broker_set_default(broker);
+    /* Installed as the default only if the drop below actually happens. A
+     * core that is STILL ROOT gains nothing by asking a root broker to fork
+     * for it, and it loses something: the broker refuses a spawn whose user
+     * cannot be resolved (nd_broker.c), which on an image with no users table
+     * would be every app on the phone. Routing a privileged core straight to
+     * nd_proc_spawn keeps that image booting exactly as it did before, loudly
+     * logged, while the broker's invariant stays absolute for the case it is
+     * actually for. */
 
     /* 2. The clock floor, before anything can reach the network. */
     if (nd_clock_start != NULL)
@@ -429,9 +436,12 @@ int main(int argc, char **argv)
                 nd_log_err(ND_LOG_CORE,
                            "could not become " ND_PRIV_USER " (step %d: %s); the UI stays root",
                            step, strerror(errno));
-            else
+            else {
+                /* Only here. See the fork above. */
+                nd_broker_set_default(broker);
                 nd_log(ND_LOG_CORE, "UI is now uid %ld; privilege lives in the broker only",
                        (long)getuid());
+            }
         }
     }
 

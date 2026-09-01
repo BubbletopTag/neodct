@@ -133,6 +133,23 @@ static const struct {
     /* A JSON NUMBER rather than the shipped string form. int() takes both. */
     {"Beta", "{\"id\": 7}"},
 
+    /* ============ THE MANIFEST IS THE APP'S OWN FILE ============
+     *
+     * Under /NeoDCT/User/sdcard/apps that means it is a file an attacker
+     * wrote, and "icon" was joined to the app directory with no containment
+     * at all -- so it named any path on the phone, and the CORE opened it,
+     * as ndusr, on the menu draw, with no app launched at all. The decoders
+     * are the interesting target; a failed decode is the good case.
+     *
+     * All three keep their app -- a bad icon is not a bad app -- and fall
+     * back to the default name, which is what a missing icon already did. */
+    {"Climber", "{\"name\": \"Climber\", \"id\": \"31\","
+                " \"icon\": \"../../../../etc/shadow\"}"},
+    {"Absolute", "{\"name\": \"Absolute\", \"id\": \"32\","
+                 " \"icon\": \"/NeoDCT/User/.remote/id_ed25519\"}"},
+    {"Sneaky", "{\"name\": \"Sneaky\", \"id\": \"33\","
+               " \"icon\": \"art/../../../NeoDCT/User/db/contacts.db\"}"},
+
     /* No id at all -> data.get("id", 999). */
     {"NoId", "{\"name\": \"No Id\"}"},
 
@@ -186,6 +203,11 @@ static const struct {
     {5, "Alpha App", "Alpha", "art/big.png", "app.so"},
     {7, "Beta", "Beta", "icon.png", "main.py"},
     {12, "Padded", "Padded", "icon.png", "main.py"},
+    /* Each asked for something outside its own directory and got the default
+     * instead. The app survives; the escape does not. */
+    {31, "Climber", "Climber", "icon.png", "main.py"},
+    {32, "Absolute", "Absolute", "icon.png", "main.py"},
+    {33, "Sneaky", "Sneaky", "icon.png", "main.py"},
     {42, "Tie A", "TieA", "icon.png", "main.py"},
     {42, "Tie B", "TieB", "icon.png", "main.py"},
     {999, "No Id", "NoId", "icon.png", "main.py"},
@@ -325,9 +347,28 @@ static void test_synthetic_manifests(void)
         CHECK_STR(e->exec, SURVIVORS[i].exec, "exec as written, else main.py");
     }
 
-    /* The two id-42 entries are adjacent and distinct. */
-    CHECK(apps[4].id == 42 && apps[5].id == 42, "the tied ids stayed adjacent");
-    CHECK(strcmp(apps[4].name, apps[5].name) != 0, "and are two distinct entries");
+    /* The two id-42 entries are adjacent and distinct.
+     *
+     * Found rather than indexed. This asserted apps[4] and apps[5], which
+     * made it a test of how many apps happen to sort before 42 -- adding
+     * three fixtures with lower ids broke it while the property it is about
+     * was never in question. */
+    {
+        size_t tie = 0u;
+        bool found = false;
+
+        for (i = 0u; i + 1u < n; i++) {
+            if (apps[i].id == 42 && apps[i + 1u].id == 42) {
+                tie = i;
+                found = true;
+                break;
+            }
+        }
+        CHECK(found, "the tied ids stayed adjacent");
+        if (found)
+            CHECK(strcmp(apps[tie].name, apps[tie + 1u].name) != 0,
+                  "and are two distinct entries");
+    }
 
     /* CODING-STANDARDS 1.5: the caller's array is a hard bound. Python's list
      * grows without one, which is the recorded deviation. */

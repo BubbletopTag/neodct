@@ -43,6 +43,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <poll.h>
+
 #include "nd_crash.h"
 #include "nd_draw.h"
 #include "nd_fb.h"
@@ -172,12 +174,48 @@ bool nd_crash_read_report(int report_fd, nd_crash_info *out)
         return false;
 
     memset(&rep, 0, sizeof rep);
+
+    /* ============ WAITED FOR, NOT BLOCKED ON ============
+     *
+     * This read had no deadline, and the pipe's write end is a descriptor the
+     * CHILD holds. A child that forks a helper before it dies leaves that end
+     * open in the helper, so the pipe never reports EOF and this read never
+     * returns -- in the core, on the launch path, with the app already reaped.
+     * The phone is then a still picture: no menu, no keys, no incoming call.
+     *
+     * An untrusted app is entitled to fork. It is not entitled to stop the
+     * phone, so the wait is bounded. A crash report that does not arrive in
+     * ND_CRASH_REPORT_WAIT_MS is one the core does without -- it still knows
+     * the app died and still draws the crash screen, just without the signal
+     * detail. */
+    {
+        struct pollfd pfd;
+        int r;
+
+        pfd.fd = report_fd;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        do {
+            r = poll(&pfd, 1u, ND_CRASH_REPORT_WAIT_MS);
+        } while (r < 0 && errno == EINTR);
+        if (r <= 0 || (pfd.revents & POLLIN) == 0)
+            return false;
+    }
+
     do {
         n = read(report_fd, &rep, sizeof rep);
     } while (n < 0 && errno == EINTR);
 
     if (n != (ssize_t)sizeof rep || rep.magic != CRASH_REPORT_MAGIC)
         return false;
+
+    /* The record crossed a trust boundary: it was written by the app's own
+     * signal handler, and an untrusted app can write whatever it likes into
+     * the pipe instead. `entry` is the last member of the struct, so a
+     * 64-byte field with no NUL is a %s that reads off the end of this
+     * stack frame and into the core's memory -- which then goes on the
+     * screen and into the log. One byte closes it. */
+    rep.entry[sizeof rep.entry - 1u] = '\0';
 
     out->from_signal = true;
     out->signo = rep.signo;

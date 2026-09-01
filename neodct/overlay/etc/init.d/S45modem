@@ -63,6 +63,45 @@ PIDFILE=/tmp/modem-boot.pid
 # so a cache under /etc would silently never persist and every boot would
 # re-scan the APN list.
 CACHE=/NeoDCT/User/.modem.cache   # written on success: CACHED_APN/_PDP/_RAW
+
+# ============ AND WHY THIS IS PARSED RATHER THAN SOURCED ============
+#
+# This was `[ -r "$CACHE" ] && . "$CACHE"`, which is a shell `source` of a
+# file on the WRITABLE user partition, performed by a script rcS runs as
+# ROOT, on every single boot, before the UI is up.
+#
+# /NeoDCT/User is 0751 ndusr:ndusr (S00userdata), so ndusr owns the directory
+# and may create and unlink files in it -- and ndusr is nd-core after the
+# drop, and every trusted app, all of which parse data an attacker chose.
+# Writing one file there therefore meant arbitrary shell as uid 0 on the next
+# boot, and every boot after it, surviving a system update: an .ndsw replaces
+# the rootfs and never touches /NeoDCT/User.
+#
+# That is the same vector as /NeoDCT/User/env.sh, which SECURITY-AUDIT.md
+# rates Critical and which run_neodct.sh consequently guards behind
+# /etc/neodct-devenv or neodct.devenv=1 on the kernel command line. This one
+# had no gate at all, and unlike env.sh it needed no developer mode and lit
+# no warning in the status bar.
+#
+# So: three known keys, read as data. The value charset is deliberately
+# narrower than the file format allows -- an APN is a hostname, a PDP type is
+# a word, raw_ip is a digit -- because the values are used UNQUOTED in the
+# `for` loops below, where a space or a glob would be a second bug behind the
+# first.
+read_cache() {
+    [ -r "$CACHE" ] || return 0
+    while IFS='=' read -r _k _v; do
+        case "$_v" in
+            ''|*[!A-Za-z0-9._-]*) continue ;;
+        esac
+        case "$_k" in
+            CACHED_APN) CACHED_APN="$_v" ;;
+            CACHED_PDP) CACHED_PDP="$_v" ;;
+            CACHED_RAW) CACHED_RAW="$_v" ;;
+        esac
+    done < "$CACHE"
+    return 0
+}
 RESOLV=/etc/resolv.conf       # symlink into /run -- only ever append through it
 
 # Colours, shared with the Python side so a [MODEM] line is the same blue
@@ -593,7 +632,7 @@ worker() {
     CACHED_APN=""
     CACHED_PDP=""
     CACHED_RAW=""
-    [ -r "$CACHE" ] && . "$CACHE"
+    read_cache
     prep_wwan || fail "no wwan network interface found (qmi_wwan missing?)"
     stop_call 1   # clear any half-open call from a previous run
 

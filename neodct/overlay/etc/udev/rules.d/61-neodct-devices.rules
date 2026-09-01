@@ -127,3 +127,22 @@ KERNEL=="uinput", GROUP="ndusr", MODE="0660"
 # given away with a mode bit; see SECURITY-PLAN.md section 5 Phase 1 on
 # preferring an auditable helper to a capability on the whole core.
 KERNEL=="rtc[0-9]*", GROUP="ndusr", MODE="0660"
+
+# --- ALSA capture ---------------------------------------------------------
+#
+# The uinput lesson again, in the other direction, and it took an audit to
+# see it: ndusr_ut is in `audio` because that is how the browser and the
+# media player PLAY sound, and eudev's stock rule puts every /dev/snd node in
+# `audio` at 0660 -- capture devices included. So the same group membership
+# that lets a web page play a video lets it open the microphone.
+#
+# Playing and recording are no more the same privilege than receiving and
+# injecting keys were. The `c` suffix is ALSA's own: pcmC0D0p is playback,
+# pcmC0D0c is capture, and the only things on this phone that legitimately
+# record are the modem's voice bridge (nd_modem_audio.c) and MicTest -- the
+# core and a stock app, both ndusr.
+#
+# Playback nodes are deliberately left alone. Taking `audio` off ndusr_ut
+# entirely would be the blunter fix and it would silence the browser, which
+# is a feature nobody asked to remove.
+SUBSYSTEM=="sound", KERNEL=="pcmC[0-9]*D[0-9]*c", GROUP="ndusr", MODE="0660"

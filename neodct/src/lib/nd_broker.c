@@ -22,6 +22,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,6 +46,7 @@ typedef enum { REQ_SPAWN = 1, REQ_WAIT = 2, REQ_HALT = 3, REQ_CLOCK = 4 } nd_bro
 
 typedef struct {
     uint32_t op;
+    uint32_t seq; /* echoed in the reply; see round_trip() */
     /* SPAWN */
     char path[ND_PATH_MAX];
     char user[32]; /* "" means do not drop */
@@ -69,6 +71,7 @@ typedef struct {
 } nd_broker_req;
 
 typedef struct {
+    uint32_t seq; /* the request this answers */
     int32_t err; /* nd_err */
     int64_t pid;
     uint8_t exited;
@@ -77,10 +80,30 @@ typedef struct {
     int32_t signo;
 } nd_broker_rep;
 
+/* ============ ONE SOCKET, THREE THREADS ============
+ *
+ * The core reaches the broker from at least three places, and they are not
+ * the same thread:
+ *
+ *   the UI thread          launching an app and waiting for it
+ *   the nd_svc serve thread  a Power app asking to halt
+ *   the NTP thread         setting the clock
+ *
+ * round_trip() send()s and then recv()s with nothing in between. Two threads
+ * interleaving there do not corrupt a message -- SOCK_SEQPACKET keeps the
+ * boundaries -- they collect EACH OTHER'S replies: the clock thread returns
+ * the spawn's pid, and the launch returns "the clock was set". Both then
+ * carry on believing something untrue about a root process's state.
+ *
+ * The mutex is the fix. `seq` is the check that the fix is working: a reply
+ * whose sequence is not the one just sent means the socket is desynchronised,
+ * which is worth failing loudly for rather than acting on. */
 struct nd_broker {
     int fd;    /* our end; the broker holds the other */
     pid_t pid; /* the broker process */
     bool ok;
+    uint32_t seq;
+    pthread_mutex_t lock;
 };
 
 /* ------------------------------------------------------------------ *
@@ -277,7 +300,33 @@ static bool user_is_allowed(const char *user)
  * ../../tmp/x" and a realpath here would be a second answer to a question the
  * mount table already answers. The paths that may run as root are three
  * literals, and a literal cannot be traversed into. */
-static bool root_exec_allowed(const char *path, const char *const *argv, uint32_t n_argv)
+/* Every way a request can end in a child that is STILL ROOT, in one place.
+ *
+ * There turned out to be three, and they were found one at a time, each after
+ * the previous one had been closed and tested:
+ *
+ *   user == "root"     refused by user_is_allowed() -- the first version.
+ *   user == "" / NULL  "do not drop", which is the same thing said without
+ *                      saying it. Closed by ND_BROKER_ROOT_EXEC.
+ *   user names someone the image does not have. nd_priv_lookup() fails,
+ *                      spec.run_as stays zeroed, and nd_priv_become() on a
+ *                      zeroed id is a documented no-op. The child never
+ *                      drops -- and this route never reaches the root-exec
+ *                      list at all, because that gate is keyed on the name
+ *                      being empty.
+ *
+ * A predicate rather than three ifs scattered through do_spawn, because the
+ * lesson of the first two is that this question gets answered in one place and
+ * asked in another. It is pure, so a test can enumerate it instead of hoping
+ * the host happens to be missing a user. */
+bool nd_broker__spawn_stays_root(const char *user, bool resolved)
+{
+    if (user == NULL || user[0] == '\0')
+        return true;
+    return !resolved;
+}
+
+bool nd_broker__root_exec_allowed(const char *path, const char *const *argv, uint32_t n_argv)
 {
     static const char *const allowed[] = ND_BROKER_ROOT_EXEC;
     size_t i;
@@ -308,7 +357,70 @@ static bool root_exec_allowed(const char *path, const char *const *argv, uint32_
         if (strstr(argv[1], "/../") != NULL || strstr(argv[1], "/..") == argv[1])
             return false;
     }
+
+    /* The sdcard helper had NO argv condition, which made the whole of it
+     * reachable: `add`, `remove`, `scan`, `format`, against any device, at any
+     * mountpoint. The core asks for exactly one thing (nd_svc_format_card),
+     * so that is the only thing this permits.
+     *
+     * The device is checked for SHAPE, not for identity -- which card is the
+     * right one to format is the helper's own question, and it has the
+     * /proc and /sys it needs to answer it. All this refuses is a "device"
+     * that is a path somewhere else entirely. */
+    if (strcmp(path, ND_PATH_SDCARD_HELPER) == 0) {
+        static const char DEV[] = "/dev/";
+
+        if (n_argv != 3u || argv == NULL || argv[1] == NULL || argv[2] == NULL)
+            return false;
+        if (strcmp(argv[1], "format") != 0)
+            return false;
+        if (strncmp(argv[2], DEV, sizeof DEV - 1u) != 0)
+            return false;
+        if (strstr(argv[2], "/..") != NULL || strchr(argv[2] + sizeof DEV - 1u, '/') != NULL)
+            return false;
+    }
     return true;
+}
+
+/* The environment for a spawn that will NOT drop, built here rather than
+ * taken from the request. nd_broker.h carries the three attacks this closes;
+ * the short version is that both allowed executables are steered by their
+ * environment, so pinning the path without pinning the environment pins
+ * nothing.
+ *
+ * `out` is NUL-terminated in place and must hold at least two entries. */
+void nd_broker__root_env_filter(const char *const *in, uint32_t n_in, const char **out,
+                                size_t out_max)
+{
+    static const char *const keep[] = ND_BROKER_ROOT_ENV_KEEP;
+    uint32_t n_out = 0u;
+    uint32_t i;
+
+    if (out_max < 2u)
+        return;
+
+    /* First, and always: the helper is a shell script full of bare names and
+     * it sets no PATH of its own. One that the caller did not choose is the
+     * whole point. */
+    out[n_out++] = ND_BROKER_ROOT_PATH;
+
+    for (i = 0u; i < n_in && (size_t)n_out < out_max - 1u; i++) {
+        size_t k;
+
+        if (in == NULL || in[i] == NULL)
+            continue;
+        for (k = 0u; keep[k] != NULL; k++) {
+            size_t len = strlen(keep[k]);
+
+            /* NAME= and nothing else: "NEODCT_FB_FD_EVIL=" must not pass for
+             * NEODCT_FB_FD, and neither must a bare "NEODCT_FB_FD". */
+            if (strncmp(in[i], keep[k], len) == 0 && in[i][len] == '=') {
+                out[n_out++] = in[i];
+                break;
+            }
+        }
+    }
+    out[n_out] = NULL;
 }
 
 /* `fds` is MUTATED: the descriptors are moved above the targets below, and
@@ -317,6 +429,7 @@ static void do_spawn(const nd_broker_req *req, int *fds, size_t n_fds, nd_broker
 {
     const char *argv[8];
     const char *envp[24];
+    const char *root_envp[8];
     const char *hide[ND_PROC_MAX_HIDE + 1];
     nd_proc_spec spec;
     uint32_t off = 0u;
@@ -329,6 +442,22 @@ static void do_spawn(const nd_broker_req *req, int *fds, size_t n_fds, nd_broker
         req->n_fds > (size_t)ND_PROC_MAX_FDS || req->n_hide > (uint32_t)ND_PROC_MAX_HIDE) {
         rep->err = ND_ERR_INVAL;
         return;
+    }
+
+    /* The descriptor NUMBERS are wire data too, and they were the one field
+     * taken on trust. They are used twice, and both uses want a bound: the
+     * relocation below computes `highest + 1` (which overflows on INT32_MAX,
+     * and the sum is what F_DUPFD is then asked for), and nd_proc_spawn
+     * dup2()s onto them (which for a negative or absurd number is an error
+     * the child dies on rather than a slot). A child descriptor above
+     * ND_BROKER_CHILD_FD_MAX is not a launch anyone is attempting. */
+    for (i = 0u; i < n_fds; i++) {
+        if (req->child_fd[i] < 0 || req->child_fd[i] > ND_BROKER_CHILD_FD_MAX) {
+            nd_log_err(ND_LOG_OS, "broker: REFUSING a spawn asking for child fd %ld",
+                       (long)req->child_fd[i]);
+            rep->err = ND_ERR_INVAL;
+            return;
+        }
     }
     if (!user_is_allowed(req->user)) {
         /* The one policy decision here, and it is a refusal. */
@@ -348,7 +477,7 @@ static void do_spawn(const nd_broker_req *req, int *fds, size_t n_fds, nd_broker
      * A no-drop spawn is the only way anything stays root on the far side of
      * this socket, so it is the one request that has to be argued for rather
      * than merely well-formed. */
-    if (req->user[0] == '\0' && !root_exec_allowed(req->path, argv, req->n_argv)) {
+    if (req->user[0] == '\0' && !nd_broker__root_exec_allowed(req->path, argv, req->n_argv)) {
         nd_log_err(ND_LOG_OS, "broker: REFUSING to run '%s' as root: not on the list", req->path);
         rep->err = ND_ERR_PERM;
         return;
@@ -356,6 +485,11 @@ static void do_spawn(const nd_broker_req *req, int *fds, size_t n_fds, nd_broker
 
     spec.argv = argv;
     spec.envp = (req->n_envp > 0u) ? envp : NULL;
+    if (req->user[0] == '\0') {
+        /* Not the caller's environment. See root_env_filter(). */
+        nd_broker__root_env_filter(envp, req->n_envp, root_envp, ND_ARRAY_LEN(root_envp));
+        spec.envp = root_envp;
+    }
     spec.owner = (nd_proc_owner)req->owner;
     spec.no_new_privs = req->no_new_privs != 0u;
     spec.new_session = req->new_session != 0u;
@@ -366,8 +500,33 @@ static void do_spawn(const nd_broker_req *req, int *fds, size_t n_fds, nd_broker
     /* The uid is looked up HERE, from a name checked against a fixed list,
      * rather than taken off the wire. */
     if (req->user[0] != '\0') {
-        if (!nd_priv_lookup(req->user, &spec.run_as))
-            nd_log_err(ND_LOG_OS, "broker: no '%s' in this image", req->user);
+        /* ============ AND THE THIRD SPELLING OF "STAY ROOT" ============
+         *
+         * This LOGGED and carried on. A zeroed nd_priv_id is a documented
+         * no-op in nd_priv_become(), so a name that does not resolve reached
+         * exactly where no name at all reaches -- a child that never drops --
+         * except that this route never passes root_exec_allowed(), because
+         * that gate is keyed on the name being EMPTY. So "spawn /bin/sh as
+         * ndusr_ut" was a root shell on any image whose users table did not
+         * make it in, which is a state this tree has shipped in before
+         * (nd_proc.c says so at length, and it is how netsurf once ran as
+         * root).
+         *
+         * Refusing is right even though it means no apps at all on such an
+         * image: that is the same trade nd_proc_launch_app already makes for
+         * the untrusted set, and for the same reason. Not opening is a bad
+         * outcome; opening as root is a worse one, and unlike the first it is
+         * invisible. */
+        if (nd_broker__spawn_stays_root(req->user, nd_priv_lookup(req->user, &spec.run_as))) {
+            nd_log_err(ND_LOG_OS,
+                       "broker: REFUSING to spawn '%s': no '%s' in this image, and a user "
+                       "that cannot be resolved must not become a child that never drops. "
+                       "Rebuild with the users table: cd buildroot && make "
+                       "neodct_qemu_defconfig && make.",
+                       req->path, req->user);
+            rep->err = ND_ERR_PERM;
+            return;
+        }
     }
 
     /* ============ MOVE EVERY SOURCE ABOVE EVERY TARGET ============
@@ -478,8 +637,13 @@ static void broker_loop(int fd)
             break; /* EOF: nd-core is gone, and so is the reason to exist */
 
         memset(&rep, 0, sizeof rep);
+        /* Echoed before anything can go wrong, so that even a refusal
+         * answers the request it refused. A reply that carries the wrong
+         * number is the core's signal that the channel has lost its place. */
+        rep.seq = req.seq;
         if ((size_t)n != sizeof req) {
             rep.err = ND_ERR_PARSE;
+            rep.seq = 0u; /* a short read did not necessarily carry a seq */
             close_all(fds, n_fds);
         } else if (req.op == REQ_SPAWN) {
             do_spawn(&req, fds, n_fds, &rep);
@@ -523,8 +687,28 @@ nd_broker *nd_broker_start(void)
         return NULL;
     b->fd = -1;
     b->pid = -1;
+    b->seq = 0u;
+    if (pthread_mutex_init(&b->lock, NULL) != 0) {
+        nd_log_err(ND_LOG_OS, "broker: mutex: %s", strerror(errno));
+        free(b);
+        return NULL;
+    }
 
-    if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) != 0) {
+    /* SOCK_CLOEXEC, and it is not decoration.
+     *
+     * Both ends outlive an execve without it. sv[1] is the BROKER's end, and
+     * the broker's children are every app on the phone -- so an app in the
+     * user apps directory, running as ndusr_ut with deliberately no service
+     * socket, would find the root control channel sitting in its descriptor
+     * table. From there it can recvmsg() the SPAWN records the core sends,
+     * SCM_RIGHTS payload included, which for a trusted app's launch contains
+     * the nd_svc socket it was never meant to have. sv[0] leaks the other way,
+     * into everything the core forks directly -- aplay, sshd, the halt binary.
+     *
+     * nd_svc's identical socketpair two files over has always passed
+     * SOCK_CLOEXEC. This one did not, and neither end is ever inherited on
+     * purpose: the broker keeps sv[1] across a fork, not an exec. */
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv) != 0) {
         nd_log_err(ND_LOG_OS, "broker: socketpair: %s", strerror(errno));
         free(b);
         return NULL;
@@ -560,22 +744,46 @@ bool nd_broker_ok(const nd_broker *b)
 static nd_err round_trip(nd_broker *b, const nd_broker_req *req, const int *fds, size_t n_fds,
                          nd_broker_rep *rep)
 {
+    nd_broker_req sent;
     ssize_t n;
+    nd_err rc = ND_OK;
 
     if (!nd_broker_ok(b))
         return ND_ERR_IO;
-    if (!send_msg(b->fd, req, sizeof *req, fds, n_fds)) {
+
+    (void)pthread_mutex_lock(&b->lock);
+
+    /* Stamped under the lock so the number and the send cannot be separated. */
+    sent = *req;
+    sent.seq = ++b->seq;
+
+    if (!send_msg(b->fd, &sent, sizeof sent, fds, n_fds)) {
         nd_log_err(ND_LOG_OS, "broker: send: %s", strerror(errno));
         b->ok = false;
-        return ND_ERR_IO;
+        rc = ND_ERR_IO;
+        goto out;
     }
     n = recv_msg(b->fd, rep, sizeof *rep, NULL, NULL);
     if (n != (ssize_t)sizeof *rep) {
         nd_log_err(ND_LOG_OS, "broker: no answer (%s)", n == 0 ? "it exited" : strerror(errno));
         b->ok = false;
-        return ND_ERR_IO;
+        rc = ND_ERR_IO;
+        goto out;
     }
-    return ND_OK;
+    if (rep->seq != sent.seq) {
+        /* Not a race any more -- the lock removed that one -- so this is the
+         * socket having lost its place, and the next reply would be wrong
+         * too. Refusing to use the broker again is the safe end of that. */
+        nd_log_err(ND_LOG_OS, "broker: reply %u does not answer request %u; channel abandoned",
+                   (unsigned)rep->seq, (unsigned)sent.seq);
+        b->ok = false;
+        rc = ND_ERR_IO;
+        goto out;
+    }
+
+out:
+    (void)pthread_mutex_unlock(&b->lock);
+    return rc;
 }
 
 nd_err nd_broker_spawn(nd_broker *b, const char *path, const nd_proc_spec *spec, const char *user,
@@ -714,5 +922,6 @@ void nd_broker_stop(nd_broker *b)
 
         (void)nd_proc_wait(b->pid, 2.0, &st);
     }
+    (void)pthread_mutex_destroy(&b->lock);
     free(b);
 }

@@ -735,6 +735,39 @@ static bool manifest_id(const nd_json_val *o, int32_t *out)
     return false;
 }
 
+/* An icon is a file UNDER the app's own directory. A subdirectory is fine --
+ * "art/big.png" is a manifest the tree already contains -- so the rule is
+ * about escaping, not about shape:
+ *
+ *   absolute      "/etc/shadow" ignores appdir entirely
+ *   a ".." step   "../../../../etc/shadow" climbs out of it
+ *
+ * Rejecting rather than sanitising. A sanitiser has to be right about "..",
+ * "//", trailing dots and symlinks; a refusal only has to be right about
+ * what it refuses, and the caller falls back to the default name, so a
+ * hostile manifest gets exactly the treatment a missing one gets.
+ *
+ * Symlinks inside the app directory are NOT covered here and do not need to
+ * be: following one is the decoder opening a path the app owns, which it
+ * could have filled with the same bytes directly. */
+static bool icon_path_is_contained(const char *icon)
+{
+    const char *p;
+
+    if (icon == NULL || icon[0] == '\0' || icon[0] == '/')
+        return false;
+
+    for (p = icon; p != NULL; p = strchr(p, '/')) {
+        if (*p == '/')
+            p++;
+        if (p[0] == '.' && p[1] == '.' && (p[2] == '/' || p[2] == '\0'))
+            return false;
+        if (strchr(p, '/') == NULL)
+            break;
+    }
+    return true;
+}
+
 size_t nd_ui_scan_apps(const char *dir, nd_app_entry *out, size_t max)
 {
     char resolved[ND_PATH_MAX];
@@ -789,7 +822,18 @@ size_t nd_ui_scan_apps(const char *dir, nd_app_entry *out, size_t max)
         e = &out[written];
         memset(e, 0, sizeof *e);
         (void)nd_strlcpy(e->name, nd_json_get_str(root, "name", de->d_name), sizeof e->name);
+        /* The manifest is the APP's file, and under the user apps directory
+         * that means it is an attacker's file. "icon" was joined to appdir
+         * with no containment at all, so "../../../../etc/shadow" or an
+         * absolute path made the core's PNG and JPEG decoders read whatever
+         * the manifest named -- as ndusr, in the core, on the menu draw, with
+         * no app even launched. Failing to decode is the good case; the
+         * decoders are the interesting case.
+         *
+         * A name, not a path. That is all an icon ever was. */
         icon = nd_json_get_str(root, "icon", "icon.png");
+        if (!icon_path_is_contained(icon))
+            icon = "icon.png";
         (void)nd_snprintf(e->icon, sizeof e->icon, "%s/%s", appdir, icon);
         (void)nd_strlcpy(e->path, appdir, sizeof e->path);
         (void)nd_strlcpy(e->exec, nd_json_get_str(root, "exec", "main.py"), sizeof e->exec);
