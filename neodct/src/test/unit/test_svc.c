@@ -1573,6 +1573,27 @@ static void test_a_format_over_the_wire(core_fixture *fx)
     CHECK(!nd_svc_format_card());
     CHECK_INT(format_fake_calls(&fake), 2);
 
+    /* ============ AND THE CARD THIS IS MOSTLY FOR ============
+     *
+     * `legacy` is a NeoDCT card in the pre-0.5.0b FAT format: it mounts, the
+     * owner's music plays, and it cannot hold an installed app because FAT
+     * records no ownership. It is therefore the card an owner is most likely
+     * to be sitting in front of when they choose Format.
+     *
+     * It is a state of its own in nd_storage.h, which is the shape that could
+     * go wrong here: a new state that the format path had not been taught
+     * about would blank the device or refuse, and the one card the UI offers
+     * to reformat would be the one it cannot. So the whole trip is made
+     * again, and the device the helper is pointed at is checked. */
+    write_card_state("legacy", "/dev/mmcblk1p1", "vfat");
+    (void)pthread_mutex_lock(&fake.mu);
+    fake.result = 0;
+    (void)pthread_mutex_unlock(&fake.mu);
+    CHECK(nd_svc_format_card());
+    CHECK_INT(format_fake_calls(&fake), 3);
+    format_fake_device(&fake, device, sizeof device);
+    CHECK_STR(device, "/dev/mmcblk1p1");
+
     /* Every one of those refusals is a failed operation, not a protocol
      * error: the channel is still good. */
     CHECK(nd_svc_modem_present(&app));
