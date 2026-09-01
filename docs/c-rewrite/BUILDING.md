@@ -259,6 +259,50 @@ the CPU** (`BR2_cortex_a53`, `BR2_TOOLCHAIN_BUILDROOT_MUSL`, the FPU flags),
 buildroot cannot rebuild incrementally across it — that is a full tree rebuild,
 hours. If you only want the code changes, don't re-run the defconfig.
 
+### And the second half of that trap, which bites after you escape the first
+
+Regenerating `.config` is not enough when a **new package selects an option on
+a package you have already built**. Buildroot decides what to build from build
+stamps, not from what `.config` now says, so a package that is already stamped
+installed is simply left alone — with the option still off.
+
+0.5.0b is exactly this case and it is worth walking through, because the error
+message names the wrong thing:
+
+    BR2_PACKAGE_E2FSPROGS=y          (new — the card is ext4 now)
+      selects BR2_PACKAGE_UTIL_LINUX_LIBUUID
+        but util-linux was configured months ago with --disable-libuuid,
+        and is stamped installed, so it is not reconfigured
+          e2fsprogs: configure: error: external uuid library not found
+
+`.config` is right, the defconfig is right, and the build still fails. The fix
+is to make buildroot forget the stale package, once:
+
+```sh
+make util-linux-dirclean util-linux-libs-dirclean
+make neodct_qemu_defconfig
+make
+```
+
+The general rule: **after a pull that adds a package, if a build fails looking
+for a library, `dirclean` the package that provides it rather than the one that
+complained.** `make clean` also works and costs hours.
+
+And then a second-order version of the same thing, which is what actually
+happened next: a package that failed *during* configure leaves a half-prepared
+build directory behind, and buildroot's next attempt re-applies patches that
+are already applied —
+
+    >>> e2fsprogs 1.47.3 Patching libtool
+    8 out of 8 hunks ignored -- saving rejects to .../ltmain.sh.rej
+    make: *** [.stamp_configured] Error 1
+
+— which reads like a broken patch and is really just a dirty directory.
+`make e2fsprogs-dirclean` and build again. **A package that has failed once
+should be dircleaned before retrying**, whatever the original cause; retrying
+on top of the wreckage produces a second, unrelated error that sends you
+looking in the wrong place.
+
 ---
 
 ## 3. What changed in 0.4.0
