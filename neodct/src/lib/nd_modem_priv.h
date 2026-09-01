@@ -190,6 +190,13 @@ struct nd_modem {
     int32_t csq;      /* -1 is Python's None, 99 is the modem's "unknown" */
     int32_t reg_stat; /* -1 is Python's None                              */
 
+    /* The diagnostic rotation's three answers, straight onto the snapshot.
+     * See nd_modem.h for why they exist and what empty means. */
+    char sim_state[40];
+    char reg_cause[64];
+    char cell_mode[24];
+    int32_t rsrp_dbm10;
+
     nd_mev ev[ND_MODEM_EVENT_QUEUE_MAX];
     size_t ev_head;
     size_t ev_count;
@@ -217,6 +224,10 @@ struct nd_modem {
     double next_csq;
     double next_net;
     double next_cops;
+    double next_diag;
+    /* Which of the three diagnostic commands the next free tick sends. One
+     * per tick, not three in a row: see ND_POLL_DIAG_S. */
+    size_t diag_step;
     double next_probe;
     /* The last reason the probe gave, so a failure that repeats every
      * PROBE_RETRY_S is printed ONCE and not forever. Cleared on success, so a
@@ -310,6 +321,13 @@ void nd_modem__handle_urc(nd_modem *m, const char *line);
 void nd_modem__parse_reg(nd_modem *m, const char *line);
 void nd_modem__parse_csq(nd_modem *m, const nd_lines *lines);
 void nd_modem__parse_cops(nd_modem *m, const nd_lines *lines);
+void nd_modem__parse_cpin(nd_modem *m, const nd_lines *lines);
+void nd_modem__parse_ceer(nd_modem *m, const nd_lines *lines);
+void nd_modem__parse_cpsi(nd_modem *m, const nd_lines *lines);
+/* true for +CEREG <stat> 1 (home) and 5 (roaming) -- the two values that mean
+ * the network has accepted this phone. Everything else, -1 included, is not
+ * registered and is what turns the diagnostic rows on. */
+bool nd_modem__reg_is_home(int32_t stat);
 void nd_modem__poll_clcc(nd_modem *m);
 int32_t nd_modem__bars(int32_t csq);
 void nd_modem__queue(nd_modem *m, const nd_mev *e);

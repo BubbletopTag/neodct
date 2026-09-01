@@ -17,8 +17,8 @@
  * nodes exist, what the boot script logged) from inside the environment is
  * the whole point -- serial consoling the real hardware is annoying." That is
  * also what golden/eng-modem.png is a picture of: a phone with no modem,
- * showing OPER/REG/CSQ as "--", the PORTS row that only appears when there is
- * no hardware, and SIMULATION along the bottom.
+ * showing OPER/REG/CSQ as "--", the PORTS and WHY rows that only appear when
+ * there is no hardware, and SIMULATION along the bottom.
  *
  * ============ WHICH READOUT EACH ROW COMES FROM ============
  *
@@ -89,6 +89,28 @@ static void row_set(nd_modemapp_row *r, const char *label, const char *value)
     (void)nd_strlcpy(r->value, value, sizeof r->value);
 }
 
+const char *nd_modemapp_rsrp_text(int32_t dbm10, char *buf, size_t buf_sz)
+{
+    int32_t whole;
+    int32_t tenth;
+
+    if (buf == NULL || buf_sz == 0u)
+        return "";
+    buf[0] = '\0';
+    if (dbm10 == ND_MODEM_RSRP_UNKNOWN)
+        return buf;
+    /* RSRP is negative, so the sign belongs to the number as a whole and not
+     * to each half of it: -1134 / 10 is -113 and -1134 % 10 is -4, and
+     * printing both with their own signs gives "-113.-4". Take the tenths off
+     * the magnitude. */
+    whole = dbm10 / 10;
+    tenth = dbm10 % 10;
+    if (tenth < 0)
+        tenth = -tenth;
+    (void)nd_snprintf(buf, buf_sz, "%d.%d dBm", whole, tenth);
+    return buf;
+}
+
 const char *nd_modemapp_state_name(nd_call_state st)
 {
     switch (st) {
@@ -104,14 +126,49 @@ const char *nd_modemapp_state_name(nd_call_state st)
     }
 }
 
+/* ============ SIX ROWS, AND WHY IT IS EXACTLY SIX ============
+ *
+ * nd_modemapp_line_h() floors the pitch at 15 px and font_s is 14 px, so the
+ * floor is not a style choice -- it is the smallest pitch the type fits in.
+ * The content area is 36 px down to the port line at bottom-14, which on the
+ * 240x175 panel is 95 px: six rows at 15 and no seventh, ever. A page that
+ * builds seven draws the last one across the port line.
+ *
+ * That is why the WHY row has never appeared on a phone. It is built last,
+ * after five fixed rows and PORTS, and _radio_rows() returns at `n >= max`
+ * before reaching it -- so the probe's reason, which is carried across the
+ * service wire for the sole purpose of being drawn here, could not be. The
+ * fix is not a bigger cap, because there is nowhere to put a seventh row. It
+ * is to stop spending one of the six on a row that cannot say anything:
+ *
+ *   CALL is dropped when there is no modem. _drop_hardware() forces the state
+ *        to IDLE and nothing can change it back, so the row is the constant
+ *        "IDLE" and WHY takes its place.
+ *   BARS is dropped when there IS a modem and it is not registered.
+ *        nd_modem_signal_level() returns a hard 0 for every known stat that
+ *        is not 1 or 5, so the row is the constant "0/4" and the SIM and
+ *        CAUSE rows take its place.
+ *
+ * Neither drop touches a phone that is working: on hardware that is
+ * registered all five original rows are drawn, unchanged, and there is no
+ * sixth.
+ */
 size_t nd_modemapp_radio_rows(const nd_modem_status *st, int32_t bars, nd_modemapp_row *out,
                               size_t max)
 {
     char buf[ND_MODEMAPP_VALUE_MAX];
+    /* The three prose rows -- SIM, CAUSE, WHY -- all go through
+     * nd_modemapp_shorten(), which needs somewhere to put the result. */
+    char shortened[ND_MODEMAPP_VALUE_MAX];
+    bool no_service;
     size_t n = 0u;
 
     if (st == NULL || out == NULL || max == 0u)
         return 0u;
+
+    /* A modem that is there and not on the network -- the case this page is
+     * opened for, and the only one that has anything else to say. */
+    no_service = st->hardware && !st->registered;
 
     row_set(&out[n++], "OPER", st->operator_name[0] != '\0' ? st->operator_name : "--");
     if (n >= max)
@@ -135,33 +192,56 @@ size_t nd_modemapp_radio_rows(const nd_modem_status *st, int32_t bars, nd_modema
         return n;
 
     /* csq None -> "--", 99 -> "99 (no signal)", else the raw value and the
-     * dBm it maps to. -113 + 2 * rssi is the 3GPP 27.007 table. */
+     * dBm it maps to. -113 + 2 * rssi is the 3GPP 27.007 table.
+     *
+     * 99 is the modem saying it has no RSSI to report, and on LTE many
+     * SIM7600 builds say it permanently -- +CSQ is a GSM-era measurement and
+     * the firmware often declines to map one from E-UTRAN at all. So "99 (no
+     * signal)" is frequently a lie in the one direction that matters: it
+     * reads as "you are out of range" on a phone sitting under a tower. When
+     * +CPSI? has a serving cell, IT is the reading, and it goes here rather
+     * than in a row of its own because it answers the question this row is
+     * already asking. */
     if (st->csq_rssi < 0)
         (void)nd_strlcpy(buf, "--", sizeof buf);
-    else if (st->csq_rssi == 99)
-        (void)nd_strlcpy(buf, "99 (no signal)", sizeof buf);
-    else
+    else if (st->csq_rssi == 99) {
+        char rsrp[32];
+
+        (void)nd_modemapp_rsrp_text(st->rsrp_dbm10, rsrp, sizeof rsrp);
+        if (st->cell_mode[0] != '\0' && rsrp[0] != '\0')
+            (void)nd_snprintf(buf, sizeof buf, "99  %s %s", st->cell_mode, rsrp);
+        else if (st->cell_mode[0] != '\0')
+            /* "+CPSI: NO SERVICE" is itself the reading: nothing was heard,
+             * so there was nothing to measure. */
+            (void)nd_snprintf(buf, sizeof buf, "99  %s", st->cell_mode);
+        else
+            (void)nd_strlcpy(buf, "99 (no signal)", sizeof buf);
+    } else
         (void)nd_snprintf(buf, sizeof buf, "%d/31  %d dBm", st->csq_rssi, -113 + 2 * st->csq_rssi);
     row_set(&out[n++], "CSQ", buf);
     if (n >= max)
         return n;
 
-    if (bars < 0)
-        (void)nd_strlcpy(buf, "--", sizeof buf);
-    else
-        (void)nd_snprintf(buf, sizeof buf, "%d/4", bars);
-    row_set(&out[n++], "BARS", buf);
-    if (n >= max)
-        return n;
+    if (!no_service) {
+        if (bars < 0)
+            (void)nd_strlcpy(buf, "--", sizeof buf);
+        else
+            (void)nd_snprintf(buf, sizeof buf, "%d/4", bars);
+        row_set(&out[n++], "BARS", buf);
+        if (n >= max)
+            return n;
+    }
 
-    row_set(&out[n++], "CALL", nd_modemapp_state_name(st->state));
-    if (n >= max)
-        return n;
+    if (st->hardware) {
+        row_set(&out[n++], "CALL", nd_modemapp_state_name(st->state));
+        if (n >= max)
+            return n;
+    }
 
-    /* The PORTS row exists ONLY without hardware: with a modem attached the
-     * port is already on the bottom line, and with none the question is which
-     * nodes the kernel did enumerate. */
     if (!st->hardware) {
+        /* PORTS exists ONLY without hardware: with a modem attached the port
+         * is already on the bottom line, and with none the question is which
+         * nodes the kernel did enumerate. */
         char ttys[ND_MODEMAPP_VALUE_MAX];
 
         if (nd_modemapp_ttyusb_list(ttys, sizeof ttys) == 0u)
@@ -175,8 +255,47 @@ size_t nd_modemapp_radio_rows(const nd_modem_status *st, int32_t bars, nd_modema
          * has no serial console attached -- so the probe's own reason comes
          * across the wire and is drawn here rather than only being printed
          * where nobody can see it. */
-        if (st->probe_why[0] != '\0')
-            row_set(&out[n++], "WHY", st->probe_why);
+        if (st->probe_why[0] != '\0') {
+            /* Elided in the MIDDLE, like every other long value on this app's
+             * pages, because a probe reason carries its news at whichever end
+             * the caller looked at: "no candidate AT ports (no ttyUSB* in
+             * ...)" is the head, "/dev/ttyUSB2: Permission denied" is the
+             * errno on the tail. Clipping at the screen edge -- which is what
+             * happens to a value nothing shortens -- keeps the head and
+             * throws away exactly the half that names the fault. */
+            row_set(&out[n++], "WHY",
+                    nd_modemapp_shorten(st->probe_why, ND_MODEMAPP_REASON_LIMIT, shortened,
+                                        sizeof shortened));
+            if (n >= max)
+                return n;
+        }
+    } else if (no_service) {
+        /* The two rows that turn "REG DENIED" and "CSQ 99" into something a
+         * person can act on. A SIM that is not seated, a SIM that wants its
+         * PIN, a network that refused the attach and a basement all look
+         * identical in the four rows above, and they are four different
+         * problems with four different fixes. The modem knows which; +CPIN?
+         * and +CEER are it saying so, and the core polls both because an app
+         * process cannot ask (raw AT is deliberately not on the service
+         * wire). Each row is skipped while its answer is still unknown, so a
+         * half-filled snapshot draws half of them and never a blank one. */
+        if (st->sim_state[0] != '\0') {
+            row_set(&out[n++], "SIM",
+                    nd_modemapp_shorten(st->sim_state, ND_MODEMAPP_REASON_LIMIT, shortened,
+                                        sizeof shortened));
+            if (n >= max)
+                return n;
+        }
+        /* The network's own reason, and the only thing on this page that can
+         * tell a refused registration (CEREG 3 -- the plan, the APN, the SIM)
+         * apart from a hole in the coverage (CEREG 2 or 4). */
+        if (st->reg_cause[0] != '\0') {
+            row_set(&out[n++], "CAUSE",
+                    nd_modemapp_shorten(st->reg_cause, ND_MODEMAPP_REASON_LIMIT, shortened,
+                                        sizeof shortened));
+            if (n >= max)
+                return n;
+        }
     }
     return n;
 }
@@ -288,9 +407,16 @@ static size_t sim_rows_present(nd_modem *m, const nd_modem_status *st, nd_modema
     if (strcmp(final, "OK") == 0) {
         if (!nd_modemapp_first_content(view, n_view, "+CPIN:", sim, sizeof sim) || sim[0] == '\0')
             (void)nd_strlcpy(sim, "?", sizeof sim);
-    } else if (final[0] == '\0')
-        (void)nd_strlcpy(sim, "no reply", sizeof sim);
-    else
+    } else if (final[0] == '\0') {
+        /* "no reply" is what an app process ALWAYS got here: ui->modem is
+         * NULL out here and raw AT is deliberately not on the service wire,
+         * so this row -- the one that says whether the SIM is readable at all
+         * -- has never once been answered on a real phone. The core polls
+         * +CPIN? on its own timer now and the answer rides the snapshot, so
+         * prefer that and keep "no reply" for when it has not answered
+         * either. */
+        (void)nd_strlcpy(sim, st->sim_state[0] != '\0' ? st->sim_state : "no reply", sizeof sim);
+    } else
         (void)nd_strlcpy(sim, "NOT DETECTED", sizeof sim);
 
     /* "(not on SIM)" unless +CNUM gives a non-empty fourth quoted field. The

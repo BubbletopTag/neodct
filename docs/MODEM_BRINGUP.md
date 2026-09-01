@@ -56,10 +56,18 @@ alias at='/NeoDCT/System/engineering/tools/atcmd'
 at AT              # -> OK              (modem alive)
 at ATI             # -> SIM7600 model info
 at AT+CPIN?        # -> +CPIN: READY    (SIM detected/unlocked)
-at AT+CSQ          # -> +CSQ: 20,99     (rssi 0-31; 99,99 = no signal yet)
+at AT+CSQ          # -> +CSQ: 20,99     (rssi 0-31; the 99 here is BER)
 at AT+CEREG?       # -> +CEREG: 0,1     (…,1 home / …,5 roaming = registered)
 at AT+COPS?        # -> +COPS: 0,0,"T-Mobile",7
+at AT+CPSI?        # -> +CPSI: LTE,Online,…,-1134,…  (field 12 is RSRP x10)
+at AT+CEER         # -> why the last attach/PDN failed, when one did
 ```
+
+`+CSQ: 99,99` is the modem declining to give a reading, which is not the
+same as a bad one: on LTE many firmwares answer 99 permanently. `AT+CPSI?`
+is the measurement to trust — and if a phone is showing "no signal", ask
+`AT+CPIN?` and `AT+CEER` before the antenna, because a locked SIM and a
+refused registration look identical from the CSQ row.
 
 Then the data call (T-Mobile is IPv6-only with NAT64/DNS64). APN matters:
 our Tello SIM uses **`wholesale`**; a native T-Mobile SIM wants
@@ -123,6 +131,16 @@ the SIM, waits up to 90 s for LTE registration, then dials and brings up
   `uqmi --start-network --apn wholesale` on `/dev/cdc-wdm0` — the exact
   mechanism ModemManager used for the proven host connection, in case
   `$QCRMCALL` is the broken layer.
+* **Neither the SIM nor registration is fatal** — both used to `fail`, which
+  exits the worker. A SIM subsystem two seconds slower than the AT
+  interpreter (`+CME ERROR: 14`, SIM busy) or ninety seconds without a tower
+  therefore cost the phone its data connection for the whole session, and
+  none of the self-healing below ever ran. The SIM is now waited for
+  (`MODEM_SIM_WAIT_S`, 20 s), a locked SIM is reported rather than retried
+  forever, and a phone that is not registered falls into the redial loop —
+  which re-checks registration every round and every 120 s after that — with
+  `AT+CPIN?`, `AT+CEER`, `AT+CPSI?`, `AT+CSQ` and `AT+COPS?` in the log
+  saying why.
 * **Module reset once** — if a whole dial cycle fails, `AT+CFUN=1,1`
   reboots the module and everything is retried. Firmware state survives
   USB passthrough: a QMI/WDS session left by host-side ModemManager can
@@ -223,6 +241,20 @@ probe-or-simulate pattern as BatteryService):
   console. In Simulation Mode it lists which ttyUSB nodes exist instead
   of bailing out.
 
+  The RADIO page has room for six rows and spends the sixth on whatever
+  is actually wrong. On a phone that is **not registered** it drops BARS
+  (a hard 0 for every non-registered CEREG stat, so the row is a constant)
+  and shows **SIM** (`AT+CPIN?`) and **CAUSE** (`AT+CEER`) instead, and the
+  CSQ row shows `AT+CPSI?`'s serving cell in place of "99 (no signal)". On
+  a phone with **no modem** it drops CALL (a forced IDLE) and shows **WHY**
+  — the probe's own reason, which is carried across the service wire for
+  that purpose and, before this, never fitted on the page.
+
+  ModemService polls those three from the core, one per free tick every
+  10 s, because an app process cannot: raw AT is deliberately not on the
+  service wire, so the SIM page's own six transactions answer nothing on
+  real hardware. They ride the status snapshot instead.
+
 ## Stage 4 — proving the full stack (modem = the internet)
 
 `scripts/qemu_modem_data_test.py` is the one-command end-to-end proof.
@@ -258,9 +290,11 @@ modem — unplug eth0 (or boot the modem-only QEMU command) to be sure.
 |---------|---------------|
 | no `/dev/ttyUSB*` | `lsusb` shows `1e0e:9001`? If yes: kernel missing `option` driver (needs the 0.3.0a image). If no: passthrough/cable/power. |
 | interface isn't called `wwan0` | Normal — eudev predictable naming renames it (QEMU: `wwp0s5u3i5`). S45modem and the Modem app find it by the `qmi_wwan` driver, not the name; substitute your name in any manual command here. |
-| `+CSQ: 99,99` forever | No RF: antenna, or modem brownout-rebooted (cap bodge). |
+| `+CSQ: 99,99` forever | 99 is "no reading", which is not the same as "no signal" — many SIM7600 builds never map an RSSI from LTE at all and answer 99 for the entire time the phone is camped and working. Read `AT+CPSI?` before believing it (the Modem app's CSQ row now shows the serving cell in place of the 99). A 99 **with** `+CPSI: NO SERVICE` is the real thing: antenna, or a brownout reboot (cap bodge). |
 | `+CEREG: 0,2` stuck | Searching. Check antenna + `AT+CPIN?`; give it 1–2 min. |
-| `+CEREG: 0,3` | Registration denied — APN/SIM plan issue usually. |
+| `+CEREG: 0,3` | Registration **denied** — the network is refusing this SIM/IMEI, not failing to hear it. `AT+CEER` names the cause and each points somewhere different: #11 PLMN not allowed, #13 roaming not allowed here, #33 service option not subscribed (plan/APN), #5 IMEI not accepted. Usually an unactivated or wrong-carrier SIM. The Modem app's CAUSE row is this reading. |
+| `+CEREG: 0,4` | Unknown — the modem is not seeing a usable E-UTRAN cell. On its own it is coverage (or an antenna); if it later becomes a 3, the modem HAS found the network and been refused, so read the 0,3 row. |
+| RADIO page says `REG UNKNOWN` / `CSQ 99` and nothing else | Older image. Since the CPIN/CEER/CPSI rotation the page adds SIM and CAUSE rows whenever the phone is not registered, and the CSQ row carries `+CPSI?`'s serving cell — that is where the answer is. |
 | `$QCRMCALL` OK but no SLAAC address | S45modem now flips raw-ip framing by itself; if hand-testing: `ip link set wwan0 down; echo Y > /sys/class/net/wwan0/qmi/raw_ip; ip link set wwan0 up` and re-dial. |
 | `$QCRMCALL` → `NO CARRIER` instantly | Read the `cause:` (AT+CEER) lines in `/tmp/modem-boot.log`. "ESM sync up with network" = dialed too soon / second-PDN collision — the ride-the-attach-bearer path and settle delay handle it. "EMM detached" while CEREG=1 and `cgact:` shows active bearers = stale firmware state (usually host ModemManager's leftover QMI session) — the automatic `AT+CFUN=1,1` reset clears it. Cause #33 "service option not subscribed" = APN/plan. RF causes clear on retry — the worker keeps redialing every 2 min on its own. Check `cell:` (CPSI): field 12 is RSRP×10 (−1134 = −113.4 dBm; below ≈ −115 is cell-edge), field 11 RSRQ×10 (−185 = −18.5 dB, poor). |
 | `$QCRMCALL` broken no matter what | The QMI path is the escape hatch (it's what ModemManager uses): `uqmi -d /dev/cdc-wdm0 --start-network --apn wholesale --ip-family ipv6`, then watch for SLAAC. S45modem tries this automatically at the end of every round. |

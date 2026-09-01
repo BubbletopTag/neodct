@@ -678,6 +678,110 @@ static void test_csq_and_cops_parsers(void)
     nd_modem__destroy(m);
 }
 
+/* The three diagnostic replies: the ones that say WHY there is no signal
+ * rather than repeating that there is none. */
+static void test_diagnostic_parsers(void)
+{
+    nd_modem *m = make_modem();
+    nd_lines lines;
+
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+
+    /* +CPIN. */
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(&lines, "+CPIN: READY");
+    nd_modem__parse_cpin(m, &lines);
+    CHECK_STR(m->sim_state, "READY");
+
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(&lines, "+CPIN: SIM PIN");
+    nd_modem__parse_cpin(m, &lines);
+    CHECK_STR(m->sim_state, "SIM PIN");
+
+    /* Nothing usable leaves the last answer alone rather than blanking it. */
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(&lines, "+CPIN:");
+    nd_modem__lines_add(&lines, "not a CPIN line at all");
+    nd_modem__parse_cpin(m, &lines);
+    CHECK_STR(m->sim_state, "SIM PIN");
+
+    /* +CEER: the FIRST non-empty line, prefix stripped, and a bare line
+     * accepted because some firmwares answer without the prefix. */
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(&lines, "+CEER: PLMN not allowed");
+    nd_modem__lines_add(&lines, "+CEER: something later");
+    nd_modem__parse_ceer(m, &lines);
+    CHECK_STR(m->reg_cause, "PLMN not allowed");
+
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(&lines, "");
+    nd_modem__lines_add(&lines, "No cause information available");
+    nd_modem__parse_ceer(m, &lines);
+    CHECK_STR(m->reg_cause, "No cause information available");
+
+    /* Registration succeeding is what clears it: +CEER keeps reporting the
+     * last failure forever, and it stops being true the moment the phone is
+     * on the network. */
+    nd_modem__handle_urc(m, "+CEREG: 0,1");
+    CHECK_STR(m->reg_cause, "");
+    nd_modem__handle_urc(m, "+CEREG: 0,3");
+    CHECK_STR(m->reg_cause, ""); /* and a refusal does not invent one */
+
+    /* +CPSI: fourteen fields on LTE, RSRP eleventh from zero, in tenths. */
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(&lines, "+CPSI: LTE,Online,310-260,0x1A2B,12345678,257,EUTRAN-BAND2,"
+                                "900,3,3,-185,-1134,-856,17");
+    nd_modem__parse_cpsi(m, &lines);
+    CHECK_STR(m->cell_mode, "LTE");
+    CHECK_INT(m->rsrp_dbm10, -1134);
+
+    /* The two-field "nothing to report" form: the mode IS the reading, and
+     * the stale RSRP beside it has to go rather than describe a cell that is
+     * no longer there. */
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(&lines, "+CPSI: NO SERVICE,Online");
+    nd_modem__parse_cpsi(m, &lines);
+    CHECK_STR(m->cell_mode, "NO SERVICE");
+    CHECK_INT(m->rsrp_dbm10, ND_MODEM_RSRP_UNKNOWN);
+
+    /* A blank RSRP field, and the -32768 some builds emit for "not
+     * measured", are both absences and not readings. */
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(&lines, "+CPSI: WCDMA,Online,310-260,0x1A2B,1234,10700,,,,,,,,");
+    nd_modem__parse_cpsi(m, &lines);
+    CHECK_STR(m->cell_mode, "WCDMA");
+    CHECK_INT(m->rsrp_dbm10, ND_MODEM_RSRP_UNKNOWN);
+
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(&lines, "+CPSI: LTE,Online,310-260,0x1A2B,1,2,B2,900,3,3,-185,-32768,0,0");
+    nd_modem__parse_cpsi(m, &lines);
+    CHECK_INT(m->rsrp_dbm10, ND_MODEM_RSRP_UNKNOWN);
+
+    /* A positive number is not an RSRP either -- received power is always
+     * below zero, and 0 is the sentinel. */
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(&lines, "+CPSI: LTE,Online,310-260,0x1A2B,1,2,B2,900,3,3,-185,17,0,0");
+    nd_modem__parse_cpsi(m, &lines);
+    CHECK_INT(m->rsrp_dbm10, ND_MODEM_RSRP_UNKNOWN);
+
+    /* And losing the modem clears all three: they describe a radio this
+     * process can no longer see. */
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(&lines, "+CPSI: LTE,Online,310-260,0x1A2B,1,2,B2,900,3,3,-185,-900,0,0");
+    nd_modem__parse_cpsi(m, &lines);
+    nd_modem__lines_reset(&lines);
+    nd_modem__lines_add(&lines, "+CPIN: READY");
+    nd_modem__parse_cpin(m, &lines);
+    nd_modem__drop_hardware(m, "test");
+    CHECK_STR(m->sim_state, "");
+    CHECK_STR(m->cell_mode, "");
+    CHECK_INT(m->rsrp_dbm10, ND_MODEM_RSRP_UNKNOWN);
+
+    nd_modem__destroy(m);
+}
+
 static void test_sms_record_parsers(void)
 {
     nd_lines lines;
@@ -979,6 +1083,10 @@ static const fake_rule SIM7600[] = {
     {"AT+CSQ", "\r\n+CSQ: 23,99\r\n\r\nOK\r\n"},
     {"AT+CEREG?", "\r\n+CEREG: 0,1\r\n\r\nOK\r\n"},
     {"AT+COPS?", "\r\n+COPS: 0,0,\"Tello\",7\r\n\r\nOK\r\n"},
+    {"AT+CPIN?", "\r\n+CPIN: READY\r\n\r\nOK\r\n"},
+    {"AT+CEER", "\r\n+CEER: No cause information available\r\n\r\nOK\r\n"},
+    {"AT+CPSI?", "\r\n+CPSI: LTE,Online,310-260,0x1A2B,12345678,257,EUTRAN-BAND2,900,3,3,"
+                 "-185,-1134,-856,17\r\n\r\nOK\r\n"},
     {"AT+CLCC", "\r\n+CLCC: 1,0,0,0,0,\"+15551234\",129\r\n\r\nOK\r\n"},
     {"AT+CHUP", "\r\nOK\r\n"},
     {"AT+CPCMFRM=1", "\r\nOK\r\n"},
@@ -1075,10 +1183,34 @@ static void test_poll_staggers_csq_then_cereg_then_cops(void)
     CHECK_STR(fm.last_cmd, "AT+COPS?");
     CHECK_STR(nd_modem_operator_display(m), "Tello");
 
-    /* Nothing is due now, so a fourth tick sends nothing at all. */
+    /* Tick 4 is the diagnostic rotation, which is last in the chain and so
+     * takes the first tick the three above leave free. One command, not
+     * three: the port is shared with S45modem through the flock and a burst
+     * would be three chances to land inside its dial. */
+    poll_now(m); /* tick 4: AT+CPIN? */
+    CHECK_STR(fm.last_cmd, "AT+CPIN?");
+    CHECK_STR(m->sim_state, "READY");
+
+    /* Nothing is due now, so a fifth tick sends nothing at all. */
     before = fake_commands(&fm);
     poll_now(m);
     CHECK_INT(fake_commands(&fm) - before, 0);
+
+    /* And the rotation moves on rather than re-asking the same question. */
+    m->next_diag = 0.0;
+    poll_now(m);
+    CHECK_STR(fm.last_cmd, "AT+CEER");
+    CHECK_STR(m->reg_cause, "No cause information available");
+
+    m->next_diag = 0.0;
+    poll_now(m);
+    CHECK_STR(fm.last_cmd, "AT+CPSI?");
+    CHECK_STR(m->cell_mode, "LTE");
+    CHECK_INT(m->rsrp_dbm10, -1134);
+
+    m->next_diag = 0.0;
+    poll_now(m);
+    CHECK_STR(fm.last_cmd, "AT+CPIN?"); /* back to the top of the three */
 
     nd_modem__destroy(m);
     fake_stop(&fm);
@@ -2037,6 +2169,7 @@ int main(void)
     RUN(test_urc_call_lifecycle);
     RUN(test_urc_cmti_and_registration);
     RUN(test_csq_and_cops_parsers);
+    RUN(test_diagnostic_parsers);
     RUN(test_sms_record_parsers);
     RUN(test_number_filter);
 

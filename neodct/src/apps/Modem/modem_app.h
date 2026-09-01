@@ -28,8 +28,12 @@ typedef enum {
 
 extern const char *const nd_modemapp_pages[ND_MODEMAPP_N_PAGES];
 
-/* RADIO has six rows with no modem attached and five with one; SIM has six;
- * DATA has five. */
+/* SIX, and it is a hard limit rather than a tally of the rows that exist.
+ * nd_modemapp_line_h() floors the row pitch at 15 px because font_s is 14,
+ * and the content area between the divider and the port line is 95 px on the
+ * 240x175 panel: six rows fit and a seventh is drawn over the port line. See
+ * the comment above nd_modemapp_radio_rows(), which is the page that has to
+ * choose. SIM has six; DATA has five. */
 #define ND_MODEMAPP_MAX_ROWS  6
 #define ND_MODEMAPP_LABEL_MAX 8
 /* "PORTS" can list every ttyUSB node on the phone and the Python does not
@@ -40,6 +44,18 @@ typedef struct {
     char label[ND_MODEMAPP_LABEL_MAX];
     char value[ND_MODEMAPP_VALUE_MAX];
 } nd_modemapp_row;
+
+/* The elision limit for the RADIO page's three prose rows -- SIM, CAUSE and
+ * WHY -- tighter than the DATA page's 24.
+ *
+ * The value column runs from x=70 to the right edge, 170 px, and font_s is
+ * 14 px of proportional type: about 20 characters of the lower-case Latin
+ * these three are made of. The DATA page's 24 is sized for addresses and
+ * APNs, which are digits, colons and dots and therefore narrower. A sentence
+ * at 24 runs off the screen edge, and what runs off is the end -- which for
+ * "Permission denied", "SIM not inserted" and "service option not
+ * subscribed" is the half that names the fault. */
+#define ND_MODEMAPP_REASON_LIMIT 20
 
 /* REG_NAMES. Index by +CEREG <stat>; anything outside 0..5 is str(stat), and
  * None (-1) is "--". */
@@ -55,6 +71,12 @@ const char *nd_modemapp_state_name(nd_call_state st);
  * the capture harness overrides -- -1 for unknown, as everywhere else. */
 size_t nd_modemapp_radio_rows(const nd_modem_status *st, int32_t bars, nd_modemapp_row *out,
                               size_t max);
+
+/* "-1134" -> "-113.4 dBm". `dbm10` is nd_modem_status.rsrp_dbm10, tenths of a
+ * dBm as +CPSI? reports it; ND_MODEM_RSRP_UNKNOWN gives "". Exported for the
+ * unit test, which is the only way to check the tenths do not come out
+ * negative twice. */
+const char *nd_modemapp_rsrp_text(int32_t dbm10, char *buf, size_t buf_sz);
 
 /* _sim_rows(modem) for a phone with no modem: six "n/a (sim)" rows. The
  * hardware path lives in main.c because it is six AT transactions. */

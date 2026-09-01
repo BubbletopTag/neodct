@@ -430,6 +430,12 @@ void nd_modem__parse_reg(nd_modem *m, const char *line)
     }
     lock_state(m);
     m->reg_stat = v;
+    /* +CEER reports the LAST failure and keeps reporting it, so a cause left
+     * over from before the phone got on the network would sit under a healthy
+     * REG row claiming the attach was refused. Registration succeeding is the
+     * event that makes it untrue. */
+    if (nd_modem__reg_is_home(v))
+        m->reg_cause[0] = '\0';
     unlock_state(m);
 }
 
@@ -598,6 +604,124 @@ void nd_modem__parse_cops(nd_modem *m, const nd_lines *lines)
             m->operator_name[0] = '\0';
             m->operator_known = false;
         }
+        unlock_state(m);
+    }
+}
+
+bool nd_modem__reg_is_home(int32_t stat)
+{
+    return stat == 1 || stat == 5; /* 1 home, 5 roaming */
+}
+
+/* ------------------------------------------------------------------ *
+ * The diagnostic replies -- what "no signal" is actually made of
+ * ------------------------------------------------------------------ */
+
+/* +CPIN: READY  ->  "READY". A locked SIM answers "SIM PIN" or "SIM PUK"; a
+ * missing one does not answer +CPIN at all, it fails the command with "+CME
+ * ERROR: SIM not inserted", and a final result line never reaches here. So an
+ * OK carrying no +CPIN line leaves the last answer alone rather than blanking
+ * it, and the caller is what turns the error into the row. */
+void nd_modem__parse_cpin(nd_modem *m, const nd_lines *lines)
+{
+    size_t i;
+
+    for (i = 0u; i < lines->n; i++) {
+        const char *line = nd_modem__lines_get(lines, i);
+        const char *rest;
+        char state[sizeof m->sim_state];
+
+        if (!starts_with(line, "+CPIN:"))
+            continue;
+        rest = after_colon(line);
+        if (rest == NULL)
+            continue;
+        (void)nd_strlcpy(state, rest, sizeof state);
+        py_strip(state);
+        if (state[0] == '\0')
+            continue;
+        lock_state(m);
+        (void)nd_strlcpy(m->sim_state, state, sizeof m->sim_state);
+        unlock_state(m);
+    }
+}
+
+/* +CEER's reply is one line of free text and the firmwares disagree about its
+ * shape: "+CEER: No cause information available", "+CEER: EMM detached", and
+ * on some builds a bare line with no prefix at all. So the FIRST non-empty
+ * line is taken, with a "+CEER:" prefix stripped when there is one.
+ *
+ * It is the answer to a CEREG 3. "Registration denied" is the network saying
+ * no; the cause is the network saying WHY -- #11 PLMN not allowed, #13
+ * roaming not allowed here, #33 service option not subscribed -- and those
+ * point at three different fixes. */
+void nd_modem__parse_ceer(nd_modem *m, const nd_lines *lines)
+{
+    size_t i;
+
+    for (i = 0u; i < lines->n; i++) {
+        const char *line = nd_modem__lines_get(lines, i);
+        char cause[sizeof m->reg_cause];
+
+        if (starts_with(line, "+CEER:")) {
+            const char *rest = after_colon(line);
+
+            (void)nd_strlcpy(cause, rest != NULL ? rest : "", sizeof cause);
+        } else {
+            (void)nd_strlcpy(cause, line, sizeof cause);
+        }
+        py_strip(cause);
+        if (cause[0] == '\0')
+            continue;
+        lock_state(m);
+        (void)nd_strlcpy(m->reg_cause, cause, sizeof m->reg_cause);
+        unlock_state(m);
+        return; /* the first non-empty line, not the last */
+    }
+}
+
+/* +CPSI: <mode>,<Online|Offline>,<mcc-mnc>,<tac>,<scell>,<pcell>,<band>,
+ *        <earfcn>,<dlbw>,<ulbw>,<RSRQ>,<RSRP>,<RSSI>,<RSSNR>
+ *
+ * -- fourteen fields on LTE, and only two when there is nothing to report:
+ * "+CPSI: NO SERVICE,Online". Field 0 is always there and is the whole point
+ * of asking; RSRP is field 11 counting from zero, in tenths of a dBm.
+ *
+ * This is the honest signal reading. AT+CSQ answers a GSM-era 0..31 RSSI and
+ * many SIM7600 builds return its 99 "unknown" for the entire time the phone
+ * is on LTE, or whenever it is not camped -- which is exactly when somebody
+ * is looking at the screen wondering why there are no bars. */
+void nd_modem__parse_cpsi(nd_modem *m, const nd_lines *lines)
+{
+    size_t i;
+
+    for (i = 0u; i < lines->n; i++) {
+        const char *line = nd_modem__lines_get(lines, i);
+        const char *rest;
+        char mode[sizeof m->cell_mode];
+        char field[32];
+        int32_t rsrp = ND_MODEM_RSRP_UNKNOWN;
+        int32_t v;
+
+        if (!starts_with(line, "+CPSI:"))
+            continue;
+        rest = after_colon(line);
+        if (rest == NULL || !comma_field(rest, 0u, mode, sizeof mode))
+            continue;
+        py_strip(mode);
+        if (mode[0] == '\0')
+            continue;
+        if (comma_field(rest, 11u, field, sizeof field)) {
+            py_strip(field);
+            /* A field the firmware left blank, or filled with a dash, is not
+             * a reading. -32768 is the "no measurement" value some builds
+             * emit rather than omitting the field. */
+            if (nd_modem__parse_int(field, &v) && v < 0 && v > -32768)
+                rsrp = v;
+        }
+        lock_state(m);
+        (void)nd_strlcpy(m->cell_mode, mode, sizeof m->cell_mode);
+        m->rsrp_dbm10 = rsrp;
         unlock_state(m);
     }
 }
@@ -1047,6 +1171,13 @@ void nd_modem__drop_hardware(nd_modem *m, const char *why)
     m->reg_stat = -1;
     m->operator_name[0] = '\0';
     m->operator_known = false;
+    /* These go with the signal and the carrier, for the same reason: they
+     * describe a radio this process can no longer see, and a stale "SIM
+     * READY" beside "SIMULATION" reads as a live modem. */
+    m->sim_state[0] = '\0';
+    m->reg_cause[0] = '\0';
+    m->cell_mode[0] = '\0';
+    m->rsrp_dbm10 = ND_MODEM_RSRP_UNKNOWN;
     unlock_state(m);
 
     /* caller_id, imei, _call_stat and the audio pipes are deliberately NOT
@@ -1120,9 +1251,9 @@ void nd_modem_poll(nd_modem *m)
         nd_modem__watch_audio_proc(m, now);
     }
 
-    /* if / elif / elif: at most ONE query per tick, deliberately staggered.
-     * All three timers start at 0.0, so the first three ticks fire CSQ, then
-     * CEREG?, then COPS?. */
+    /* if / elif / elif / elif: at most ONE query per tick, deliberately
+     * staggered. All four timers start at 0.0, so the first four ticks fire
+     * CSQ, then CEREG?, then COPS?, then the first of the diagnostics. */
     if (now >= m->next_csq) {
         char final[64];
 
@@ -1142,6 +1273,55 @@ void nd_modem_poll(nd_modem *m)
         if (nd_modem__transact(m, "AT+COPS?", 3.0, final, sizeof final, &m->collected) &&
             strcmp(final, "OK") == 0)
             nd_modem__parse_cops(m, &m->collected);
+    } else if (now >= m->next_diag) {
+        /* Last in the chain on purpose: this is the one poll nothing on
+         * screen updates once a second, so it yields every tick the other
+         * three want and takes one of the many they leave. */
+        char final[64];
+        size_t step = m->diag_step;
+
+        m->next_diag = now + ND_POLL_DIAG_S;
+        m->diag_step = (step + 1u) % (size_t)ND_MODEM_DIAG_STEPS;
+        switch (step) {
+        case 0:
+            if (nd_modem__transact(m, "AT+CPIN?", 2.0, final, sizeof final, &m->collected)) {
+                if (strcmp(final, "OK") == 0)
+                    nd_modem__parse_cpin(m, &m->collected);
+                else if (final[0] != '\0') {
+                    /* THE ERROR IS THE ANSWER. A missing SIM never emits a
+                     * +CPIN line at all -- it fails the command, and "SIM not
+                     * inserted" is the entire diagnosis for a phone showing no
+                     * signal. AT+CMEE=2 in the init sequence is what makes it
+                     * that sentence rather than the number 10.
+                     *
+                     * The "+CME ERROR: " prefix is dropped: it says which
+                     * error class the modem is speaking, which nobody reading
+                     * a SIM row needs, and it costs twelve of the twenty
+                     * characters the row can show. A bare "ERROR" from a
+                     * firmware built without CMEE keeps its whole self. */
+                    const char *colon = strchr(final, ':');
+                    char text[sizeof m->sim_state];
+
+                    (void)nd_strlcpy(text, (colon != NULL) ? colon + 1 : final, sizeof text);
+                    py_strip(text);
+                    lock_state(m);
+                    (void)nd_strlcpy(m->sim_state, text[0] != '\0' ? text : final,
+                                     sizeof m->sim_state);
+                    unlock_state(m);
+                }
+            }
+            break;
+        case 1:
+            if (nd_modem__transact(m, "AT+CEER", 2.0, final, sizeof final, &m->collected) &&
+                strcmp(final, "OK") == 0)
+                nd_modem__parse_ceer(m, &m->collected);
+            break;
+        default:
+            if (nd_modem__transact(m, "AT+CPSI?", 2.0, final, sizeof final, &m->collected) &&
+                strcmp(final, "OK") == 0)
+                nd_modem__parse_cpsi(m, &m->collected);
+            break;
+        }
     }
 
     nd_modem__release(m);
@@ -1729,9 +1909,11 @@ nd_err nd_modem__create(nd_modem **out)
     m->csq = -1;
     m->reg_stat = -1;
     m->call_stat = -1;
+    m->rsrp_dbm10 = ND_MODEM_RSRP_UNKNOWN;
     m->audio_pid = -1;
     m->mic_pid = -1;
-    /* All six timers start at 0.0, so the first poll() fires CSQ at once. */
+    /* Every next_* timer starts at 0.0, so the first poll() fires CSQ at
+     * once and the staggered chain unwinds from there. */
 
     if (pthread_mutex_init(&m->st_mu, NULL) != 0) {
         free(m);
@@ -2050,7 +2232,7 @@ bool nd_modem_registered(nd_modem *m)
     lock_state(m);
     reg = m->reg_stat;
     unlock_state(m);
-    return reg == 1 || reg == 5; /* 1 home, 5 roaming */
+    return nd_modem__reg_is_home(reg);
 }
 
 int32_t nd_modem_signal_level(nd_modem *m)
@@ -2082,7 +2264,7 @@ int32_t nd_modem_signal_level(nd_modem *m)
     reg = m->reg_stat;
     unlock_state(m);
 
-    if (reg >= 0 && !(reg == 1 || reg == 5))
+    if (reg >= 0 && !nd_modem__reg_is_home(reg))
         return 0;
     return nd_modem__bars(csq);
 }
@@ -2209,6 +2391,9 @@ void nd_modem_status_snapshot(nd_modem *m, nd_modem_status *out)
     out->signal_level = -1;
     out->csq_rssi = -1;
     out->reg_stat = -1; /* Python's None; REG_NAMES[None] is "--" */
+    /* Redundant after the memset above, and written anyway so the sentinel is
+     * stated where the other "nothing is known" values are. */
+    out->rsrp_dbm10 = ND_MODEM_RSRP_UNKNOWN;
     out->call_secs = -1;
     out->state = ND_CALL_IDLE;
     if (m == NULL)
@@ -2228,6 +2413,10 @@ void nd_modem_status_snapshot(nd_modem *m, nd_modem_status *out)
     out->csq_rssi = m->csq;
     out->reg_stat = m->reg_stat;
     out->state = m->state;
+    (void)nd_strlcpy(out->sim_state, m->sim_state, sizeof out->sim_state);
+    (void)nd_strlcpy(out->reg_cause, m->reg_cause, sizeof out->reg_cause);
+    (void)nd_strlcpy(out->cell_mode, m->cell_mode, sizeof out->cell_mode);
+    out->rsrp_dbm10 = m->rsrp_dbm10;
     (void)nd_strlcpy(out->probe_why, m->last_probe_why, sizeof out->probe_why);
     (void)nd_strlcpy(out->caller_id, m->caller_id_known ? m->caller_id : "", sizeof out->caller_id);
     unlock_state(m);

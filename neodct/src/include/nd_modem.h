@@ -44,13 +44,23 @@ extern "C" {
 /* One line of "why is there no modem": a candidate list with a reason each. */
 #define ND_MODEM_PROBE_WHY_MAX 200
 
-/* Timings, all load-bearing for a 1:1 port of the poll cadence. */
+/* Timings, all load-bearing for a 1:1 port of the poll cadence -- except the
+ * two DIAG constants, which are this port's own.
+ *
+ * The diagnostic rotation sends ONE of +CPIN? / +CEER / +CPSI? per tick the
+ * CSQ, CEREG and COPS polls leave free, so each is re-read every 30 s and the
+ * AT port is never held for longer than the single transaction those polls
+ * already cost. Not three in a row: S45modem shares this port through the
+ * same flock, and a burst would be three chances to land in the middle of
+ * its dial. */
 #define ND_POLL_URC_S              0.5
 #define ND_SMS_PROMPT_TIMEOUT_S    5.0
 #define ND_SMS_SEND_TIMEOUT_S      30.0
 #define ND_POLL_SIGNAL_S           5.0
 #define ND_POLL_NET_S              20.0
 #define ND_POLL_OPERATOR_S         60.0
+#define ND_POLL_DIAG_S             10.0
+#define ND_MODEM_DIAG_STEPS        3
 #define ND_PROBE_RETRY_S           10.0
 #define ND_CLCC_POLL_S             2.0
 #define ND_AUDIO_RESTART_HOLDOFF_S 3.0
@@ -64,6 +74,10 @@ extern "C" {
 /* CSQ rssi 0..31 (99 = unknown) mapped to 0..4 bars at roughly
  * -105/-93/-81/-73 dBm. */
 extern const int ND_BAR_THRESHOLDS[4]; /* { 2, 8, 14, 20 } */
+
+/* +CPSI? reports RSRP in tenths of a dBm and it is always well below zero, so
+ * zero is free to mean "no reading" and no measurement can collide with it. */
+#define ND_MODEM_RSRP_UNKNOWN 0
 
 typedef enum {
     ND_CALL_IDLE = 0,
@@ -131,6 +145,31 @@ typedef struct {
      * it is not a diagnosis -- so the reason rides along and the engineering
      * Modem app draws it. Appended, so no existing field moves. */
     char probe_why[ND_MODEM_PROBE_WHY_MAX];
+
+    /* ---- APPENDED: why there is no service ----
+     *
+     * "CSQ 99 (no signal)" and "REG UNKNOWN" are the two things this app says
+     * when the radio is unhappy, and neither of them is a diagnosis. They are
+     * the same two lines whether the SIM is missing, the SIM is locked, the
+     * network refused the attach, or the phone is genuinely in a hole -- four
+     * different problems with four different fixes, and the modem knows which
+     * one it is. It answers +CPIN?, +CEER and +CPSI?, and an app process
+     * cannot ask: raw AT is deliberately not on the service wire, so the SIM
+     * page's own six transactions return nothing off the phone's own core.
+     * These three ride the snapshot instead, filled in by the modem thread.
+     *
+     * All three are empty/unknown until the modem has answered once, and on a
+     * registered phone the app draws none of them. Appended, so no existing
+     * field moves. */
+    char sim_state[40]; /* +CPIN? content: "READY", "SIM PIN", ""=unasked  */
+    char reg_cause[64]; /* +CEER's text for the last failure, "" for none  */
+    char cell_mode[24]; /* +CPSI? system mode: "LTE", "NO SERVICE", ""     */
+    /* Serving-cell RSRP in tenths of a dBm (-1134 is -113.4 dBm), which is
+     * the unit +CPSI? reports it in. 0 means unknown: RSRP is a received
+     * power in dBm and is always well below zero, so no reading collides
+     * with the sentinel. This is the number to believe when CSQ says 99 --
+     * CSQ is a GSM-era RSSI the firmware often declines to map from LTE. */
+    int32_t rsrp_dbm10;
 } nd_modem_status;
 
 typedef struct nd_modem nd_modem;

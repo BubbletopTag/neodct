@@ -46,6 +46,11 @@ MODEM_PDPTYPE_FALLBACKS="${MODEM_PDPTYPE_FALLBACKS:-IPV4V6}"
 MODEM_RAW_IP="${MODEM_RAW_IP:-auto}"         # auto | y | n  (qmi_wwan framing)
 MODEM_DNS="${MODEM_DNS:-2001:4860:4860::6464 2001:4860:4860::64}"  # Google DNS64
 MODEM_PORT_WAIT_S=30
+# The SIM subsystem comes up after the AT interpreter does, and how long
+# after is a property of the module's boot, not of anything here: 20 s is
+# comfortably past every SIM7600G-H start seen on this board and costs
+# nothing when the SIM is ready on the first ask.
+MODEM_SIM_WAIT_S="${MODEM_SIM_WAIT_S:-20}"
 MODEM_REG_WAIT_S=90
 MODEM_ADDR_WAIT_S=20
 MODEM_DIAL_ROUNDS="${MODEM_DIAL_ROUNDS:-4}"
@@ -190,17 +195,84 @@ dial() {   # $1 = cid
     start_call "$1"
 }
 
-wait_registered() {   # $1 = max seconds; sets LAST_REG on failure
+# wait_sim -- poll AT+CPIN? until the SIM answers READY.
+#
+# Sets LAST_CPIN, and SIM_LOCKED=y for the two states that will never become
+# READY on their own however long anyone waits. Everything else -- "SIM busy",
+# a +CME ERROR, no reply at all -- is treated as "not up YET" and retried,
+# because that is what a module three seconds out of reset says about a SIM
+# that is about to work perfectly.
+wait_sim() {   # $1 = max seconds
+    SIM_LOCKED=n
     w=0
     while :; do
-        LAST_REG=$(at "AT+CEREG?" | grep '+CEREG:')
-        case "$LAST_REG" in
-            *": "*",1"*|*": "*",5"*) return 0 ;;
+        LAST_CPIN=$(at 'AT+CPIN?' 8 | grep -E '\+CPIN:|ERROR' | tr '\n' ' ')
+        case "$LAST_CPIN" in
+            *READY*) return 0 ;;
+            # PIN2/PUK2 guard fixed dialling and the phonebook, not the
+            # radio: a SIM asking for one registers and carries data
+            # perfectly well, so it is not a lock in the sense that matters
+            # here. Listed first because the first matching pattern wins and
+            # "SIM PIN" is a prefix of "SIM PIN2".
+            *"SIM PIN2"*|*"SIM PUK2"*) : ;;
+            *"SIM PIN"*|*"SIM PUK"*|*"PH-"*) SIM_LOCKED=y; return 1 ;;
         esac
         w=$((w + 2))
         [ "$w" -ge "$1" ] && return 1
         sleep 2
     done
+}
+
+# The <stat> out of an AT+CEREG? reply. The query form is always
+# "+CEREG: <n>,<stat>[,...]", so it is the second comma-separated field
+# whether or not the module is also reporting a location.
+reg_stat() { printf '%s' "$1" | cut -d, -f2 | tr -dc '0-9'; }
+
+reg_name() {   # 3GPP 27.007 7.2 <stat>, in words, for the log
+    case "$1" in
+        0) echo "not registered, not searching" ;;
+        1) echo "home" ;;
+        2) echo "searching" ;;
+        3) echo "registration DENIED by the network" ;;
+        4) echo "unknown -- no coverage" ;;
+        5) echo "roaming" ;;
+        "") echo "no reply" ;;
+        *) echo "CEREG $1" ;;
+    esac
+}
+
+wait_registered() {   # $1 = max seconds; sets LAST_REG/LAST_REG_STAT
+    w=0
+    while :; do
+        LAST_REG=$(at "AT+CEREG?" | grep '+CEREG:')
+        LAST_REG_STAT=$(reg_stat "$LAST_REG")
+        case "$LAST_REG_STAT" in
+            1|5) return 0 ;;
+        esac
+        w=$((w + 2))
+        [ "$w" -ge "$1" ] && return 1
+        sleep 2
+    done
+}
+
+# Why the network has not taken us. Registration failing and a DIAL failing
+# are different events with different causes, and only the second had a
+# diagnostic: a phone that never registers used to log one CEREG line and one
+# CSQ and then give up, which names the symptom the user is already looking at
+# on the Modem app and nothing else.
+#
+# CEREG 3 in particular is the network actively refusing this SIM+IMEI, not
+# weak RF -- +CEER carries its reason (#11 PLMN not allowed, #13 roaming not
+# allowed here, #33 service option not subscribed) and each points somewhere
+# different. +CPSI? is the honest signal: +CSQ answers 99 for whole SIM7600
+# firmware families while the modem is measuring LTE perfectly well.
+diag_registration() {
+    log "  reg:   $(reg_name "$LAST_REG_STAT") (${LAST_REG:-no reply})"
+    log "  sim:   $(at 'AT+CPIN?' 8 | grep -E '\+CPIN:|ERROR' | tr '\n' ' ')"
+    log "  cause: $(at 'AT+CEER' 8 | grep -v '^OK$' | tr '\n' ' ')"
+    log "  cell:  $(at 'AT+CPSI?' 8 | grep '+CPSI')"
+    log "  csq:   $(at 'AT+CSQ' 8 | grep '+CSQ')"
+    log "  oper:  $(at 'AT+COPS?' 8 | grep '+COPS')"
 }
 
 # CEREG can read "registered" while the PS attach is actually gone
@@ -568,20 +640,57 @@ worker() {
     at "AT+CMEE=2" >> /dev/null
     log "modem answering; echo off"
 
-    # 3. SIM check.
-    if ! at "AT+CPIN?" | grep -q "READY"; then
-        fail "SIM not ready (locked or missing) -- check AT+CPIN?"
+    # 3. SIM check. WAITED FOR, not sampled once: the module answers AT
+    #    several seconds before its SIM subsystem is up, and until it is
+    #    AT+CPIN? replies "+CME ERROR: 14" (SIM busy) or nothing useful. A
+    #    single look therefore fails on a perfectly good SIM often enough to
+    #    matter, and this used to `fail`, which exits the worker -- so a race
+    #    lost by two seconds at boot cost the phone its data connection until
+    #    somebody rebooted it.
+    if wait_sim "$MODEM_SIM_WAIT_S"; then
+        log "SIM ready"
+    elif [ "$SIM_LOCKED" = "y" ]; then
+        # The one SIM state nothing here can fix: it wants a human with a PIN.
+        # Still not fatal -- the worker carries on so the phone goes on
+        # reporting its real state instead of being a dead script -- but this
+        # is the root cause of everything that follows, so it is what the
+        # status file says if registration then fails.
+        log "SIM is locked: ${LAST_CPIN:-no reply}"
+    else
+        log "SIM not ready after ${MODEM_SIM_WAIT_S}s: ${LAST_CPIN:-no reply}"
     fi
-    log "SIM ready"
 
-    # 4. Wait for LTE registration (home or roaming).
-    if ! wait_registered "$MODEM_REG_WAIT_S"; then
-        log "last CEREG: $LAST_REG   CSQ: $(at 'AT+CSQ' | grep '+CSQ')"
-        fail "no LTE registration after ${MODEM_REG_WAIT_S}s"
+    # 4. Wait for LTE registration (home or roaming). NOT FATAL EITHER, and
+    #    this is the one that mattered most: `fail` here exited the worker, so
+    #    a phone that booted somewhere the network would not take it -- a
+    #    basement, a denied attach, a tower down for ninety seconds -- stayed
+    #    off the network for the rest of the session even after service came
+    #    back. Every retry path below (the per-round wait_registered, the
+    #    forever-redial loop, the watchdog) was already written to handle
+    #    exactly this and none of it ever ran, because the script had already
+    #    exited before reaching them.
+    if wait_registered "$MODEM_REG_WAIT_S"; then
+        log "registered: $LAST_REG"
+        log "signal: $(at 'AT+CSQ' | grep '+CSQ')  operator: $(at 'AT+COPS?' | grep '+COPS')"
+        log "cell: $(at 'AT+CPSI?' 8 | grep '+CPSI')"
+    else
+        log "no registration after ${MODEM_REG_WAIT_S}s; diagnostics:"
+        diag_registration
+        # The number, not the name: the Modem app's DATA page elides a BOOT
+        # line past 24 characters and "no service (CEREG 3)" is 20, while
+        # "no service: registration denied" is not. Its RADIO page spells the
+        # number out anyway, and the log line above has it in words.
+        #
+        # A locked SIM outranks it: CEREG will read 0 or 2 forever and saying
+        # so describes the consequence, when the cause is a PIN prompt nobody
+        # has answered.
+        if [ "$SIM_LOCKED" = "y" ]; then
+            echo "SIM locked -- needs PIN" > "$STATUS"
+        else
+            echo "no service (CEREG ${LAST_REG_STAT:-?})" > "$STATUS"
+        fi
+        log "carrying on: the dial loop below re-checks registration every round"
     fi
-    log "registered: $LAST_REG"
-    log "signal: $(at 'AT+CSQ' | grep '+CSQ')  operator: $(at 'AT+COPS?' | grep '+COPS')"
-    log "cell: $(at 'AT+CPSI?' 8 | grep '+CPSI')"
     # Dialing the instant CEREG goes 1 gets "ESM sync up with network"
     # rejects: the attach (incl. the IMS PDN) is still settling.
     log "letting ESM settle ${MODEM_ESM_SETTLE_S}s before dialing"
