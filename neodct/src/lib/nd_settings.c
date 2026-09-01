@@ -61,6 +61,7 @@
 
 #include "nd_log.h"
 #include "nd_paths.h"
+#include <sys/stat.h>
 #include "nd_settings.h"
 
 /* The tag the Python printed: print(f"[Settings] Failed to ...") */
@@ -135,6 +136,63 @@ static nd_props *load_version(void)
     return nd_props_parse_settings(g_version_path);
 }
 
+/* ============ WHY ROOT DOES NOT WRITE THIS FILE ============
+ *
+ * nd-core is root for about a second at boot -- from exec until it becomes
+ * ndusr (core/nd_main.c step 4b) -- and in that window it starts the clock
+ * service and the remote shell, BOTH of which read a setting. Every read
+ * rewrites the file, because `missing` in nd_settings_load() is always true
+ * (R-24, and deliberate).
+ *
+ * So on a phone whose user partition is FRESH -- a new phone, or one whose
+ * data was wiped -- root created /NeoDCT/User/settings.prop owned root:root
+ * 0640, from run_neodct.sh's umask. nd-core then dropped to ndusr and could
+ * never read its own settings file again:
+ *
+ *     [Settings] Failed to read /NeoDCT/User/settings.prop: Permission denied
+ *
+ * which is every preference on the phone silently falling back to its default
+ * and refusing to stick. It self-heals on the SECOND boot, because S00userdata
+ * then finds the file and chowns it -- which is precisely why it survived:
+ * a developer who reboots constantly never sees it, and a person opening a new
+ * phone sees nothing else.
+ *
+ * Found by booting the thing, not by reading it. The unit tests all run as one
+ * user and cannot express "and then the process became somebody else".
+ *
+ * The condition is not a bare `geteuid() == 0`. An image built without the
+ * users table has no ndusr, nd-core stays root for its whole life and the
+ * partition is root's -- there, root writing this file is correct and the only
+ * thing that will ever write it. So the question asked is the exact one that
+ * matters: am I about to create a file that the user who owns this directory
+ * will not be able to read?
+ */
+static bool root_would_orphan_the_file(void)
+{
+    char resolved[ND_PATH_MAX];
+    struct stat st;
+    const char *slash;
+    size_t dir_len;
+
+    if (geteuid() != 0)
+        return false;
+
+    /* The directory the file lives in, resolved the same way the file is. */
+    if (nd_path_resolve(resolved, sizeof resolved, g_settings_path) != ND_OK)
+        return false;
+    slash = strrchr(resolved, '/');
+    if (slash == NULL || slash == resolved)
+        return false;
+    dir_len = (size_t)(slash - resolved);
+    resolved[dir_len] = '\0';
+
+    if (stat(resolved, &st) != 0)
+        return false;
+    /* Somebody else owns it, and that somebody is who nd-core is about to
+     * become. Leave the file to them. */
+    return st.st_uid != 0u;
+}
+
 /* save_settings(): drop every system.os.* key, then write atomically. All
  * failures are swallowed -- an unwritable user partition must not stop the
  * phone booting, it just means preferences do not stick. */
@@ -143,6 +201,9 @@ static void save_settings(const nd_props *settings)
     nd_props *out = nd_props_new();
     size_t i;
     nd_err rc;
+
+    if (root_would_orphan_the_file())
+        return;
 
     if (out == NULL)
         return;
