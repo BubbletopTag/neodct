@@ -195,9 +195,17 @@ fi
 # reboot. Set here rather than in /etc/fstab because the partition never
 # appears there -- it is mounted before switch_root and mount --moved in.
 #
-# NOT noexec: /NeoDCT/User/apps is the eventual home of user-installed apps
-# and nd-apprun loads them with dlopen(), which noexec refuses exactly as it
-# refuses execve(). See SECURITY-PLAN.md section 1.
+# NOT noexec, and the reason moved. It was that /NeoDCT/User/apps would hold
+# user-installed apps, which nd-apprun loads with dlopen() -- and noexec
+# refuses mmap(PROT_EXEC) exactly as it refuses execve(). Those apps live on
+# the CARD now (nd_paths.h says why: this partition is eight megabytes), so
+# that argument belongs to the card's mount and not to this one.
+#
+# It stays off anyway. Mount flags do not propagate into a submount, so noexec
+# here would not reach the card mounted underneath it -- and the browser's
+# profile and the crash handler both live on this partition, where a rule that
+# has to be reasoned about per-subdirectory is a rule waiting to be wrong.
+# SECURITY-PLAN.md section 1.
 USER_OPTS="rw,noatime,nosuid,nodev"
 if [ -n "$USER_READY" ]; then
     if user_is_ubi "$USER_DEV"; then USER_FSTYPE=ubifs; else USER_FSTYPE=ext4; fi

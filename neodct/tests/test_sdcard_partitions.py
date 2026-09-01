@@ -448,27 +448,67 @@ def fat32_image(path, label, size=MIB):
     return path
 
 
-def test_the_label_is_read_out_of_the_boot_sector(tmp_path):
-    """Not from blkid. Busybox's blkid reported NOTHING for a plain mkfs.vfat
-    card once already, which is why try_mount asks the kernel whether a
-    filesystem mounts rather than asking blkid what it is."""
-    result = sh(tmp_path, 'fat_label "%s"'
-                % fat32_image(tmp_path / "card.img", "NEODCT"))
+def card_is_ours(tmp_path, setup):
+    """Run card_is_ours() against a mountpoint `setup` has prepared."""
+    mount = tmp_path / "sdcard"
+    mount.mkdir(parents=True, exist_ok=True)
+    setup(mount)
+    result = sh(tmp_path, 'card_is_ours && echo YES || echo NO',
+                env={"NEODCT_SDCARD_MOUNT": str(mount)})
+    return result.stdout.strip()
 
-    assert result.stdout.strip() == "NEODCT"
+
+def test_a_card_of_ours_is_known_by_its_marker(tmp_path):
+    """And NOT by its volume label.
+
+    This decision was gated on `label_of`, which is blkid -- the reader this
+    helper's own comments record as having returned NOTHING for a perfectly
+    good FAT32 card, which is why try_mount asks the kernel whether something
+    mounts rather than asking blkid what it is.
+
+    Depending on it again, for the decision that applies the whole layout,
+    would mean a card whose label blkid could not read silently kept whatever
+    modes it arrived with -- and on removable media that is the difference
+    between the confinement being enforced and merely being intended. The card
+    is already mounted when this is asked, so the filesystem is right there.
+    """
+    assert card_is_ours(tmp_path, lambda m: (m / ".neodct").write_text("")) == "YES"
 
 
-def test_something_that_is_not_fat32_has_no_label(tmp_path):
-    """Eleven bytes at offset 71 of an arbitrary filesystem are eleven
-    arbitrary bytes. Checking the FAT32 signature is what stops them reading
-    as a volume label -- and an ext4 NeoDCT card is exactly such a filesystem,
-    with its own label somewhere else entirely."""
-    (tmp_path / "other.img").write_bytes(b"NEODCT\x00\x00" * 128)
+def test_a_card_from_an_older_neodct_is_known_by_its_folders(tmp_path):
+    """The marker is new, so a card the phone formatted before 0.5.0b does not
+    carry one -- nor does one a person made on a computer by following the SD
+    card help. Recognising the folder set is what stops those being treated as
+    strangers' cards and left unlaid-out."""
+    def older_card(m):
+        for folder in ("wallpapers", "tones", "music"):
+            (m / folder).mkdir()
+    assert card_is_ours(tmp_path, older_card) == "YES"
 
-    result = sh(tmp_path, 'fat_label "%s" && echo YES || echo NO'
-                % (tmp_path / "other.img"))
 
-    assert result.stdout.strip() == "NO"
+def test_a_strangers_card_is_not_ours(tmp_path):
+    """The case that matters in the other direction. Chowning a card the phone
+    merely found would be it quietly taking ownership of somebody's
+    photographs, so an empty card, and a card with unrelated things on it, must
+    both answer no."""
+    assert card_is_ours(tmp_path, lambda m: None) == "NO"
+
+    def holiday_photos(m):
+        (m / "DCIM").mkdir()
+        (m / "music").mkdir()      # one NeoDCT-ish name is not the set
+    assert card_is_ours(tmp_path, holiday_photos) == "NO"
+
+
+def test_a_freshly_formatted_card_is_ours_before_anything_is_on_it(tmp_path):
+    """do_format's case, and the one moment neither test above can cover: the
+    filesystem is seconds old and empty, so there is no marker and no folder
+    set to recognise. FRESHLY_FORMATTED is how the phone says it knows,
+    because it has just made the thing."""
+    mount = tmp_path / "sdcard"
+    mount.mkdir(parents=True, exist_ok=True)
+    result = sh(tmp_path, 'FRESHLY_FORMATTED=1; card_is_ours && echo YES || echo NO',
+                env={"NEODCT_SDCARD_MOUNT": str(mount)})
+    assert result.stdout.strip() == "YES"
 
 
 @pytest.mark.parametrize("disk,part,want", [

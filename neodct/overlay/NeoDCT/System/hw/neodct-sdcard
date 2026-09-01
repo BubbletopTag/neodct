@@ -9,58 +9,84 @@
 #
 # The state file is what System/core/Storage reads, so the UI never has to
 # poke at block devices itself:
-#   state=mounted|unmountable|share|absent  device=  fstype=  label=
-#   untrusted=<path>              empty unless a NeoDCT card's second
-#                                 partition is mounted; see below
+#   state=mounted|legacy|unmountable|share|absent  device=  fstype=  label=
+#   untrusted=<path>              empty unless this is a NeoDCT card with
+#                                 somewhere for a download to go; see below
 #
 # A card is anything that is not the system or user-data partition -- those
 # two come from the kernel cmdline, so this works the same on QEMU virtio
 # and on a real SD slot.
 #
-# ============ TWO PARTITIONS, AND WHY ============
+# ============ ONE EXT4 PARTITION, AND WHY IT USED TO BE TWO FAT ============
 #
-# SECURITY-PLAN.md section 1. A NeoDCT card carries two FAT32 partitions, and
-# the split is the whole of the storage half of the confinement design.
+# SECURITY-PLAN.md section 1, revised. A NeoDCT card was TWO FAT32 partitions
+# and is now ONE ext4 one, and the reason is worth keeping because the old
+# design was a correct answer to a real constraint.
 #
-# The constraint it exists to solve: a FAT filesystem HAS no ownership. chown
-# and chmod do nothing on one. Permissions come from mount options -- uid=,
-# gid=, fmask=, dmask= -- and those apply to the WHOLE FILESYSTEM AT ONCE. So
-# there is no way to grant ndusr_ut a subdirectory of a card and deny it the
-# rest: one mount, one uid, one gid. A card mounted for the browser is a card
-# the browser owns entirely, including any authorized_keys sitting on it.
+# The constraint: a FAT filesystem HAS no ownership. chown and chmod do
+# nothing on one. Permissions come from mount options -- uid=, gid=, fmask=,
+# dmask= -- and those apply to the WHOLE FILESYSTEM AT ONCE. So there was no
+# way to grant ndusr_ut a subdirectory of a card and deny it the rest: one
+# mount, one uid, one gid. A card mounted for the browser was a card the
+# browser owned entirely.
 #
-# The way out is that a CARD can carry more than one FILESYSTEM. Mount options
-# are per mount and a mount is per block device, so two partitions get two
-# genuinely independent sets of ownership -- with no kernel feature, no
-# filesystem change, and a card that still reads on any computer.
+# The old way out was that a CARD can carry more than one FILESYSTEM: two
+# partitions, two independent sets of ownership, no kernel feature and no
+# filesystem change, and a card that still read on any computer. p1 belonged
+# to ndusr and held what the owner copied on; p2 belonged to ndusr_ut, was
+# mounted noexec, and held what arrived.
 #
-#   p1  NEODCT    uid=ndusr    nosuid,nodev             EXEC ALLOWED
-#                 media, wallpapers, tones, updates -- the import side
-#   p2  NEODCTUT  uid=ndusr_ut nosuid,nodev,noexec      NO EXEC
-#                 downloads and MMS attachments -- the arrival side
+# What that could NOT express is an installed app. An app.so on p1 would have
+# been 0640 ndusr:ndusr -- unreadable by the ndusr_ut process that has to
+# dlopen it -- and making it readable meant making every file on p1 readable,
+# the owner's music included. p2 is ndusr_ut's own, so an app there could
+# rewrite itself, and it is noexec besides. Two partitions, and nowhere for
+# an app to live. A third would have been the same trick a third time.
 #
-# The boundary is PROVENANCE, not trust: did the owner choose to put this
-# here, or did it arrive? noexec goes on the arrival side only, and that is
-# deliberate rather than timid -- noexec refuses mmap(PROT_EXEC) as well as
-# execve, so a blanket rule would block emulator cores loaded with dlopen()
-# and, if /NeoDCT/User/apps ever lives on a card, nd-apprun's own app.so.
-# Installing something therefore becomes an explicit copy from p2 to p1,
-# performed by a person through the UI. That is not friction to engineer
-# away; it is the one point in the whole design where somebody says "yes,
-# run this".
+# ext4 records owner, group and mode PER INODE, so one filesystem says all of
+# it at once, and the partition table stops being load-bearing:
 #
-# FAT cannot represent a setuid bit or a device node in the first place, which
-# is a property worth keeping and the reason this is FAT rather than ext.
-# nosuid,nodev are there anyway, because the helper will mount an ext card
-# somebody else formatted.
+#   .           0751 ndusr:ndusr      traverse, do not list
+#   apps        0755 ndusr:ndusr      the owner installs here; an app cannot
+#     <app>/    0755 ndusr:ndusr      its code -- files 0644, so an app can
+#                                     read and run its own app.so and not
+#                                     write it
+#     <app>/data 0770 ndusr:ndusr_ut  the one thing the app may write
+#   untrusted   0770 ndusr:ndusr_ut   downloads, browser and player state
+#   media       0750 ndusr:ndusr      music, wallpapers, tones, backups,
+#                                     updates -- ndusr_ut cannot read any
+#
+# The boundary is still PROVENANCE, not trust: did the owner choose to put
+# this here, or did it arrive? What changed is that the answer is now written
+# on the card rather than decided at mount time.
+#
+# ============ AND WHY THE LAYOUT IS RESTATED ON EVERY MOUNT ============
+#
+# Because ownership living ON the card means the card carries it to a PC and
+# back. A person can chmod 0777 the lot, deliberately or with one bad umask
+# on a copy, and the modes that arrive are therefore a claim about the past.
+# apply_layout() runs on every mount, exactly as S00userdata restates the user
+# partition on every boot. See card_is_ours() for how a card of ours is told
+# apart from a stranger's, and why that decision does NOT go through blkid.
+#
+# The cost, stated plainly because the old header defended the opposite trade:
+# Linux reads ext4 everywhere and Windows and macOS need a helper. That is the
+# price of a card that knows who owns what.
+#
+# nosuid,nodev stay on every mount. FAT could not represent a setuid bit or a
+# device node in the first place; ext4 can, so the options that were belt and
+# braces on a FAT card are load-bearing on this one.
 #
 # ============ WHAT A FOREIGN CARD GETS ============
 #
-# Everything it got before. A single-partition FAT card from a PC mounts as
-# the media side and there is simply no arrival partition -- untrusted= stays
-# empty and the caller has nowhere to put a download, which is the correct
-# answer rather than a degraded one. That direction is the one owners
-# actually use, and it stays the fast path.
+# Mounted, read, and otherwise left alone. It gets no layout pass -- chowning
+# a stranger's card would be the phone quietly taking ownership of somebody's
+# photographs -- and untrusted= stays empty, so a caller has nowhere to put a
+# download, which is the correct answer rather than a degraded one.
+#
+# A NeoDCT card in the old FAT format is reported as `legacy`: it mounts, the
+# owner's music plays, and the UI offers to reformat it. That erases the card,
+# so it is offered and never done uninvited.
 set -u
 
 MOUNT_POINT="${NEODCT_SDCARD_MOUNT:-/NeoDCT/User/sdcard}"
@@ -94,6 +120,41 @@ FOLDERS="wallpapers tones backup_db music update apps untrusted"
 # do_format() writes: the others are here so an ext2/ext3 card somebody else
 # made still mounts.
 CARD_EXT_FSTYPES="ext4 ext3 ext2"
+
+# ============ HOW THE PHONE KNOWS A CARD IS ITS OWN ============
+#
+# By looking at the MOUNTED FILESYSTEM, and deliberately not by asking blkid
+# for the volume label.
+#
+# This gated the layout pass on `label_of` -- which is blkid -- and blkid is
+# the reader this very file records as having returned NOTHING for a
+# perfectly good FAT32 card, which is why try_mount asks the kernel whether
+# something mounts instead of asking blkid what it is. Depending on it again,
+# for the decision that applies the entire confinement, would mean a card
+# whose label blkid could not read silently kept whatever modes it arrived
+# with. On removable media that is the difference between the layout being
+# enforced and merely being intended.
+#
+# The card is already mounted by the time this is asked, so the filesystem is
+# right there. Three ways in, cheapest first:
+#
+#   FRESHLY_FORMATTED  do_format just made it; there is nothing to look at yet
+#   the marker file     every card this phone formats gets one
+#   the folder set      a card from an older NeoDCT, or one a person made on a
+#                       computer by following the SD card help
+#
+# The label is still read, and still published, because the UI shows it. It
+# just no longer decides anything.
+CARD_MARKER=.neodct
+FRESHLY_FORMATTED=""
+
+card_is_ours() {
+    [ -n "$FRESHLY_FORMATTED" ] && return 0
+    [ -f "$MOUNT_POINT/$CARD_MARKER" ] && return 0
+    [ -d "$MOUNT_POINT/wallpapers" ] && [ -d "$MOUNT_POINT/tones" ] &&
+        [ -d "$MOUNT_POINT/music" ] && return 0
+    return 1
+}
 
 
 # The users the two partitions are mounted for. Empty on an image built
@@ -136,13 +197,9 @@ backup_db:0750:$CARD_USER:$CARD_USER
 update:0750:$CARD_USER:$CARD_USER
 "
 
-# How much of a fresh card becomes the arrival side. Downloads and MMS
-# attachments are small and media is not, so a quarter, floored at 16 MiB so
-# a tiny card still gets a usable one and capped at 512 MiB so a 64 GB card
-# does not hand over 16 GB nothing will ever fill.
-UNTRUSTED_SHARE_PERCENT="${NEODCT_UNTRUSTED_PERCENT:-25}"
-UNTRUSTED_MIN_SECTORS=$((16 * 1024 * 1024 / 512))
-UNTRUSTED_MAX_SECTORS=$((512 * 1024 * 1024 / 512))
+# The arrival side used to be a partition and needed a size: a quarter of the
+# card, floored at 16 MiB and capped at 512 MiB. It is a directory now and
+# takes whatever it takes, which is one of the smaller things ext4 bought.
 # 1 MiB alignment, which is what every partitioner has used for fifteen years
 # and what an SD card's erase blocks want.
 ALIGN_SECTORS=$((1024 * 1024 / 512))
@@ -161,16 +218,7 @@ UNTRUSTED_STATE=""
 # /proc/mounts would be the obvious way and the wrong one: it answers a
 # different question (what the kernel calls it) and answers nothing at all in
 # the host tests, which would quietly blank the field.
-MOUNTED_DEVICE=""
-MOUNTED_FSTYPE=""
-MOUNTED_LABEL=""
 
-# One value out of the record we last wrote, for the path where this process
-# did not do the mounting -- the second udev add event for a card whose media
-# side another invocation already brought up.
-read_state() {   # read_state KEY
-    sed -n "s/^$1=//p" "$STATE_FILE" 2>/dev/null | head -n1
-}
 
 write_state() {   # write_state STATE DEVICE FSTYPE LABEL
     mkdir -p "$STATE_DIR" 2>/dev/null
@@ -275,27 +323,6 @@ is_system_device() {
     return 1
 }
 
-# The FAT volume label, read out of the boot sector rather than asked of
-# blkid.
-#
-# Same trick as is_squashfs() above, and for the same reason: busybox's blkid
-# has far fewer probers than util-linux's and reported NOTHING for a plain
-# mkfs.vfat card, which is the bug that made a perfectly good FAT32 image
-# read as "no filesystem we can mount". The boot sector is always there and
-# always says the same thing.
-#
-# FAT32 keeps BS_VolLab at offset 71, eleven space-padded bytes, and
-# BS_FilSysType at 82. Both are written by mkfs.vfat, and checking the second
-# is what stops a random eleven bytes of some other filesystem reading as a
-# label.
-fat_label() {   # fat_label DEV
-    [ -b "$1" ] || [ -f "$1" ] || return 1
-    case "$(dd if="$1" bs=1 skip=82 count=8 2>/dev/null)" in
-        FAT32*) ;;
-        *) return 1 ;;
-    esac
-    dd if="$1" bs=1 skip=71 count=11 2>/dev/null | sed -e 's/[[:space:]]*$//'
-}
 
 partition_path() {   # partition_path DISK N
     case "${1##*/}" in
@@ -445,8 +472,6 @@ try_mount() {   # try_mount DEV
                 ;;
         esac
         if mount -t "$fstype" -o "$options" "$1" "$MOUNT_POINT" 2>/dev/null; then
-            MOUNTED_DEVICE="$1"; MOUNTED_FSTYPE="$fstype"
-            MOUNTED_LABEL="$(label_of "$1")"
             after_mount "$1" "$fstype"
             return 0
         fi
@@ -455,8 +480,6 @@ try_mount() {   # try_mount DEV
     # Last resort: let the kernel pick from its own probe list.
     if mount -o "rw,noatime,$CARD_SAFETY_OPTS" "$1" "$MOUNT_POINT" 2>/dev/null; then
         fstype="$(mounted_fstype "$MOUNT_POINT")"
-        MOUNTED_DEVICE="$1"; MOUNTED_FSTYPE="${fstype:-unknown}"
-        MOUNTED_LABEL="$(label_of "$1")"
         after_mount "$1" "${fstype:-unknown}"
         return 0
     fi
@@ -563,7 +586,7 @@ after_mount() {   # after_mount DEV FSTYPE
         # `legacy` rather than `mounted` so the UI can say so and offer to
         # format. That is a destructive offer and it is the owner's to accept:
         # the phone will not reformat a card it found.
-        if [ "$(label_of "$1")" = "$LABEL" ]; then
+        if card_is_ours; then
             log "$1 is a NeoDCT card in the old FAT format; it can hold media but not apps"
             write_state legacy "$1" "$2" "$(label_of "$1")"
         else
@@ -573,10 +596,16 @@ after_mount() {   # after_mount DEV FSTYPE
         return 0
     fi
 
-    if [ "$(label_of "$1")" = "$LABEL" ]; then
+    if card_is_ours; then
         for folder in $FOLDERS; do
             mkdir -p "$MOUNT_POINT/$folder" 2>/dev/null
         done
+        # Written before the layout pass so the pass can set its mode, and so
+        # the NEXT mount recognises the card without needing the folder set --
+        # which an owner can delete.
+        : > "$MOUNT_POINT/$CARD_MARKER" 2>/dev/null
+        chown "$CARD_USER:$CARD_USER" "$MOUNT_POINT/$CARD_MARKER" 2>/dev/null
+        chmod 0644 "$MOUNT_POINT/$CARD_MARKER" 2>/dev/null
         apply_layout
         UNTRUSTED_STATE="$UNTRUSTED_MOUNT"
     fi
@@ -850,9 +879,17 @@ do_format() {   # do_format DEV -- destroys everything on it
         return 1
     fi
 
-    # try_mount does the rest: it creates the folders and applies the layout,
-    # because those have to happen on every mount and not only on this one.
-    try_mount "$p1" || return 1
+    # try_mount does the rest: it creates the folders, writes the marker and
+    # applies the layout, because those have to happen on every mount and not
+    # only on this one.
+    #
+    # FRESHLY_FORMATTED because card_is_ours() has nothing to go on yet: the
+    # filesystem is seconds old and empty, so neither the marker nor the
+    # folder set exists. This is the one moment the phone knows the card is
+    # its own without having to look.
+    FRESHLY_FORMATTED=1
+    try_mount "$p1" || { FRESHLY_FORMATTED=""; return 1; }
+    FRESHLY_FORMATTED=""
     sync
     log "formatted $disk as a NeoDCT card"
     return 0

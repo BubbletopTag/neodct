@@ -7,6 +7,8 @@
   ready        a NeoDCT card: mounted, with all five folders
   needs_setup  mountable, but not laid out as a NeoDCT card yet
   unformatted  a card is there but carries no filesystem we can mount
+  legacy       a NeoDCT card in the pre-0.5.0b FAT format: it mounts and the
+               owner's media reads, but it cannot hold an installed app
 
 Only "ready" hands out paths, so an app can never write into a card that is
 about to be reformatted.
@@ -55,6 +57,18 @@ def card():
     if reported in ("unmountable", "unformatted"):
         return Card("unformatted", device, fstype, values.get("label", ""),
                     MOUNT_POINT, removable)
+    # A NeoDCT card in the pre-0.5.0b FAT format: mounted, readable, and
+    # unable to hold an installed app because FAT records no ownership. It is
+    # a state of its own because the remedy differs in kind -- NEEDS_SETUP is
+    # five missing folders, this is a reformat that erases the card.
+    #
+    # Without this it fell through to `absent` below, so the reference
+    # implementation reported "no card" for a card the C says is present and
+    # usable. See nd_storage.h.
+    if reported == "legacy":
+        return Card("legacy", device, fstype, values.get("label", ""),
+                    MOUNT_POINT, removable)
+
     if reported not in ("mounted", "share", "ready"):
         return Card("absent", "", "", "", MOUNT_POINT, removable)
 

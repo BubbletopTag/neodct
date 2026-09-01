@@ -61,7 +61,7 @@ if [ -n "$OVERLAY_ROOT" ]; then
             name="$(basename "$path")"
             # The confinement probes are built from neodct/src/apps like any
             # other app, but deliberately have NO overlay directory -- they are
-            # staged into /NeoDCT/User/apps instead, because being installed by
+            # staged into /NeoDCT/User/sdcard/apps instead, because being installed by
             # the owner onto writable storage is the situation under test.
             #
             # That makes them look exactly like a stale app to the rule below,
@@ -205,7 +205,7 @@ rm -rf "$TARGET_DIR/NeoDCT/Development"
 # In a release that is wrong twice over: they are dead weight, and an image
 # that ships apps probing its own confinement gives an attacker a tested
 # starting point. They are removed unless the build asked for them, and the
-# build that asks stages them somewhere else entirely -- /NeoDCT/User/apps, via
+# build that asks stages them somewhere else entirely -- the card, via
 # post-image-neodct.sh -- because being INSTALLED BY THE OWNER onto writable
 # storage is the situation being tested. An app in the signed system image is
 # not that situation and could not stand in for it.

@@ -230,20 +230,31 @@ def test_the_cmdline_is_still_used_when_nothing_was_recorded(tmp_path):
 # card can be mounted is a question for the kernel, not for blkid.
 
 def call_with_fake_mount(tmp_path, device, succeed_on, cmdline="", boot_state="",
-                         label=None):
+                         label=None, ours=False):
     """Run try_mount with `mount` stubbed, recording every attempt.
 
-    `label` is what blkid reports for the device. None keeps the historical
-    stub -- blkid saying nothing at all, which is exactly what busybox's did
-    for a perfectly good FAT card and the reason this helper asks the kernel
-    whether something mounts rather than asking blkid what it is. A string
-    makes blkid answer, which is what after_mount() consults to decide whether
-    the card is one of ours.
+    `label` is what blkid reports. It is COSMETIC -- it ends up in the state
+    file because the UI shows it, and it decides nothing. None keeps the
+    historical stub, blkid saying nothing at all, which is exactly what
+    busybox's did for a perfectly good FAT card and the reason this helper
+    asks the kernel whether something mounts rather than asking blkid what it
+    is.
+
+    `ours` is what actually decides, and it makes the mountpoint look like a
+    card of ours the way card_is_ours() checks for: the marker file. The
+    identification deliberately does NOT go through blkid -- gating the layout
+    pass on a reader this file already records as returning nothing would mean
+    a card whose label could not be read silently kept whatever modes it
+    arrived with.
 
     chown is stubbed throughout, and recorded: the layout pass runs on a card
     the helper recognises, and "did it take ownership of this card" is a
     question every case below has an answer to.
     """
+    if ours:
+        mountpoint = tmp_path / "sdcard"
+        mountpoint.mkdir(parents=True, exist_ok=True)
+        (mountpoint / ".neodct").write_text("")
     (tmp_path / "cmdline").write_text(cmdline + "\n")
     (tmp_path / "boot_state").write_text(boot_state)
     (tmp_path / "mounts").write_text("")
@@ -381,7 +392,7 @@ def test_an_ext_card_of_ours_is_laid_out(tmp_path):
     has been out of the phone since the last one and anything could have
     happened to it in between."""
     result, _, state = call_with_fake_mount(tmp_path, "/dev/vda", '*"-t ext4"*',
-                                            label="NEODCT")
+                                            label="NEODCT", ours=True)
 
     assert result.returncode == 0
     assert state["state"] == "mounted"
@@ -398,7 +409,7 @@ def test_an_ext_card_of_ours_publishes_where_a_download_may_go(tmp_path):
     to /NeoDCT/User -- which is 8 MiB on the phone, shared with the databases.
     So the field is only set for a card that really has the directory."""
     _, _, state = call_with_fake_mount(tmp_path, "/dev/vda", '*"-t ext4"*',
-                                       label="NEODCT")
+                                       label="NEODCT", ours=True)
 
     assert state["untrusted"] == str(tmp_path / "sdcard" / "untrusted")
     assert (tmp_path / "sdcard" / "untrusted").is_dir()
@@ -428,7 +439,7 @@ def test_a_neodct_card_in_the_old_fat_format_is_reported_legacy(tmp_path):
     the owner's to accept -- the phone will not reformat a card it found -- so
     the state exists to let Settings say so and offer."""
     _, _, state = call_with_fake_mount(tmp_path, "/dev/vda", '*"-t vfat"*',
-                                       label="NEODCT")
+                                       label="NEODCT", ours=True)
 
     assert state["state"] == "legacy"
     assert state["fstype"] == "vfat"
