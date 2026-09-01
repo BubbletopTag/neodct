@@ -612,3 +612,92 @@ def test_app_selector_wraps_around(project, ui):
     em.lists["nd icons"] = ["", "", ""]
     em.call("app selector show")
     assert float(em.variables["nd result"]) == 2
+
+
+def test_the_project_is_structurally_sound(project):
+    """What scratch-parser and the editor will not forgive.
+
+    A .sb3 is a flat dict of blocks wired together by id, and nothing in the
+    generator stops it emitting a call to a procedure that does not exist or
+    an input pointing at a block that was never written. The editor's
+    response to either is to refuse the whole project, so check it here.
+    """
+    import json
+    import zipfile
+
+    with zipfile.ZipFile(project) as zf:
+        payload = json.loads(zf.read("project.json"))
+
+    stage = [t for t in payload["targets"] if t["isStage"]][0]
+    sprite = [t for t in payload["targets"] if not t["isStage"]][0]
+    blocks = sprite["blocks"]
+    variables = set(stage["variables"]) | set(sprite["variables"])
+    lists = set(stage["lists"]) | set(sprite["lists"])
+    problems = []
+
+    costumes = [c["name"] for c in sprite["costumes"]]
+    if len(costumes) != len(set(costumes)):
+        problems.append("two costumes share a name")
+
+    prototypes = {}
+    for bid, block in blocks.items():
+        opcode = block["opcode"]
+        if block.get("parent") and block["parent"] not in blocks:
+            problems.append("%s has a dangling parent" % bid)
+        if block.get("next") and block["next"] not in blocks:
+            problems.append("%s has a dangling next" % bid)
+        if block.get("topLevel") and block.get("parent"):
+            problems.append("%s is top level but has a parent" % bid)
+        if not block.get("topLevel") and block["parent"] is None \
+                and not block["shadow"]:
+            problems.append("%s (%s) is orphaned" % (bid, opcode))
+        for name, entry in block.get("inputs", {}).items():
+            if isinstance(entry[1], str) and entry[1] not in blocks:
+                problems.append("input %s of %s points at nothing" % (name, bid))
+            if entry[0] == 3 and isinstance(entry[2], str) \
+                    and entry[2] not in blocks:
+                problems.append("obscured shadow of %s is missing" % bid)
+        field = block.get("fields", {}).get("VARIABLE")
+        if field and field[1] not in variables:
+            problems.append("%s uses an undeclared variable" % bid)
+        field = block.get("fields", {}).get("LIST")
+        if field and field[1] not in lists:
+            problems.append("%s uses an undeclared list" % bid)
+        if opcode in ("looks_costume", "sensing_keyoptions") \
+                and not block["shadow"]:
+            problems.append("the menu on %s is not a shadow" % bid)
+        if opcode == "procedures_prototype":
+            code = block["mutation"]["proccode"]
+            if code in prototypes:
+                problems.append("two definitions of %r" % code)
+            prototypes[code] = block["mutation"]
+            if not block["shadow"]:
+                problems.append("the prototype of %r is not a shadow" % code)
+            if blocks[block["parent"]]["opcode"] != "procedures_definition":
+                problems.append("the prototype of %r is misparented" % code)
+            argids = json.loads(block["mutation"]["argumentids"])
+            if len(argids) != len(set(argids)):
+                problems.append("%r repeats an argument id" % code)
+            for argid in argids:
+                if argid not in block["inputs"]:
+                    problems.append("%r declares %s and does not hold it"
+                                    % (code, argid))
+                elif not blocks[block["inputs"][argid][1]]["shadow"]:
+                    problems.append("%r has a non-shadow argument" % code)
+
+    for bid, block in blocks.items():
+        if block["opcode"] != "procedures_call":
+            continue
+        code = block["mutation"]["proccode"]
+        if code not in prototypes:
+            problems.append("call to undefined %r" % code)
+            continue
+        argids = json.loads(prototypes[code]["argumentids"])
+        if json.loads(block["mutation"]["argumentids"]) != argids:
+            problems.append("%r is called with the wrong argument ids" % code)
+        for argid in argids:
+            if argid not in block["inputs"]:
+                problems.append("a call to %r leaves %s empty" % (code, argid))
+
+    assert not problems, problems[:10]
+    assert len(prototypes) > 40, "the framework should define far more blocks"
