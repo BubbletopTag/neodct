@@ -199,6 +199,23 @@ def test_app_selector(project, ui):
     same(expected, em.canvas.image, "app-selector")
 
 
+def test_app_selector_with_a_non_square_icon(project, ui):
+    from System.ui.framework import AppSelector
+    # Koki's icon is 120x115, so it thumbnails to 82x79 and is centred
+    # horizontally but pinned to the top of the icon box, not centred in it.
+    apps = [{"name": "Koki", "icon": "/NeoDCT/System/apps/Koki/icon.png"}]
+
+    def draw():
+        AppSelector("Main Menu", apps, ui).draw()
+
+    expected = python_frame(ui, draw)
+    em = emulate(project, keys=["\\"])
+    em.lists["nd items"] = ["Koki"]
+    em.lists["nd icons"] = ["Koki"]
+    em.call("app selector show")
+    same(expected, em.canvas.image, "app-selector-tall-icon")
+
+
 def test_app_selector_without_an_icon(project, ui):
     from System.ui.framework import AppSelector
     apps = [{"name": "Mystery", "icon": None}]
@@ -489,7 +506,9 @@ def test_wrap_matches_the_framework(project, ui):
         assert list(em.lists["nd lines"]) == _wrap_lines(ui, text, ui.font_s, 220), text
 
     widget = TextInputLong(ui, "Write")
-    for text in texts:
+    # The last of these is the phantom empty line _wrap_text leaves behind
+    # when a hard-broken word is the last thing on its line.
+    for text in texts + ["m" * 30 + "_", "a " + "m" * 30, "word " + "x" * 40]:
         em.call("ui wrap %s font %s width %s break %s trim %s", text, 1, 220, 1, 0)
         assert list(em.lists["nd lines"]) == widget._wrap_text(text, 220), text
 

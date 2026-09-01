@@ -844,7 +844,9 @@ def _dialogs(port, api, s):
                 [result.set(key.get()), d["done"].set(1)]),
         ]),
     ], "Not a warning -- no icon, and nothing to decide. `nd result` is the "
-       "key that dismissed it.")
+       "key that dismissed it. An empty value means there is no value: the "
+       "Python distinguishes None from \"\" and Scratch has no None, so a "
+       "genuinely empty reading gets the one-line layout here.")
     api["info"] = info
 
     # --- TextScroller -----------------------------------------------------

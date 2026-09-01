@@ -109,7 +109,9 @@ class Port:
         return proc
 
     def _place(self):
-        x = 60 + self._column * 720
+        # The demo app sits at the origin; definitions start to the right of
+        # it, so opening the project lands on the thing worth reading first.
+        x = 900 + self._column * 720
         y = 60 + self._row * 900
         self._row += 1
         if self._row >= 6:

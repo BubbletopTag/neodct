@@ -110,15 +110,15 @@ def _demo_script(port, api):
     def choice(index, body):
         return if_(eq(result.get(), index), body)
 
-    about = ("NeoDCT for Scratch\\n\\n"
+    about = ("NeoDCT for Scratch\n\n"
              "Every screen here is drawn by the blocks in this sprite, which "
-             "are System/ui/framework.py from the phone, block for block.\\n\\n"
+             "are System/ui/framework.py from the phone, block for block.\n\n"
              "Press Clear -- backslash -- to go back.")
 
-    instructions = ("Move with the up and down arrows.\\n\\n"
+    instructions = ("Move with the up and down arrows.\n\n"
                     "Enter is the softkey under the screen. Backslash is the "
                     "C key: it deletes a character, and on an empty field it "
-                    "backs out of the screen.\\n\\n"
+                    "backs out of the screen.\n\n"
                     "That is the whole 5190 interface. There is nothing else "
                     "to learn.")
 
@@ -179,5 +179,5 @@ def _demo_script(port, api):
             ]),
         ]),
     ]
-    port.sprite.script(script, -1400, -600)
-    port.sprite.comment(HELP, -1400, -1000, width=560, height=420)
+    port.sprite.script(script, 60, 60)
+    port.sprite.comment(HELP, 500, 60, width=380, height=560)
