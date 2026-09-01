@@ -102,6 +102,26 @@ BR2_PACKAGE_LVM2=y
 # BR2_PACKAGE_LVM2_STANDARD_INSTALL is not set
 # FAT32 SD cards: mkfs.vfat to format one, fatlabel to name it NEODCT,
 # fsck.fat to repair a card the user pulled out mid-write.
+# ---- e2fsprogs: the card is ext4 now ------------------------------------
+#
+# A memory card was two FAT partitions until 0.5.0b. FAT stores no ownership,
+# so every permission on one came from uid=/gid=/fmask=/dmask= mount options
+# applied to the WHOLE filesystem -- which is why "downloads are writable by
+# ndusr_ut and the owner's music is not" needed a second partition, and why an
+# installed app's app.so could not be made readable to the process that has to
+# dlopen it without making every file on the card readable too.
+#
+# ext4 records owner, group and mode per inode. One partition then expresses
+# the whole layout (see neodct-sdcard's CARD_LAYOUT) and the partition table
+# goes away with the problem.
+#
+# busybox has an mke2fs and it is already enabled, but it makes ext2 and
+# rejects -t/-O. The helper falls back to it and logs that the card has no
+# journal; this is what makes a phone-formatted card ext4 instead.
+BR2_PACKAGE_E2FSPROGS=y
+BR2_PACKAGE_E2FSPROGS_MKE2FS=y
+BR2_PACKAGE_E2FSPROGS_E2FSCK=y
+
 BR2_PACKAGE_DOSFSTOOLS=y
 BR2_PACKAGE_DOSFSTOOLS_MKFS_FAT=y
 BR2_PACKAGE_DOSFSTOOLS_FATLABEL=y

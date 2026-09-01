@@ -90,10 +90,22 @@ def test_the_user_partition_is_mounted_nosuid_nodev():
 
 
 def test_the_user_partition_is_not_noexec():
-    """Deliberate, and worth pinning so it is not "fixed" later: nd-apprun
-    loads an app with dlopen(), which noexec refuses exactly as it refuses
-    execve(), and /NeoDCT/User/apps is where user-installed apps are meant to
-    land once confinement exists. SECURITY-PLAN.md section 1."""
+    """Deliberate, and worth pinning so it is not "fixed" later.
+
+    The reason MOVED, and the option did not. It used to be that
+    /NeoDCT/User/apps was where user-installed apps would land and nd-apprun
+    reaches an app with dlopen(), which noexec refuses exactly as it refuses
+    execve(). Apps live on the memory card now -- /NeoDCT/User/sdcard/apps,
+    because the user partition is eight megabytes on the Luckfox and is shared
+    with the databases, the settings, the logs and the pending update record.
+
+    That does not make this line free to change. A card is a SEPARATE MOUNT
+    and mount flags do not propagate into one, so the card's own options are
+    what let an app run (test_sdcard_partitions.py pins that there is no
+    noexec among them) -- but adding noexec here would still be a change to
+    the partition every one of those apps has its state under, made for a
+    reason that no longer applies. The option is absent; if it is ever added
+    it should be added on purpose. SECURITY-PLAN.md section 1."""
     options = re.search(r'^USER_OPTS="([^"]*)"', open(INIT).read(), re.M)
 
     assert options and "noexec" not in options.group(1)

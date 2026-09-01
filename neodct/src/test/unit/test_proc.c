@@ -1124,12 +1124,13 @@ static void t_only_the_browser_is_untrusted(void)
 /* The same spoofing rule as the root list, in the other direction. A
  * directory called Browser somewhere else must not inherit ndusr_ut -- which
  * is not root, but IS the owner of the browser profile and of the untrusted
- * half of the SD card.
+ * directory on the SD card.
  *
- * ONE OF THESE FLIPPED, and the flip is the point. /NeoDCT/User/apps/Browser
- * used to be an ordinary trusted app, because that directory meant nothing.
- * It is now the user-installed app directory, and EVERYTHING under it is
- * untrusted regardless of what it is called -- so that path is confined now.
+ * ONE OF THESE FLIPPED, and the flip is the point.
+ * /NeoDCT/User/sdcard/apps/Browser used to be an ordinary trusted app,
+ * because that directory meant nothing. It is now the user-installed app
+ * directory, and EVERYTHING under it is untrusted regardless of what it is
+ * called -- so that path is confined now.
  *
  * That is a rule about WHERE, not about the name, so it does not weaken what
  * this test was written to protect: a directory called Browser under the stock
@@ -1152,9 +1153,18 @@ static void t_the_browser_name_alone_confines_nothing(void)
 
 /* Everything the owner installed is untrusted, whatever it is called and
  * however deep it sits. There is no manifest field for this and no way to opt
- * out: the directory is on the writable partition, which survives a system
- * update, so an app there is the one kind whose code the signed image does not
- * vouch for. */
+ * out: the directory is writable and survives a system update, so an app there
+ * is the one kind whose code the signed image does not vouch for.
+ *
+ * It is on the CARD now -- /NeoDCT/User/sdcard/apps -- which makes the rule
+ * easier to argue rather than harder. A card comes out of the phone and goes
+ * into a PC, so an app.so under there is bytes a stranger chose in the most
+ * literal sense available, and every mode on it is a claim until
+ * neodct-sdcard's apply_layout() has restated it. A rule about WHERE code
+ * lives survives all of that; one about what the code says about itself would
+ * not. The tests below are spelled with ND_PATH_USER_APPS_DIR rather than the
+ * literal for the same reason nd_proc.c builds its prefix from it: the two
+ * cannot then disagree about where the directory is. */
 static void t_everything_the_owner_installed_is_untrusted(void)
 {
     nd_app_entry plain = app_at(ND_PATH_USER_APPS_DIR "/Notes");
@@ -1162,9 +1172,19 @@ static void t_everything_the_owner_installed_is_untrusted(void)
     nd_app_entry deep = app_at(ND_PATH_USER_APPS_DIR "/a/b/c");
     nd_app_entry probe = app_at(ND_PATH_USER_APPS_DIR "/PentestSms");
     /* The directory ITSELF is not an app, and a sibling whose name merely
-     * starts the same way is not inside it. */
+     * starts the same way is not inside it.
+     *
+     * The sibling is spelled against the CURRENT directory rather than left
+     * as the old /NeoDCT/User/appsX -- which after the move to the card is
+     * not a near miss at all but a path two levels away, and would have made
+     * this line pass without testing the component boundary it is here for. */
     nd_app_entry itself = app_at(ND_PATH_USER_APPS_DIR);
-    nd_app_entry sibling = app_at("/NeoDCT/User/appsX/Notes");
+    nd_app_entry sibling = app_at(ND_PATH_USER_APPS_DIR "X/Notes");
+    /* The mountpoint the apps directory sits on. A card that is not mounted,
+     * or is mounted and empty, leaves this as an ordinary directory on the
+     * user partition -- and it is not the apps directory, so nothing here is
+     * confined by being under it. */
+    nd_app_entry mountpoint = app_at(ND_PATH_CARD_DIR "/Notes");
 
     CHECK(nd_proc_app_is_untrusted(&plain));
     CHECK(nd_proc_app_is_untrusted(&browser));
@@ -1172,6 +1192,7 @@ static void t_everything_the_owner_installed_is_untrusted(void)
     CHECK(nd_proc_app_is_untrusted(&probe));
     CHECK(!nd_proc_app_is_untrusted(&itself));
     CHECK(!nd_proc_app_is_untrusted(&sibling));
+    CHECK(!nd_proc_app_is_untrusted(&mountpoint));
 
     /* And nothing there can ever also be a root app -- the two lists must not
      * overlap, or the app would be handed ndusr_ut and root at once. */
@@ -1213,7 +1234,7 @@ static void t_the_stock_name_alone_grants_nothing(void)
      * name. Nothing today can create any of these; the point is that when
      * something can, it will not quietly be a privilege grant. */
     nd_app_entry eng = app_at(ND_PATH_ENG_APPS_DIR "/Clock");
-    nd_app_entry user = app_at("/NeoDCT/User/apps/Clock");
+    nd_app_entry user = app_at(ND_PATH_USER_APPS_DIR "/Clock");
     nd_app_entry deep = app_at(ND_PATH_APPS_DIR "/Evil/Clock");
     nd_app_entry near = app_at(ND_PATH_APPS_DIR "/Clock2");
     nd_app_entry pre = app_at(ND_PATH_APPS_DIR "/ClockX");

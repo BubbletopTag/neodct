@@ -461,7 +461,7 @@ try_mount() {   # try_mount DEV
         return 0
     fi
 
-    write_state unformatted "$1" "$(fstype_of "$1")" "$(label_of "$1")"
+    write_state unmountable "$1" "$(fstype_of "$1")" "$(label_of "$1")"
     log "$1 has no filesystem we can mount"
     return 1
 }

@@ -166,13 +166,16 @@ static void test_apprun_as_root_is_only_for_engineering_apps(void)
     spec_for(&spec, argv);
     CHECK_INT((int)nd_broker_spawn(b, ND_PATH_ND_APPRUN, &spec, NULL, &pid), (int)ND_ERR_PERM);
 
-    /* A user-installed app, asked for as root -- the interesting one, since
-     * /NeoDCT/User is writable. */
-    argv[1] = "/NeoDCT/User/apps/Pentest";
+    /* A user-installed app, asked for as root -- the interesting one, because
+     * that directory is on the MEMORY CARD, which anyone with the phone in
+     * their hand can take out and write on a PC. "nd-apprun is allowed to run
+     * as root" plus "which app it runs is argv[1]" would otherwise mean any
+     * .so a stranger left on a card runs as root. */
+    argv[1] = ND_PATH_USER_APPS_DIR "/Pentest";
     CHECK_INT((int)nd_broker_spawn(b, ND_PATH_ND_APPRUN, &spec, NULL, &pid), (int)ND_ERR_PERM);
 
     /* And a path that starts with the engineering directory but climbs out. */
-    argv[1] = ND_PATH_ENG_APPS_DIR "/../../../NeoDCT/User/apps/Pentest";
+    argv[1] = ND_PATH_ENG_APPS_DIR "/../../.." ND_PATH_USER_APPS_DIR "/Pentest";
     CHECK_INT((int)nd_broker_spawn(b, ND_PATH_ND_APPRUN, &spec, NULL, &pid), (int)ND_ERR_PERM);
 
     nd_broker_stop(b);
@@ -197,9 +200,9 @@ static void test_a_root_child_does_not_get_the_callers_environment(void)
     bool saw_path = false;
     bool saw_fb = false;
 
-    in[0] = "LD_PRELOAD=/NeoDCT/User/apps/x/evil.so";
-    in[1] = "PATH=/NeoDCT/User/apps/x/bin";
-    in[2] = "NEODCT_ROOT=/NeoDCT/User/apps/x";
+    in[0] = "LD_PRELOAD=" ND_PATH_USER_APPS_DIR "/x/evil.so";
+    in[1] = "PATH=" ND_PATH_USER_APPS_DIR "/x/bin";
+    in[2] = "NEODCT_ROOT=" ND_PATH_USER_APPS_DIR "/x";
     in[3] = "NEODCT_FB_FD=7";      /* legitimate: a descriptor just remapped */
     in[4] = "LD_AUDIT=/tmp/a.so";
     in[5] = "NEODCT_FB_FD_EVIL=1"; /* a prefix of a kept name is not that name */
@@ -223,7 +226,7 @@ static void test_a_root_child_does_not_get_the_callers_environment(void)
     /* A PATH the caller did not choose, and it is not the caller's. */
     CHECK(saw_path);
     for (i = 0u; out[i] != NULL; i++)
-        CHECK(strcmp(out[i], "PATH=/NeoDCT/User/apps/x/bin") != 0);
+        CHECK(strcmp(out[i], "PATH=" ND_PATH_USER_APPS_DIR "/x/bin") != 0);
 
     /* And the one thing a launch genuinely cannot do without survives. */
     CHECK(saw_fb);

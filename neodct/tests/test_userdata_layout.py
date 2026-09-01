@@ -142,10 +142,40 @@ def test_the_three_that_are_owner_only(tmp_path, name):
 
 def test_the_card_mountpoint_stays_traversable(tmp_path):
     """A mounted card brings its own modes, but with nothing mounted the o+x
-    is what lets a card path resolve at all."""
+    is what lets a card path resolve at all.
+
+    It matters more than it did. Apps the owner installed live UNDER here now,
+    at sdcard/apps, so this is the first component of the path nd-apprun
+    dlopens an app.so from -- take the o+x off and no installed app starts,
+    and the browser has nowhere to download to either. 0751 and not 0755 for
+    the usual reason: traversal and listing are different bits, and the
+    listing is not owed to anybody."""
     _, user_dir, _, _ = run_layout(tmp_path)
 
-    assert mode_of(user_dir / "sdcard") & 0o001
+    assert mode_of(user_dir / "sdcard") == 0o751
+
+
+def test_the_partition_does_not_grow_an_apps_directory_back(tmp_path):
+    """Apps were briefly at /NeoDCT/User/apps, and the reason they are not is
+    arithmetic rather than taste: on the Luckfox this partition is EIGHT
+    MEGABYTES, shared with the databases, the settings, the logs, the browser
+    profile and the pending update record. An apps directory here is a feature
+    whose success fills the partition the phone needs in order to save
+    anything at all.
+
+    Nothing reads it any more -- nd_ui_scan_apps() is pointed at
+    ND_PATH_USER_APPS_DIR, which is on the card -- so an entry restored to
+    this table would be a directory that quietly accumulates apps that never
+    launch, on the partition that can least afford them."""
+    _, user_dir, _, _ = run_layout(tmp_path)
+
+    assert not (user_dir / "apps").exists(), (
+        "S00userdata is making an apps directory on the user partition again; "
+        "installed apps live at /NeoDCT/User/sdcard/apps, on the card"
+    )
+    assert "apps:" not in open(SCRIPT).read(), (
+        "the user-partition layout table names an apps directory again"
+    )
 
 
 def test_loose_files_at_the_root_are_not_world_readable(tmp_path):

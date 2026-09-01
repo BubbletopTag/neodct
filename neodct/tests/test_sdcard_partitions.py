@@ -1,30 +1,29 @@
-"""A NeoDCT card is two FAT32 partitions, and that is the storage half of
-the confinement design.
+"""A NeoDCT card is ONE ext4 partition, and the ownership on it is the storage
+half of the confinement design.
 
-SECURITY-PLAN.md section 1, Option C. The constraint it solves: a FAT
-filesystem has NO ownership. chown and chmod do nothing on one; permissions
-come from mount options, and those apply to the whole filesystem at once. So
-there is no way to give ndusr_ut a subdirectory of a card and deny it the
-rest -- a card mounted for the browser is a card the browser owns entirely,
-including any authorized_keys sitting on it.
+It was two FAT32 partitions until 0.5.0b, and the reason it is not any more is
+worth stating because it is the reason this file lost half its tests. A FAT
+filesystem has NO ownership: chown and chmod do nothing on one, permissions
+come from uid=/gid=/fmask=/dmask= mount options, and those apply to the whole
+filesystem at once. "Downloads are writable by ndusr_ut and the owner's music
+is not" therefore needed two filesystems, because it could not be said inside
+one. ext4 records owner, group and mode per inode and says all of it in a
+single directory tree -- so the second partition, its NEODCTUT label, the
+arithmetic that split the card three-to-one and the guard that stopped the
+arrival side being mounted as the media side all went away together. What
+replaced them is neodct-sdcard's CARD_LAYOUT, and that is tested next door in
+test_sdcard_layout.py.
 
-The way out is that a card can carry more than one filesystem. Two
-partitions, two independent sets of ownership, no kernel feature, no
-filesystem change, and a card that still reads on any computer.
+What is left here is the partition table, which still has to be written by
+hand: there is no sfdisk, no parted and no batch-mode fdisk in the image, so
+do_format() writes the 446th to 512th bytes of the card itself. That is 66
+bytes of a format that has not changed since 1983, and the tests below check
+them against it -- and, where the machine allows it, hand them to the actual
+Linux partition scanner through a loop device and ask what it found.
 
-Two things here need proving rather than asserting, and each gets a test that
-does the real thing:
-
-  the partition table   written by hand, because there is no sfdisk, no
-                        parted and no batch-mode fdisk in the image. So the
-                        66 bytes are checked against the on-disk format, and
-                        -- where the machine allows it -- fed to the actual
-                        Linux partition scanner through a loop device.
-
-  the mount options     the arrival partition is the only one with noexec,
-                        and the media side is 0751-shaped so ndusr_ut can
-                        traverse to reach it without listing the owner's
-                        music.
+The mount options are here too, for the one card shape that still has any: a
+FAT card the phone did not make. An ext card gets none, because it carries its
+own ownership, which is the entire point.
 """
 
 import os
@@ -40,6 +39,28 @@ HELPER = os.path.join(
 )
 SECTOR = 512
 MIB = 1024 * 1024
+# The 1 MiB alignment every partition on a card starts and ends on, in
+# sectors. The helper spells it ALIGN_SECTORS; this is the same number, and
+# test_the_alignment_is_a_megabyte below pins the two together rather than
+# trusting the copy.
+ALIGN = MIB // SECTOR
+
+# Root plus loop devices, which is what it takes to ask the kernel about a
+# partition table rather than to read the bytes back ourselves. A container
+# usually has neither, and that is a fact about the machine and not about the
+# table, so those tests skip rather than fail.
+NEEDS_LOOP = pytest.mark.skipif(
+    os.geteuid() != 0 or not os.path.exists("/dev/loop-control")
+    or shutil.which("losetup") is None or shutil.which("blockdev") is None,
+    reason="needs root and loop devices to ask the real partition scanner",
+)
+
+# reread_partitions() calls partprobe, which belongs to parted and is not on
+# every host -- it is not on this one. It is a wrapper around one ioctl and
+# says nothing about the table, so it is stubbed with blockdev(8), which asks
+# the kernel the same thing. What must not be stubbed is anything that decides
+# WHERE the partition goes; that is the whole point of the test below.
+REREAD_STUB = 'reread_partitions() { sync; blockdev --rereadpt "$1"; }\n'
 
 
 def sh(tmp_path, body, env=None, stubs=""):
@@ -72,116 +93,153 @@ def parse_mbr(raw):
     return out
 
 
-# --- the arithmetic ------------------------------------------------------
+# --- the arithmetic that is left ------------------------------------------
+# partition_plan() is gone with the second partition. What do_format() does
+# now is: start at ALIGN_SECTORS, and take everything to the end of the disk,
+# rounded down. So the only arithmetic left is align_down(), and it is worth
+# its own tests because a partition that ends past the end of the card is a
+# card the kernel truncates reads on.
 
-def plan(tmp_path, sectors):
-    result = sh(tmp_path, 'partition_plan /dev/fake',
-                stubs='device_sectors() { echo %d; }' % sectors)
+def align_down(tmp_path, value):
+    result = sh(tmp_path, 'align_down %d' % value)
     assert result.returncode == 0, result.stderr
-    return result.stdout.split()
+    return int(result.stdout.strip())
 
 
-def test_a_normal_card_is_split_three_to_one(tmp_path):
-    """Downloads and MMS attachments are small; media is not."""
-    p1_start, p1, p2_start, p2 = (int(v) for v in plan(tmp_path, 256 * MIB // SECTOR))
+def test_the_alignment_is_a_megabyte(tmp_path):
+    """Pinned rather than assumed. An SD card's erase blocks want 1 MiB and a
+    partition that straddles one performs like a floppy -- and every number
+    below is derived from this one, so a drift here would make the rest of
+    this file agree with the helper about the wrong thing."""
+    result = sh(tmp_path, 'echo $ALIGN_SECTORS')
 
-    assert p1 > p2, "the media side is the bigger one"
-    assert abs(p2 * SECTOR / MIB - 64) < 2, p2
-
-
-def test_every_boundary_is_a_megabyte(tmp_path):
-    """1 MiB alignment. An SD card's erase blocks want it, and a partition
-    that straddles one performs like a floppy."""
-    for size_mib in (64, 128, 256, 1024, 8192):
-        values = [int(v) for v in plan(tmp_path, size_mib * MIB // SECTOR)]
-
-        for value in values:
-            assert value % (MIB // SECTOR) == 0, (size_mib, values)
+    assert int(result.stdout.strip()) == ALIGN
 
 
-def test_the_partitions_do_not_overlap_or_run_off_the_end(tmp_path):
-    for size_mib in (64, 128, 256, 1024, 8192, 65536):
-        total = size_mib * MIB // SECTOR
-        p1_start, p1, p2_start, p2 = (int(v) for v in plan(tmp_path, total))
+@pytest.mark.parametrize("sectors", [
+    2 * ALIGN,              # exactly two megabytes
+    2 * ALIGN + 1,          # one sector over
+    3 * ALIGN - 1,          # one sector short
+    64 * MIB // SECTOR,
+    256 * MIB // SECTOR,
+    64 * 1024 * MIB // SECTOR,   # a 64 GB card, and 32-bit arithmetic
+])
+def test_alignment_rounds_down_and_never_up(tmp_path, sectors):
+    """Down, and only down. Rounding up by one megabyte is a partition whose
+    last sector is off the end of the card, which reads as a filesystem that
+    was fine until the day something used the last of it."""
+    got = align_down(tmp_path, sectors)
 
-        assert p1_start >= MIB // SECTOR, "the table itself needs room"
-        assert p1_start + p1 <= p2_start, "the media side overruns the arrival one"
-        assert p2_start + p2 <= total, "the arrival side runs off the end"
-
-
-def test_a_huge_card_does_not_hand_over_a_quarter_of_it(tmp_path):
-    """A quarter of 64 GB is 16 GB of downloads nobody will ever make."""
-    _, _, _, p2 = (int(v) for v in plan(tmp_path, 64 * 1024 * MIB // SECTOR))
-
-    assert p2 * SECTOR <= 600 * MIB, p2
-
-
-def test_a_tiny_card_is_left_whole(tmp_path):
-    """Not an error: it gets exactly what every card got before this -- one
-    filesystem, no table, and no arrival partition, which is the same answer
-    a foreign card gives."""
-    result = sh(tmp_path, 'partition_plan /dev/fake',
-                stubs='device_sectors() { echo %d; }' % (8 * MIB // SECTOR))
-
-    assert result.stdout.strip() == "superfloppy"
-
-
-def test_a_device_with_no_readable_size_is_a_failure_not_a_guess(tmp_path):
-    result = sh(tmp_path, 'partition_plan /dev/fake || echo REFUSED',
-                stubs='device_sectors() { return 1; }')
-
-    assert "REFUSED" in result.stdout
+    assert got % ALIGN == 0, got
+    assert got <= sectors, got
+    assert sectors - got < ALIGN, "it rounded down further than it had to"
 
 
 # --- the table itself ----------------------------------------------------
 
 def test_the_written_table_is_a_partition_table(tmp_path):
     """66 bytes of a format that has not changed since 1983, written by hand
-    because the image has no partitioner that can be scripted."""
+    because the image has no partitioner that can be scripted.
+
+    THREE arguments now, not five. The second entry was the arrival partition
+    and it is a directory on the ext4 filesystem instead, so entries two,
+    three and four have to be empty -- a card whose table still claims a
+    second partition is one a PC will offer to repair."""
     image = tmp_path / "card.img"
     image.write_bytes(b"\xee" * (2 * MIB))
 
-    result = sh(tmp_path, 'write_mbr "%s" 2048 129024 131072 129024' % image)
+    result = sh(tmp_path, 'write_mbr "%s" 2048 260096' % image)
 
     assert result.returncode == 0, result.stderr
     entries = parse_mbr(image.read_bytes()[:512])
-    assert entries[0] == (0x0C, 2048, 129024), entries
-    assert entries[1] == (0x0C, 131072, 129024), entries
+    assert entries[0] == (0x83, 2048, 260096), entries
+    assert entries[1] == (0, 0, 0), "a second partition that no longer exists"
     assert entries[2] == (0, 0, 0) and entries[3] == (0, 0, 0), "junk in 3 and 4"
 
 
-def test_both_partitions_are_fat32_lba(tmp_path):
-    """0x0C, not 0x0B. A card big enough to matter is addressed by LBA, and
-    an 0x0B entry beyond the CHS range is one some tools refuse to read."""
+def test_the_one_partition_says_linux_and_not_fat32(tmp_path):
+    """0x83, and the byte is not decoration.
+
+    It was 0x0C (FAT32 with LBA) when the card was FAT. A PC that reads the
+    table decides what to try mounting from it, so an ext4 filesystem inside a
+    partition that claims to be FAT32 is a card a desktop offers to REPAIR --
+    which is a dialog box away from a card with nothing on it."""
     image = tmp_path / "card.img"
     image.write_bytes(b"\x00" * (2 * MIB))
-    sh(tmp_path, 'write_mbr "%s" 2048 1024 4096 1024' % image)
 
-    for ptype, _, _ in parse_mbr(image.read_bytes()[:512])[:2]:
-        assert ptype == 0x0C
+    sh(tmp_path, 'write_mbr "%s" 2048 1024' % image)
+
+    ptype, _, _ = parse_mbr(image.read_bytes()[:512])[0]
+    assert ptype == 0x83, hex(ptype)
 
 
-def test_writing_the_table_does_not_touch_anything_else(tmp_path):
-    """conv=notrunc, and one sector. A format that also zeroed the card
-    would take minutes and wear the flash for nothing."""
+def test_the_table_is_exactly_one_sector_with_the_signature_on_the_end(tmp_path):
+    """512 bytes: 446 of nothing, four 16-byte entries, and 0x55 0xAA.
+
+    The count is asserted rather than assumed because the helper assembles the
+    table in a temp file precisely so that it can check the length before
+    anything touches the card -- see the comment on write_mbr(), and the pipe
+    bug it is there to have caught. This is the same check, from outside."""
+    image = tmp_path / "card.img"
+    image.write_bytes(b"\x11" * (2 * MIB))
+
+    sh(tmp_path, 'write_mbr "%s" 2048 1024' % image)
+
+    body = image.read_bytes()
+    assert body[510:512] == b"\x55\xaa", "no signature"
+    # 446 zero bytes, then the one entry, then 48 more zeros. Everything the
+    # helper wrote, counted.
+    assert body[:446] == b"\x00" * 446, "boot code where there should be none"
+    assert body[462:510] == b"\x00" * 48, "entries two to four are not empty"
+    assert body[512] == 0x11, "it wrote past the first sector"
+
+
+def test_a_table_that_did_not_come_out_512_bytes_is_not_written(tmp_path):
+    """The guard that makes the one function here that can destroy a card
+    refuse rather than half-succeed.
+
+    The bug it exists for: dd reads a pipe with one read() per block and a
+    read() from a pipe returns whatever happens to be in it, so `dd bs=512
+    count=1` on the far end of the assembly took the first 446 bytes and
+    stopped -- a partition table with no partitions in it, written to a card,
+    silently. mbr_entry is stubbed short here to produce the same shape of
+    wrongness on purpose."""
     image = tmp_path / "card.img"
     image.write_bytes(b"\xab" * (2 * MIB))
 
-    sh(tmp_path, 'write_mbr "%s" 2048 1024 4096 1024' % image)
+    result = sh(tmp_path, 'write_mbr "%s" 2048 1024' % image,
+                stubs='mbr_entry() { printf "short"; }')
+
+    assert result.returncode != 0, "it wrote a table it could not measure"
+    assert set(image.read_bytes()) == {0xAB}, "it touched the card anyway"
+
+
+def test_writing_the_table_does_not_touch_anything_else(tmp_path):
+    """conv=notrunc, and one sector. A format that also zeroed the card would
+    take minutes and wear the flash for nothing."""
+    image = tmp_path / "card.img"
+    image.write_bytes(b"\xab" * (2 * MIB))
+
+    sh(tmp_path, 'write_mbr "%s" 2048 1024' % image)
 
     body = image.read_bytes()
     assert len(body) == 2 * MIB, "the image was truncated"
     assert set(body[512:]) == {0xAB}, "it wrote past the first sector"
 
 
-@pytest.mark.skipif(os.geteuid() != 0 or not os.path.exists("/dev/loop-control")
-                    or shutil.which("losetup") is None
-                    or shutil.which("blockdev") is None,
-                    reason="needs root and loop devices to ask the real scanner")
+# --- and what the kernel makes of it --------------------------------------
+
+@NEEDS_LOOP
 def test_linux_itself_reads_the_table_back(tmp_path):
     """The one that matters. Everything above checks the bytes against the
     format as documented; this hands them to the actual partition scanner and
     asks what it found.
+
+    do_format() is driven for real as far as the table, with only the mkfs and
+    the mount stubbed out -- so the arithmetic that decides where the
+    partition starts and ends is the helper's own and not a copy of it here.
+    That arithmetic is now three lines rather than a function, which is
+    exactly why it is worth exercising through the thing that uses it.
 
     Skipped rather than failed where the kernel reserves no partition minors
     for loop devices -- a container, usually -- because that is a fact about
@@ -193,28 +251,61 @@ def test_linux_itself_reads_the_table_back(tmp_path):
     loop = subprocess.run(["losetup", "--show", "-f", "-P", str(image)],
                           capture_output=True, text=True, check=True).stdout.strip()
     try:
-        result = sh(tmp_path, 'plan="$(partition_plan %s)" && '
-                              'set -- $plan && write_mbr %s "$1" "$2" "$3" "$4" && '
-                              'echo "$plan"' % (loop, loop))
+        result = sh(tmp_path, 'do_format %s' % loop,
+                    stubs=REREAD_STUB
+                          + 'mkfs_ext4() { echo "$1" > "%s"; }\n'
+                            'try_mount() { return 0; }\n' % (tmp_path / "mkfs"))
         assert result.returncode == 0, result.stderr
-        want = [int(v) for v in result.stdout.split()]
 
-        subprocess.run(["blockdev", "--rereadpt", loop], capture_output=True)
         name = os.path.basename(loop)
-        base = "/sys/block/%s/%sp1" % (name, name)
-        if not os.path.isdir(base):
+        part = "/sys/block/%s/%sp1" % (name, name)
+        if not os.path.isdir(part):
             pytest.skip("this kernel makes no partition nodes for loop devices")
-        for index, (start, size) in enumerate(((want[0], want[1]),
-                                               (want[2], want[3])), start=1):
-            part = "/sys/block/%s/%sp%d" % (name, name, index)
-            assert os.path.isdir(part), "the kernel found no partition %d" % index
-            assert int(open(part + "/start").read()) == start
-            assert int(open(part + "/size").read()) == size
+
+        start = int(open(part + "/start").read())
+        size = int(open(part + "/size").read())
+        assert start == ALIGN, "the table itself needs the first megabyte"
+        assert size % ALIGN == 0, size
+        assert start + size <= 256 * MIB // SECTOR, "the partition runs off the end"
+        # Everything that is left, not a share of it: there is no second
+        # partition to leave room for any more.
+        assert 256 * MIB // SECTOR - (start + size) < ALIGN, size
+
+        # ...and the filesystem went on the PARTITION, not on the whole disk.
+        assert (tmp_path / "mkfs").read_text().strip() == loop + "p1"
+        assert "one ext4 partition" in result.stderr, result.stderr
     finally:
         subprocess.run(["losetup", "-d", loop], capture_output=True)
 
 
-# --- the mount options, which are what the partitions are FOR ------------
+@NEEDS_LOOP
+def test_an_image_with_no_mke2fs_refuses_rather_than_making_a_fat_card(tmp_path):
+    """An image built without e2fsprogs cannot make a NeoDCT card at all, and
+    the honest answer is to say so.
+
+    Falling back to mkfs.vfat would produce a card that MOUNTS -- and then
+    cannot hold an app, cannot give a download anywhere to land, and reports
+    itself as a working card while doing none of it. The failure being
+    invisible is what makes it worth refusing out loud."""
+    image = tmp_path / "card.img"
+    with open(image, "wb") as handle:
+        handle.truncate(32 * MIB)
+
+    loop = subprocess.run(["losetup", "--show", "-f", str(image)],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    try:
+        result = sh(tmp_path, 'do_format %s' % loop,
+                    stubs='command() { return 1; }\n')
+
+        assert result.returncode != 0
+        assert "no mke2fs in this image" in result.stderr, result.stderr
+        state = (tmp_path / "run" / "sdcard.prop").read_text()
+        assert "state=unformatted" in state, state
+    finally:
+        subprocess.run(["losetup", "-d", loop], capture_output=True)
+
+
+# --- the mount options, for the one card shape that still has any ---------
 
 _ATTEMPT_SEQ = [0]
 
@@ -238,47 +329,76 @@ def mount_attempts(tmp_path, function, *args, extra_stubs=""):
     return result, tried
 
 
-def test_the_arrival_partition_is_the_only_one_with_noexec(tmp_path):
-    """Split by provenance, not by trust. noexec refuses mmap(PROT_EXEC) as
-    well as execve, so a blanket rule would block emulator cores loaded with
-    dlopen() and nd-apprun's own app.so."""
-    _, media = mount_attempts(tmp_path, "try_mount", "/dev/mmcblk1p1")
-    _, arrival = mount_attempts(
-        tmp_path, "mount_untrusted", "/dev/mmcblk1p1",
-        extra_stubs='candidates() { echo /dev/mmcblk1p2; }\n'
-                    'is_untrusted_partition() { return 0; }\n')
+def options_of(attempt):
+    """The -o field of one recorded `mount` call, as a list.
 
-    assert arrival, "the arrival partition was never mounted"
-    for attempt in arrival:
-        assert "noexec" in attempt, attempt
-    for attempt in media:
-        assert "noexec" not in attempt, attempt
+    Split out rather than searched for in the whole line, because the line
+    ends in the mountpoint -- which under pytest is a directory named after
+    the test. A test called ..._is_noexec therefore made `"noexec" not in
+    attempt` false by existing, which is a test that can only pass by being
+    renamed."""
+    fields = attempt.split()
+    return fields[fields.index("-o") + 1].split(",")
 
 
-def test_the_media_side_can_be_traversed_but_not_listed(tmp_path):
-    """dmask=0026 is 0751, the same trick /NeoDCT/User uses: ndusr_ut walks
-    through "sdcard" to reach "untrusted" and `ls` of the music is EACCES."""
+def test_no_card_mount_is_noexec(tmp_path):
+    """THE OPTION THAT MUST NOT COME BACK, and the one this file used to
+    insist on.
+
+    noexec was the arrival partition's, and the split it belonged to was by
+    PROVENANCE: things the owner copied on could run, things that arrived on
+    their own could not. That partition is a directory now, and a directory
+    cannot carry its own mount options -- so the card is mounted once, for
+    everything on it.
+
+    It has to be mounted exec, and that is not a weakening. Apps the owner
+    installed live at /NeoDCT/User/sdcard/apps, nd-apprun reaches app.so with
+    dlopen(), and noexec refuses mmap(PROT_EXEC) exactly as it refuses
+    execve() -- so a noexec card is a phone on which no installed app will
+    start, including the emulator cores the media player loads the same way.
+
+    What carries the boundary instead is ownership: apps/ is 0755 ndusr:ndusr,
+    so an untrusted process can read and execute what is there and cannot add
+    to it or change it. That is a stronger statement than noexec ever made,
+    because it distinguishes running code from writing it. See
+    test_sdcard_layout.py."""
+    _, tried = mount_attempts(tmp_path, "try_mount", "/dev/mmcblk1p1")
+
+    assert tried, "nothing was mounted at all"
+    for attempt in tried:
+        assert "noexec" not in options_of(attempt), attempt
+
+
+def test_the_safety_options_are_on_every_attempt(tmp_path):
+    """nosuid,nodev, on the one filesystem whose contents were chosen by
+    whoever last held it and which udev mounts on insertion. FAT could not
+    represent a setuid bit or a device node in the first place; ext4 can, so
+    on a card the phone now formats these are the only thing between a crafted
+    card and a root shell rather than defence in depth."""
+    _, tried = mount_attempts(tmp_path, "try_mount", "/dev/mmcblk1p1")
+
+    for attempt in tried:
+        options = options_of(attempt)
+        assert "nosuid" in options and "nodev" in options, attempt
+
+
+def test_a_fat_card_is_still_mounted_traversable_but_not_listable(tmp_path):
+    """dmask=0026 is 0751, the same "traverse but do not list" trick
+    /NeoDCT/User uses.
+
+    Only FAT gets this. It is either somebody else's card or a NeoDCT card
+    from before 0.5.0b, and in both cases mount options are the only way to
+    say anything about it at all -- so the old shape is kept for the old
+    filesystem rather than dropped along with the partition it was designed
+    around."""
     _, tried = mount_attempts(tmp_path, "try_mount", "/dev/mmcblk1p1")
     vfat = [a for a in tried if "-t vfat" in a]
 
     assert vfat, tried
-    assert "uid=1000" in vfat[0] and "gid=1000" in vfat[0], vfat[0]
-    assert "dmask=0026" in vfat[0], vfat[0]
-    assert "fmask=0137" in vfat[0], vfat[0]
-
-
-def test_the_arrival_side_is_written_by_one_user_and_read_by_the_other(tmp_path):
-    """uid=ndusr_ut so the browser can write, gid=ndusr so the core can read
-    -- because the plan's own workflow is that installing a download is an
-    explicit copy the owner performs through the UI, and the UI is ndusr."""
-    _, tried = mount_attempts(
-        tmp_path, "mount_untrusted", "/dev/mmcblk1p1",
-        extra_stubs='candidates() { echo /dev/mmcblk1p2; }\n'
-                    'is_untrusted_partition() { return 0; }\n')
-
-    assert tried
-    assert "uid=1001" in tried[0], tried[0]
-    assert "gid=1000" in tried[0], tried[0]
+    options = options_of(vfat[0])
+    assert "uid=1000" in options and "gid=1000" in options, vfat[0]
+    assert "dmask=0026" in options, vfat[0]
+    assert "fmask=0137" in options, vfat[0]
 
 
 def test_an_image_with_no_users_still_mounts_the_card(tmp_path):
@@ -293,24 +413,29 @@ def test_an_image_with_no_users_still_mounts_the_card(tmp_path):
 
     tried = attempts.read_text().splitlines()
     assert result.returncode == 0
-    assert tried and "uid=" not in tried[0], tried[0]
-    assert "nosuid" in tried[0] and "nodev" in tried[0], tried[0]
+    assert tried, "nothing was mounted at all"
+    options = options_of(tried[0])
+    assert not [o for o in options if o.startswith("uid=")], tried[0]
+    assert "nosuid" in options and "nodev" in options, tried[0]
 
 
 def test_ownership_is_not_forced_onto_an_ext_card(tmp_path):
-    """An ext card carries real uids. Forcing uid= would make every file on
-    it belong to ndusr whoever wrote it, and the kernel rejects the option
-    there anyway -- which would turn "someone else's ext card" from
-    "mountable" into "unmountable"."""
+    """An ext card carries real uids, which is now the whole reason the phone
+    formats one. Forcing uid= would make every file on it belong to ndusr
+    whoever wrote it -- and the kernel rejects the option there anyway, which
+    would turn a NeoDCT card from "mounted" into "unmountable"."""
     _, tried = mount_attempts(tmp_path, "try_mount", "/dev/mmcblk1p1")
 
     for attempt in tried:
-        if "ext4" in attempt or "ext3" in attempt or "ext2" in attempt:
-            assert "uid=" not in attempt, attempt
-            assert "dmask" not in attempt, attempt
+        if not [t for t in ("ext4", "ext3", "ext2") if ("-t " + t) in attempt]:
+            continue
+        for option in options_of(attempt):
+            assert not option.startswith("uid="), attempt
+            assert not option.startswith("dmask"), attempt
+            assert not option.startswith("fmask"), attempt
 
 
-# --- identifying the arrival partition -----------------------------------
+# --- telling one kind of card from another --------------------------------
 
 def fat32_image(path, label, size=MIB):
     """A boot sector that says what mkfs.vfat's says, and nothing else."""
@@ -325,30 +450,22 @@ def fat32_image(path, label, size=MIB):
 
 def test_the_label_is_read_out_of_the_boot_sector(tmp_path):
     """Not from blkid. Busybox's blkid reported NOTHING for a plain mkfs.vfat
-    card once already, which is why try_mount asks the kernel rather than
-    asking it -- the same reasoning applies here."""
+    card once already, which is why try_mount asks the kernel whether a
+    filesystem mounts rather than asking blkid what it is."""
     result = sh(tmp_path, 'fat_label "%s"'
-                % fat32_image(tmp_path / "p2.img", "NEODCTUT"))
+                % fat32_image(tmp_path / "card.img", "NEODCT"))
 
-    assert result.stdout.strip() == "NEODCTUT"
-
-
-def test_a_media_partition_is_not_mistaken_for_an_arrival_one(tmp_path):
-    fat32_image(tmp_path / "p1.img", "NEODCT")
-
-    result = sh(tmp_path, 'is_untrusted_partition "%s" && echo YES || echo NO'
-                % (tmp_path / "p1.img"))
-
-    assert result.stdout.strip() == "NO"
+    assert result.stdout.strip() == "NEODCT"
 
 
 def test_something_that_is_not_fat32_has_no_label(tmp_path):
     """Eleven bytes at offset 71 of an arbitrary filesystem are eleven
     arbitrary bytes. Checking the FAT32 signature is what stops them reading
-    as a volume label."""
-    (tmp_path / "other.img").write_bytes(b"NEODCTUT" * 128)
+    as a volume label -- and an ext4 NeoDCT card is exactly such a filesystem,
+    with its own label somewhere else entirely."""
+    (tmp_path / "other.img").write_bytes(b"NEODCT\x00\x00" * 128)
 
-    result = sh(tmp_path, 'is_untrusted_partition "%s" && echo YES || echo NO'
+    result = sh(tmp_path, 'fat_label "%s" && echo YES || echo NO'
                 % (tmp_path / "other.img"))
 
     assert result.stdout.strip() == "NO"
@@ -365,7 +482,9 @@ def test_partition_paths_are_spelled_the_way_the_kernel_spells_them(
         tmp_path, disk, part, want):
     """mmcblk, nvme and loop take a "p"; sd and vd do not. Getting this wrong
     means mkfs writes to a device that does not exist -- or worse, one that
-    does."""
+    does. Only partition 1 is ever made now, but the function is still asked
+    for arbitrary numbers by reread_partitions() and by the tests, so both
+    spellings stay pinned."""
     result = sh(tmp_path, 'partition_path %s %d' % (disk, part))
 
     assert result.stdout.strip() == want
@@ -384,9 +503,9 @@ def test_partition_path_is_the_inverse_of_parent_disk(tmp_path):
 # --- the safety property that must survive all of this -------------------
 
 def test_formatting_still_refuses_the_disk_the_phone_runs_from(tmp_path):
-    """do_format now resolves what it was given to a whole DISK, because a
-    partition table is written to one. That must not become a way to reach
-    the system disk through one of its partitions."""
+    """do_format resolves what it was given to a whole DISK, because a
+    partition table is written to one. That must not become a way to reach the
+    system disk through one of its partitions."""
     for target in ("/dev/vda", "/dev/vda1", "/dev/vdb", "/dev/vdb2"):
         result = sh(tmp_path, 'do_format %s' % target)
 
