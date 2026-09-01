@@ -61,10 +61,28 @@
 # A missing group here is a permission bug on the phone, not a build error,
 # so the group comes first and 61-neodct-devices.rules names it second.
 #
-# video, audio, dialout, input and disk already exist: the first four from
+# video, audio, dialout and input already exist: the first three from
 # buildroot's skeleton, input from the udev package's own users table. i2c
 # does not exist anywhere in the image, which is why /dev/i2c-3 -- the keypad
 # expander and the fuel gauge -- is root:root 0600 today.
+#
+# ============ AND WHY disk IS NOT HERE ANY MORE ============
+#
+# It was, and it should not have been. Every block node on this phone is
+# root:disk 0660, so group disk is read AND WRITE on the raw storage: the
+# system partition, the userdata partition, the SD card. `dd if=/dev/mmcblk0`
+# reads the lot; `dd of=` rewrites it. That is not a smaller privilege than
+# root, it is most of root with extra steps.
+#
+# It was granted on the assumption that formatting a card needs it. It does
+# not. /NeoDCT/System/hw/neodct-sdcard MOUNTS, and mount(2) needs CAP_SYS_ADMIN
+# rather than a group -- so the helper never worked by being in disk, it worked
+# by being run by a root core. It is now run by the broker instead
+# (ND_BROKER_ROOT_EXEC), which is where that privilege belongs.
+#
+# Nothing else in the tree opens a block device at all: no /dev/mmcblk*,
+# /dev/sd*, /dev/vd* or /dev/ubi* anywhere in neodct/src or the overlay. The
+# group bought nothing and cost everything.
 #
 # 1002 rather than a number in the system range on purpose: mkusers assigns
 # every explicit gid before any automatic one, so pinning i2c inside 100-999
@@ -72,5 +90,5 @@
 - -1 i2c 1002 * - - - i2c nodes -- the keypad expander and the fuel gauge
 
 # --- the two users -------------------------------------------------------
-ndusr 1000 ndusr 1000 * /NeoDCT/User /bin/false video,audio,dialout,input,i2c,disk NeoDCT UI and trusted apps
+ndusr 1000 ndusr 1000 * /NeoDCT/User /bin/false video,audio,dialout,input,i2c NeoDCT UI and trusted apps
 ndusr_ut 1001 ndusr_ut 1001 * - /bin/false video,audio,input NeoDCT untrusted apps -- the browser and the media player

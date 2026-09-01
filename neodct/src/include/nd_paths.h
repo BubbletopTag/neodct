@@ -30,8 +30,22 @@ extern "C" {
 #define ND_PATH_ND_APPRUN    "/NeoDCT/System/bin/nd-apprun"
 #define ND_PATH_APPS_DIR     "/NeoDCT/System/apps"
 #define ND_PATH_ENG_APPS_DIR "/NeoDCT/System/engineering/apps"
-#define ND_PATH_VERSION_PROP "/NeoDCT/System/version.prop"
-#define ND_PATH_DISPLAYD     "/NeoDCT/System/hw/neodct_displayd"
+
+/* Where an app the OWNER installed lives, as opposed to one the image shipped.
+ *
+ * It is on the WRITABLE partition, which is the whole point and the whole
+ * problem. Anything that can write a file here gets code that runs when the
+ * owner opens it, and /NeoDCT/User survives system updates -- so unlike the
+ * rootfs, a bad app here is not removed by reinstalling the OS.
+ *
+ * Everything under this directory is therefore UNTRUSTED, without exception
+ * and regardless of what its manifest claims. nd_proc_app_is_untrusted()
+ * enforces it by prefix, and that is the only place in the tree where a prefix
+ * decides a privilege -- see the comment there for why it is safe here and
+ * would not be elsewhere. */
+#define ND_PATH_USER_APPS_DIR "/NeoDCT/User/apps"
+#define ND_PATH_VERSION_PROP  "/NeoDCT/System/version.prop"
+#define ND_PATH_DISPLAYD      "/NeoDCT/System/hw/neodct_displayd"
 /* The SD-card helper. Lives here rather than in settings_app.h because the
  * CORE runs it now: formatting a card is a verb on the service socket
  * (nd_svc.h), and the app that used to spawn it can no longer spawn
@@ -51,7 +65,7 @@ extern "C" {
 #define ND_PATH_T9_DICT   "/NeoDCT/System/core/t9.dict"
 
 /* ---- the writable user partition --------------------------------- */
-#define ND_PATH_USER          "/NeoDCT/User"
+#define ND_PATH_USER "/NeoDCT/User"
 
 /* The mode of that directory, and it is load-bearing rather than tidy.
  *
@@ -69,7 +83,7 @@ extern "C" {
  * overlay/etc/init.d/S00userdata carries the same number in its own layout
  * table, because it is shell and cannot include a header;
  * tests/test_userdata_layout.py pins the two together. */
-#define ND_MODE_USER_DIR 0751u
+#define ND_MODE_USER_DIR      0751u
 #define ND_PATH_SETTINGS_PROP "/NeoDCT/User/settings.prop"
 #define ND_PATH_KEYMAP        "/NeoDCT/User/keymap.json"
 #define ND_PATH_WALLPAPER     "/NeoDCT/User/wallpaper.jpg"

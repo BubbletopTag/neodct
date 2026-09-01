@@ -255,13 +255,60 @@ static bool user_is_allowed(const char *user)
     static const char *const allowed[] = ND_BROKER_USERS;
     size_t i;
 
+    /* An empty name is "do not drop", which is NOT waved through here any more
+     * -- see root_exec_allowed(), which the caller consults instead. */
     if (user == NULL || user[0] == '\0')
-        return true; /* "do not drop" -- an engineering app */
+        return true;
     for (i = 0u; allowed[i] != NULL; i++) {
         if (strcmp(user, allowed[i]) == 0)
             return true;
     }
     return false;
+}
+
+/* True when `path` may run WITHOUT being dropped, i.e. as root.
+ *
+ * This is the check that makes the broker a boundary rather than a root-exec
+ * service. ND_BROKER_ROOT_EXEC has the argument for the list; the extra
+ * condition on nd-apprun is here because it needs argv.
+ *
+ * Exact string comparison, deliberately. Not a prefix, not a realpath, not
+ * "does it start with /NeoDCT/System" -- a prefix test invites "/NeoDCT/System/
+ * ../../tmp/x" and a realpath here would be a second answer to a question the
+ * mount table already answers. The paths that may run as root are three
+ * literals, and a literal cannot be traversed into. */
+static bool root_exec_allowed(const char *path, const char *const *argv, uint32_t n_argv)
+{
+    static const char *const allowed[] = ND_BROKER_ROOT_EXEC;
+    size_t i;
+    bool listed = false;
+
+    if (path == NULL)
+        return false;
+    for (i = 0u; allowed[i] != NULL; i++) {
+        if (strcmp(path, allowed[i]) == 0) {
+            listed = true;
+            break;
+        }
+    }
+    if (!listed)
+        return false;
+
+    /* nd-apprun as root is only ever for an ENGINEERING app, and which app it
+     * runs is argv[1]. Without this, one allowed path would mean every app on
+     * the phone could be asked for as root. */
+    if (strcmp(path, ND_PATH_ND_APPRUN) == 0) {
+        static const char ENG[] = ND_PATH_ENG_APPS_DIR "/";
+
+        if (n_argv < 2u || argv == NULL || argv[1] == NULL)
+            return false;
+        if (strncmp(argv[1], ENG, sizeof ENG - 1u) != 0)
+            return false;
+        /* And nothing may climb back out of it. */
+        if (strstr(argv[1], "/../") != NULL || strstr(argv[1], "/..") == argv[1])
+            return false;
+    }
+    return true;
 }
 
 /* `fds` is MUTATED: the descriptors are moved above the targets below, and
@@ -293,6 +340,17 @@ static void do_spawn(const nd_broker_req *req, int *fds, size_t n_fds, nd_broker
         !blob_take(req->blob, req->blob_len, &off, req->n_envp, envp, ND_ARRAY_LEN(envp)) ||
         !blob_take(req->blob, req->blob_len, &off, req->n_hide, hide, ND_ARRAY_LEN(hide))) {
         rep->err = ND_ERR_PARSE;
+        return;
+    }
+
+    /* AFTER the blob is parsed, because the nd-apprun rule needs argv[1].
+     *
+     * A no-drop spawn is the only way anything stays root on the far side of
+     * this socket, so it is the one request that has to be argued for rather
+     * than merely well-formed. */
+    if (req->user[0] == '\0' && !root_exec_allowed(req->path, argv, req->n_argv)) {
+        nd_log_err(ND_LOG_OS, "broker: REFUSING to run '%s' as root: not on the list", req->path);
+        rep->err = ND_ERR_PERM;
         return;
     }
 

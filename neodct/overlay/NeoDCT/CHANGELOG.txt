@@ -1,8 +1,31 @@
 # NeoDCT OS Changelog
 
 0.5.0b
-The browser stops being the phone, the phone keeps a diary, and the phone
-says so when it falls over.
+The phone stops running as root, the browser stops being the phone, the phone
+keeps a diary, and the phone says so when it falls over.
+
+--- The phone stops running as root ---
+
+The user interface -- the home screen, the menus, the modem and battery
+services, everything you see -- no longer runs with full permissions. It runs
+as an ordinary user called ndusr, the same as the apps.
+
+What is left with full permissions is one small helper that does four things:
+start an app, wait for it to finish, turn the phone off, and set the clock.
+It will not run anything as root outside a fixed list of three programs, all
+of them on the read-only part of the disk where nothing can replace them.
+
+How much the interface actually needed those permissions was measured rather
+than guessed: it was made to give them up and then run on a real phone. The
+screen, the keypad, the modem, the battery, the settings and the fonts all
+carried on working. One thing broke -- starting an app -- and that is the
+whole reason the helper exists.
+
+Two smaller things came with it. The phone no longer grants itself access to
+raw storage; it never needed it, and that access was enough to read or rewrite
+every partition. And apps you install yourself now have a home, in
+/NeoDCT/User/apps -- everything there is treated as untrusted, always, because
+it lives on the writable part of the phone and survives a system update.
 
 --- The browser stops being the phone ---
 

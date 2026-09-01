@@ -51,6 +51,7 @@
 
 #include <sys/types.h>
 
+#include "nd_paths.h"
 #include "nd_proc.h"
 #include "nd_types.h"
 
@@ -65,6 +66,34 @@ extern "C" {
 #define ND_BROKER_USERS                     \
     {                                       \
         ND_PRIV_USER, ND_PRIV_USER_UT, NULL \
+    }
+
+/* ============ AND THE HOLE THAT LIST DID NOT CLOSE ============
+ *
+ * Refusing the NAME "root" is worth nothing on its own, because not naming a
+ * user at all means "do not drop" -- and a child the broker never drops stays
+ * root. So the first version of this file shipped with
+ *
+ *     nd_broker_spawn(b, "/bin/sh", &spec, NULL, &pid)
+ *
+ * as a working root shell, reachable by anything that could talk to the socket,
+ * which is the whole point of the socket. The test asserted that "root" was
+ * refused and passed, because it never tried NULL. A boundary that only stops
+ * the spelling you thought of is not a boundary.
+ *
+ * So a no-drop spawn is now allowed only for these exact executables. Both live
+ * on the read-only squashfs under dm-verity, so "replace the binary and ask for
+ * it by name" is not available either -- the list would be worth much less if
+ * it named anything on /NeoDCT/User.
+ *
+ * nd-apprun is here because engineering apps legitimately run as root, and it
+ * carries an EXTRA condition the list cannot express: argv[1] is the app
+ * directory, and it must be under ND_PATH_ENG_APPS_DIR. Without that, "run
+ * nd-apprun as root" is "run any app as root", which is the same hole with one
+ * more step. See root_exec_allowed(). */
+#define ND_BROKER_ROOT_EXEC                            \
+    {                                                  \
+        ND_PATH_SDCARD_HELPER, ND_PATH_ND_APPRUN, NULL \
     }
 
 /* argv, envp and the hide list, flattened into one NUL-separated run. 8 KiB is

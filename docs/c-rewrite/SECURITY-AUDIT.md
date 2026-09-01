@@ -561,12 +561,12 @@ covered by host tests; nothing here has been booted.
 | # | Finding | Severity | Phase | Status |
 | --- | --- | --- | --- | --- |
 | 1 | Update applier verifies no signature; verity root hash is attacker-writable | **Critical** | 0 | **Built.** The initramfs carries a verifier and the release key, and every field of `pending.prop` is compared against the signed manifest |
-| 2 | `.remote/state.prop` is a self-installing persistent reverse-shell backdoor | **Critical** | 0/1 | Partly. `.remote` is 0700 `ndusr` and hidden from the browser, so it is out of reach of the untrusted set — but nd-core is still root, so a compromised app still reaches it |
+| 2 | `.remote/state.prop` is a self-installing persistent reverse-shell backdoor | **Critical** | 0/1 | Partly. `.remote` is 0700 `ndusr` and hidden from the untrusted set. A trusted app still reaches it, because trusted apps share `ndusr` with nd-core — per-app users are what would close this |
 | 3 | `env.sh` sourced as root on every boot from writable storage | **Critical** | 0 | **Built.** Gated on the kernel cmdline or a rootfs marker, and deliberately not on engineering mode |
-| 4 | Everything runs as root; no MAC, no seccomp, no capability drop | High | 1/2 | Partly. Two users, and the browser is the untrusted one. nd-core, nd-apprun and the apps are still root; no seccomp |
+| 4 | Everything runs as root; no MAC, no seccomp, no capability drop | High | 1/2 | **Mostly built.** Nothing runs as root except a four-verb broker: nd-core is `ndusr`, apps are `ndusr`/`ndusr_ut`. Group `disk` dropped. Still no MAC and no seccomp — seccomp on the broker is the cheapest remaining win |
 | 5 | Browser reads the entire filesystem via `file://`, as root (JS is already off) | High | 0 | Partly. Not as root, and a mount namespace empties the engineering tree and the databases for it. The `file` fetcher is still built |
 | 6 | No permission model; manifests have no permission field | High | 3 | Not started, deliberately — section 3 of the plan says doing it before the direct path is closed produces "a permission system that politely asks" |
-| 7 | Apps can drive the modem directly; `nd_svc` narrowness is unenforced | High | 2 | Partly. The browser cannot: `ndusr_ut` is not in `dialout`. Apps still can, because nd-apprun is still root |
+| 7 | Apps can drive the modem directly; `nd_svc` narrowness is unenforced | High | 2 | Partly. Nothing is root any more, but trusted apps share `ndusr` with nd-core and so inherit `dialout`. Untrusted apps cannot — no `dialout`, and no service socket either. Proven by `tests/pentest-apps/PentestSms` |
 | 8 | `engineering_mode` is a writable flag unlocking shell, raw AT and Downgrade | Medium | 1 | Open. It is now explicitly refused as a gate where a gate has to be trustworthy (`env.sh`, the unsigned-update hatch) |
 | 9 | User partition, `/tmp`, `/dev/shm` and auto-mounted SD cards lack `nosuid,nodev,noexec` | Medium | 0 | **Built**, with `noexec` where it belongs — the arrival partition and the boot-time card mount, not `/tmp` |
 | 10 | SMS text and SNTP replies parsed on the core's own threads | Low (High once MMS lands) | 3 | Open |

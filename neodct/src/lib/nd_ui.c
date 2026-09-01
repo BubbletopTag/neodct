@@ -834,6 +834,17 @@ static void rescan_apps(nd_ui *ui)
                             ND_APP_MAX - ui->home_.n_apps);
         ui->home_.n_apps += n;
     }
+    /* Apps the owner installed. Scanned unconditionally -- NOT behind
+     * engineering mode -- because this is meant to be an ordinary thing an
+     * owner does, and a feature only reachable in engineering mode is a feature
+     * nobody uses. What makes that safe is not a gate but the confinement:
+     * everything here runs as ndusr_ut with a private mount namespace and no
+     * service socket at all. See ND_PATH_USER_APPS_DIR. */
+    if (ui->home_.n_apps < ND_APP_MAX) {
+        n = nd_ui_scan_apps(ND_PATH_USER_APPS_DIR, &ui->home_.apps[ui->home_.n_apps],
+                            ND_APP_MAX - ui->home_.n_apps);
+        ui->home_.n_apps += n;
+    }
     sort_apps_by_id(ui->home_.apps, ui->home_.n_apps);
 }
 
@@ -1460,6 +1471,9 @@ nd_err nd_ui_init_app(nd_ui *ui, nd_fb *fb, int keypad_fd)
      * hand-run nd-apprun has no core to ask, and every nd_svc_* call answers
      * "not present", which is the sentence Messages and the Modem app already
      * draw. OPEN-QUESTIONS.md MSG-1. */
+    /* Before the adopt, so it holds even when there is no socket to adopt --
+     * which is exactly the case that needs it. */
+    nd_svc_mark_app_process();
     nd_svc_client_open_from_env();
     if (keypad_fd >= 0 && nd_input_open_pipe(&ui->input, keypad_fd) != ND_OK)
         ui->input = NULL;

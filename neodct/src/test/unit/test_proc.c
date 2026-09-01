@@ -998,7 +998,6 @@ static void test_crash_log_rotates(void)
     CHECK(crash_log_contains("source: rotation"));
 }
 
-
 /* ------------------------------------------------------------------ *
  * Which user an app runs as
  * ------------------------------------------------------------------ */
@@ -1102,8 +1101,8 @@ static void t_no_stock_app_holds_root(void)
 static void t_only_the_browser_is_untrusted(void)
 {
     static const char *const stock[] = {
-        "Browser",   "Calculator",  "Calendar",  "CallLog", "Clock",  "Games", "Koki",
-        "Messages",  "MusicPlayer", "PhoneBook", "Power",   "Settings", "Tones", "Update",
+        "Browser",  "Calculator",  "Calendar",  "CallLog", "Clock",    "Games", "Koki",
+        "Messages", "MusicPlayer", "PhoneBook", "Power",   "Settings", "Tones", "Update",
     };
     size_t i;
 
@@ -1125,21 +1124,59 @@ static void t_only_the_browser_is_untrusted(void)
 /* The same spoofing rule as the root list, in the other direction. A
  * directory called Browser somewhere else must not inherit ndusr_ut -- which
  * is not root, but IS the owner of the browser profile and of the untrusted
- * half of the SD card. */
+ * half of the SD card.
+ *
+ * ONE OF THESE FLIPPED, and the flip is the point. /NeoDCT/User/apps/Browser
+ * used to be an ordinary trusted app, because that directory meant nothing.
+ * It is now the user-installed app directory, and EVERYTHING under it is
+ * untrusted regardless of what it is called -- so that path is confined now.
+ *
+ * That is a rule about WHERE, not about the name, so it does not weaken what
+ * this test was written to protect: a directory called Browser under the stock
+ * apps tree still gets nothing from its name. And the direction is the safe
+ * one. Being wrong about this prefix can only ever confine something that did
+ * not need confining; it can never release something that did. */
 static void t_the_browser_name_alone_confines_nothing(void)
 {
-    nd_app_entry eng  = app_at(ND_PATH_ENG_APPS_DIR "/Browser");
-    nd_app_entry user = app_at("/NeoDCT/User/apps/Browser");
+    nd_app_entry eng = app_at(ND_PATH_ENG_APPS_DIR "/Browser");
     nd_app_entry deep = app_at(ND_PATH_APPS_DIR "/Evil/Browser");
     nd_app_entry near = app_at(ND_PATH_APPS_DIR "/Browser2");
     nd_app_entry real = app_at(ND_PATH_APPS_DIR "/Browser");
 
     CHECK(!nd_proc_app_is_untrusted(&eng));
-    CHECK(!nd_proc_app_is_untrusted(&user));
     CHECK(!nd_proc_app_is_untrusted(&deep));
     CHECK(!nd_proc_app_is_untrusted(&near));
     CHECK(!nd_proc_app_is_untrusted(NULL));
     CHECK(nd_proc_app_is_untrusted(&real));
+}
+
+/* Everything the owner installed is untrusted, whatever it is called and
+ * however deep it sits. There is no manifest field for this and no way to opt
+ * out: the directory is on the writable partition, which survives a system
+ * update, so an app there is the one kind whose code the signed image does not
+ * vouch for. */
+static void t_everything_the_owner_installed_is_untrusted(void)
+{
+    nd_app_entry plain = app_at(ND_PATH_USER_APPS_DIR "/Notes");
+    nd_app_entry browser = app_at(ND_PATH_USER_APPS_DIR "/Browser");
+    nd_app_entry deep = app_at(ND_PATH_USER_APPS_DIR "/a/b/c");
+    nd_app_entry probe = app_at(ND_PATH_USER_APPS_DIR "/PentestSms");
+    /* The directory ITSELF is not an app, and a sibling whose name merely
+     * starts the same way is not inside it. */
+    nd_app_entry itself = app_at(ND_PATH_USER_APPS_DIR);
+    nd_app_entry sibling = app_at("/NeoDCT/User/appsX/Notes");
+
+    CHECK(nd_proc_app_is_untrusted(&plain));
+    CHECK(nd_proc_app_is_untrusted(&browser));
+    CHECK(nd_proc_app_is_untrusted(&deep));
+    CHECK(nd_proc_app_is_untrusted(&probe));
+    CHECK(!nd_proc_app_is_untrusted(&itself));
+    CHECK(!nd_proc_app_is_untrusted(&sibling));
+
+    /* And nothing there can ever also be a root app -- the two lists must not
+     * overlap, or the app would be handed ndusr_ut and root at once. */
+    CHECK(!nd_proc_app_needs_root(&plain, true));
+    CHECK(!nd_proc_app_needs_root(&probe, true));
 }
 
 static void t_a_lookalike_directory_gets_nothing(void)
@@ -1148,7 +1185,7 @@ static void t_a_lookalike_directory_gets_nothing(void)
      * doing a plain strncmp. Nothing creates these directories; the point is
      * that if anything ever did, it would not be a privilege grant. */
     nd_app_entry a = app_at("/NeoDCT/System/engineering/appsX/Evil");
-    nd_app_entry b = app_at("/NeoDCT/System/engineering/apps");        /* no app part */
+    nd_app_entry b = app_at("/NeoDCT/System/engineering/apps"); /* no app part */
     nd_app_entry c = app_at("/NeoDCT/User/browser/engineering/apps/Evil");
     nd_app_entry d = app_at(ND_PATH_APPS_DIR "/engineering/apps/Evil");
 
@@ -1218,6 +1255,7 @@ int main(void)
     t_no_stock_app_holds_root();
     t_only_the_browser_is_untrusted();
     t_the_browser_name_alone_confines_nothing();
+    t_everything_the_owner_installed_is_untrusted();
     t_a_lookalike_directory_gets_nothing();
     t_no_app_is_the_confined_answer();
     t_the_stock_name_alone_grants_nothing();

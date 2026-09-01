@@ -488,6 +488,15 @@ void nd_svc_server_free(nd_svc_server *s);
 /* Resolve and run poweroff/reboot with THIS process's privilege. The core
  * decides; the broker performs, because /sbin/poweroff needs CAP_SYS_BOOT and
  * an unprivileged nd-core has none. See nd_broker.h. */
+/* Say that this process is an APP, not the core.
+ *
+ * Every verb here works on both sides of the boundary, and the test for which
+ * side used to be "do I have a socket?". An untrusted app has none BECAUSE it
+ * was refused one, so it answered that question as though it were the core and
+ * tried to act locally. Called once by nd_ui_init_app(); the core never calls
+ * it. See the comment on g_is_app_process. */
+void nd_svc_mark_app_process(void);
+
 bool nd_svc_halt_now(bool reboot);
 
 #endif /* ND_SVC_H_INCLUDED */

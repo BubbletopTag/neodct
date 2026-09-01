@@ -744,7 +744,18 @@ matches.
 Everything netsurf starts inherits the drop, so `neodct-play` is confined by
 the same line.
 
-**What is left: nd-core itself still runs as root.** Three things stop it and
+**DONE. nd-core no longer runs as root.** The three blockers below were the ones
+predicted here; what actually happened when the drop was tried on a phone is that
+only ONE of them mattered, and it was not on this list -- `setgroups()` needs
+`CAP_SETGID`, so an unprivileged core cannot start an app *as anybody*. The
+reboot and the clock did break exactly as predicted, and the SD-card helper made
+a fourth that this list missed.
+
+All four are broker verbs now (`nd_broker.h`). The remote shell still starts
+before the drop. Left below as written, because a prediction that was two-thirds
+right is worth keeping next to the outcome.
+
+**What was left: nd-core itself still runs as root.** Three things stop it and
 none of them is group membership:
 
 - `reboot` and `poweroff`, which the Power app spawns;

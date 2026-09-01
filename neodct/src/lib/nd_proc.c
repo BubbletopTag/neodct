@@ -777,6 +777,38 @@ bool nd_proc_app_is_untrusted(const nd_app_entry *app)
         if (strcmp(app->path, UNTRUSTED_APPS[i]) == 0)
             return true;
     }
+
+    /* ============ AND EVERYTHING THE OWNER INSTALLED ============
+     *
+     * This is the ONE prefix test in the tree that decides a privilege, and
+     * everywhere else the rule is whole-path comparison precisely to stop
+     * "/NeoDCT/System/apps/../../tmp/Evil" reading as a stock app. So why is a
+     * prefix safe here?
+     *
+     * Because it is the direction that matters. Everywhere else the prefix
+     * would GRANT something, and a traversal that escapes the prefix would
+     * grant it wrongly. Here the prefix TAKES something away, so the only thing
+     * a traversal can achieve is to escape into being confined -- which is the
+     * safe side. An attacker gains nothing by making a path look like it is
+     * under /NeoDCT/User/apps.
+     *
+     * The direction it could be attacked from is the other one: a path that IS
+     * under the user apps directory but does not look like it, and so escapes
+     * confinement. That cannot happen from here, because app->path is not
+     * attacker-supplied text -- it is built by nd_ui_scan_apps() from the
+     * directory it was asked to read, so an app found under
+     * ND_PATH_USER_APPS_DIR has that string as its literal prefix.
+     *
+     * A symlink under /NeoDCT/User/apps pointing into /NeoDCT/System is the
+     * remaining case, and it does not help either: the app would still be
+     * launched by its /NeoDCT/User/apps path, still match here, and still be
+     * confined. It would run stock code with LESS privilege, not more. */
+    {
+        static const char PREFIX[] = ND_PATH_USER_APPS_DIR "/";
+
+        if (strncmp(app->path, PREFIX, sizeof PREFIX - 1u) == 0)
+            return true;
+    }
     return false;
 }
 

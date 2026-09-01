@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "nd_broker.h"
+#include "nd_paths.h"
 #include "nd_priv.h"
 #include "nd_proc.h"
 
@@ -91,6 +92,92 @@ static void test_the_broker_refuses_to_spawn_as_root(void)
     nd_broker_stop(b);
 }
 
+/* ============ THE ONE THE FIRST VERSION OF THIS FILE MISSED ============
+ *
+ * test_the_broker_refuses_to_spawn_as_root() above asserts that the NAME "root"
+ * is refused, and it passed from the day it was written. It was also nearly
+ * worthless, because not naming a user at all means "do not drop" -- and a
+ * child that is never dropped stays root. nd_broker_spawn(b, "/bin/sh", &spec,
+ * NULL, &pid) was a root shell, reachable by anything that could reach the
+ * socket, which is the entire population the socket exists to keep out.
+ *
+ * The lesson is in the test, not just the fix: a boundary that only stops the
+ * spelling you thought of is not a boundary. */
+static void test_a_nameless_user_is_not_a_way_to_stay_root(void)
+{
+    nd_broker *b;
+    const char *path = true_path();
+    const char *argv[2];
+    nd_proc_spec spec;
+    pid_t pid = -1;
+
+    if (path == NULL)
+        return;
+    b = nd_broker_start();
+    CHECK(b != NULL);
+    if (b == NULL)
+        return;
+
+    argv[0] = path;
+    argv[1] = NULL;
+    spec_for(&spec, argv);
+
+    /* /bin/true is not on ND_BROKER_ROOT_EXEC, so "run it undropped" is
+     * refused however the request is phrased. */
+    CHECK_INT((int)nd_broker_spawn(b, path, &spec, NULL, &pid), (int)ND_ERR_PERM);
+    CHECK_INT((int)pid, 0);
+    CHECK_INT((int)nd_broker_spawn(b, path, &spec, "", &pid), (int)ND_ERR_PERM);
+
+    /* Naming a user that IS allowed still works -- the refusal is about
+     * staying root, not about this path. */
+    pid = -1;
+    CHECK_INT((int)nd_broker_spawn(b, path, &spec, ND_PRIV_USER, &pid), (int)ND_OK);
+    if (pid > 0) {
+        nd_proc_status st;
+
+        memset(&st, 0, sizeof st);
+        while (nd_broker_wait(b, pid, 1.0, &st) == ND_ERR_TIMEOUT)
+            ;
+    }
+
+    nd_broker_stop(b);
+}
+
+/* nd-apprun IS on the list, because engineering apps run as root. That makes it
+ * the weak link: one allowed path would otherwise mean every app on the phone
+ * could be asked for as root, since which app it runs is argv[1]. */
+static void test_apprun_as_root_is_only_for_engineering_apps(void)
+{
+    nd_broker *b;
+    const char *argv[4];
+    nd_proc_spec spec;
+    pid_t pid = -1;
+
+    b = nd_broker_start();
+    CHECK(b != NULL);
+    if (b == NULL)
+        return;
+
+    /* An ordinary stock app, asked for as root. */
+    argv[0] = ND_PATH_ND_APPRUN;
+    argv[1] = "/NeoDCT/System/apps/PhoneBook";
+    argv[2] = "run";
+    argv[3] = NULL;
+    spec_for(&spec, argv);
+    CHECK_INT((int)nd_broker_spawn(b, ND_PATH_ND_APPRUN, &spec, NULL, &pid), (int)ND_ERR_PERM);
+
+    /* A user-installed app, asked for as root -- the interesting one, since
+     * /NeoDCT/User is writable. */
+    argv[1] = "/NeoDCT/User/apps/Pentest";
+    CHECK_INT((int)nd_broker_spawn(b, ND_PATH_ND_APPRUN, &spec, NULL, &pid), (int)ND_ERR_PERM);
+
+    /* And a path that starts with the engineering directory but climbs out. */
+    argv[1] = ND_PATH_ENG_APPS_DIR "/../../../NeoDCT/User/apps/Pentest";
+    CHECK_INT((int)nd_broker_spawn(b, ND_PATH_ND_APPRUN, &spec, NULL, &pid), (int)ND_ERR_PERM);
+
+    nd_broker_stop(b);
+}
+
 /* And it still spawns what it should. A refusal that refuses everything is not
  * a boundary, it is a broken phone -- which is what the first attempt at this
  * produced, since a build failure left a stale image and the UI never dropped
@@ -119,10 +206,12 @@ static void test_the_broker_spawns_and_reaps(void)
     argv[1] = NULL;
     spec_for(&spec, argv);
 
-    /* NULL user: "do not drop", which is what an engineering app gets. The
-     * host has no guarantee of an ndusr to become, so the drop itself is not
-     * what this test is about -- the round trip is. */
-    rc = nd_broker_spawn(b, path, &spec, NULL, &pid);
+    /* A NAMED user, because "do not drop" is no longer a request an arbitrary
+     * path may make -- see test_a_nameless_user_is_not_a_way_to_stay_root().
+     * This test is about the round trip, not the drop: if the host has no
+     * ndusr, nd_priv_lookup fails on the broker's side and the child simply
+     * runs undropped, which does not change what is being measured here. */
+    rc = nd_broker_spawn(b, path, &spec, ND_PRIV_USER, &pid);
     CHECK_INT((int)rc, (int)ND_OK);
     CHECK(pid > 0);
 
@@ -171,7 +260,7 @@ static void test_an_oversized_request_is_refused_not_trimmed(void)
     argv[2] = NULL;
     spec_for(&spec, argv);
 
-    rc = nd_broker_spawn(b, path, &spec, NULL, &pid);
+    rc = nd_broker_spawn(b, path, &spec, ND_PRIV_USER, &pid);
     CHECK_INT((int)rc, (int)ND_ERR_TOOLONG);
 
     /* And the broker is still usable afterwards: a rejected record must not
@@ -186,7 +275,7 @@ static void test_an_oversized_request_is_refused_not_trimmed(void)
         ok_argv[1] = NULL;
         spec_for(&spec, ok_argv);
         pid = -1;
-        CHECK_INT((int)nd_broker_spawn(b, path, &spec, NULL, &pid), (int)ND_OK);
+        CHECK_INT((int)nd_broker_spawn(b, path, &spec, ND_PRIV_USER, &pid), (int)ND_OK);
         CHECK(pid > 0);
         memset(&st, 0, sizeof st);
         while (nd_broker_wait(b, pid, 1.0, &st) == ND_ERR_TIMEOUT)
@@ -200,6 +289,8 @@ static void test_an_oversized_request_is_refused_not_trimmed(void)
 int main(void)
 {
     RUN(test_the_broker_refuses_to_spawn_as_root);
+    RUN(test_a_nameless_user_is_not_a_way_to_stay_root);
+    RUN(test_apprun_as_root_is_only_for_engineering_apps);
     RUN(test_the_broker_spawns_and_reaps);
     RUN(test_an_oversized_request_is_refused_not_trimmed);
     return pt_report("test_broker");

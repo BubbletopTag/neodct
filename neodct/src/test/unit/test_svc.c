@@ -1804,6 +1804,35 @@ static void test_two_launches_in_a_row(core_fixture *fx)
  * main
  * ------------------------------------------------------------------ */
 
+/* ============ "NO SOCKET" MUST NOT MEAN "I AM THE CORE" ============
+ *
+ * Every verb works on both sides of the boundary, and the side used to be
+ * decided by "do I have a client socket?". An untrusted app has none BECAUSE
+ * nd_proc_launch_app refused it one -- so it fell through into the core's
+ * branch and tried to act locally.
+ *
+ * Nothing was ever actually rebooted: the kernel stopped an ndusr_ut process
+ * with no_new_privs from gaining anything by exec'ing setuid busybox. But
+ * halt_perform() does not check its child, so nd_svc_reboot() RETURNED TRUE,
+ * and the confinement probe printed "*** ALLOWED ***" for rebooting the phone.
+ * The boundary held and the library lied about it.
+ *
+ * Found by running the probe on a phone, not by reading the code. */
+static void test_an_app_with_no_socket_is_not_the_core(void)
+{
+    /* No NEODCT_SERVICE_FD, and marked as an app: the untrusted case exactly. */
+    (void)unsetenv(ND_ENV_SERVICE_FD);
+    nd_svc_client_open_from_env();
+    CHECK(!nd_svc_client_active());
+    nd_svc_mark_app_process();
+
+    /* Each of the three that can act locally must refuse rather than try. */
+    CHECK(!nd_svc_reboot());
+    CHECK(!nd_svc_poweroff());
+    CHECK(!nd_svc_set_clock((time_t)1893456000)); /* 2030, comfortably in range */
+    CHECK(!nd_svc_format_card());
+}
+
 int main(void)
 {
     core_fixture fx;
@@ -1839,6 +1868,7 @@ int main(void)
     test_the_clock_over_the_wire(&fx);
     test_a_format_over_the_wire(&fx);
     test_an_untrusted_uid_is_still_served(&fx);
+    test_an_app_with_no_socket_is_not_the_core();
 
     /* SvcApp asks for a poweroff, and the launcher's own server thread is
      * the one that serves it -- so the fake has to be installed around the

@@ -48,7 +48,34 @@ rm -rf "$SKEL"
 # These are the directories S00userdata would create on first boot; making
 # them here means a fresh partition is usable even before it runs.
 mkdir -p "$SKEL/db" "$SKEL/logs" "$SKEL/.ndsys" \
-         "$SKEL/.seedrng" "$SKEL/sdcard" "$SKEL/tones" "$SKEL/wallpapers"
+         "$SKEL/.seedrng" "$SKEL/sdcard" "$SKEL/tones" "$SKEL/wallpapers" \
+         "$SKEL/apps"
+
+# ---- the confinement test apps, and why they are NOT in a release ----
+#
+# neodct/tests/pentest-apps holds a set of apps that deliberately try things an
+# app is not allowed to do: send a message as the owner, write to the root of
+# the user partition, install an unsigned update, reboot the phone, and leave
+# something behind that runs on the next boot. They exist to prove the
+# confinement empirically rather than by argument, and each one REPORTS what
+# stopped it rather than doing anything harmful.
+#
+# They ship only when NEODCT_PENTEST=1 is set for the build. A release image
+# has an empty /NeoDCT/User/apps, because an image that ships apps probing its
+# own boundaries is an image whose boundaries have more to probe.
+if [ "${NEODCT_PENTEST:-0}" = "1" ]; then
+    if [ -d "$NEODCT_DIR/tests/pentest-apps" ]; then
+        say "NEODCT_PENTEST=1: staging the confinement test apps into User/apps"
+        cp -a "$NEODCT_DIR/tests/pentest-apps/." "$SKEL/apps/"
+        # The .so is built by the neodct package; the staged tree carries only
+        # the manifest and the icon, so pick each one out of the target.
+        for d in "$SKEL/apps"/*/; do
+            name=$(basename "$d")
+            so="$TARGET_DIR/NeoDCT/System/apps/$name/app.so"
+            [ -f "$so" ] && cp -a "$so" "$d/app.so"
+        done
+    fi
+fi
 
 "$NEODCT_DIR/tools/mkupdate.py" \
     --images-dir "$BINARIES_DIR" \

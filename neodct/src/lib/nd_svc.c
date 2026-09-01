@@ -502,6 +502,15 @@ bool nd_svc_halt_which(const char *name, char *out, size_t out_sz)
     return false;
 }
 
+/* Reap a child that the BROKER forked, when there is one. waitpid() here would
+ * return ECHILD: this process did not fork it. */
+static nd_err nd_svc__wait_child(pid_t pid, double timeout_s, nd_proc_status *out)
+{
+    nd_broker *b = nd_broker_default();
+
+    return (b != NULL) ? nd_broker_wait(b, pid, timeout_s, out) : nd_proc_wait(pid, timeout_s, out);
+}
+
 /* Step 2's answer, carried from before the reply to after it. */
 typedef struct {
     bool pending;
@@ -715,13 +724,28 @@ static bool format_card(void)
     }
 
     nd_log(ND_LOG_OS, "App service: formatting %s", card.device);
-    if (nd_proc_spawn(ND_PATH_SDCARD_HELPER, &spec, &pid) != ND_OK) {
-        nd_log_err(ND_LOG_OS, "cannot run %s: %s", ND_PATH_SDCARD_HELPER, strerror(errno));
-        return false;
+    {
+        /* The helper mounts and partitions, which needs root, and the core is
+         * not root any more. It is one of the two executables the broker will
+         * run undropped (ND_BROKER_ROOT_EXEC) -- a fixed path on the read-only
+         * rootfs, so "ask for it by name" cannot become "ask for anything".
+         *
+         * Found by auditing after the drop rather than by the phone, like the
+         * halt and the clock before it. Three privileged things went out with
+         * the same change; the count is the reason this file now says which
+         * side of the socket each one runs on. */
+        nd_broker *b = nd_broker_default();
+        nd_err rc2 = (b != NULL) ? nd_broker_spawn(b, ND_PATH_SDCARD_HELPER, &spec, NULL, &pid)
+                                 : nd_proc_spawn(ND_PATH_SDCARD_HELPER, &spec, &pid);
+
+        if (rc2 != ND_OK) {
+            nd_log_err(ND_LOG_OS, "cannot run %s: %s", ND_PATH_SDCARD_HELPER, nd_strerror(rc2));
+            return false;
+        }
     }
 
     memset(&st, 0, sizeof st);
-    if (nd_proc_wait(pid, ND_SVC_FORMAT_WAIT_S, &st) != ND_OK) {
+    if (nd_svc__wait_child(pid, ND_SVC_FORMAT_WAIT_S, &st) != ND_OK) {
         /* Four minutes with no exit is not a slow card, it is a wedged
          * helper, and leaving it wedged would leave the serving thread in
          * here for the life of the core. Killing an mkfs is destructive --
@@ -1143,6 +1167,42 @@ void nd_svc_server_stop(nd_svc_server *s)
 
 static int g_client_fd = -1;
 
+/* ============ "NO SOCKET" IS NOT THE SAME ANSWER TWICE ============
+ *
+ * Every verb below is written to work on both sides of the boundary: an app
+ * asks the core, and the core -- which has no client socket -- does the thing
+ * itself. The test for which side you are on was `g_client_fd < 0`, i.e. "if I
+ * have nobody to ask, I must BE the one who does it".
+ *
+ * That is true for the core and false for an untrusted app, which has no socket
+ * precisely BECAUSE it was refused one. nd_proc_launch_app only opens the
+ * service socket when !untrusted, so the browser and everything in
+ * /NeoDCT/User/apps fell straight through into the core's branch and tried to
+ * run /sbin/poweroff themselves.
+ *
+ * The kernel stopped them -- ndusr_ut plus PR_SET_NO_NEW_PRIVS against a setuid
+ * busybox -- so nothing was ever actually rebooted. But halt_perform() does not
+ * check its child, so nd_svc_reboot() RETURNED TRUE to the caller, and a
+ * confinement probe reported "*** ALLOWED ***" for rebooting the phone. The
+ * boundary held; the sentence the library said about it was wrong.
+ *
+ * So an app says so, once, and the three verbs that can act locally refuse to.
+ * Set by nd_ui_init_app() -- the app-side constructor, which the core never
+ * calls. */
+static bool g_is_app_process = false;
+
+void nd_svc_mark_app_process(void)
+{
+    g_is_app_process = true;
+}
+
+/* True when this process is an app that has no channel -- which means it was
+ * denied one, not that it is the core. */
+static bool app_without_a_channel(void)
+{
+    return g_is_app_process && g_client_fd < 0;
+}
+
 static int env_fd(const char *name)
 {
     const char *s = getenv(name);
@@ -1443,6 +1503,11 @@ static bool svc_halt(bool reboot)
          * needs CAP_SYS_BOOT. The broker has it. */
         nd_broker *b = nd_broker_default();
 
+        if (app_without_a_channel()) {
+            nd_log_err(ND_LOG_POWER, "an app with no service socket asked to %s; refused",
+                       reboot ? "reboot" : "power off");
+            return false;
+        }
         if (b != NULL)
             return nd_broker_halt(b, reboot);
         return nd_svc_halt_now(reboot);
@@ -1478,6 +1543,10 @@ bool nd_svc_set_clock(time_t when)
 {
     svc_resp resp;
 
+    if (app_without_a_channel()) {
+        nd_log_err(ND_LOG_CLOCK, "an app with no service socket asked to set the clock; refused");
+        return false;
+    }
     if (g_client_fd < 0)
         return clock_set_bounded(when);
 
@@ -1501,6 +1570,10 @@ bool nd_svc_format_card(void)
 {
     svc_resp resp;
 
+    if (app_without_a_channel()) {
+        nd_log_err(ND_LOG_OS, "an app with no service socket asked to format the card; refused");
+        return false;
+    }
     if (g_client_fd < 0)
         return format_card();
 

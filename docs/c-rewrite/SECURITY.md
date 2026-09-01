@@ -1,6 +1,10 @@
 # Security notes — sandboxing, and what the C design should leave room for
 
-**Status: partly implemented.** This file records a design conversation, held before
+**Status: mostly implemented, and the biggest item is done.** nd-core is no longer
+root; see "Where the phone stands today" below and `docs/HOW-IT-WORKS.md` for the
+current shape in plain language.
+
+**Status was: partly implemented.** This file records a design conversation, held before
 any of it was built, so the hooks stayed in place. Some of it has since been built --
 `SECURITY-PLAN.md` section 7 is the record of exactly what, and where the two
 disagree the plan is right, because it was written against the kernel the phone
@@ -20,13 +24,22 @@ One thing is already right:
 
 Two are not:
 
-- **Everything runs as root.** Every process has every permission. A bug anywhere is a
-  bug everywhere.
+- ~~**Everything runs as root.**~~ **No longer true of anything.** This is now the
+  paragraph that is out of date rather than the phone.
 
-  *No longer entirely true.* There are two users now, `ndusr` and `ndusr_ut`, and the
-  browser and everything it starts are the second one. What is still root is nd-core,
-  nd-apprun and therefore every app -- so the sentence holds for an app and not for
-  the browser.
+  nd-core runs as `ndusr`. Apps run as `ndusr` or, if they came from
+  `/NeoDCT/User/apps` or are the browser, as `ndusr_ut`. The only process left at
+  uid 0 is a small broker that nd-core forks before dropping, which holds four
+  verbs -- start an app, wait for one, halt, set the clock -- and refuses to run
+  anything as root outside a fixed list of three programs on the read-only image.
+
+  How much privilege nd-core actually needed was **measured** rather than argued:
+  it was made to drop at startup and run on a booted phone. Everything the UI
+  touches is reachable by group already; the only thing that broke was launching an
+  app, because changing a child's user needs `CAP_SETGID`. That one syscall is what
+  the broker exists for. See `neodct/src/include/nd_broker.h`.
+
+  `docs/HOW-IT-WORKS.md` is the plain-language version of all of this.
 - **dm-verity is an integrity guarantee, not an authenticity one.** This paragraph used
   to claim the phone "cannot be permanently backdoored through the update path", on the
   grounds that the signing key lives in the read-only image. That was wrong, and it was
