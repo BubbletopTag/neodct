@@ -79,6 +79,15 @@ extern "C" {
  * test_settings_app.c pins its value. */
 #define ND_SETAPP_SDCARD_HELPER ND_PATH_SDCARD_HELPER
 
+
+/* The memory-card screen's two strings for a card in the pre-0.5.0b FAT
+ * format. Declared here rather than left as literals because the dialog has
+ * room for FIVE LINES and a test measures these against the real font -- see
+ * nd_msgdialog_measure(). A sixth line is clipped with a U+2026 the font
+ * cannot draw, so it disappears silently, which is how a modem error shipped
+ * with its second sentence missing. */
+extern const char *const nd_setapp_sdcard_legacy;
+extern const char *const nd_setapp_sdcard_legacy_help;
 /* SUPPORTED_WALLPAPERS. A real two-element tuple here, unlike the Tones
  * app's `(".mp3")`, which is a string (OPEN-QUESTIONS.md TN-2). */
 /* .gif joined the two the Python shipped when animated wallpapers landed. It

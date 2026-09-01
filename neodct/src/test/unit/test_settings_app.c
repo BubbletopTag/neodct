@@ -197,8 +197,9 @@ static void test_strings(void)
     CHECK_STR(*api.get_more_help,
               "Get more wallpapers by adding an SD card!\n"
               "\n"
-              "Format a card as FAT32, make a folder called \"wallpapers\" on it, and "
-              "copy your .jpg or .gif files into it.\n"
+              "Let the phone format a card for you, or format one as ext4 yourself, "
+              "make a folder called \"wallpapers\" on it, and copy your .jpg or .gif "
+              "files into it.\n"
               "\n"
               "240x175 pictures look best, and a .gif that size animates. Put the card "
               "in the phone and they appear in this list. The phone can set a blank "
@@ -211,31 +212,45 @@ static void test_strings(void)
               "is in the phone and they appear in this list. 240x175 looks best, and a "
               ".gif that size animates.",
               "GET_MORE_HELP_WITH_CARD");
-    /* The last paragraph arrived with SECURITY-PLAN.md section 1: a card the
-     * phone formats is TWO FAT32 partitions, and the second one is where
-     * downloads and picture messages land -- separate from the owner's
-     * music, and noexec. A card made on a computer has one partition and
-     * therefore nowhere for a download to go, which the owner has to be told
-     * in the one place they are told what a NeoDCT card is. */
+    /* This described TWO FAT32 partitions -- the second being where downloads
+     * landed, separate from the owner's music, and noexec -- and it argued
+     * that keeping both halves FAT was the point, because an ext card would
+     * stop reading on a PC.
+     *
+     * That trade was reversed in 0.5.0b and this is where the owner is told
+     * so. FAT records no ownership at all, which is why the second partition
+     * had to exist to say anything about downloads, and why an installed
+     * app's program could not be made readable-but-not-writable on one. ext4
+     * says both on a single card. What it costs is Windows and macOS needing
+     * a helper, which the text now states plainly rather than defending. */
     CHECK_STR(*api.sdcard_help,
-              "A NeoDCT memory card is a FAT32 card with these folders on it:\n"
+              "A NeoDCT memory card is an ext4 card with these folders on it:\n"
               "\n"
               "  wallpapers   .jpg and .gif pictures\n"
               "  tones        .mp3 ringtones\n"
               "  music        your music\n"
               "  backup_db    copies of your contacts\n"
               "  update       UPDATE.ndsw system updates\n"
+              "  apps         apps you installed\n"
+              "  untrusted    downloads and picture messages\n"
               "\n"
               "You can make one on a computer, or let the phone do it. Setting up only "
               "adds the folders. Formatting erases everything on the card.\n"
               "\n"
-              "A card the phone formats gets a second, separate area for downloads and "
-              "picture messages. Things that arrive on their own go there and cannot "
-              "reach your music, and nothing there can run. Both parts are FAT32, so "
-              "both still read on a computer -- which is why the card is split rather "
-              "than reformatted as ext. A card you make on a "
-              "computer works for everything above, but has nowhere for downloads to "
-              "go.",
+              "The card is ext4 because ext4 remembers who owns each file and FAT32 "
+              "does not. That is what lets one card keep your music private from an "
+              "app, let an app read its own program without being able to change it, "
+              "and give downloads a corner of their own. On a FAT32 card every file "
+              "has to be treated the same way, so none of that can be said.\n"
+              "\n"
+              "Linux reads ext4 everywhere. Windows and macOS need a helper to read "
+              "one, which is the cost of the card knowing who owns what.\n"
+              "\n"
+              "Anything in untrusted arrived on its own rather than being chosen by "
+              "you. It cannot reach your music and nothing there can run. Apps you "
+              "install live in apps, each in its own folder, with a data folder inside "
+              "it that only that app writes to -- so removing the folder removes the "
+              "app and everything it kept.",
               "SDCARD_HELP");
 
     /* The destructive confirmation. It has to say the card is erased -- and
@@ -258,10 +273,14 @@ static void test_strings(void)
               "and no longer explains the layout, which did not fit");
     }
     if (api.sdcard_help != NULL && *api.sdcard_help != NULL) {
-        CHECK(strstr(*api.sdcard_help, "separate area for downloads") != NULL,
-              "the help says the card is repartitioned");
-        CHECK(strstr(*api.sdcard_help, "read on a computer") != NULL,
-              "and that it still reads on a PC, which is the point of FAT");
+        /* The two facts the confirmation dropped, still owed to the owner and
+         * now said here: what the card actually is, and what it costs. */
+        CHECK(strstr(*api.sdcard_help, "ext4") != NULL,
+              "the help says the card is ext4");
+        CHECK(strstr(*api.sdcard_help, "remembers who owns each file") != NULL,
+              "and why, which is the whole reason for the change");
+        CHECK(strstr(*api.sdcard_help, "Windows and macOS need a helper") != NULL,
+              "and what it costs, which is the half a release note omits");
     }
 
     CHECK_STR(ND_SETAPP_SYSTEM_WALLPAPER_DIR, "/NeoDCT/System/wallpapers", "SYSTEM_WALLPAPER_DIR");

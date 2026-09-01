@@ -72,9 +72,15 @@ It is also not in `dialout`, which is the group that reaches the modem. A
 browser that cannot open the modem cannot dial a premium-rate number, and that
 is the classic feature-phone attack.
 
-Until recently `ndusr` was also in group `disk`, which reaches the raw storage —
-every partition, readable and writable. That was a mistake and it has been
-removed: nothing on the phone ever needed it.
+Two group memberships were taken away after they turned out to grant more than
+they looked like they did:
+
+- `ndusr` was in `disk`, which reaches the raw storage — every partition,
+  readable and writable. Nothing ever needed it.
+- `ndusr_ut` is in `audio`, because that is how the browser plays sound, and
+  Linux puts *every* sound device in that one group — including the
+  microphone. Recording is now a separate group. Playing and recording are no
+  more the same permission than hearing and speaking are.
 
 ---
 
@@ -110,12 +116,27 @@ every message arriving at the broker is treated as untrusted:
   differently. Only three specific programs may run undropped, all of them on
   the read-only part of the disk where they cannot be swapped.
 
-That second rule was missing at first, and for a short time
-`spawn("/bin/sh", …, no user)` was a working root shell. The test asserted that
-the *name* "root" was refused and passed happily, because it never tried leaving
-the name out. **A boundary that only stops the spelling you thought of is not a
-boundary** — it is the most useful thing this project has learned about writing
-security tests.
+- Nor is naming a user the phone does not have, which is the same thing said a
+  third way: a name that cannot be looked up means nobody to become, and a
+  program told to become nobody stays what it was.
+- And it builds the environment for those three programs itself, rather than
+  passing on the one it was handed.
+
+Each of those was found separately, after the one before it had been fixed and
+tested. The first version refused the *name* "root" and its test passed happily
+— because the test never tried leaving the name out, and
+`spawn("/bin/sh", …, no user)` was a working root shell for as long as that
+lasted. **A boundary that only stops the spelling you thought of is not a
+boundary.** It is the most useful thing this project has learned about writing
+security tests, and it has now been learned three times.
+
+The environment one is worth understanding, because it is not obvious. Two
+programs are allowed to run as root. One of them is a shell script that calls
+`mount` and `mkfs` by name, without saying where to find them; the other loads
+its real code from a folder named in a variable. So handing either of them a
+chosen environment is handing them a chosen *program*, no matter how carefully
+the filename was checked. Pinning the path and not the environment pins
+nothing.
 
 ---
 
@@ -173,8 +194,17 @@ is not expressible.
 | open the modem directly | yes (it is in `dialout`) | **no** |
 | read the phone's signing keys | yes | **no — the folder appears empty** |
 | write to your storage | yes | only its own folder |
+| read another app's data | yes | only within the untrusted set — see below |
+| change its own program | — | **no — its folder is not its** |
 | restart the phone | by asking nd-core | **no** |
 | become root | no | no |
+
+One row is deliberately not a clean "no". All untrusted things — the browser,
+the media player, everything you installed — run as the *same* user, so the
+permissions cannot yet tell them apart from each other. They are separated from
+*you* completely and from *each other* not at all. A user per installed app is
+the fix, and the folder layout is already shaped for it; ext4 is what made it
+possible to consider, because FAT had nowhere to write an owner down.
 
 The "appears empty" rows are worth a moment. An untrusted app does not get a
 *permission error* when it looks at your contacts — it gets an **empty
@@ -186,20 +216,68 @@ bug in a permission check.
 
 ## 7. Apps you install yourself
 
-`/NeoDCT/User/apps` is where an app you installed lives, as opposed to one that
-came with the phone.
+They live on the **memory card**, at `/NeoDCT/User/sdcard/apps`.
+
+Not on the phone's own writable partition, which is eight megabytes and already
+holds your contacts, your messages, your settings and the logs. An apps folder
+there is a feature that fills the space the phone needs in order to save
+anything at all.
 
 **Everything in that folder is untrusted, always**, no matter what it claims
-about itself. That is not a setting and there is no way for an app to opt out.
+about itself. There is no setting and no way for an app to opt out. The card
+comes out of the phone and goes into a computer, so an app there is quite
+literally bytes a stranger could have chosen — which is why the rule is about
+*where the code is* and never about what the code says about itself.
 
-The reason is where the folder lives. `/NeoDCT/User` is the writable part of the
-phone, and it *survives system updates* — so unlike the built-in apps, a bad app
-here is not removed by reinstalling the OS. Anything that can put a file there
-gets code that runs when you open it.
+The built-in apps are somewhere else entirely: a read-only, cryptographically
+verified image. They cannot be changed without replacing the whole system, which
+needs a signature the phone checks at boot.
 
-The built-in apps are in a different place entirely: a read-only, cryptographically
-verified image. They cannot be modified without replacing the whole system, which
-requires a signature the phone checks at boot.
+### Why the card is ext4 now
+
+It used to be FAT32, the format every camera and every cheap USB stick uses.
+FAT32 has one property that turned out to decide this whole design: **it does
+not record who owns a file.**
+
+On a FAT card, permissions are not stored on the card at all. They are decided
+once, when the card is plugged in, and applied identically to every single file
+on it. So "this app may read its own program but may not change it" is not a
+sentence a FAT card can hold. Neither is "downloads are writable but your music
+is not" — the old card needed a *second partition* just to say that much.
+
+ext4 records an owner, a group and permissions for every file and folder
+separately. One card then says all of it:
+
+```
+/NeoDCT/User/sdcard/
+  apps/            you may install; an app may not
+    Bible/         the app's program — the app can read it, not write it
+      app.so
+      data/        the app's own storage, and the only thing it can write
+  untrusted/       downloads, and the browser's and media player's state
+  music/           an app cannot read this at all
+  wallpapers/
+  tones/
+```
+
+**An app cannot modify its own program.** Its folder belongs to you, not to it.
+That is what makes uninstalling mean something, and it is why an app cannot
+arrange to still be there after you remove it.
+
+**An app cannot read your music, or list the card, or see another app's
+folder.** Not because a check refuses — because the permissions on the card say
+it is not its.
+
+Two honest notes. The phone **re-applies these permissions every single time it
+mounts the card**, because you can carry a card to a computer and change them
+there; permissions on removable media are a claim until the phone has checked
+them. And Windows and macOS need a helper to read ext4, where Linux reads it
+out of the box. That is the price of a card that knows who owns what.
+
+If you have a card from an older NeoDCT, the phone still reads it — your music
+and wallpapers work exactly as before — and Settings will offer to reformat it
+so it can hold apps. That erases the card, so it asks first and it will never
+do it on its own.
 
 ---
 
@@ -210,7 +288,15 @@ An honest list matters more than a reassuring one.
 **All normal apps share one user.** Clock, Messages and a bible app all run as
 `ndusr`, so they are not separated *from each other*. Any of them can read your
 contacts. The separation that exists today is "built-in versus installed", not
-"per app". Per-app users are the obvious next step.
+"per app". Per-app users are the obvious next step, and the card layout is
+already arranged so that adding them is a change of owner rather than a change
+of design.
+
+**Untrusted apps are not separated from each other either.** The browser and
+anything you installed are the same user, so they can reach each other's
+storage. The browser's own profile is now hidden from installed apps, which
+closes the case that mattered, but it is a patch over the real gap rather than
+the gap being closed.
 
 **The broker is a big program running as root.** It only *does* four things, but
 it is a copy of nd-core, so it *contains* the whole framework — the screen code,
@@ -223,6 +309,11 @@ is allowed to ask for.
 
 **Nothing here protects against someone with the phone in their hands** and a
 serial cable, or against a flaw in the kernel itself.
+
+**Nor against someone with your memory card.** Everything on it can be read and
+rewritten on any Linux computer. That is not a hole so much as the reason
+everything on the card is treated as untrusted, and the reason the phone
+re-applies the card's permissions every time it mounts it.
 
 ---
 

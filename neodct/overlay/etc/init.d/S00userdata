@@ -57,7 +57,20 @@ USER_DIR=/NeoDCT/User
 #                     that replaces the operating system
 #   .seedrng    0700  the entropy seed. Readable is predictable.
 #   sdcard      0751  a mountpoint; a mounted card brings its own modes, and
-#                     o+x is what lets a card path be reached at all
+#                     o+x is what lets a card path be reached at all.
+#
+#                     Apps the owner installed live UNDER here, at
+#                     sdcard/apps, and deliberately not at the root of this
+#                     partition: on the Luckfox /NeoDCT/User is EIGHT
+#                     MEGABYTES shared with the databases, the settings, the
+#                     logs and the pending update record, so an apps
+#                     directory here is a feature that fills the partition
+#                     the phone needs in order to save anything at all.
+#                     There is therefore no `apps` entry in this table --
+#                     the card's own layout owns it, in neodct-sdcard, where
+#                     it is restated on every mount because a card is
+#                     removable and its modes are a claim until the phone
+#                     has checked them
 #   the rest    0750  no reason for the untrusted set to see any of it
 NEODCT_USER_LAYOUT="
 :0751
@@ -67,7 +80,6 @@ logs:0750
 tones:0750
 wallpapers:0750
 sdcard:0751
-apps:0751
 .ndsys:0700
 .remote:0700
 .seedrng:0700

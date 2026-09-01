@@ -328,6 +328,26 @@ bool nd_proc_app_is_untrusted(const nd_app_entry *app);
             "/NeoDCT/User/.ndsys", "/NeoDCT/User/.seedrng", NULL                     \
     }
 
+/* ============ AND ONE MORE, FOR APPS THE OWNER INSTALLED ============
+ *
+ * Everything above is hidden from the whole untrusted set. This is hidden
+ * from INSTALLED apps only, and the browser keeps it, because it is the
+ * browser's own profile: /NeoDCT/User/browser is 0770 ndusr:ndusr_ut, which
+ * made it not "the browser's directory" but "the directory of every process
+ * that runs as ndusr_ut".
+ *
+ * That was fine while the browser was the only untrusted thing on the phone.
+ * It stopped being fine the moment an app you installed became untrusted too:
+ * same uid, same group, so an app under the apps directory could read the
+ * browser's cookies and history, and could leave a file there for the browser
+ * to pick up later.
+ *
+ * Masking it is not the real fix and is not pretending to be. The real fix is
+ * a uid per installed app, at which point the group stops meaning "anything
+ * untrusted" and this entry becomes unnecessary. Until then it costs one
+ * tmpfs mount and closes the leak that actually exists. */
+#define ND_PROC_INSTALLED_HIDE_EXTRA "/NeoDCT/User/browser"
+
 /* 1. open the key channel and the crash pipe
  * 2. spawn nd-apprun with the app's directory, the entry point and its
  *    argument, and the three inherited descriptors in the environment

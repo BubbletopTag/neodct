@@ -99,8 +99,9 @@ const char *const nd_setapp_get_more_label = "Get more...";
 const char *const nd_setapp_get_more_help =
     "Get more wallpapers by adding an SD card!\n"
     "\n"
-    "Format a card as FAT32, make a folder called \"wallpapers\" on it, and "
-    "copy your .jpg or .gif files into it.\n"
+    "Let the phone format a card for you, or format one as ext4 yourself, "
+    "make a folder called \"wallpapers\" on it, and copy your .jpg or .gif "
+    "files into it.\n"
     "\n"
     "240x175 pictures look best, and a .gif that size animates. Put the card "
     "in the phone and they appear in this list. The phone can set a blank "
@@ -117,18 +118,26 @@ const char *const nd_setapp_get_more_help_with_card =
  * _show_about() and _show_memory_card(), which is why it reads as an
  * afterthought there. The two leading spaces in the folder table are load
  * bearing -- TextScroller draws them. */
-/* Shown before anything is written, on both routes to a format -- the card
- * that cannot be read and the card that can. It has to say two things, and
- * the second one is new:
+/* Shown before anything is written, on every route to a format -- the card
+ * that cannot be read, the card that can, and now the card in the old FAT
+ * format.
  *
- *   everything on it goes, which was always true; and
+ * ============ AND THE ARGUMENT THAT LOST ============
  *
- *   the card is REPARTITIONED, because a NeoDCT card is two FAT32
- *   partitions rather than one (SECURITY-PLAN.md section 1). What it no
- *   longer has to say -- and this is why Option C was chosen over
- *   formatting the card as ext -- is that the card will stop reading on a
- *   PC. It will not. Both partitions are FAT32 and any computer opens the
- *   first one.
+ * This said that the card stays FAT32 on purpose, so it keeps reading on any
+ * PC, and that this was why two FAT partitions beat one ext filesystem.
+ *
+ * That was the wrong trade and the card is ext4 now. The reason is the one
+ * the old design was working around: FAT records no ownership, so every
+ * permission on a FAT card comes from mount options applied to the WHOLE
+ * filesystem. "This app may read its own program but not rewrite it" cannot
+ * be said on FAT at all, and "downloads are writable but your music is not"
+ * needed a second partition to say. On ext4 both are one chmod, and the
+ * partition table goes away with the problem.
+ *
+ * What it costs is real and worth stating plainly rather than defending:
+ * Windows and macOS need a helper to read an ext4 card. Linux does not. The
+ * SD card help says so.
  */
 /* ============ A CONFIRMATION HAS TO FIT, MORE THAN MOST ============
  *
@@ -149,23 +158,61 @@ const char *const nd_setapp_format_warning = "Format this card?\n"
                                              "EVERYTHING ON IT WILL BE ERASED!";
 
 const char *const nd_setapp_sdcard_help =
-    "A NeoDCT memory card is a FAT32 card with these folders on it:\n"
+    "A NeoDCT memory card is an ext4 card with these folders on it:\n"
     "\n"
     "  wallpapers   .jpg and .gif pictures\n"
     "  tones        .mp3 ringtones\n"
     "  music        your music\n"
     "  backup_db    copies of your contacts\n"
     "  update       UPDATE.ndsw system updates\n"
+    "  apps         apps you installed\n"
+    "  untrusted    downloads and picture messages\n"
     "\n"
     "You can make one on a computer, or let the phone do it. Setting up only "
     "adds the folders. Formatting erases everything on the card.\n"
     "\n"
-    "A card the phone formats gets a second, separate area for downloads and "
-    "picture messages. Things that arrive on their own go there and cannot "
-    "reach your music, and nothing there can run. Both parts are FAT32, so "
-    "both still read on a computer -- which is why the card is split rather "
-    "than reformatted as ext. A card you make on a computer works for "
-    "everything above, but has nowhere for downloads to go.";
+    "The card is ext4 because ext4 remembers who owns each file and FAT32 "
+    "does not. That is what lets one card keep your music private from an "
+    "app, let an app read its own program without being able to change it, "
+    "and give downloads a corner of their own. On a FAT32 card every file "
+    "has to be treated the same way, so none of that can be said.\n"
+    "\n"
+    "Linux reads ext4 everywhere. Windows and macOS need a helper to read "
+    "one, which is the cost of the card knowing who owns what.\n"
+    "\n"
+    "Anything in untrusted arrived on its own rather than being chosen by "
+    "you. It cannot reach your music and nothing there can run. Apps you "
+    "install live in apps, each in its own folder, with a data folder inside "
+    "it that only that app writes to -- so removing the folder removes the "
+    "app and everything it kept.";
+
+/* Five lines is the whole dialog. See settings_app.h. */
+const char *const nd_setapp_sdcard_legacy =
+    "Card uses the old format.\n"
+    "Music and photos work.\n"
+    "Apps need a reformat,\n"
+    "which erases the card.";
+
+const char *const nd_setapp_sdcard_legacy_help =
+    "This card was set up by an older version of NeoDCT, when cards were "
+    "FAT32. It still works for everything it did before: your music, your "
+    "wallpapers, your ringtones and system updates all read normally.\n"
+    "\n"
+    "What it cannot do is hold an app you installed.\n"
+    "\n"
+    "FAT32 does not record who owns a file. Every file on a FAT32 card has "
+    "to be treated identically, so there is no way to say that an app may "
+    "read its own program but not rewrite it, and no way to keep your music "
+    "private from something you installed. Those rules are the whole of how "
+    "the phone keeps an app in its place, and on this card they cannot be "
+    "written down.\n"
+    "\n"
+    "Formatting the card makes it ext4, which does record ownership. It also "
+    "ERASES EVERYTHING ON THE CARD. Copy anything you want to keep to a "
+    "computer first.\n"
+    "\n"
+    "There is no hurry. A card in the old format is not unsafe -- it simply "
+    "has nowhere for apps to live.";
 
 size_t nd_setapp_bt_lines(char lines[][ND_SETAPP_BT_LINE_MAX], size_t max, bool enabled,
                           bool connected)
@@ -1284,6 +1331,24 @@ static void show_memory_card(nd_ui *ui)
             nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
         }
         (void)nd_msgdialog_show(&dialog);
+        return;
+    }
+
+    if (card.state == ND_CARD_LEGACY_FORMAT) {
+        /* A NeoDCT card from before 0.5.0b. It mounted, the owner's music is
+         * on it and plays; what it cannot do is hold an installed app,
+         * because FAT records no ownership and the confinement is expressed
+         * entirely in ownership (nd_storage.h).
+         *
+         * So this says what is true rather than reusing the generic "nothing
+         * we can mount" below, which would be a lie about a working card --
+         * and it says the cost out loud, because the remedy erases it. */
+        nd_msgdialog_init(&dialog, ui, nd_setapp_sdcard_legacy);
+        nd_msgdialog_set_button(&dialog, "More");
+        (void)nd_msgdialog_show(&dialog);
+        nd_scroller_init(&help, ui, nd_setapp_sdcard_legacy_help, NULL, NULL);
+        nd_scroller_show(&help);
+        offer_format(ui, &card);
         return;
     }
 

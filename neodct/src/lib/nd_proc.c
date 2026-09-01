@@ -790,7 +790,7 @@ bool nd_proc_app_is_untrusted(const nd_app_entry *app)
      * grant it wrongly. Here the prefix TAKES something away, so the only thing
      * a traversal can achieve is to escape into being confined -- which is the
      * safe side. An attacker gains nothing by making a path look like it is
-     * under /NeoDCT/User/apps.
+     * under the apps directory.
      *
      * The direction it could be attacked from is the other one: a path that IS
      * under the user apps directory but does not look like it, and so escapes
@@ -799,10 +799,20 @@ bool nd_proc_app_is_untrusted(const nd_app_entry *app)
      * directory it was asked to read, so an app found under
      * ND_PATH_USER_APPS_DIR has that string as its literal prefix.
      *
-     * A symlink under /NeoDCT/User/apps pointing into /NeoDCT/System is the
+     * A symlink under the apps directory pointing into /NeoDCT/System is the
      * remaining case, and it does not help either: the app would still be
-     * launched by its /NeoDCT/User/apps path, still match here, and still be
-     * confined. It would run stock code with LESS privilege, not more. */
+     * launched by its apps-directory path, still match here, and still be
+     * confined. It would run stock code with LESS privilege, not more.
+     *
+     * ============ AND IT IS A CARD NOW ============
+     *
+     * The directory moved to /NeoDCT/User/sdcard/apps, which strengthens the
+     * argument rather than complicating it. A card comes out of the phone and
+     * goes into a PC, so an app.so there is bytes a stranger chose in the most
+     * literal sense available -- and every mode on the card is a claim until
+     * neodct-sdcard's apply_layout() has restated it. A rule about WHERE code
+     * lives survives all of that; a rule about what the code says about itself
+     * would not. */
     {
         static const char PREFIX[] = ND_PATH_USER_APPS_DIR "/";
 
@@ -965,9 +975,32 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
      * exactly as every build before this one did, rather than refusing to
      * open. */
     if (untrusted) {
-        /* The browser, confined by the core because only the core still has
-         * the privilege to do it. nd_proc.h carries the whole argument. */
-        static const char *const hide[] = ND_PROC_UNTRUSTED_HIDE_PATHS;
+        /* Confined by the core, because only the core still has the privilege
+         * to do it. nd_proc.h carries the whole argument.
+         *
+         * Two lists, not one. The browser and an app the owner installed are
+         * both untrusted and are not untrusted in the same WAY: the browser
+         * is stock code with a hostile input, and an installed app is code
+         * from a card. The one thing that separates them here is the
+         * browser's own profile directory, which an installed app has no
+         * business in -- see ND_PROC_INSTALLED_HIDE_EXTRA. */
+        static const char *const hide_common[] = ND_PROC_UNTRUSTED_HIDE_PATHS;
+        const char *hide[ND_ARRAY_LEN(hide_common) + 1u];
+        size_t h = 0u;
+
+        while (hide_common[h] != NULL && h + 2u < ND_ARRAY_LEN(hide)) {
+            hide[h] = hide_common[h];
+            h++;
+        }
+        /* Under the apps directory means the owner installed it, which is the
+         * one case that does not get to see the browser's profile. */
+        {
+            static const char PREFIX[] = ND_PATH_USER_APPS_DIR "/";
+
+            if (strncmp(app->path, PREFIX, sizeof PREFIX - 1u) == 0)
+                hide[h++] = ND_PROC_INSTALLED_HIDE_EXTRA;
+        }
+        hide[h] = NULL;
 
         run_user = ND_PRIV_USER_UT;
 

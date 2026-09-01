@@ -62,7 +62,21 @@ typedef enum {
     ND_CARD_ABSENT = 0,
     ND_CARD_READY,
     ND_CARD_NEEDS_SETUP,
-    ND_CARD_UNFORMATTED
+    ND_CARD_UNFORMATTED,
+    /* A NeoDCT card from before 0.5.0b: FAT32, and mounted, and perfectly
+     * good for the owner's music -- but it cannot hold an installed app.
+     *
+     * FAT records no ownership, so every permission on a FAT mount comes from
+     * uid=/gid=/fmask=/dmask= applied to the whole filesystem. There is no way
+     * to say "an app may read its own app.so but not write it" on one, and no
+     * way to give downloads a different regime from music without a second
+     * partition. ext4 stores owner, group and mode per inode and says both.
+     *
+     * Distinct from NEEDS_SETUP because the remedy is different in kind.
+     * NEEDS_SETUP is five missing folders and the fix creates them. This is a
+     * REFORMAT, which destroys everything on the card, so it is the owner's to
+     * accept and the phone will not do it uninvited. */
+    ND_CARD_LEGACY_FORMAT
 } nd_card_state;
 
 typedef struct {

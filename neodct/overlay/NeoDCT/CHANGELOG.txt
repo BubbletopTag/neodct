@@ -23,9 +23,43 @@ whole reason the helper exists.
 
 Two smaller things came with it. The phone no longer grants itself access to
 raw storage; it never needed it, and that access was enough to read or rewrite
-every partition. And apps you install yourself now have a home, in
-/NeoDCT/User/apps -- everything there is treated as untrusted, always, because
-it lives on the writable part of the phone and survives a system update.
+every partition. And the microphone is no longer reachable by the browser: on
+Linux every sound device sits in one group, so the permission that lets a web
+page play a video was also the permission to record you. Playing and recording
+are now separate.
+
+--- Apps you install, and a card that can hold them ---
+
+Apps you install yourself now have a home, on the memory card, at
+/NeoDCT/User/sdcard/apps. Everything there is untrusted, always: a card comes
+out of the phone and goes into a computer, so an app on one is bytes a stranger
+could have chosen.
+
+For that to work the card had to change. A NeoDCT card is now ONE ext4
+partition instead of two FAT32 ones.
+
+FAT32 does not record who owns a file. Permissions on a FAT card are decided
+once when it is plugged in and applied identically to everything on it, so
+"this app may read its own program but not change it" is not a sentence such a
+card can hold -- and "downloads are writable but your music is not" needed a
+whole second partition to say. ext4 records an owner and permissions for every
+file separately, so one card says all of it, and the second partition is gone.
+
+What that buys, concretely: an app can read and run its own program but cannot
+change it, cannot put a second program beside it, cannot install or delete
+another app, cannot read your music or wallpapers, and cannot list the card at
+all. It gets one folder it may write -- its own data folder -- which the phone
+creates for it. Removing the app's folder removes the app and everything it
+kept.
+
+The phone re-applies the card's permissions every time it mounts it, because a
+card can be carried to a computer and changed there.
+
+The cost is real: Windows and macOS need a helper to read an ext4 card, where
+Linux reads one out of the box. A card from an older NeoDCT still works for
+music, wallpapers, ringtones and updates -- Settings will tell you it is in the
+old format and offer to reformat it, which erases it, and will never do that on
+its own.
 
 --- The browser stops being the phone ---
 

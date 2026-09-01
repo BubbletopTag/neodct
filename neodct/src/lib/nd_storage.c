@@ -6,6 +6,8 @@
  *
  *   absent       no card in the slot
  *   ready        a NeoDCT card: mounted, with all five folders
+ *   legacy       a NeoDCT card in the pre-0.5.0b FAT format: mounted and
+ *                readable, but it cannot hold an installed app
  *   needs_setup  mountable, but not laid out as a NeoDCT card yet
  *   unformatted  a card is there but carries no filesystem we can mount
  *
@@ -97,6 +99,21 @@ void nd_storage_card(nd_card *out)
     /* Computed BEFORE any of the returns below, so an absent card still
      * reports removable == true. test_storage.py pins the virtiofs case. */
     out->removable = strcmp(fstype, "virtiofs") != 0;
+
+    /* Mounted, ours, and the wrong filesystem. Reported before the
+     * absent/mounted split below because `legacy` is neither: the card IS
+     * there and IS usable, just not for everything. */
+    if (strcmp(reported, "legacy") == 0) {
+        out->state = ND_CARD_LEGACY_FORMAT;
+        (void)nd_strlcpy(out->device, device, sizeof out->device);
+        (void)nd_strlcpy(out->fstype, fstype, sizeof out->fstype);
+        (void)nd_strlcpy(out->label, label, sizeof out->label);
+        /* No arrival directory on a FAT card -- see nd_storage_untrusted_dir,
+         * whose contract is that the caller REFUSES rather than falling back
+         * to the 8 MiB user partition. */
+        out->untrusted[0] = '\0';
+        goto done;
+    }
 
     if (strcmp(reported, "unmountable") == 0 || strcmp(reported, "unformatted") == 0) {
         out->state = ND_CARD_UNFORMATTED;
