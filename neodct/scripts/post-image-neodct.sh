@@ -236,4 +236,65 @@ else
     fi
 fi
 
+# ============ THE USERS MUST BE IN THE IMAGE, OR STOP ============
+#
+# Without ndusr and ndusr_ut in /etc/passwd, nd_priv_lookup() finds nothing,
+# nd_priv_become() is a documented no-op, and EVERY APP RUNS AS ROOT --
+# netsurf included. The privilege split is not degraded, it is absent.
+#
+# That shipped. An output/ tree older than the users table keeps its original
+# .config through every rebuild, never gains BR2_ROOTFS_USERS_TABLES, and
+# `make` says nothing; the only trace was one line in a boot log. It was found
+# by running `top` on a real build and seeing netsurf as root.
+#
+# So it is checked here, and a build that would produce such an image FAILS.
+# A broken phone you are told about beats a broken phone you are not.
+#
+# full_users_table.txt is what buildroot actually handed mkusers -- the
+# defconfig's table plus every package's users, assembled in fs/common.mk. It
+# is the right thing to test because it is the input to the only step that
+# creates users; testing the built image instead would need unsquashfs or
+# debugfs, which are not guaranteed on a build host.
+check_users() {
+    # BUILD_DIR is NOT among the variables buildroot exports to post-image
+    # scripts -- BASE_DIR is (buildroot/Makefile:495) and BUILD_DIR is defined
+    # as $(BASE_DIR)/build (:213). Taking ${BUILD_DIR:-} alone left the path as
+    # "/buildroot-fs/..." , which does not exist, which took the "cannot
+    # verify" branch and returned 0. A check that silently passes is the exact
+    # thing this was written to stop, so it derives the path and treats a
+    # missing table as a failure: post-image only runs after a rootfs has been
+    # built, so fs/common.mk has always written this file by now.
+    table="${BUILD_DIR:-${BASE_DIR:-}/build}/buildroot-fs/full_users_table.txt"
+
+    if [ ! -f "$table" ]; then
+        echo "" >&2
+        echo "post-image: FATAL: cannot find $table" >&2
+        echo "  so it cannot be verified that this image has the users that" >&2
+        echo "  keep apps from running as root. Refusing to call it ready." >&2
+        echo "" >&2
+        exit 1
+    fi
+    for u in ndusr ndusr_ut; do
+        if ! grep -qE "^[[:space:]]*$u[[:space:]]" "$table"; then
+            echo "" >&2
+            echo "post-image: FATAL: no '$u' in this image." >&2
+            echo "" >&2
+            echo "  Every app would run as ROOT -- the browser included." >&2
+            echo "  nd_priv_lookup() has no user to find, so nd_priv_become()" >&2
+            echo "  does nothing and the child keeps nd-core's uid 0." >&2
+            echo "" >&2
+            echo "  The users come from neodct/configs/users-table.txt, via" >&2
+            echo "  BR2_ROOTFS_USERS_TABLES and via NEODCT_USERS in" >&2
+            echo "  package/neodct/neodct.mk. Both have failed here." >&2
+            echo "" >&2
+            echo "  Try:  cd buildroot && make neodct_qemu_defconfig && make" >&2
+            echo "  Then: nd-selftest on the phone reports the same thing." >&2
+            echo "" >&2
+            exit 1
+        fi
+    done
+    say "users: ndusr and ndusr_ut are in this image"
+}
+check_users
+
 say "image set ready in $BINARIES_DIR"

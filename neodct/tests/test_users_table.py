@@ -185,34 +185,79 @@ def test_both_defconfigs_ask_for_the_table(defconfig):
 NEODCT_MK = os.path.join(REPO, "buildroot", "package", "neodct", "neodct.mk")
 
 
+POST_IMAGE = os.path.join(REPO, "neodct", "scripts", "post-image-neodct.sh")
+
+
 @pytest.mark.skipif(not os.path.exists(NEODCT_MK), reason="buildroot not vendored")
-def test_the_package_supplies_the_users_when_the_config_does_not():
+def test_the_package_supplies_the_users_too():
     """The defconfig alone is not enough, and this is the line that covers it.
 
     Buildroot generates output/.config from the defconfig ONCE. A checkout made
     before the users table was added keeps its old .config through every
     rebuild, never gains BR2_ROOTFS_USERS_TABLES, and produces images with no
     ndusr in them -- so nd_priv_lookup() finds nothing and EVERY APP RUNS AS
-    ROOT. That is not hypothetical: it was found with `top` on a real build,
-    showing netsurf as root.
+    ROOT. Found with `top` on a real build, showing netsurf as root.
 
     PACKAGES_USERS is collected from enabled packages regardless of the
     .config's rootfs settings, so declaring the users in neodct.mk reaches a
-    stale tree that the defconfig cannot. Guarded by ifeq on
-    BR2_ROOTFS_USERS_TABLES so a current .config uses the normal path and the
-    users are never declared twice."""
+    stale tree that the defconfig cannot."""
     body = open(NEODCT_MK).read()
 
     assert "NEODCT_USERS" in body, "the package no longer supplies the users"
-    assert "ifeq ($(call qstrip,$(BR2_ROOTFS_USERS_TABLES)),)" in body, (
-        "the fallback must be guarded, or a current .config declares the "
-        "users twice"
-    )
-    assert "$(file <$(NEODCT_USERS_TABLE))" in body, (
-        "read with $(file <), not $(shell cat): mkusers parses on newlines "
-        "and $(shell) collapses them to spaces"
-    )
     assert "users-table.txt" in body, "and it must read THE table, not a copy"
+
+
+@pytest.mark.skipif(not os.path.exists(NEODCT_MK), reason="buildroot not vendored")
+def test_the_package_fallback_is_not_guarded():
+    """It must NOT be wrapped in ifeq on BR2_ROOTFS_USERS_TABLES.
+
+    That guard looks right -- it stops the two paths both firing -- but it
+    assumes the reason the users are missing is a .config without the line. If
+    that assumption is ever wrong the guard switches the fallback off in
+    exactly the case it exists for. mkusers accepts an entry it has already
+    seen (the table listed twice gives rc=0 and two users, not four), so being
+    unguarded costs nothing and removes the assumption."""
+    body = open(NEODCT_MK).read()
+
+    assert "ifeq ($(call qstrip,$(BR2_ROOTFS_USERS_TABLES)),)" not in body, (
+        "guarding the fallback on the .config re-introduces the assumption it "
+        "was written to remove"
+    )
+
+
+@pytest.mark.skipif(not os.path.exists(NEODCT_MK), reason="buildroot not vendored")
+def test_the_table_is_not_read_with_a_make_4_only_function():
+    """$(file <...) is GNU make 4.0. Buildroot's stated minimum is 3.81, where
+    it is not a function at all -- it parses as an undefined variable and
+    expands to the EMPTY STRING. No error, no users, an image where everything
+    runs as root. $(shell) and $(subst) work everywhere."""
+    # Comment lines only EXPLAIN why $(file <) is avoided; they must not fail
+    # this. Strip them and look at what make will actually evaluate.
+    code = "\n".join(line for line in open(NEODCT_MK).read().splitlines()
+                     if not line.lstrip().startswith("#"))
+
+    assert "$(file <" not in code, "make 3.81 expands $(file <...) to nothing"
+    assert "$(shell sed" in code, "read the table with $(shell), which is portable"
+
+
+@pytest.mark.skipif(not os.path.exists(POST_IMAGE), reason="script missing")
+def test_the_build_refuses_an_image_with_no_users():
+    """Belt and braces, and the braces matter more.
+
+    Both mechanisms above can fail -- a renamed file, an odd .config, a make
+    that behaves unexpectedly. What must never happen again is that such a
+    build SUCCEEDS and hands over an image where every app is root. post-image
+    greps the users table buildroot actually handed mkusers and exits non-zero
+    if the users are not in it."""
+    body = open(POST_IMAGE).read()
+
+    assert "full_users_table.txt" in body, "the check must read what mkusers got"
+    assert "ndusr_ut" in body, "both users have to be checked, not just ndusr"
+    assert "exit 1" in body, "and it has to FAIL the build, not warn"
+    # BUILD_DIR is not exported to post-image scripts; BASE_DIR is. Deriving it
+    # wrongly left the path non-existent, which took the "cannot verify" branch
+    # and passed -- a check that silently passes is worse than no check.
+    assert "BASE_DIR" in body, "BUILD_DIR is not exported; derive it from BASE_DIR"
 
 
 @pytest.mark.skipif(not os.path.exists(MKUSERS), reason="buildroot not vendored")
