@@ -250,8 +250,10 @@ CARD_UT_GID="$(phone_id ndusr_ut 4)"
 # The list is written out here rather than read from the helper's FOLDERS on
 # purpose -- this function also serves the path taken when the helper cannot
 # be read at all, and a list sourced from a file that is missing is not a
-# list. It is the same seven names, and they are checked against the helper by
-# the host tests.
+# list. It is the same seven names, and unlike the layout below it does not
+# have to stay in step to be safe: after_mount() mkdirs every one of FOLDERS
+# on every mount of a NeoDCT card, so a name that falls behind here costs one
+# directory that appears on the phone's first look at the card.
 sdcard_folders() {   # sdcard_folders STAGING-DIR
     for folder in wallpapers tones backup_db music update apps untrusted; do
         mkdir -p "$1/$folder"
@@ -482,10 +484,10 @@ build_sdcard_image() {   # build_sdcard_image PATH MKE2FS
     }
 
     # count=0 seek=N makes a file of exactly the partition's length without
-    # writing a byte of it; mke2fs takes its size from the file and the dd
-    # back into the card fills the hole with the zeros that are already there.
-    # -b 4096 above, so the block count is an eighth of the sector count, and
-    # the plan is 1 MiB aligned so that division is exact.
+    # writing a byte of it, so the dd back into the card copies exactly the
+    # sectors the table claims and nothing beyond them. The block count is an
+    # eighth of the sector count because of the -b 4096 in mkfs_card, and the
+    # plan is 1 MiB aligned, so that division is exact rather than nearly.
     dd if=/dev/zero of="$_fs" bs=512 count=0 seek="$_p1_sectors" status=none
     mkfs_card "$_mkfs" "$_fs" "$_stage" "$((_p1_sectors / 8))" || {
         say "mke2fs could not make the card's filesystem"
