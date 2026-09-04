@@ -868,7 +868,9 @@ static void draw_no_map(frame *fr)
 {
     const nd_font *f = fr->scene->ui->font_s;
     static const char *const LINES[] = {"No map here.", "Options > Download map"};
-    int32_t y = fr->h / 2 - 22;
+    /* Above the crosshair, not across it: centred on the screen the second
+     * line ran straight through the cross. */
+    int32_t y = fr->h / 2 - 56;
     size_t i;
 
     if (f == NULL)
