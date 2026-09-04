@@ -459,28 +459,39 @@ static const nd_osm_way *edge_way(const nd_osm_map *m, uint32_t a, uint32_t b)
 /* What an unnamed road is called in a direction. */
 static const char *kind_word(uint8_t kind)
 {
+    /* Capitalised, because it stands where a road name stands: as the
+     * page's own title line. */
     switch (kind) {
     case ND_OSM_KIND_PATH:
-        return "path";
+        return "Path";
     case ND_OSM_KIND_TRACK:
-        return "track";
+        return "Track";
     case ND_OSM_KIND_SERVICE:
-        return "service road";
+        return "Service road";
     case ND_OSM_KIND_MOTORWAY:
-        return "motorway";
+        return "Motorway";
     default:
-        return "road";
+        return "Road";
     }
 }
 
 static void road_label(const nd_osm_map *m, const nd_osm_way *w, char *out, size_t out_sz)
 {
     const char *name = (w != NULL) ? nd_osm_way_name(m, w) : "";
+    size_t i;
 
-    if (name[0] != '\0')
-        (void)nd_strlcpy(out, name, out_sz);
-    else
+    if (name[0] == '\0') {
         (void)nd_strlcpy(out, kind_word((w != NULL) ? w->kind : ND_OSM_KIND_NONE), out_sz);
+        return;
+    }
+    (void)nd_strlcpy(out, name, out_sz);
+    /* A road carrying two route numbers is tagged "US 36;SR 83". The
+     * semicolon is OSM's list separator, not a spelling; a sign says it
+     * with a slash. */
+    for (i = 0u; out[i] != '\0'; i++) {
+        if (out[i] == ';')
+            out[i] = '/';
+    }
 }
 
 size_t nd_osm_route_steps(const nd_osm_map *m, const nd_osm_route *r, nd_osm_step *out, size_t max)
@@ -577,13 +588,26 @@ void nd_osm_step_label(const nd_osm_step *s, char *out, size_t out_sz)
 
     if (s == NULL || out == NULL || out_sz == 0u)
         return;
+    /* The turn in a word or two, then the distance: short enough to fit the
+     * one 20 px line the PagedList gives a value, which is 223 px. The
+     * road is the page's ITEM, which the widget wraps over two lines at
+     * 24 px -- so "Scio Bowerstown Road" is read whole rather than as
+     * "Scio Bow..." with the distance lost off the end, which is what
+     * putting the road on this line did.
+     *
+     * Measured against that width in the phone's font: "Turn right, 28 km"
+     * is 230 px and "Sharp right, 1.2 km" 244, so the words here are the
+     * short ones and the comma is gone. "Hard right 1.2 km" is 223 exactly;
+     * only a hard turn followed by a hundred kilometres of the same road
+     * would still be shortened, and no road does that. */
+    static const char *const WORDS[ND_OSM_TURN_ARRIVE + 1] = {
+        "Start", "Continue", "Left", "Right", "Hard left", "Hard right", "Arrive"};
+
     if (s->turn == ND_OSM_TURN_ARRIVE) {
-        (void)nd_strlcpy(out, "at the destination", out_sz);
+        (void)nd_strlcpy(out, "End of route", out_sz);
         return;
     }
     nd_osm_format_distance((double)s->metres, dist, sizeof dist);
-    if (s->road[0] != '\0')
-        (void)nd_snprintf(out, out_sz, "%s, %s", s->road, dist);
-    else
-        (void)nd_strlcpy(out, dist, out_sz);
+    (void)nd_snprintf(out, out_sz, "%s %s",
+                      WORDS[nd_clamp32((int32_t)s->turn, 0, ND_OSM_TURN_ARRIVE)], dist);
 }

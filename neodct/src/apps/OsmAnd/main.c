@@ -571,8 +571,19 @@ static void directions(app_state *app)
     }
     n = nd_osm_route_steps(app->maps[app->route_map], &app->route, dl->steps, ND_OSM_STEPS_MAX);
     for (i = 0u; i < n; i++) {
-        dl->items[i] = nd_osmand_turn_names[dl->steps[i].turn];
-        nd_osm_step_label(&dl->steps[i], dl->values[i], sizeof dl->values[i]);
+        char raw[64];
+
+        /* The road is the page's title, in big type, wrapped over two lines
+         * by the widget; the turn and the distance are the value under it.
+         * The other way round put the road on the one unwrapped line, where
+         * "Coshocton Road, 28 km" lost its distance under the scrollbar. */
+        dl->items[i] = (dl->steps[i].road[0] != '\0') ? dl->steps[i].road
+                                                      : nd_osmand_turn_names[dl->steps[i].turn];
+        nd_osm_step_label(&dl->steps[i], raw, sizeof raw);
+        /* 223 px is the width the widget centres its value in -- bar_x
+         * minus 12 -- and the value is not wrapped, so it is fitted here. */
+        (void)nd_text_ellipsize(dl->values[i], sizeof dl->values[i], raw, ui->font_n,
+                                nd_ui_width(ui) - 5 - 12);
         dl->value_ptrs[i] = dl->values[i];
     }
 

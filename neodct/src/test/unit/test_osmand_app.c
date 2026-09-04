@@ -907,10 +907,11 @@ static void test_directions(void)
     }
 
     api.step_label(&steps[0], label, sizeof label);
-    CHECK(strstr(label, steps[0].road) == label, "the label opens with the road");
+    CHECK(strncmp(label, "Start ", 6) == 0, "the label opens with the turn");
     CHECK(strstr(label, " m") != NULL, "and ends with the distance");
+    CHECK(strstr(label, steps[0].road) == NULL, "the road is the page's title, not its value");
     api.step_label(&steps[n - 1u], label, sizeof label);
-    CHECK_STR(label, "at the destination", "the arrival's label");
+    CHECK_STR(label, "End of route", "the arrival's label");
 
     api.route_free(&r);
     api.map_free(m);

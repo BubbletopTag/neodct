@@ -494,7 +494,9 @@ nd_osm_turn nd_osm_turn_for(double delta_deg);
  * step is always ND_OSM_TURN_ARRIVE. Returns how many were written. */
 size_t nd_osm_route_steps(const nd_osm_map *m, const nd_osm_route *r, nd_osm_step *out, size_t max);
 
-/* "Left onto High St", "450 m" -- the two lines of a directions row. */
+/* "Right 450 m" -- the line under a directions page's title, which is the
+ * road. The turn and the distance are short and go on the one line the
+ * PagedList draws a value on; the road is the item, which it wraps. */
 void nd_osm_step_label(const nd_osm_step *s, char *out, size_t out_sz);
 void nd_osm_format_distance(double metres, char *out, size_t out_sz);
 
