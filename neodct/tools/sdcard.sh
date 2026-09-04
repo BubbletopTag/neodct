@@ -105,6 +105,46 @@ run_debugfs() {   # run_debugfs WRITABLE < commands
     fi
 }
 
+# ============ AND IT HAS TO REFUSE A CARD IT CANNOT TOUCH ============
+#
+# debugfs edits ext filesystems and nothing else. Handed a FAT card it prints
+# its complaints, exits 0 anyway -- which is what debugfs does -- and this
+# script cheerfully reported
+#
+#     sdcard: copied UPDATE.ndsw to /update/ (ndusr, 0640)
+#
+# having copied nothing at all. The phone then said the package was "not on
+# this card", and the lie was three steps upstream of the symptom. It cost a
+# whole end-to-end update test to find, on a card that was FAT only because a
+# fixture had been left behind.
+#
+# So: read the ext superblock magic before doing anything. It lives at offset
+# 0x38 of the superblock, which starts 1024 bytes into the filesystem.
+card_is_ext() {
+    _spec="$(card_spec)"
+    _off="${_spec##*?offset=}"
+    [ "$_off" = "$_spec" ] && _off=0
+    python3 - "$CARD" "$_off" <<'PY' 2>/dev/null
+import sys
+try:
+    with open(sys.argv[1], "rb") as f:
+        f.seek(int(sys.argv[2]) + 1024 + 0x38)
+        sys.exit(0 if f.read(2) == b"\x53\xef" else 1)
+except Exception:
+    sys.exit(1)
+PY
+}
+
+require_ext() {
+    card_is_ext && return 0
+    echo "sdcard: $CARD is not an ext filesystem." >&2
+    echo "  A NeoDCT card is ext4 since 0.5.0b -- FAT cannot record who owns a" >&2
+    echo "  file, which is what the confinement is written in. This tool edits" >&2
+    echo "  ext with debugfs and can do nothing at all to a FAT card." >&2
+    echo "  Make one with: $0 new 128   (this ERASES the image)" >&2
+    exit 1
+}
+
 usage() {
     sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
@@ -119,6 +159,8 @@ if [ "$ACTION" != "new" ] && [ ! -f "$CARD" ]; then
     echo "  card with: $0 new 128" >&2
     exit 1
 fi
+
+[ "$ACTION" = "new" ] || require_ext
 
 case "$ACTION" in
     ls)
