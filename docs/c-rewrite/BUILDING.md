@@ -303,6 +303,38 @@ should be dircleaned before retrying**, whatever the original cause; retrying
 on top of the wreckage produces a second, unrelated error that sends you
 looking in the wrong place.
 
+### And the one that costs the most time: a DELETED overlay file is still in the image
+
+`target-finalize` copies `neodct/overlay/` over `output/target/` on every
+build. It only ever copies **in**. Nothing removes a file from `output/target`
+because it stopped existing in the overlay.
+
+So this does not do what it looks like it does:
+
+```sh
+rm neodct/overlay/etc/init.d/S97debug   # gone from the source
+cd buildroot && make                    # still in the image
+```
+
+The file boots. Every time. Until you delete it from the target tree as well
+or do a full rebuild:
+
+```sh
+rm -f buildroot/output/target/etc/init.d/S97debug
+cd buildroot && make
+```
+
+This is worst for temporary debugging scripts, which is exactly where it
+happened: a throwaway init script that ran `neodct-sdcard format` was deleted
+from the overlay, stayed in the image, and reformatted the SD card on every
+boot for four consecutive end-to-end update tests. Each one failed with the
+phone saying the update package was "not on this card" — which was true, and
+three layers away from the cause.
+
+**If you delete something from the overlay, check `output/target` for it.**
+`grep -rl <marker> buildroot/output/target/` before believing a removal
+happened.
+
 ---
 
 ## 3. What changed in 0.4.0
