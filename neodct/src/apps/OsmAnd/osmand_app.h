@@ -61,10 +61,10 @@
 extern "C" {
 #endif
 
-/* App id 13 -- manifest.json, and the "13" the options list's header
- * draws. The first free
- * slot after the stock 1..12. A string as well as a number because the
- * widgets take the root id as text and the two must not be able to drift. */
+/* App id 13 -- manifest.json, and the "13" the options list's header draws.
+ * The first free slot after the stock 1..12. A string as well as a number
+ * because the widgets take the root id as text and the two must not be able
+ * to drift. */
 #define ND_OSMAND_APP_ID   13
 #define ND_OSMAND_APP_ROOT "13"
 
@@ -505,11 +505,26 @@ void nd_osm_format_distance(double metres, char *out, size_t out_sz);
 #define ND_OSM_OVERPASS_URL "https://overpass-api.de/api/interpreter"
 #define ND_OSM_USER_AGENT   "NeoDCT-OsmAnd/1.0 (+https://github.com/BubbletopTag/neodct)"
 
-/* The Overpass QL for a bounding box. `buildings` false leaves building
- * outlines out, which is what makes the largest area size fit the ceilings
- * above. */
+/* How much of an area to ask for. Three levels, because they are three
+ * different sizes of answer for the same box, and the ceilings above are
+ * what decide which is possible:
+ *
+ *   FULL          everything the app draws, buildings included: a town
+ *   NO_BUILDINGS  the same without building outlines: a larger town
+ *   MAIN_ROADS    motorway to tertiary, rivers and place names only: a
+ *                 region. Measured on a 140 x 33 km corridor of rural Ohio,
+ *                 tertiary roads and above were 66,000 nodes and lakes
+ *                 another 47,000, which is what puts the lakes and the
+ *                 railways out of a box four times that size. */
+typedef enum {
+    ND_OSM_DETAIL_FULL = 0,
+    ND_OSM_DETAIL_NO_BUILDINGS,
+    ND_OSM_DETAIL_MAIN_ROADS
+} nd_osm_detail;
+
+/* The Overpass QL for a bounding box at a level of detail. */
 nd_err nd_osm_fetch_query(char *out, size_t out_sz, int32_t south, int32_t west, int32_t north,
-                          int32_t east, bool buildings);
+                          int32_t east, nd_osm_detail detail);
 
 /* Bytes landed so far. `bytes` only grows. */
 typedef void (*nd_osm_fetch_progress_fn)(void *ctx, int64_t bytes);
@@ -541,12 +556,14 @@ typedef enum {
 } nd_osmand_option;
 extern const char *const nd_osmand_options[ND_OSMAND_OPTIONS_COUNT];
 
-/* The three download sizes: a side in kilometres, and whether buildings
- * come too. */
-#define ND_OSMAND_SIZES_COUNT 3
+/* The four download sizes: a side in kilometres and the detail asked for.
+ * The fourth is the one that makes a journey possible: a town map cannot
+ * route to the next town, and a 140 km square of main roads can -- Mount
+ * Vernon to Scio, Ohio, is 140 km of US 36 and US 250 and fits one. */
+#define ND_OSMAND_SIZES_COUNT 4
 extern const char *const nd_osmand_size_names[ND_OSMAND_SIZES_COUNT];
 extern const double nd_osmand_size_km[ND_OSMAND_SIZES_COUNT];
-extern const bool nd_osmand_size_buildings[ND_OSMAND_SIZES_COUNT];
+extern const nd_osm_detail nd_osmand_size_detail[ND_OSMAND_SIZES_COUNT];
 
 /* Settings keys. The view is saved on exit so the map opens where it was
  * left; a map that forgot would open on a town you were not looking at. */

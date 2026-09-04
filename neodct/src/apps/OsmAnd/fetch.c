@@ -54,7 +54,7 @@
 #define LOG_TAG "OsmAnd"
 
 nd_err nd_osm_fetch_query(char *out, size_t out_sz, int32_t south, int32_t west, int32_t north,
-                          int32_t east, bool buildings)
+                          int32_t east, nd_osm_detail detail)
 {
     /* The bbox is written from the 1e7 integers digit by digit rather than
      * through %f, so the query says exactly what the header of the map
@@ -81,6 +81,23 @@ nd_err nd_osm_fetch_query(char *out, size_t out_sz, int32_t south, int32_t west,
         else
             (void)nd_snprintf(strs[i], 24u, "%d.%07d", (int)whole, (int)frac);
     }
+    if (detail == ND_OSM_DETAIL_MAIN_ROADS) {
+        /* A region: the roads a journey uses, the rivers that say where
+         * you are, the towns. No lakes, no rails, no landuse -- see
+         * nd_osm_detail. The server is given longer, because a box this
+         * size is a real question for it. */
+        return nd_snprintf(out, out_sz,
+                           "[out:xml][timeout:600][bbox:%s,%s,%s,%s];\n"
+                           "(\n"
+                           "  way[highway~\"^(motorway|motorway_link|trunk|trunk_link|primary|"
+                           "primary_link|secondary|secondary_link|tertiary|tertiary_link)$\"];\n"
+                           "  way[waterway=river];\n"
+                           "  node[place][name];\n"
+                           ");\n"
+                           "(._;>;);\n"
+                           "out;\n",
+                           s, w, n, e);
+    }
     return nd_snprintf(out, out_sz,
                        "[out:xml][timeout:180][bbox:%s,%s,%s,%s];\n"
                        "(\n"
@@ -98,7 +115,7 @@ nd_err nd_osm_fetch_query(char *out, size_t out_sz, int32_t south, int32_t west,
                        ");\n"
                        "(._;>;);\n"
                        "out;\n",
-                       s, w, n, e, buildings ? "  way[building];\n" : "");
+                       s, w, n, e, (detail == ND_OSM_DETAIL_FULL) ? "  way[building];\n" : "");
 }
 
 /* execvp's PATH lookup, which nd_proc_spawn() does not do. The same shape

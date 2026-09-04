@@ -19,9 +19,11 @@ the options and C leaves.
 Maps live on the memory card and are downloaded once, from the map's
 Options: "Download map" fetches a 2, 5 or 10 km square around the cross
 from the OpenStreetMap Overpass service over mobile data, and keeps it as
-one file at /NeoDCT/User/sdcard/apps/OsmAnd/data. After that nothing needs
-a network. Up to six maps are loaded at a time; "Installed maps" lists them
-and deletes them.
+one file at /NeoDCT/User/sdcard/apps/OsmAnd/data. A fourth size, Region,
+fetches a 140 km square of main roads, rivers and town names -- enough to
+plan a drive from one town to the next, which a town map cannot. After
+that nothing needs a network. Up to six maps are loaded at a time;
+"Installed maps" lists them and deletes them.
 
 Routes are planned on the phone, by car or on foot: "Start here" and "Route
 to here" mark the two ends under the cross, the route is drawn in blue, and

@@ -65,9 +65,18 @@ const char *const nd_osmand_size_names[ND_OSMAND_SIZES_COUNT] = {
     "Small (2 km)",
     "Medium (5 km)",
     "Large (10 km, no buildings)",
+    "Region (140 km, main roads)",
 };
-const double nd_osmand_size_km[ND_OSMAND_SIZES_COUNT] = {2.0, 5.0, 10.0};
-const bool nd_osmand_size_buildings[ND_OSMAND_SIZES_COUNT] = {true, true, false};
+const double nd_osmand_size_km[ND_OSMAND_SIZES_COUNT] = {2.0, 5.0, 10.0, 140.0};
+const nd_osm_detail nd_osmand_size_detail[ND_OSMAND_SIZES_COUNT] = {
+    ND_OSM_DETAIL_FULL, ND_OSM_DETAIL_FULL, ND_OSM_DETAIL_NO_BUILDINGS, ND_OSM_DETAIL_MAIN_ROADS};
+
+/* What an answer of each size usually weighs, in megabytes, measured: a 2 km
+ * town square with buildings is a megabyte or two, and 140 x 33 km of
+ * rural Ohio's main roads and water was 13 MB, so a 140 km square of roads
+ * and rivers is about two and a half times that. Drives the progress bar and nothing
+ * else. */
+static const double SIZE_MB[ND_OSMAND_SIZES_COUNT] = {1.5, 4.0, 8.0, 32.0};
 
 const char *const nd_osmand_msg_no_maps = "No maps yet.\n\nDownload the area under the cross.";
 const char *const nd_osmand_msg_no_start = "No start point.\n\nChoose Start here first.";
@@ -902,7 +911,7 @@ static void download(app_state *app)
 
     nd_osm_bbox_around(lat, lon, nd_osmand_size_km[size], &south, &west, &north, &east);
     if (nd_osm_fetch_query(query, sizeof query, south, west, north, east,
-                           nd_osmand_size_buildings[size]) != ND_OK ||
+                           nd_osmand_size_detail[size]) != ND_OK ||
         nd_snprintf(query_path, sizeof query_path, "%s/.query.txt", ND_OSMAND_DATA_DIR) != ND_OK ||
         nd_snprintf(xml_path, sizeof xml_path, "%s/.download.osm", ND_OSMAND_DATA_DIR) != ND_OK ||
         nd_path_resolve(real, sizeof real, query_path) != ND_OK) {
@@ -917,11 +926,8 @@ static void download(app_state *app)
         return;
     }
 
-    /* A 2 km square of a town is a megabyte or two of XML; a 10 km one
-     * without buildings is about the same. The estimate only drives the
-     * bar. */
     dc.bar = &bar;
-    dc.estimate = (int64_t)(1.5 * 1024.0 * 1024.0 * nd_osmand_size_km[size] / 2.0);
+    dc.estimate = (int64_t)(SIZE_MB[size] * 1024.0 * 1024.0);
     dc.shown = 0;
     nd_progress_init(&bar, ui, "Downloading", nd_osmand_app_title, "Press nothing", download_detail,
                      &dc);

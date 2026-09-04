@@ -88,7 +88,7 @@ static struct {
     size_t (*route_steps)(const nd_osm_map *, const nd_osm_route *, nd_osm_step *, size_t);
     void (*step_label)(const nd_osm_step *, char *, size_t);
     void (*format_distance)(double, char *, size_t);
-    nd_err (*fetch_query)(char *, size_t, int32_t, int32_t, int32_t, int32_t, bool);
+    nd_err (*fetch_query)(char *, size_t, int32_t, int32_t, int32_t, int32_t, nd_osm_detail);
     nd_err (*fetch)(const char *, const char *, nd_osm_fetch_progress_fn, void *, char *, size_t);
     nd_osm_scratch *(*scratch_new)(void);
     void (*scratch_free)(nd_osm_scratch *);
@@ -231,6 +231,7 @@ static void test_rows(void)
 
     CHECK_STR(api.size_names[0], "Small (2 km)", "size row 1");
     CHECK_STR(api.size_names[2], "Large (10 km, no buildings)", "size row 3");
+    CHECK_STR(api.size_names[3], "Region (140 km, main roads)", "size row 4");
     CHECK_STR(api.mode_names[ND_OSM_MODE_CAR], "By car", "mode row 1");
     CHECK_STR(api.mode_names[ND_OSM_MODE_FOOT], "On foot", "mode row 2");
     CHECK_STR(api.turn_names[ND_OSM_TURN_LEFT], "Turn left", "the turn a page shows");
@@ -986,7 +987,8 @@ static void test_the_query_names_the_box(void)
 {
     char q[1024];
 
-    CHECK_INT(api.fetch_query(q, sizeof q, TOWN_SOUTH, TOWN_WEST, TOWN_NORTH, TOWN_EAST, true),
+    CHECK_INT(api.fetch_query(q, sizeof q, TOWN_SOUTH, TOWN_WEST, TOWN_NORTH, TOWN_EAST,
+                              ND_OSM_DETAIL_FULL),
               ND_OK, "a query");
     CHECK(strstr(q, "[bbox:53.3440000,-6.2760000,53.3560000,-6.2440000]") != NULL,
           "with the box spelled from the integers, south west north east");
@@ -994,12 +996,27 @@ static void test_the_query_names_the_box(void)
     CHECK(strstr(q, "way[building]") != NULL, "and buildings");
     CHECK(strstr(q, "node[place][name]") != NULL, "and named places");
     CHECK(strstr(q, "(._;>;);") != NULL, "with every way's nodes");
-    CHECK_INT(api.fetch_query(q, sizeof q, LAT(-0.5), LON(-0.25), 0, 0, false), ND_OK,
-              "a box across the equator");
+    CHECK_INT(api.fetch_query(q, sizeof q, LAT(-0.5), LON(-0.25), 0, 0, ND_OSM_DETAIL_NO_BUILDINGS),
+              ND_OK, "a box across the equator");
     CHECK(strstr(q, "[bbox:-0.5000000,-0.2500000,0.0000000,0.0000000]") != NULL,
           "keeps its minus signs on a negative fraction");
     CHECK(strstr(q, "way[building]") == NULL, "and leaves buildings out when asked");
-    CHECK_INT(api.fetch_query(q, 16u, 0, 0, 0, 0, true), ND_ERR_TOOLONG, "a short buffer");
+    CHECK_INT(api.fetch_query(q, 16u, 0, 0, 0, 0, ND_OSM_DETAIL_FULL), ND_ERR_TOOLONG,
+              "a short buffer");
+
+    /* A region asks for the roads a journey uses and nothing that would
+     * push a 140 km square over the importer's ceilings. */
+    CHECK_INT(api.fetch_query(q, sizeof q, TOWN_SOUTH, TOWN_WEST, TOWN_NORTH, TOWN_EAST,
+                              ND_OSM_DETAIL_MAIN_ROADS),
+              ND_OK, "a region query");
+    CHECK(strstr(q, "tertiary|tertiary_link)$") != NULL, "down to tertiary roads");
+    CHECK(strstr(q, "way[highway];") == NULL, "and not every road");
+    CHECK(strstr(q, "way[waterway=river];") != NULL, "with rivers");
+    CHECK(strstr(q, "natural") == NULL && strstr(q, "landuse") == NULL &&
+              strstr(q, "railway") == NULL && strstr(q, "building") == NULL,
+          "but no lakes, landuse, rails or buildings");
+    CHECK(strstr(q, "node[place][name]") != NULL, "and the towns");
+    CHECK(strstr(q, "[timeout:600]") != NULL, "with longer for the server to answer");
 }
 
 static void test_download_then_import(void)
@@ -1021,7 +1038,8 @@ static void test_download_then_import(void)
     }
     (void)nd_snprintf(query_path, sizeof query_path, "%s/.query.txt", ND_OSMAND_DATA_DIR);
     (void)nd_snprintf(xml_path, sizeof xml_path, "%s/.download.osm", ND_OSMAND_DATA_DIR);
-    (void)api.fetch_query(q, sizeof q, TOWN_SOUTH, TOWN_WEST, TOWN_NORTH, TOWN_EAST, true);
+    (void)api.fetch_query(q, sizeof q, TOWN_SOUTH, TOWN_WEST, TOWN_NORTH, TOWN_EAST,
+                          ND_OSM_DETAIL_FULL);
     if (nd_path_resolve(real, sizeof real, query_path) != ND_OK || (f = fopen(real, "w")) == NULL) {
         CHECK(false, "the query file");
         restore_path();
