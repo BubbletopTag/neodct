@@ -539,60 +539,30 @@ static void start_here(app_state *app)
         compute_route(app);
 }
 
-/* The turn list, one turn per page in big type with the road and distance
- * under it -- the PagedList idiom Clock uses for its rows' values, which
- * here is exactly what a direction is. NaviKey on a page centres the map
- * on that turn. */
-typedef struct {
-    nd_osm_step steps[ND_OSM_STEPS_MAX];
-    char values[ND_OSM_STEPS_MAX][64];
-    const char *items[ND_OSM_STEPS_MAX];
-    const char *value_ptrs[ND_OSM_STEPS_MAX];
-} directions_list;
-
+/* The turn list: directions.c's own screen, one turn a page with an arrow.
+ * NaviKey on a page centres the map on that turn. */
 static void directions(app_state *app)
 {
     nd_ui *ui = app->ui;
-    directions_list *dl;
+    nd_osm_step *steps;
     size_t n;
-    size_t i;
-    nd_pagedlist page;
     int32_t choice;
 
     if (app->route.n_nodes < 2u || app->route_map >= app->n_maps) {
         say(ui, "No route yet.\n\nChoose Route to here first.");
         return;
     }
-    /* 64 * (64 + 64 + 16) bytes is about 9 kB: heap, not an app's stack. */
-    dl = calloc(1u, sizeof *dl);
-    if (dl == NULL) {
+    /* 64 steps of 64 bytes is 4 kB: heap, not an app's stack. */
+    steps = calloc(ND_OSM_STEPS_MAX, sizeof *steps);
+    if (steps == NULL) {
         say(ui, "Not enough memory to list the directions.");
         return;
     }
-    n = nd_osm_route_steps(app->maps[app->route_map], &app->route, dl->steps, ND_OSM_STEPS_MAX);
-    for (i = 0u; i < n; i++) {
-        char raw[64];
-
-        /* The road is the page's title, in big type, wrapped over two lines
-         * by the widget; the turn and the distance are the value under it.
-         * The other way round put the road on the one unwrapped line, where
-         * "Coshocton Road, 28 km" lost its distance under the scrollbar. */
-        dl->items[i] = (dl->steps[i].road[0] != '\0') ? dl->steps[i].road
-                                                      : nd_osmand_turn_names[dl->steps[i].turn];
-        nd_osm_step_label(&dl->steps[i], raw, sizeof raw);
-        /* 223 px is the width the widget centres its value in -- bar_x
-         * minus 12 -- and the value is not wrapped, so it is fitted here. */
-        (void)nd_text_ellipsize(dl->values[i], sizeof dl->values[i], raw, ui->font_n,
-                                nd_ui_width(ui) - 5 - 12);
-        dl->value_ptrs[i] = dl->values[i];
-    }
-
-    nd_pagedlist_init(&page, ui, "Directions", dl->items, n, ND_OSMAND_APP_ROOT, true);
-    nd_pagedlist_set_values(&page, dl->value_ptrs);
-    choice = nd_pagedlist_show(&page);
+    n = nd_osm_route_steps(app->maps[app->route_map], &app->route, steps, ND_OSM_STEPS_MAX);
+    choice = nd_osm_directions_show(ui, steps, n, 0u);
     if (choice >= 0 && (size_t)choice < n) {
         const nd_osm_map *m = app->maps[app->route_map];
-        uint32_t node = dl->steps[choice].node;
+        uint32_t node = steps[choice].node;
 
         if (node < m->n_nodes) {
             app->view.cx = m->mx[node];
@@ -601,7 +571,7 @@ static void directions(app_state *app)
                 app->view.zoom = 16;
         }
     }
-    free(dl);
+    free(steps);
 }
 
 /* ------------------------------------------------------------------ *

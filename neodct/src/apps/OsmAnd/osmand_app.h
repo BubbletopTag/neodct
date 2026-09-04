@@ -61,6 +61,8 @@
 extern "C" {
 #endif
 
+struct nd_draw;
+
 /* App id 13 -- manifest.json, and the "13" the options list's header draws.
  * The first free slot after the stock 1..12. A string as well as a number
  * because the widgets take the root id as text and the two must not be able
@@ -494,11 +496,36 @@ nd_osm_turn nd_osm_turn_for(double delta_deg);
  * step is always ND_OSM_TURN_ARRIVE. Returns how many were written. */
 size_t nd_osm_route_steps(const nd_osm_map *m, const nd_osm_route *r, nd_osm_step *out, size_t max);
 
-/* "Right 450 m" -- the line under a directions page's title, which is the
- * road. The turn and the distance are short and go on the one line the
- * PagedList draws a value on; the road is the item, which it wraps. */
+/* "Right 450 m" -- the turn and the distance in one short line, for a
+ * summary that has only one. The directions screen itself draws the parts
+ * separately; see directions.c. */
 void nd_osm_step_label(const nd_osm_step *s, char *out, size_t out_sz);
 void nd_osm_format_distance(double metres, char *out, size_t out_sz);
+
+/* ---- the directions screen (directions.c) ---- */
+
+/* The arrow for a turn, drawn in a size x size box at (x, y) with lines and
+ * a triangle: the font has no arrow glyphs. Nothing below 16 px. */
+void nd_osm_arrow_draw(struct nd_draw *d, nd_osm_turn turn, int32_t x, int32_t y, int32_t size,
+                       nd_color c);
+
+/* One page: arrow, distance, road, "4 of 28". Clears rows 0..content_bottom
+ * ONLY and presents, the same contract as the map screen. */
+void nd_osm_directions_draw(nd_ui *ui, const nd_osm_step *steps, size_t n, size_t index);
+
+typedef enum {
+    ND_OSM_DIR_NONE = 0, /* the key meant nothing; do not redraw */
+    ND_OSM_DIR_MOVED,    /* the page changed, or stayed at an end */
+    ND_OSM_DIR_SHOW,     /* NaviKey: show this turn on the map    */
+    ND_OSM_DIR_BACK      /* C                                     */
+} nd_osm_dir_nav;
+
+/* Up/2/4 back a page, Down/8/6 forward, clamped and still MOVED at the
+ * ends so a held key is a steady screen. Pure. */
+nd_osm_dir_nav nd_osm_directions_key(int32_t key, size_t n, size_t *index);
+
+/* Draw, loop, return the page NaviKey was pressed on, or -1 for C. */
+int32_t nd_osm_directions_show(nd_ui *ui, const nd_osm_step *steps, size_t n, size_t initial);
 
 /* ------------------------------------------------------------------ *
  * Downloading

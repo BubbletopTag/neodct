@@ -94,6 +94,9 @@ static struct {
     void (*scratch_free)(nd_osm_scratch *);
     void (*render)(const nd_osm_scene *, nd_image *);
     void (*scene_draw)(const nd_osm_scene *, nd_image *);
+    void (*arrow_draw)(nd_draw *, nd_osm_turn, int32_t, int32_t, int32_t, nd_color);
+    void (*directions_draw)(nd_ui *, const nd_osm_step *, size_t, size_t);
+    nd_osm_dir_nav (*directions_key)(int32_t, size_t, size_t *);
 } api;
 
 #define SYM(field, name)                        \
@@ -148,6 +151,9 @@ static bool api_open(void *h)
     SYM(scratch_free, "nd_osm_scratch_free");
     SYM(render, "nd_osm_render");
     SYM(scene_draw, "nd_osm_scene_draw");
+    SYM(arrow_draw, "nd_osm_arrow_draw");
+    SYM(directions_draw, "nd_osm_directions_draw");
+    SYM(directions_key, "nd_osm_directions_key");
     return ok && api.title != NULL && api.options != NULL && api.size_names != NULL &&
            api.mode_names != NULL && api.turn_names != NULL;
 }
@@ -1110,6 +1116,173 @@ static void test_download_then_import(void)
 }
 
 /* ------------------------------------------------------------------ *
+ * 7b. The directions screen
+ * ------------------------------------------------------------------ */
+
+static int32_t count_white(const nd_image *img, int32_t x0, int32_t y0, int32_t x1, int32_t y1)
+{
+    int32_t n = 0;
+    int32_t x;
+    int32_t y;
+
+    for (y = y0; y <= y1; y++) {
+        for (x = x0; x <= x1; x++) {
+            nd_color c = nd_image_get_px(img, x, y);
+
+            if (c.r > 128u && c.g > 128u && c.b > 128u)
+                n++;
+        }
+    }
+    return n;
+}
+
+/* Every turn has an arrow, every arrow is different from the one before it,
+ * and none of them draws outside its box. */
+static void test_every_turn_has_an_arrow(void)
+{
+    nd_image *img = nd_image_new_filled(80, 80, ND_PIXFMT_RGB888, ND_BLACK);
+    nd_image *seen[ND_OSM_TURN_ARRIVE + 1];
+    nd_draw d;
+    int32_t t;
+    int32_t u;
+
+    memset(seen, 0, sizeof seen);
+    if (img == NULL || nd_draw_bind(&d, img) != ND_OK) {
+        CHECK(false, "an arrow canvas");
+        nd_image_free(img);
+        return;
+    }
+    for (t = 0; t <= (int32_t)ND_OSM_TURN_ARRIVE; t++) {
+        int32_t ink;
+
+        (void)nd_image_fill(img, ND_BLACK);
+        api.arrow_draw(&d, (nd_osm_turn)t, 12, 12, 56, ND_WHITE);
+        ink = count_white(img, 12, 12, 67, 67);
+        CHECK(ink > 150, "an arrow is a picture, not a hairline");
+        CHECK_INT(count_white(img, 0, 0, 79, 11) + count_white(img, 0, 68, 79, 79) +
+                      count_white(img, 0, 12, 11, 67) + count_white(img, 68, 12, 79, 67),
+                  0, "and it stays inside its box");
+        seen[t] = nd_image_copy(img);
+    }
+    /* Left and right are mirror images with the same ink, so "different" is
+     * the pixels, not the count. */
+    for (t = 0; t <= (int32_t)ND_OSM_TURN_ARRIVE; t++) {
+        for (u = 0; u < t; u++) {
+            CHECK(seen[t] != NULL && seen[u] != NULL &&
+                      memcmp(seen[t]->pixels, seen[u]->pixels, (size_t)(80 * 80 * 3)) != 0,
+                  "no two turns draw the same picture");
+        }
+    }
+    for (t = 0; t <= (int32_t)ND_OSM_TURN_ARRIVE; t++)
+        nd_image_free(seen[t]);
+    /* Too small to draw is not drawn, rather than drawn as a smudge. */
+    (void)nd_image_fill(img, ND_BLACK);
+    api.arrow_draw(&d, ND_OSM_TURN_LEFT, 0, 0, 8, ND_WHITE);
+    CHECK_INT(count_white(img, 0, 0, 79, 79), 0, "an 8 px arrow is nothing");
+    api.arrow_draw(NULL, ND_OSM_TURN_LEFT, 0, 0, 56, ND_WHITE);
+    sa_checks++;
+    nd_image_free(img);
+}
+
+static void test_the_directions_keys(void)
+{
+    size_t i = 3u;
+
+    CHECK_INT(api.directions_key(ND_KEY_DOWN, 10u, &i), ND_OSM_DIR_MOVED, "Down pages on");
+    CHECK_INT(i, 4, "to the next");
+    CHECK_INT(api.directions_key(ND_KEY_8, 10u, &i), ND_OSM_DIR_MOVED, "so does 8");
+    CHECK_INT(api.directions_key(ND_KEY_6, 10u, &i), ND_OSM_DIR_MOVED, "and 6");
+    CHECK_INT(i, 6, "two more");
+    CHECK_INT(api.directions_key(ND_KEY_UP, 10u, &i), ND_OSM_DIR_MOVED, "Up pages back");
+    CHECK_INT(api.directions_key(ND_KEY_2, 10u, &i), ND_OSM_DIR_MOVED, "so does 2");
+    CHECK_INT(api.directions_key(ND_KEY_4, 10u, &i), ND_OSM_DIR_MOVED, "and 4");
+    CHECK_INT(i, 3, "back where it started");
+    i = 9u;
+    CHECK_INT(api.directions_key(ND_KEY_DOWN, 10u, &i), ND_OSM_DIR_MOVED, "the last page");
+    CHECK_INT(i, 9, "stays the last page, and the screen stays steady");
+    i = 0u;
+    (void)api.directions_key(ND_KEY_UP, 10u, &i);
+    CHECK_INT(i, 0, "and the first stays first");
+    CHECK_INT(api.directions_key(ND_KEY_ENTER, 10u, &i), ND_OSM_DIR_SHOW, "NaviKey shows the map");
+    CHECK_INT(api.directions_key(ND_KEY_CLEAR, 10u, &i), ND_OSM_DIR_BACK, "C leaves");
+    CHECK_INT(api.directions_key(ND_KEY_0, 10u, &i), ND_OSM_DIR_NONE, "0 is nothing");
+    CHECK_INT(api.directions_key(ND_KEY_DOWN, 0u, &i), ND_OSM_DIR_NONE, "no pages, no paging");
+    CHECK_INT(api.directions_key(ND_KEY_DOWN, 10u, NULL), ND_OSM_DIR_NONE, "NULL index");
+}
+
+/* The whole reason the screen exists: a long road name is never cut. Every
+ * page of the town's route is drawn and the column under the right bezel
+ * is checked for ink, then a step with the longest name a way can carry. */
+static void test_no_direction_is_cut_off(void)
+{
+    sa_fixture fx;
+    nd_osm_map *m = NULL;
+    nd_osm_route r;
+    nd_osm_step steps[ND_OSM_STEPS_MAX];
+    size_t n;
+    size_t i;
+    uint32_t sw;
+    uint32_t ne;
+    int32_t top;
+    int32_t h;
+
+    if (!sa_fx_init(&fx)) {
+        CHECK(false, "fixture");
+        sa_fx_free(&fx);
+        return;
+    }
+    if (api.map_load(g_map_path, &m) != ND_OK || m == NULL) {
+        CHECK(false, "the town loads for directions");
+        sa_fx_free(&fx);
+        return;
+    }
+    sw = node_at(m, 53.3480, -6.2650);
+    ne = node_at(m, 53.3520, -6.2550);
+    if (api.route_find(m, sw, ne, ND_OSM_MODE_CAR, &r) != ND_OK) {
+        CHECK(false, "corner to corner");
+        api.map_free(m);
+        sa_fx_free(&fx);
+        return;
+    }
+    n = api.route_steps(m, &r, steps, ND_OSM_STEPS_MAX);
+    api.map_geometry(&fx.ui, &top, NULL, &h);
+
+    for (i = 0u; i < n; i++) {
+        const nd_image *frame;
+
+        api.directions_draw(&fx.ui, steps, n, i);
+        frame = nd_capture_recent(fx.cap, 0u);
+        CHECK(frame != NULL, "a page was drawn");
+        if (frame == NULL)
+            continue;
+        CHECK_INT(count_white(frame, 236, 31, 239, 144), 0, "nothing runs under the right bezel");
+        CHECK(count_white(frame, 6, 42, 61, 97) > 150, "the arrow is there");
+        CHECK(count_white(frame, 70, 31, 235, 144) > 100, "and the words are");
+    }
+
+    /* The longest name a step can carry: 47 characters. */
+    (void)nd_strlcpy(steps[0].road, "Saint Bartholomew and All Angels Memorial Avenue",
+                     sizeof steps[0].road);
+    steps[0].turn = ND_OSM_TURN_SHARP_RIGHT;
+    steps[0].metres = 12345;
+    api.directions_draw(&fx.ui, steps, n, 0u);
+    {
+        const nd_image *frame = nd_capture_recent(fx.cap, 0u);
+
+        CHECK(frame != NULL, "the long page was drawn");
+        if (frame != NULL) {
+            CHECK_INT(count_white(frame, 236, 31, 239, 144), 0,
+                      "a 47-character road stops short of the bezel too");
+            CHECK(count_white(frame, 70, 60, 235, 110) > 200, "and is drawn, on two lines");
+        }
+    }
+
+    api.route_free(&r);
+    api.map_free(m);
+    sa_fx_free(&fx);
+}
+
+/* ------------------------------------------------------------------ *
  * 8. The frame
  * ------------------------------------------------------------------ */
 
@@ -1408,6 +1581,10 @@ int main(void)
 
     RUN(test_the_query_names_the_box);
     RUN(test_download_then_import);
+
+    RUN(test_every_turn_has_an_arrow);
+    RUN(test_the_directions_keys);
+    RUN(test_no_direction_is_cut_off);
 
     RUN(test_the_town_renders_in_carto_colours);
     RUN(test_the_scale_bar);
