@@ -284,6 +284,48 @@ is_reserved_device() {
     return 1
 }
 
+# ============ AND THE SAME QUESTION, ASKED BY THE FORMATTER ============
+#
+# is_reserved_device() answers "is this something the phone must not touch",
+# and one of its reasons is "it is mounted". That is right for candidates(),
+# which is looking for a card to mount and has no business at one that already
+# is. It is WRONG for do_format, and wrong in a way that made formatting a
+# card impossible:
+#
+#   the owner opens Settings, the card is mounted -- that is what makes it a
+#   card and not a slot -- and presses Format. is_mounted() says yes, and the
+#   phone answers "refusing to format /dev/vda1: the phone is running from
+#   it", which is not true and reads to the owner as
+#
+#       Formatting failed. The card may be write protected.
+#
+# So the only card that COULD be formatted was one that had failed to mount.
+# A working card, and the legacy FAT card the UI itself offers to convert,
+# both refused -- which took the FAT-to-ext4 migration with them.
+#
+# Found by running it on the phone. Nothing in the host suite could see it:
+# the tests drive do_format against a loop device that nothing has mounted,
+# which is the one state a real card is never in when somebody asks.
+#
+# The protection that matters is unchanged. The system and user partitions are
+# still refused, by name and by parent disk; a squashfs is still refused; and
+# anything mounted SOMEWHERE ELSE is still refused, which is what stops
+# "format the card" reaching a filesystem the phone is actually using. Only
+# the card at the phone's own card mountpoint is allowed through -- and
+# do_format unmounts it four lines later.
+mounted_outside_the_card() {   # mounted_outside_the_card DEV
+    awk -v dev="$1" -v mnt="$MOUNT_POINT" -v ut="$UNTRUSTED_MOUNT" \
+        '$1 == dev && $2 != mnt && $2 != ut { found = 1 } END { exit !found }' \
+        "$MOUNTS" 2>/dev/null
+}
+
+is_reserved_for_format() {
+    is_system_device "$1" && return 0
+    is_squashfs "$1" && return 0
+    mounted_outside_the_card "$1" && return 0
+    return 1
+}
+
 # Whole disk a device belongs to: /dev/mmcblk0p1 -> /dev/mmcblk0,
 # /dev/sda2 -> /dev/sda, /dev/vdc -> /dev/vdc.
 #
@@ -832,7 +874,7 @@ do_format() {   # do_format DEV -- destroys everything on it
     # Safety check first, on BOTH spellings, and before anything looks at
     # whether it is a block device at all: never let "format this card" point
     # mkfs at something the phone is running from.
-    if is_reserved_device "$device" || is_reserved_device "$disk"; then
+    if is_reserved_for_format "$device" || is_reserved_for_format "$disk"; then
         log "refusing to format $device: the phone is running from it"
         return 1
     fi

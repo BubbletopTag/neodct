@@ -542,6 +542,62 @@ def test_partition_path_is_the_inverse_of_parent_disk(tmp_path):
 
 # --- the safety property that must survive all of this -------------------
 
+def test_formatting_the_card_works_while_the_card_is_mounted(tmp_path):
+    """The state a real card is ALWAYS in when somebody asks to format it.
+
+    is_reserved_device() refuses anything mounted, which is right for
+    candidates() -- looking for a card to mount, and uninterested in one that
+    already is -- and was catastrophic for do_format. A card is mounted; that
+    is what makes it a card rather than a slot. So the phone answered
+
+        refusing to format /dev/vda1: the phone is running from it
+
+    to every format of a working card, and the owner saw "Formatting failed.
+    The card may be write protected."
+
+    Which took the FAT-to-ext4 migration with it: the legacy card the UI
+    itself offers to convert is, necessarily, mounted.
+
+    The whole host suite missed it because every do_format test drives an
+    unmounted loop device -- the one state a real card is never in at the
+    moment of asking. So this test's entire point is the mount table.
+    """
+    card = tmp_path / "card.img"
+    card.write_bytes(b"\0" * (8 * 1024 * 1024))
+    table = tmp_path / "mounts-card"
+    table.write_text("%s %s vfat rw 0 0\n" % (card, tmp_path / "sdcard"))
+
+    result = sh(tmp_path, 'do_format %s' % card,
+                env={"NEODCT_MOUNTS": str(table)},
+                stubs='mkfs_ext4() { return 0; }\n'
+                      'try_mount() { return 0; }\n'
+                      'reread_partitions() { return 0; }\n'
+                      'umount() { return 0; }\n')
+
+    # It gets PAST the reserved gate, which is the whole property. It then
+    # stops at "not a block device", because a regular file is not one -- and
+    # that is the proof: the refusal that used to come first no longer does.
+    assert "refusing" not in result.stderr, result.stderr
+    assert "not a block device" in result.stderr, result.stderr
+
+
+def test_formatting_still_refuses_a_device_mounted_somewhere_else(tmp_path):
+    """The half of the mounted check that was worth keeping. A device in use
+    at a mountpoint that is NOT the card's is something the phone is actually
+    running on, and pointing mkfs at it is the accident the check exists for.
+    """
+    card = tmp_path / "card.img"
+    card.write_bytes(b"\0" * (8 * 1024 * 1024))
+    table = tmp_path / "mounts-elsewhere"
+    table.write_text("%s /NeoDCT/User ext4 rw 0 0\n" % card)
+
+    result = sh(tmp_path, 'do_format %s' % card,
+                env={"NEODCT_MOUNTS": str(table)})
+
+    assert result.returncode != 0
+    assert "refusing" in result.stderr
+
+
 def test_formatting_still_refuses_the_disk_the_phone_runs_from(tmp_path):
     """do_format resolves what it was given to a whole DISK, because a
     partition table is written to one. That must not become a way to reach the
