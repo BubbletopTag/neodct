@@ -26,7 +26,12 @@
  *
  * nd_modem_signal_level() returns -1 for "unknown", 0..4 otherwise, and the
  * difference is visible: the home screen falls back to the layout's sim_val
- * (3) when it is unknown but draws an empty meter when it is genuinely 0.
+ * when it is unknown but draws an empty meter when it is genuinely 0.
+ *
+ * ============ AND "NO MODEM" IS NOT "A BROKEN MODEM" ============
+ *
+ * There are THREE link states, not two, and the third one is why this header
+ * grew a section. See nd_modem_link.
  */
 
 #ifndef ND_MODEM_H_INCLUDED
@@ -52,6 +57,25 @@ extern "C" {
 #define ND_POLL_NET_S              20.0
 #define ND_POLL_OPERATOR_S         60.0
 #define ND_PROBE_RETRY_S           10.0
+
+/* How long a LIVE modem may go without a single successful AT transaction
+ * before the service stops believing in it.
+ *
+ * Generous on purpose. A SIM7600 that is busy registering routinely misses
+ * the 1.5 s AT+CSQ and the 2.0 s AT+CLCC, and the whole design treats one
+ * timeout as nothing at all -- so this must sit far above any run of ordinary
+ * misses. Ninety seconds is roughly eighteen consecutive failed CSQ polls at
+ * ND_POLL_SIGNAL_S spacing. A modem that has said nothing for a minute and a
+ * half is not busy, it is gone. */
+#define ND_MODEM_FAULT_AFTER_S     90.0
+
+/* What Simulation Mode puts on the home screen in place of an operator name,
+ * and how many bars it draws. See nd_modem_signal_level() for why the two
+ * numbers differ on network presence rather than being a fixed constant. */
+#define ND_MODEM_SIM_CARRIER       "Simulation"
+#define ND_MODEM_SIM_BARS_ONLINE   4
+#define ND_MODEM_SIM_BARS_OFFLINE  1
+#define ND_MODEM_SIM_ROUTE_TTL_S   2.0
 #define ND_CLCC_POLL_S             2.0
 #define ND_AUDIO_RESTART_HOLDOFF_S 3.0
 #define ND_TRANSACT_SLEEP_S        0.02
@@ -237,6 +261,50 @@ void nd_modem_call_status(nd_modem *m, const char **label, int32_t *secs);
 nd_call_state nd_modem_state(nd_modem *m);
 const char *nd_modem_caller_id(nd_modem *m); /* NULL when none */
 bool nd_modem_has_hardware(nd_modem *m);
+
+/* ------------------------------------------------------------------ *
+ * The link: three states, because two was a lie
+ * ------------------------------------------------------------------ *
+ *
+ * nd_modem_has_hardware() answers "am I talking to a modem right now", and
+ * for years the service had nothing else -- so both ways of answering "no"
+ * came out as Simulation Mode:
+ *
+ *   ND_MODEM_LINK_SIM     No modem was ever found. On QEMU, or on a phone
+ *                         with nothing plugged in, this is CORRECT and the
+ *                         phone should say so plainly. Calls and texts are
+ *                         still simulated end to end, so the right thing to
+ *                         show is "Simulation", not "No Service" -- there IS
+ *                         a service, it is just a pretend one.
+ *
+ *   ND_MODEM_LINK_LIVE    A modem answered AT and is being talked to.
+ *
+ *   ND_MODEM_LINK_FAULT   A modem WAS found and then failed: a hard errno on
+ *                         a port already adopted, or ND_MODEM_FAULT_AFTER_S
+ *                         with nothing answering. Reporting this as
+ *                         Simulation is the bug this enum exists to fix. It
+ *                         tells the owner of a broken phone that everything
+ *                         is fine, and it is the one state where the phone
+ *                         must look obviously wrong: zero bars, no carrier
+ *                         name at all, and a modal notice once.
+ *
+ * A NULL modem is ND_MODEM_LINK_SIM: a core with no ModemService is not a
+ * core with a broken one. */
+typedef enum {
+    ND_MODEM_LINK_SIM = 0,
+    ND_MODEM_LINK_LIVE,
+    ND_MODEM_LINK_FAULT
+} nd_modem_link;
+
+nd_modem_link nd_modem_link_state(nd_modem *m);
+
+/* The one-shot the UI drains, exactly as nd_battery_take_pending_warning()
+ * is drained by nd_ui_show_pending_battery_warning(): the service latches a
+ * fault from its own thread, the UI THREAD pops it at a safe point and puts a
+ * modal on the screen. Returns NULL when there is nothing pending, and the
+ * reason string when there is -- and having returned it once, returns NULL
+ * until the modem faults again. Never draws anything itself. */
+const char *nd_modem_take_pending_fault(nd_modem *m);
 
 #ifdef __cplusplus
 }

@@ -116,6 +116,73 @@ static void test_an_unmountable_card_wants_formatting(void)
     CHECK_STR(card.device, "/dev/vdc");
 }
 
+/* The helper has two words for this and they mean the same thing to the UI:
+ * try_mount() says `unmountable` when nothing it tried would mount, and
+ * do_format() says `unformatted` when the image has no mke2fs to make a card
+ * with. One branch here, or the second spelling would read as an absent card
+ * -- which blanks the device, which is the one thing the format dialog needs.
+ */
+static void test_the_other_spelling_means_the_same_thing(void)
+{
+    nd_card card;
+
+    use_scratch_paths();
+    insert("unformatted", "", "", NULL, 0u);
+
+    nd_storage_card(&card);
+    CHECK_INT(card.state, ND_CARD_UNFORMATTED);
+    CHECK_STR(card.device, "/dev/vdc");
+}
+
+/* ============ A CARD FROM BEFORE THE CARD WAS EXT4 ============
+ *
+ * FAT32, labelled NEODCT, mounted, and the owner's music on it plays. What it
+ * cannot do is hold an installed app: FAT records no ownership, so "an app
+ * may read its own app.so but not write it" and "the untrusted set may write
+ * this directory and not that one" are sentences the filesystem cannot store.
+ *
+ * So it is its own state and not UNFORMATTED. The remedy differs in KIND: a
+ * card that will not mount can only be reformatted and nothing is lost by it,
+ * while this card works and reformatting it ERASES the owner's music. That is
+ * theirs to accept, so the phone reports and offers rather than acting.
+ */
+static void test_a_legacy_fat_card_is_its_own_state(void)
+{
+    nd_card card;
+
+    use_scratch_paths();
+    insert("legacy", "vfat", "NEODCT", FOLDERS, 5u);
+
+    nd_storage_card(&card);
+    CHECK_INT(card.state, ND_CARD_LEGACY_FORMAT);
+    /* Not READY, even with all five folders present -- the folders are not
+     * what is wrong with it. */
+    CHECK(nd_storage_is_ready() == false);
+    /* Everything the dialog names survives the branch: the device is what
+     * the format is pointed at, and the fstype is what makes it legacy. */
+    CHECK_STR(card.device, "/dev/vdc");
+    CHECK_STR(card.fstype, "vfat");
+    CHECK_STR(card.label, "NEODCT");
+    CHECK(card.removable == true);
+}
+
+static void test_a_legacy_card_has_nowhere_for_a_download(void)
+{
+    nd_card card;
+    char path[ND_PATH_MAX];
+
+    use_scratch_paths();
+    insert("legacy", "vfat", "NEODCT", FOLDERS, 5u);
+
+    nd_storage_card(&card);
+    /* A directory ndusr_ut may write cannot exist on a filesystem with no
+     * notion of who owns what, so there is none -- and the caller's answer
+     * must be to REFUSE the download rather than fall back to /NeoDCT/User,
+     * which is 8 MiB on the phone and holds the databases. */
+    CHECK_STR(card.untrusted, "");
+    CHECK(!nd_storage_untrusted_dir(path, sizeof path));
+}
+
 /* The QEMU convenience path: a host folder, no label, no formatting. */
 static void test_a_virtiofs_share_counts_as_a_ready_card(void)
 {
@@ -312,6 +379,112 @@ static void test_a_corrupt_state_file_reads_as_no_card(void)
     CHECK_INT(card.state, ND_CARD_ABSENT);
 }
 
+/* ------------------------------------------------------------------ *
+ * The untrusted directory
+ * ------------------------------------------------------------------ *
+ *
+ * SECURITY-PLAN.md section 1. It was a second FAT32 PARTITION, because a FAT
+ * filesystem has no ownership of its own and its mount options apply to the
+ * whole of one -- so "downloads are writable by ndusr_ut and the owner's
+ * music is not" needed two filesystems to say.
+ *
+ * The card is one ext4 partition now and it is a DIRECTORY, 0770
+ * ndusr:ndusr_ut, sitting beside music/ and apps/ on the same filesystem.
+ * Nothing here changes: neodct-sdcard still publishes it as `untrusted=`,
+ * this module still passes it through, and a caller with nothing in that
+ * field still has to refuse. What changed is that the field is now set for a
+ * card with ONE partition on it, which is what the fstype below says.
+ */
+
+static void insert_with_untrusted(const char *untrusted)
+{
+    char body[512];
+
+    CHECK_INT(nd_snprintf(body, sizeof body,
+                          "state=mounted\ndevice=/dev/mmcblk1p1\nfstype=ext4\n"
+                          "label=NEODCT\nuntrusted=%s\n",
+                          untrusted),
+              ND_OK);
+    pt_write_text(STATE, body);
+    pt_mkdir(MOUNT);
+}
+
+static void test_a_neodct_card_offers_somewhere_for_a_download(void)
+{
+    nd_card card;
+    char path[ND_PATH_MAX];
+
+    use_scratch_paths();
+    insert_with_untrusted(MOUNT "/untrusted");
+
+    nd_storage_card(&card);
+    CHECK_STR(card.untrusted, MOUNT "/untrusted");
+    CHECK(nd_storage_untrusted_dir(path, sizeof path));
+    CHECK_STR(path, MOUNT "/untrusted");
+}
+
+static void test_a_foreign_card_offers_nowhere(void)
+{
+    nd_card card;
+    char path[ND_PATH_MAX];
+
+    use_scratch_paths();
+    insert_default(FOLDERS, 5u);
+
+    nd_storage_card(&card);
+    CHECK_STR(card.untrusted, "");
+    /* False, and the caller's answer must be to REFUSE the download rather
+     * than fall back to /NeoDCT/User -- which is 8 MiB on the phone and is
+     * where the settings, the messages and the call log live. */
+    CHECK(!nd_storage_untrusted_dir(path, sizeof path));
+}
+
+static void test_a_state_file_from_before_any_of_this_still_reads(void)
+{
+    nd_card card;
+
+    use_scratch_paths();
+    pt_write_text(STATE, "state=mounted\ndevice=/dev/vdc\nfstype=vfat\nlabel=NEODCT\n");
+    pt_mkdir(MOUNT);
+
+    nd_storage_card(&card);
+    CHECK_INT(card.state, ND_CARD_NEEDS_SETUP);
+    CHECK_STR(card.untrusted, "");
+}
+
+static void test_a_card_that_was_pulled_leaves_no_stale_path(void)
+{
+    nd_card card;
+    char path[ND_PATH_MAX];
+
+    use_scratch_paths();
+    pt_write_text(STATE, "state=absent\ndevice=\nfstype=\nlabel=\n"
+                         "untrusted=" MOUNT "/untrusted\n");
+
+    nd_storage_card(&card);
+    CHECK_INT(card.state, ND_CARD_ABSENT);
+    /* A path to a card that is not there is a directory a download would be
+     * written into and lost with the card. */
+    CHECK_STR(card.untrusted, "");
+    CHECK(!nd_storage_untrusted_dir(path, sizeof path));
+}
+
+static void test_the_untrusted_directory_is_not_gated_on_the_five_folders(void)
+{
+    char path[ND_PATH_MAX];
+
+    use_scratch_paths();
+    insert_with_untrusted(MOUNT "/untrusted");
+
+    /* No wallpapers/tones/music/backup_db/update, so the card is
+     * NEEDS_SETUP -- and the untrusted directory is offered regardless. The
+     * five folders are what the MEDIA apps need; a download needs one
+     * directory it may write, and whether the owner's music has anywhere to
+     * live is a different question with a different answer. */
+    CHECK(!nd_storage_is_ready());
+    CHECK(nd_storage_untrusted_dir(path, sizeof path));
+}
+
 int main(void)
 {
     RUN(test_no_card_when_nothing_is_mounted);
@@ -319,6 +492,9 @@ int main(void)
     RUN(test_a_plain_fat_card_needs_setting_up);
     RUN(test_a_card_missing_one_folder_needs_setting_up);
     RUN(test_an_unmountable_card_wants_formatting);
+    RUN(test_the_other_spelling_means_the_same_thing);
+    RUN(test_a_legacy_fat_card_is_its_own_state);
+    RUN(test_a_legacy_card_has_nowhere_for_a_download);
     RUN(test_a_virtiofs_share_counts_as_a_ready_card);
     RUN(test_removable_is_computed_before_the_absent_branch);
     RUN(test_folders_are_only_offered_once_the_card_is_ready);
@@ -334,6 +510,11 @@ int main(void)
     RUN(test_non_package_files_on_the_card_are_ignored);
     RUN(test_no_updates_without_a_card);
     RUN(test_a_corrupt_state_file_reads_as_no_card);
+    RUN(test_a_neodct_card_offers_somewhere_for_a_download);
+    RUN(test_a_foreign_card_offers_nowhere);
+    RUN(test_a_state_file_from_before_any_of_this_still_reads);
+    RUN(test_a_card_that_was_pulled_leaves_no_stale_path);
+    RUN(test_the_untrusted_directory_is_not_gated_on_the_five_folders);
 
     nd_storage_set_paths(NULL, NULL);
     return pt_report("test_storage");

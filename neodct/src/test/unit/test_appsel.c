@@ -295,7 +295,7 @@ static void check_frame(nd_capture *cap, const nd_json_doc *golden, const char *
  * The registry
  * ------------------------------------------------------------------ */
 
-/* The 25 shipped manifests in the order `sort(key=lambda x: x["id"])` puts
+/* The 26 shipped manifests in the order `sort(key=lambda x: x["id"])` puts
  * them. This is the list the menu walks, so the index of each name is also
  * its page number minus one, and every scrollbar notch in the nine frames is
  * derived from it. */
@@ -308,6 +308,7 @@ static const struct {
     {2, "Messages", "/NeoDCT/System/apps/Messages"},
     {3, "Call Log", "/NeoDCT/System/apps/CallLog"},
     {4, "Settings", "/NeoDCT/System/apps/Settings"},
+    {5, "Calendar", "/NeoDCT/System/apps/Calendar"},
     {6, "Games", "/NeoDCT/System/apps/Games"},
     {7, "Calculator", "/NeoDCT/System/apps/Calculator"},
     {8, "Clock", "/NeoDCT/System/apps/Clock"},
@@ -362,7 +363,7 @@ static void test_registry(nd_ui *ui)
         (void)nd_snprintf(icon, sizeof icon, "%s/icon.png", EXPECTED[i].path);
         CHECK_STR(nd_ui_app_list(ui, NULL)[i].icon, icon, "icon path defaults to <dir>/icon.png");
         /* U-6: the field is populated from the manifest and launches nothing.
-         * All 24 still say main.py. */
+         * All 26 still say main.py. */
         CHECK_STR(nd_ui_app_list(ui, NULL)[i].exec, "main.py", "exec as the manifest spells it");
     }
 }
@@ -399,7 +400,7 @@ static void test_engineering_off(void)
 
     stock = nd_ui_scan_apps(ND_PATH_APPS_DIR, apps, ND_APP_MAX);
     eng = nd_ui_scan_apps(ND_PATH_ENG_APPS_DIR, apps, ND_APP_MAX);
-    CHECK_INT(stock, 13, "thirteen stock apps");
+    CHECK_INT(stock, 14, "fourteen stock apps");
     CHECK_INT(eng, 12, "twelve engineering apps");
 }
 

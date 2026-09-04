@@ -1,11 +1,17 @@
 # Security notes — sandboxing, and what the C design should leave room for
 
-**Status: not being implemented now.** This records a design conversation so the hooks
-stay in place and none of it needs retrofitting later. Nothing here blocks the port.
+**Status: mostly implemented, and the biggest item is done.** nd-core is no longer
+root; see "Where the phone stands today" below and `docs/HOW-IT-WORKS.md` for the
+current shape in plain language.
 
-**For what the phone actually does today, read `SECURITY-AUDIT.md` instead.** This file
-is a plan; that one is a measurement, with the line numbers. Where they disagree, the
-audit is right.
+**Status was: partly implemented.** This file records a design conversation, held before
+any of it was built, so the hooks stayed in place. Some of it has since been built --
+`SECURITY-PLAN.md` section 7 is the record of exactly what, and where the two
+disagree the plan is right, because it was written against the kernel the phone
+actually runs.
+
+**For what the phone did before any of that, read `SECURITY-AUDIT.md`.** This file is
+a design; that one is a measurement, with the line numbers.
 
 ---
 
@@ -18,8 +24,22 @@ One thing is already right:
 
 Two are not:
 
-- **Everything runs as root.** Every process has every permission. A bug anywhere is a
-  bug everywhere.
+- ~~**Everything runs as root.**~~ **No longer true of anything.** This is now the
+  paragraph that is out of date rather than the phone.
+
+  nd-core runs as `ndusr`. Apps run as `ndusr` or, if they came from
+  `/NeoDCT/User/apps` or are the browser, as `ndusr_ut`. The only process left at
+  uid 0 is a small broker that nd-core forks before dropping, which holds four
+  verbs -- start an app, wait for one, halt, set the clock -- and refuses to run
+  anything as root outside a fixed list of three programs on the read-only image.
+
+  How much privilege nd-core actually needed was **measured** rather than argued:
+  it was made to drop at startup and run on a booted phone. Everything the UI
+  touches is reachable by group already; the only thing that broke was launching an
+  app, because changing a child's user needs `CAP_SETGID`. That one syscall is what
+  the broker exists for. See `neodct/src/include/nd_broker.h`.
+
+  `docs/HOW-IT-WORKS.md` is the plain-language version of all of this.
 - **dm-verity is an integrity guarantee, not an authenticity one.** This paragraph used
   to claim the phone "cannot be permanently backdoored through the update path", on the
   grounds that the signing key lives in the read-only image. That was wrong, and it was
@@ -87,6 +107,30 @@ attacker → MMS → modem → MMSC fetch over HTTP   ← untrusted WAP/PDU pars
 
 Today the payoff is root: dial premium numbers, send SMS to every contact, read every
 message, enable RemoteShell and phone home.
+
+### The trade that has to be stated rather than glossed
+
+While the browser is on screen, it owns the screen.
+
+There is no compositor on a 64 MB phone and there will not be one, so a full-screen
+handoff means the untrusted process can draw anything -- including a convincing
+imitation of the trusted UI. A person looking at a NeoDCT-shaped dialog inside the
+browser has no way to tell it from the real one. That is inherent to the design and
+not a bug to be fixed later; the alternative costs a compositor.
+
+What keeps it bounded is worth stating in the same breath, because it is the reason
+this is acceptable rather than merely admitted:
+
+- the browser cannot run in the background -- it owns the foreground or it is not
+  running;
+- the core repaints on exit, so the screen it leaves behind is never the one it drew;
+- and it never sees a keypress the core did not route to it. On the phone
+  `/dev/input` holds only the synthetic bridge the core makes, so "the browser reads
+  what you type into the dialler" is not a thing that can happen -- though it IS a
+  thing that happens on QEMU, where `/dev/input/event0` is the real keyboard. The
+  emulator is the more dangerous configuration here, which is the reverse of the
+  usual and worth knowing before concluding from a QEMU test that the browser is
+  contained.
 
 ### The mitigation: decode in a powerless child
 
@@ -200,8 +244,11 @@ Nothing that costs effort — just avoid closing doors:
 4. **Design MediaWidget as a separate decoder process from the start.** This is the one
    item with a real cost if deferred — retrofitting a decode-in-process design into a
    decode-in-child design means changing every caller.
-5. **Enable xattrs when building the squashfs.** One flag, and labelling is impossible
-   without it.
+5. ~~**Enable xattrs when building the squashfs.**~~ **Done**, and it turned out to be
+   the other half: `mksquashfs` was already storing them -- buildroot passes no
+   `-no-xattrs` -- and the kernel was ignoring them. `CONFIG_SQUASHFS_XATTR` is now in
+   the fragment, with a comment saying it is there because a kernel cannot ship in an
+   `.ndsw` and so this cannot be added later without a reflash.
 6. **Never parse untrusted input in the core process.** MMS payloads, WAP/PDU headers,
    downloaded update manifests, web content. Parse in a child, hand back validated data.
 

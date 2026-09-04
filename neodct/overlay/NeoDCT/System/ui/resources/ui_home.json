@@ -27,6 +27,15 @@
         },
         {
             "type": "text",
+            "text": "Eng. Mode",
+            "font_size": 12,
+            "anchor": "center_h",
+            "x": 120,
+            "y": 95,
+            "color": "red"
+        },
+        {
+            "type": "text",
             "text": "12:00",
             "font_size": 8,
             "anchor": "right",

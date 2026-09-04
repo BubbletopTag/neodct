@@ -316,6 +316,45 @@ void nd_ui_render_menu(nd_ui *ui); /* blocks until the menu is dismissed */
 void nd_ui_update(nd_ui *ui);      /* the per-frame dispatcher */
 void nd_ui_handle_input(nd_ui *ui, int32_t code);
 void nd_ui_show_pending_battery_warning(nd_ui *ui);
+
+/* The modem's twin of the line above. ModemService latches a fault from its
+ * own thread; this pops the modal, once, from the home loop on the UI thread.
+ * See nd_modem.h's nd_modem_link for what counts as a fault -- notably NOT a
+ * phone that simply has no modem, which is Simulation and is fine. */
+void nd_ui_show_pending_modem_fault(nd_ui *ui);
+
+/* What that modal says. Written for somebody holding a phone, not for a
+ * developer reading a log: it names the fault, says what it probably is, and
+ * gives the one thing worth trying. The reason string from the service goes
+ * to the console instead.
+ *
+ * IT HAS TO FIT. nd_msgdialog clips a message that does not, and clips it
+ * INVISIBLY -- the " …" it appends is U+2026, which this font has no glyph
+ * for, so an overlong message simply stops mid-sentence with nothing to say
+ * it was cut. The first version of this string did exactly that on a real
+ * phone: seven lines into a five-line dialog, ending at "there is".
+ *
+ * Five lines is the whole budget (see nd_msgdialog_measure), the blank line
+ * costs one of them, and test_the_modem_fault_message_fits() fails if a
+ * rewrite spends more. Two sentences, each short enough to land on its own
+ * line, is what that buys. */
+#define ND_UI_MODEM_FAULT_MESSAGE \
+    "Modem ERROR!\n\nPossible hardware fault. Try rebooting the phone."
+
+/* Shown when nd_proc_launch_app() returns ND_ERR_PERM: an untrusted app could
+ * not be confined, so it was not started. Deliberately says what it means
+ * rather than why -- "there is no ndusr_ut in this image" is a sentence for
+ * the console, not for somebody holding a phone.
+ *
+ * 4 lines against nd_msgdialog's 5. Checked by
+ * test_the_cannot_confine_message_fits(), for the reason the modem one is. */
+#define ND_UI_CANNOT_CONFINE_MESSAGE \
+    "Cannot confine this app.\n\nIt is not run at all rather than run as root."
+
+/* True when the radio is in ND_MODEM_LINK_FAULT. The home screen drops the
+ * carrier line entirely when it is. */
+bool nd_ui_status_modem_faulted(nd_ui *ui);
+
 void nd_ui_handle_incoming_call(nd_ui *ui, const char *number);
 
 /* Re-read what an app may have changed. Called after EVERY app exit:
@@ -382,6 +421,18 @@ nd_image *nd_ui_load_wallpaper(const char *path);
 nd_image *nd_ui_wallpaper(nd_ui *ui);
 const nd_home_layout *nd_ui_home_layout(nd_ui *ui);
 bool nd_ui_engineering_mode(nd_ui *ui);
+
+/* The red line under the carrier on the home screen, and the exact string
+ * ui_home.json authors for it.
+ *
+ * It is a MACRO rather than a literal in two files because the layout and the
+ * renderer have to agree on it byte for byte: nd_ui_render_home() decides
+ * whether to draw the element by strcmp'ing el->text against this, which is
+ * the same mechanism nd_layout.c uses for the clock and the carrier ("there
+ * is no marker syntax; these exact strings are the whole mechanism"). A typo
+ * in either place does not fail to build -- it silently draws the line
+ * always, or never. tests/test_home_layout.py pins the two together. */
+#define ND_UI_ENG_MODE_LABEL "Eng. Mode"
 /* Returns the scanned list and writes its length to *n_out (which may be
  * NULL). The pointer stays valid until the next nd_ui_refresh_after_app(). */
 const nd_app_entry *nd_ui_app_list(nd_ui *ui, size_t *n_out);

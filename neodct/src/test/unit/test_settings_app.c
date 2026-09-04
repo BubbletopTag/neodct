@@ -53,6 +53,7 @@
 #include "nd_settings.h"
 #include "nd_storage.h"
 #include "nd_text.h"
+#include "nd_widgets.h"
 
 #include "smallapp_test.h"
 
@@ -71,6 +72,9 @@ static struct {
     const char *const *get_more_help;
     const char *const *get_more_help_with_card;
     const char *const *sdcard_help;
+    const char *const *sdcard_legacy;
+    const char *const *sdcard_legacy_help;
+    const char *const *format_warning;
     const char *const *menu;
     const char *const *eng_options;
     const char *const *msgstyle_options;
@@ -92,6 +96,9 @@ static bool api_open(void *h)
     api.get_more_help = dlsym(h, "nd_setapp_get_more_help");
     api.get_more_help_with_card = dlsym(h, "nd_setapp_get_more_help_with_card");
     api.sdcard_help = dlsym(h, "nd_setapp_sdcard_help");
+    api.sdcard_legacy = dlsym(h, "nd_setapp_sdcard_legacy");
+    api.sdcard_legacy_help = dlsym(h, "nd_setapp_sdcard_legacy_help");
+    api.format_warning = dlsym(h, "nd_setapp_format_warning");
     api.menu = dlsym(h, "nd_setapp_menu");
     api.eng_options = dlsym(h, "nd_setapp_eng_options");
     api.msgstyle_options = dlsym(h, "nd_setapp_msgstyle_options");
@@ -195,8 +202,9 @@ static void test_strings(void)
     CHECK_STR(*api.get_more_help,
               "Get more wallpapers by adding an SD card!\n"
               "\n"
-              "Format a card as FAT32, make a folder called \"wallpapers\" on it, and "
-              "copy your .jpg or .gif files into it.\n"
+              "Let the phone format a card for you, or format one as ext4 yourself, "
+              "make a folder called \"wallpapers\" on it, and copy your .jpg or .gif "
+              "files into it.\n"
               "\n"
               "240x175 pictures look best, and a .gif that size animates. Put the card "
               "in the phone and they appear in this list. The phone can set a blank "
@@ -209,18 +217,126 @@ static void test_strings(void)
               "is in the phone and they appear in this list. 240x175 looks best, and a "
               ".gif that size animates.",
               "GET_MORE_HELP_WITH_CARD");
+    /* This described TWO FAT32 partitions -- the second being where downloads
+     * landed, separate from the owner's music, and noexec -- and it argued
+     * that keeping both halves FAT was the point, because an ext card would
+     * stop reading on a PC.
+     *
+     * That trade was reversed in 0.5.0b and this is where the owner is told
+     * so. FAT records no ownership at all, which is why the second partition
+     * had to exist to say anything about downloads, and why an installed
+     * app's program could not be made readable-but-not-writable on one. ext4
+     * says both on a single card. What it costs is Windows and macOS needing
+     * a helper, which the text now states plainly rather than defending. */
     CHECK_STR(*api.sdcard_help,
-              "A NeoDCT memory card is a FAT32 card with these folders on it:\n"
+              "A NeoDCT memory card is an ext4 card with these folders on it:\n"
               "\n"
               "  wallpapers   .jpg and .gif pictures\n"
               "  tones        .mp3 ringtones\n"
               "  music        your music\n"
               "  backup_db    copies of your contacts\n"
               "  update       UPDATE.ndsw system updates\n"
+              "  apps         apps you installed\n"
+              "  untrusted    downloads and picture messages\n"
               "\n"
               "You can make one on a computer, or let the phone do it. Setting up only "
-              "adds the folders. Formatting erases everything on the card.",
+              "adds the folders. Formatting erases everything on the card.\n"
+              "\n"
+              "The card is ext4 because ext4 remembers who owns each file and FAT32 "
+              "does not. That is what lets one card keep your music private from an "
+              "app, let an app read its own program without being able to change it, "
+              "and give downloads a corner of their own. On a FAT32 card every file "
+              "has to be treated the same way, so none of that can be said.\n"
+              "\n"
+              "Linux reads ext4 everywhere. Windows and macOS need a helper to read "
+              "one, which is the cost of the card knowing who owns what.\n"
+              "\n"
+              "Anything in untrusted arrived on its own rather than being chosen by "
+              "you. It cannot reach your music and nothing there can run. Apps you "
+              "install live in apps, each in its own folder, with a data folder inside "
+              "it that only that app writes to -- so removing the folder removes the "
+              "app and everything it kept.",
               "SDCARD_HELP");
+
+    /* The destructive confirmation. It has to say the card is erased -- and
+     * now that is ALL it says, because the longer version did not fit.
+     *
+     * It ran to nine lines in a dialog that shows five, so the phone asked
+     * "Format this card?", shouted that everything would be erased, and then
+     * cut its own explanation mid-sentence at "It is split in two: one part"
+     * with no ellipsis to show for it. On the one screen in this app that
+     * destroys data.
+     *
+     * The repartitioning and the still-reads-on-a-PC point did not go away;
+     * they moved to sdcard_help, which is an nd_scroller and therefore PAGES
+     * instead of clipping. Asserted THERE, below, rather than deleted here --
+     * the facts are still owed to the owner, just not on the confirmation. */
+    CHECK(api.format_warning != NULL && *api.format_warning != NULL, "FORMAT_WARNING exists");
+    if (api.format_warning != NULL && *api.format_warning != NULL) {
+        CHECK(strstr(*api.format_warning, "ERASED") != NULL, "it says the card is erased");
+        CHECK(strstr(*api.format_warning, "split in two") == NULL,
+              "and no longer explains the layout, which did not fit");
+    }
+    if (api.sdcard_help != NULL && *api.sdcard_help != NULL) {
+        /* The two facts the confirmation dropped, still owed to the owner and
+         * now said here: what the card actually is, and what it costs. */
+        CHECK(strstr(*api.sdcard_help, "ext4") != NULL,
+              "the help says the card is ext4");
+        CHECK(strstr(*api.sdcard_help, "remembers who owns each file") != NULL,
+              "and why, which is the whole reason for the change");
+        CHECK(strstr(*api.sdcard_help, "Windows and macOS need a helper") != NULL,
+              "and what it costs, which is the half a release note omits");
+        /* And the two folders the change added, in the list a person reads
+         * before making a card by hand on a PC. A card missing them is a card
+         * with nowhere for an app or a download to go, and the list is the
+         * only place they are named. */
+        CHECK(strstr(*api.sdcard_help, "apps         apps you installed") != NULL,
+              "the folder list names apps/");
+        CHECK(strstr(*api.sdcard_help, "untrusted    downloads") != NULL,
+              "and untrusted/");
+    }
+
+    /* ============ AND THE SCREEN FOR A CARD FROM BEFORE ALL THAT ==========
+     *
+     * A NeoDCT card in the pre-0.5.0b FAT format mounts, and the owner's
+     * music plays off it, and it cannot hold an installed app -- because FAT
+     * records no ownership, so none of the rules that keep an app in its
+     * place can be written on it.
+     *
+     * That is a sentence with a "but" in it, said to somebody who did nothing
+     * wrong, so it gets a screen of its own rather than the generic "nothing
+     * we can mount" -- which would be a lie about a card that works.
+     *
+     * Both strings are pinned. The dialog because it is MEASURED below, and
+     * the help because it is the only place the owner is told that the remedy
+     * erases the card. A help page for a destructive offer that quietly
+     * stopped saying so is the worst regression available on this screen, and
+     * nothing else in the suite would see it. */
+    CHECK(api.sdcard_legacy != NULL && *api.sdcard_legacy != NULL,
+          "the app exports the legacy-card dialog");
+    CHECK(api.sdcard_legacy_help != NULL && *api.sdcard_legacy_help != NULL,
+          "and its help page");
+    if (api.sdcard_legacy != NULL && *api.sdcard_legacy != NULL) {
+        CHECK_STR(*api.sdcard_legacy,
+                  "Card uses the old format.\n"
+                  "Music and photos work.\n"
+                  "Apps need a reformat,\n"
+                  "which erases the card.",
+                  "SDCARD_LEGACY");
+        /* It says what still WORKS before it says what does not. A card that
+         * is fine for everything its owner has ever used it for must not be
+         * announced to them as broken. */
+        CHECK(strstr(*api.sdcard_legacy, "work") != NULL,
+              "it says the card still works");
+        CHECK(strstr(*api.sdcard_legacy, "erases") != NULL,
+              "and that the remedy erases it");
+    }
+    if (api.sdcard_legacy_help != NULL && *api.sdcard_legacy_help != NULL) {
+        CHECK(strstr(*api.sdcard_legacy_help, "ERASES EVERYTHING ON THE CARD") != NULL,
+              "the help shouts the destructive half");
+        CHECK(strstr(*api.sdcard_legacy_help, "not unsafe") != NULL,
+              "and does not frighten anyone into reformatting a working card");
+    }
 
     CHECK_STR(ND_SETAPP_SYSTEM_WALLPAPER_DIR, "/NeoDCT/System/wallpapers", "SYSTEM_WALLPAPER_DIR");
     CHECK_STR(ND_SETAPP_WALLPAPER_DIR, "/NeoDCT/User/wallpapers", "WALLPAPER_DIR");
@@ -642,6 +758,55 @@ static void test_memory_card_absent(void)
     CHECK(frames >= 4u, "the dialog and the help screen were both drawn");
 }
 
+/* ============ FIVE LINES, AND THE CLIP THAT DOES NOT SHOW ============
+ *
+ * nd_msgdialog does not fail on a message that is too long and does not mark
+ * one: append_ellipsis() adds U+2026, the font has no glyph for it, and the
+ * text simply stops. The modem fault notice shipped that way, seven lines
+ * into a five-line dialog, and nothing in the suite noticed.
+ *
+ * The legacy-card dialog is four lines and the last of them is "which erases
+ * the card." -- so the line a clip would take is the one saying the remedy is
+ * destructive, on the screen that offers it. That is the worst line in the
+ * app to lose silently, which is why this measures the real string against
+ * the real font rather than counting the newlines in it.
+ *
+ * Built exactly as show_memory_card() builds it: same message, same "More"
+ * button, no title and no icon. A dialog measured in a different shape from
+ * the one that is drawn measures nothing. */
+static void test_the_legacy_card_dialog_fits(void)
+{
+    sa_fixture fx;
+    nd_msgdialog dlg;
+    size_t needed = 0u;
+    size_t fits = 0u;
+
+    if (api.sdcard_legacy == NULL || *api.sdcard_legacy == NULL) {
+        CHECK(false, "the legacy-card dialog exists");
+        return;
+    }
+    if (!sa_fx_init(&fx)) {
+        CHECK(false, "fixture");
+        sa_fx_free(&fx);
+        return;
+    }
+
+    nd_msgdialog_init(&dlg, &fx.ui, *api.sdcard_legacy);
+    nd_msgdialog_set_button(&dlg, "More");
+    nd_msgdialog_measure(&dlg, &needed, &fits);
+
+    CHECK(needed <= fits, "THE INVARIANT: nothing on this screen is clipped");
+    CHECK_INT((int)needed, 4, "four lines of message");
+    /* Seven fit here and only five in the modem notice, and the difference is
+     * not slack to spend: that dialog carries a title and a 24 px warning
+     * triangle, which cost two lines between them. So the budget is asserted
+     * as the SMALLER one -- if this screen ever gains a title or an icon, the
+     * message still has to fit, and four lines does. */
+    CHECK(fits >= 5u, "at least the five a titled dialog would leave");
+
+    sa_fx_free(&fx);
+}
+
 /* ------------------------------------------------------------------ *
  * 9. The two golden frames
  * ------------------------------------------------------------------ */
@@ -822,6 +987,7 @@ int main(void)
     RUN(test_messages_style_writes_the_setting);
     RUN(test_engineering_mode_writes_the_setting);
     RUN(test_memory_card_absent);
+    RUN(test_the_legacy_card_dialog_fits);
     RUN(test_golden_root);
     RUN(test_golden_wallpaper);
     RUN(test_null_safety);

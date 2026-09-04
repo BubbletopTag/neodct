@@ -517,6 +517,15 @@ bool nd_modem__transact(nd_modem *m, const char *cmd, double timeout, char *fina
                     nd_modem__handle_urc(m, line);
                 if (final_out != NULL && final_sz > 0u)
                     (void)nd_strlcpy(final_out, line, final_sz);
+                /* THE ONE PLACE THE WATCHDOG IS FED. Every AT exchange in the
+                 * system funnels through this return, so "the modem answered
+                 * something, anything, recently" is exactly this timestamp.
+                 * Note it is a FINAL LINE and not an OK: "+CME ERROR: 10" is
+                 * a modem that is alive and disagreeing, which is health, not
+                 * fault. nd_modem.h's ND_MODEM_FAULT_AFTER_S. */
+                nd_modem__lock(m);
+                m->last_ok_at = nd_modem__now();
+                nd_modem__unlock(m);
                 return true;
             }
             if (nd_modem__is_urc(line))

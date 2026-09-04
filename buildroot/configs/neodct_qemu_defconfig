@@ -48,6 +48,10 @@ BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y
 BR2_SYSTEM_DHCP=""
 BR2_TARGET_TZ_INFO=y
 BR2_ROOTFS_OVERLAY="../neodct/overlay"
+# Two users, so that "the browser" and "the phone" stop being the same
+# principal. SECURITY-PLAN.md section 1; the table itself carries the
+# reasoning, including why the ids are written out rather than allocated.
+BR2_ROOTFS_USERS_TABLES="../neodct/configs/users-table.txt"
 BR2_ROOTFS_POST_IMAGE_SCRIPT="board/qemu/post-image.sh ../neodct/scripts/post-image-neodct.sh"
 BR2_ROOTFS_POST_BUILD_SCRIPT="../neodct/scripts/post-build-prune-tests.sh ../neodct/scripts/post-build-system-metadata.sh ../neodct/scripts/post-build-nonfree-firmware.sh ../neodct/scripts/post-build-bt-on-demand.sh"
 BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS="qemu-aarch64"
@@ -60,7 +64,6 @@ BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="board/qemu/aarch64-virt/linux.config"
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
 BR2_PACKAGE_DEJAVU=y
 BR2_PACKAGE_FREETYPE=y
-BR2_PACKAGE_GPM=y
 # python3, Pillow, mutagen and miniaudio were here until the last app was
 # ported. Nothing on the phone runs Python any more: /bin/run_neodct.sh
 # execs nd-core, and nd-apprun dlopen()s <app-dir>/app.so. The sources they
@@ -73,19 +76,16 @@ BR2_PACKAGE_GPM=y
 # jpeg, libpng, zlib and openssl) in its Config.in for exactly that reason.
 BR2_PACKAGE_JPEG=y
 BR2_PACKAGE_ALSA_UTILS=y
-BR2_PACKAGE_ALSA_UTILS_ALSAMIXER=y
+# BR2_PACKAGE_ALSA_UTILS_ALSAMIXER is not set
 BR2_PACKAGE_ALSA_UTILS_AMIXER=y
 BR2_PACKAGE_ALSA_UTILS_APLAY=y
 BR2_PACKAGE_CA_CERTIFICATES=y
-BR2_PACKAGE_LINKS=y
-BR2_PACKAGE_LINKS_GRAPHICS=y
 BR2_TARGET_ROOTFS_EXT2=y
 BR2_TARGET_ROOTFS_EXT2_4=y
 BR2_TARGET_ROOTFS_EXT2_SIZE="2G"
 # BR2_TARGET_ROOTFS_TAR is not set
 BR2_PACKAGE_LIBCURL=y
 BR2_PACKAGE_LIBCURL_CURL=y
-BR2_PACKAGE_MPG123=y
 BR2_PACKAGE_UQMI=y
 BR2_PACKAGE_NETSURF=y
 BR2_PACKAGE_NETSURF_FRAMEBUFFER=y
@@ -102,6 +102,34 @@ BR2_PACKAGE_LVM2=y
 # BR2_PACKAGE_LVM2_STANDARD_INSTALL is not set
 # FAT32 SD cards: mkfs.vfat to format one, fatlabel to name it NEODCT,
 # fsck.fat to repair a card the user pulled out mid-write.
+# ---- e2fsprogs: the card is ext4 now ------------------------------------
+#
+# A memory card was two FAT partitions until 0.5.0b. FAT stores no ownership,
+# so every permission on one came from uid=/gid=/fmask=/dmask= mount options
+# applied to the WHOLE filesystem -- which is why "downloads are writable by
+# ndusr_ut and the owner's music is not" needed a second partition, and why an
+# installed app's app.so could not be made readable to the process that has to
+# dlopen it without making every file on the card readable too.
+#
+# ext4 records owner, group and mode per inode. One partition then expresses
+# the whole layout (see neodct-sdcard's CARD_LAYOUT) and the partition table
+# goes away with the problem.
+#
+# busybox has an mke2fs and it is already enabled, but it makes ext2 and
+# rejects -t/-O. The helper falls back to it and logs that the card has no
+# journal; this is what makes a phone-formatted card ext4 instead.
+#
+# mke2fs and e2fsck need no sub-option -- e2fsprogs always builds them, and a
+# BR2_PACKAGE_E2FSPROGS_MKE2FS that does not exist is dropped in silence.
+#
+# This SELECTS util-linux's libuuid and libblkid. If util-linux was already
+# built in this output tree without them -- which it was, because nothing
+# needed them before -- buildroot will NOT reconfigure it, and e2fsprogs then
+# fails at "external uuid library not found". After pulling this, run
+#     make util-linux-dirclean util-linux-libs-dirclean
+# once, before make. See docs/c-rewrite/BUILDING.md.
+BR2_PACKAGE_E2FSPROGS=y
+
 BR2_PACKAGE_DOSFSTOOLS=y
 BR2_PACKAGE_DOSFSTOOLS_MKFS_FAT=y
 BR2_PACKAGE_DOSFSTOOLS_FATLABEL=y

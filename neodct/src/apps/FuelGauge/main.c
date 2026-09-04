@@ -79,8 +79,7 @@
 #define FG_KEY_BACK ND_KEY_BACK
 
 const char *const nd_fg_hw_required_msg =
-    "No MAX1704x fuel gauge found, so BatteryService is running its QEMU "
-    "simulation stub. This app needs real hardware.";
+    "No MAX1704x fuel gauge.\n\nThis app needs real hardware.";
 
 /* Shown when the app has been told there is a gauge and the driver says there
  * is not. On the phone that cannot happen -- nd_battery_debug_snapshot()

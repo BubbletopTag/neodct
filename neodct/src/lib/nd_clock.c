@@ -65,6 +65,7 @@
 
 #include <linux/rtc.h>
 
+#include "nd_broker.h"
 #include "nd_clock.h"
 #include "nd_log.h"
 #include "nd_paths.h"
@@ -361,6 +362,22 @@ bool nd_clock_set(time_t when, const char *reason)
         return true;
     }
 
+    /* clock_settime(CLOCK_REALTIME) needs CAP_SYS_TIME, which nd-core gave up
+     * when it stopped being root. The decision above -- the bounds, the log,
+     * the sandbox check -- stays here; only the syscall crosses. */
+    {
+        nd_broker *b = nd_broker_default();
+
+        if (b != NULL) {
+            if (!nd_broker_set_clock(b, (int64_t)when)) {
+                nd_log_err(ND_LOG_CLOCK, "the broker would not set the clock");
+                return false;
+            }
+            write_rtc(when);
+            return true;
+        }
+    }
+
     ts.tv_sec = when;
     ts.tv_nsec = 0;
     if (clock_settime(CLOCK_REALTIME, &ts) != 0) {
@@ -566,6 +583,42 @@ static bool field_at(const char *line, size_t index, char *out, size_t out_sz)
     }
 }
 
+/* Is this /proc/net/ipv6_route line the LOOPBACK's?
+ *
+ * THE TWO FILES PUT THE INTERFACE IN DIFFERENT PLACES, which is why there are
+ * two checks rather than one shared helper:
+ *
+ *   /proc/net/route        Iface is the FIRST field  -- read with field_at(0)
+ *   /proc/net/ipv6_route   Iface is the LAST field   -- read backwards, here
+ *
+ * This exists because of a real phone. On a NeoDCT with no network at all,
+ * /proc/net/ipv6_route contains
+ *
+ *   00000000000000000000000000000000 00 000...000 00 ... ffffffff ... lo
+ *
+ * -- the kernel's unreachable ::/0 entry, which every Linux box has -- and
+ * that matched "destination is all zeros, prefix length is 00" exactly. So
+ * nd_clock_has_route() answered TRUE on a box with nothing but loopback.
+ *
+ * For ClockService, which is what this was written for, the cost was only a
+ * pointless SNTP attempt. It became visible when the home screen's signal
+ * meter started asking the same question, because "there is a network" is a
+ * claim a user can see and disagree with. A default route out of lo is not a
+ * route to anywhere. */
+static bool v6_line_is_loopback(const char *line)
+{
+    size_t end = strlen(line);
+    size_t start;
+
+    while (end > 0u && (line[end - 1u] == '\n' || line[end - 1u] == '\r' || line[end - 1u] == ' ' ||
+                        line[end - 1u] == '\t'))
+        end--;
+    start = end;
+    while (start > 0u && line[start - 1u] != ' ' && line[start - 1u] != '\t')
+        start--;
+    return (end - start) == 2u && line[start] == 'l' && line[start + 1u] == 'o';
+}
+
 static bool has_route_v4(void)
 {
     char resolved[ND_PATH_MAX];
@@ -592,6 +645,9 @@ static bool has_route_v4(void)
         }
         /* len(fields) > 2 and fields[1] == "00000000" */
         if (!field_at(line, 2u, dummy, sizeof dummy))
+            continue;
+        /* Iface is field 0 here. See v6_line_is_loopback(). */
+        if (field_at(line, 0u, dummy, sizeof dummy) && strcmp(dummy, "lo") == 0)
             continue;
         if (field_at(line, 1u, dest, sizeof dest) && strcmp(dest, "00000000") == 0) {
             found = true;
@@ -624,6 +680,8 @@ static bool has_route_v6(void)
         char plen[64];
 
         if (!field_at(line, 1u, plen, sizeof plen))
+            continue;
+        if (v6_line_is_loopback(line))
             continue;
         if (field_at(line, 0u, dest, sizeof dest) && strcmp(dest, zeros) == 0 &&
             strcmp(plen, "00") == 0) {

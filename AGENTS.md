@@ -34,10 +34,23 @@ current image design.
 
 ```sh
 cd buildroot
-make neodct_qemu_defconfig      # first time only; overwrites .config
+make neodct_qemu_defconfig      # see the note below before skipping this
 make                            # full image set
 neodct/tools/run_qemu.sh        # from the repo root
 ```
+
+`.config` IS GENERATED FROM THE DEFCONFIG ONCE. It used to say "first time
+only" here, and that was the bug: a tree whose `output/` predates a defconfig
+change keeps its old `.config` through every rebuild and `make` never mentions
+it. That is how images came to be built with no `ndusr` in them, so
+`nd_priv_lookup()` found nothing and every app ran as root -- found with `top`
+on a real build, not by anything in the tree.
+
+The users specifically are now also declared in `package/neodct/neodct.mk`,
+which reaches a stale `.config` because PACKAGES_USERS is collected whatever
+the rootfs settings say. Nothing else is covered that way. Re-run the
+defconfig after pulling anything that touches
+`neodct/configs/neodct_qemu_defconfig`.
 
 Build an installable update on an already-built tree (no rebuild):
 
@@ -94,9 +107,45 @@ without rebuilding a read-only rootfs:
 echo 'export NEODCT_T9=1' > /NeoDCT/User/env.sh
 ```
 
+**`env.sh` is gated.** It is arbitrary shell run as root from writable storage
+on every boot — `SECURITY-AUDIT.md` section 4 Q5 vector 2, and the reason a
+phone somebody can write one file on stays backdoored across updates, since an
+update replaces only the rootfs. It is now sourced only when something
+*outside* the writable partition says so: `neodct.devenv=1` on the kernel
+cmdline, or `/etc/neodct-devenv` in the read-only, verity-covered rootfs.
+`run_qemu.sh` passes the cmdline flag by default, so the workflow above is
+unchanged in QEMU; `NEODCT_DEVENV=0 run_qemu.sh` takes it away, which is how to
+see what a shipped phone does with an `env.sh` left on the partition.
+Engineering mode is deliberately not accepted as the gate: it lives in
+`settings.prop`, on the partition the attacker just wrote to.
+
 The C build has its own suite — `cd neodct/src && make test`, and
 `make ASAN=1 test` before you push anything. It includes the golden frames in
 `neodct/tests/golden/`, captured from the Python build during the port.
+
+**Neither suite can see the confinement.** Every security test in the tree
+checks what the image was *built* to do; none can check what the kernel
+*decides*, because a build host has no `ndusr`, no `/dev/i2c-3`, a writable
+root and possibly no `CONFIG_MNT_NS`. That half is `nd-selftest`, which ships
+in `/NeoDCT/System/bin` and runs on the phone or in QEMU:
+
+```sh
+nd-selftest              # everything; exit 1 if anything failed
+nd-selftest boundary     # can ndusr_ut reach the databases, the keys, the records
+nd-selftest processes    # who is actually running as whom, right now
+```
+
+It forks and really drops before each probe, so the answers are the kernel's.
+A SKIP is not a PASS — it means the check did not run, usually because the
+device or the user is not there. Run it after anything that touches
+`users-table.txt`, the udev rules, `S00userdata`, the mount options or
+`nd_priv.c`.
+
+One consequence worth knowing before it confuses you: **if you create an
+`ndusr_ut` on your build host, `test_browser` starts exercising the real
+privilege drop.** That is deliberate and it is the only way to cover
+`apps/Browser`'s `nd_priv_lookup()` from a host at all, but it needs root —
+as a normal user with that account present, those cases print SKIP.
 
 **Golden frames are a regression net, not a gate.** The port is finished and
 apps are now being deliberately redesigned, so a frame that stops matching

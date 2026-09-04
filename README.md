@@ -66,15 +66,34 @@ Currently, this device and operating system is a **work-in-progress**, not even 
 ## Architecture Overview
 
 * **Kernel**: Linux (Buildroot-managed)
-* **Userspace**: Minimal GNU/Linux
-* **UI**: Custom Python UI framework (framebuffer / DRM)
-* **Apps**: Python scripts deployed via rootfs overlay
-* **Graphics**: No heavyweight desktop stack (no X11, web browser uses a barebones wayland compositor)
-* **Input**: Physical buttons / keypad navigation
-* **Target hardware**: ARM SBCs and embedded platforms
+* **Userspace**: Minimal Linux on musl
+* **UI**: `nd-core`, a custom C framework drawing straight to the framebuffer
+* **Apps**: native C, one `app.so` per app, **one process each**
+* **Graphics**: no desktop stack at all — no X11, no Wayland, no compositor
+* **Input**: physical keypad, sixteen keys
+* **Target hardware**: Luckfox Pico Mini B; QEMU for development
 
-All system apps are native Python programs.
-No browser engine is required for core functionality.
+The UI and every app are C. The original Python implementation is kept under
+`neodct/python-reference/` for comparison and is not built or shipped.
+
+### Security at a glance
+
+Nothing on the phone runs as root except one small broker.
+
+* `nd-core` — the UI — runs as **`ndusr`**, an ordinary user.
+* Apps run as **`ndusr`**, or as **`ndusr_ut`** if they are the browser or came
+  from `/NeoDCT/User/apps`. `ndusr_ut` cannot reach the modem, your contacts,
+  your messages or the signing keys — those folders are not merely unreadable
+  to it, they are *absent* from its view of the filesystem.
+* A **broker** process keeps root and does exactly four things: start an app,
+  wait for one, halt the phone, set the clock. It refuses to run anything as
+  root outside a fixed list of three programs on the read-only image.
+* `/` and `/NeoDCT/System` are read-only squashfs under dm-verity.
+
+**[`docs/HOW-IT-WORKS.md`](docs/HOW-IT-WORKS.md) explains all of it in plain
+language** and is the best place to start. The design reasoning is in
+`docs/c-rewrite/SECURITY.md`; the threat model it answers is in
+`docs/c-rewrite/SECURITY-AUDIT.md`.
 
 ---
 

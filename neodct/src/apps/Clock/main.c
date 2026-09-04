@@ -47,6 +47,7 @@
 #include "nd_keycodes.h"
 #include "nd_log.h"
 #include "nd_settings.h"
+#include "nd_svc.h"
 #include "nd_timeset.h"
 #include "nd_types.h"
 #include "nd_ui.h"
@@ -71,8 +72,14 @@ const char *const nd_clock_app_ntp_is_on =
     "NTP sync is on.\n\nTurn it off first, or the network will set the clock back.";
 const char *const nd_clock_app_bad_time = "Not a time.\n\nFour digits, 00:00 to 23:59.";
 const char *const nd_clock_app_bad_date = "Not a date.\n\nEight digits, day first, 2020 to 2099.";
+/* It used to say "Setting the time needs root.", which was true when this app
+ * ran as root and was the only reason it did. It does not any more, and the
+ * sentence had to change with the fact: the core sets the clock now, and it
+ * refuses a date outside what this build will believe as well as failing a
+ * write. One sentence covers both because they are the same instruction to
+ * the person holding the phone. */
 const char *const nd_clock_app_set_failed =
-    "The clock would not take it.\n\nSetting the time needs root.";
+    "The clock would not take it.\n\nCheck it and try again.";
 const char *const nd_clock_app_no_alarms = "No alarms yet.\n\nThis row is not built.";
 
 /* ------------------------------------------------------------------ *
@@ -192,7 +199,13 @@ static void show_clock_settings(nd_ui *ui)
         return;
     }
 
-    if (!nd_clock_set(when, "set by hand in the Clock app")) {
+    /* nd_svc_set_clock() and not nd_clock_set(): settimeofday() is a
+     * privileged call and this app no longer has the privilege. The core
+     * makes it, having first refused anything outside what the build will
+     * believe -- so `false` here now covers "the phone would not accept that
+     * date" as well as "the write failed", which is why the sentence below
+     * says neither. See nd_svc.h. */
+    if (!nd_svc_set_clock(when)) {
         say(ui, nd_clock_app_set_failed);
         return;
     }

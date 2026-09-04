@@ -285,12 +285,94 @@ SPLASH_IMAGES = (
     (os.path.join("splash", "sadface.bmp"), "splash.raw"),
     (os.path.join("splash", "bootlogo.bmp"), "bootlogo.raw"),
 )
+
+# The update signature check (SECURITY-AUDIT.md section 3, the critical
+# finding). Two files, and the initramfs is useless for that purpose without
+# either of them, so both are required exactly as dmsetup is.
+#
+# nd-verify is a statically linked 4 MB binary and it comes from BINARIES_DIR
+# rather than from the target tree, on purpose: nothing in the running system
+# calls it -- the Update app checks the same signature through libneodct,
+# which is already mapped -- so putting it in target/ would add those 4 MB to
+# the read-only squashfs for nothing. See neodct/src/Makefile's install-boot.
+#
+# The public key DOES come from the target tree, and that is the point: it is
+# the same file the running system verifies against, so the initramfs and the
+# UI can never disagree about which key is the release key.
+VERIFIER_CANDIDATES = ("NeoDCT/System/bin/nd-verify", "usr/bin/nd-verify",
+                       "bin/nd-verify")
+
+# The on-screen recovery UI. Like nd-verify it comes from BINARIES_DIR rather
+# than the target tree -- neodct/src/Makefile's install-boot puts it there,
+# and nothing in the running system calls it, so a copy in the verity-covered
+# squashfs would be bytes nobody executes.
+#
+# OPTIONAL, and that is the panel-daemon precedent rather than the
+# dmsetup/nd-verify one: an initramfs without it still recovers a phone,
+# because ndsys-recovery.sh falls back to the tty menu it has always had.
+# Failing the build over a nicer menu would be wrong. It is a close call --
+# on hardware, without it, recovery has no working input at all -- but that
+# is *already* true today, so its absence is a regression to the status quo
+# rather than a broken image.
+RECUI_CANDIDATES = ("NeoDCT/System/bin/nd-recui", "usr/bin/nd-recui",
+                    "bin/nd-recui")
+# The install-progress bar (neodct/src/tools/nd_bootbar.c), reached from
+# ndsys-panel.sh as $NDSYS_BOOTBAR. Like nd-verify it comes from
+# BINARIES_DIR rather than the target tree, because nothing in the running
+# system calls it.
+#
+# OPTIONAL, and deliberately not in the same class as dmsetup and nd-verify.
+# Those two make the initramfs unable to do its job SAFELY: without them it
+# cannot verify a root hash or tell a release from something somebody staged,
+# so the build fails rather than ship an image that looks finished. A missing
+# progress bar makes the initramfs silent, which is exactly where the phone is
+# today. Failing an image build over a cosmetic binary is the wrong default.
+# The risk that it then quietly never ships is covered by
+# neodct/tests/test_mkinitramfs.py.
+BOOTBAR_CANDIDATES = ("NeoDCT/System/bin/nd-bootbar", "usr/bin/nd-bootbar",
+                      "bin/nd-bootbar")
+RELEASE_KEY = "NeoDCT/System/keys/neodct-release.pub"
+RELEASE_KEY_TARGET = "neodct-release.pub"
 SPLASH_SOURCE, SPLASH_TARGET = SPLASH_IMAGES[0]
 # Matches UI_W/UI_H and neodctDisplay.c FB_W/FB_H.
 SPLASH_W, SPLASH_H = 240, 175
 
 
-def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None):
+def find_verifier(target_dir, verifier=None):
+    """Where nd-verify is, or None. `verifier` is a path from the caller."""
+    if verifier:
+        return str(verifier) if os.path.exists(str(verifier)) else None
+    for candidate in VERIFIER_CANDIDATES:
+        source = os.path.join(target_dir, candidate)
+        if os.path.exists(source):
+            return source
+    return None
+
+
+def find_recui(target_dir, recui=None):
+    """Where nd-recui is, or None. `recui` is a path from the caller."""
+    if recui:
+        return str(recui) if os.path.exists(str(recui)) else None
+    for candidate in RECUI_CANDIDATES:
+        source = os.path.join(target_dir, candidate)
+        if os.path.exists(source):
+            return source
+    return None
+
+
+def find_bootbar(target_dir, bootbar=None):
+    """Where nd-bootbar is, or None. `bootbar` is a path from the caller."""
+    if bootbar:
+        return str(bootbar) if os.path.exists(str(bootbar)) else None
+    for candidate in BOOTBAR_CANDIDATES:
+        source = os.path.join(target_dir, candidate)
+        if os.path.exists(source):
+            return source
+    return None
+
+
+def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None,
+          verifier=None, recui=None, bootbar=None):
     """Stage and pack the initramfs. Returns the output path."""
     global LAST_STAGING
     target_dir = str(target_dir)
@@ -300,6 +382,9 @@ def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None):
                  % target_dir)
 
     binaries = {"bin/busybox": busybox}
+    # Plain files: copied verbatim, not chmod +x and not searched for
+    # DT_NEEDED. Only the release key so far.
+    plain_files = {}
 
     if extra_binaries is None:
         for candidate in DMSETUP_CANDIDATES:
@@ -326,6 +411,46 @@ def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None):
         # catch a stale target/ left over from a build for another board --
         # shipping a binary the kernel cannot exec is exactly the failure
         # this whole file has to avoid.
+        # The signature verifier and the key it checks against. Both are
+        # required, for the same reason dmsetup is: an initramfs without
+        # them cannot tell a release image from one somebody staged, and it
+        # would apply either. Shipping that silently is worse than failing
+        # the build, because it looks finished.
+        found = find_verifier(target_dir, verifier)
+        if found is None:
+            sys.exit("mkinitramfs: no nd-verify (looked at %s%s) -- build "
+                     "neodct/src and run its install-boot target; the update "
+                     "signature check cannot work without it"
+                     % ("--verifier %s, " % verifier if verifier else "",
+                        ", ".join(VERIFIER_CANDIDATES)))
+        binaries["bin/nd-verify"] = found
+
+        key = os.path.join(target_dir, RELEASE_KEY)
+        if not os.path.exists(key):
+            sys.exit("mkinitramfs: no %s in %s -- the initramfs has nothing "
+                     "to check update signatures against" % (RELEASE_KEY, target_dir))
+        plain_files[RELEASE_KEY_TARGET] = key
+
+        found = find_bootbar(target_dir, bootbar)
+        if found is None:
+            print("mkinitramfs: no nd-bootbar (looked at %s) -- an update "
+                  "installing at boot will show the logo and nothing else"
+                  % ", ".join(BOOTBAR_CANDIDATES), file=sys.stderr)
+        else:
+            # Same architecture check the panel daemon gets, and for the same
+            # reason: shipping a binary the kernel cannot exec is the failure
+            # this whole file exists to avoid.
+            try:
+                if elf_machine(found) == elf_machine(busybox):
+                    binaries["bin/nd-bootbar"] = found
+                else:
+                    print("mkinitramfs: %s is a different architecture; an "
+                          "update installing at boot will be silent" % found,
+                          file=sys.stderr)
+            except ValueError as exc:
+                print("mkinitramfs: %s unreadable (%s); skipping"
+                      % (found, exc), file=sys.stderr)
+
         panel = os.path.join(target_dir, PANEL_DAEMON)
         if os.path.exists(panel):
             try:
@@ -338,6 +463,30 @@ def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None):
             except ValueError as exc:
                 print("mkinitramfs: %s unreadable (%s); skipping"
                       % (PANEL_DAEMON, exc), file=sys.stderr)
+
+        # The recovery UI, gated on the SAME architecture check the panel
+        # daemon gets. install-boot writes into BINARIES_DIR, which is not
+        # architecture-tagged, so a stale cross build left over from another
+        # board is a real way to ship a binary the kernel cannot exec -- and
+        # this one is reached from the screen a person is standing in front
+        # of, where "nothing happened" is the whole failure report.
+        found = find_recui(target_dir, recui)
+        if found is None:
+            print("mkinitramfs: no nd-recui (looked at %s%s); recovery will "
+                  "fall back to its text menu"
+                  % ("--recui %s, " % recui if recui else "",
+                     ", ".join(RECUI_CANDIDATES)), file=sys.stderr)
+        else:
+            try:
+                if elf_machine(found) == elf_machine(busybox):
+                    binaries["bin/nd-recui"] = found
+                else:
+                    print("mkinitramfs: %s is a different architecture; "
+                          "recovery will fall back to its text menu"
+                          % found, file=sys.stderr)
+            except ValueError as exc:
+                print("mkinitramfs: %s unreadable (%s); skipping"
+                      % (found, exc), file=sys.stderr)
     else:
         for relative in extra_binaries:
             source = os.path.join(target_dir, relative)
@@ -376,6 +525,12 @@ def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None):
         os.makedirs(os.path.dirname(destination), exist_ok=True)
         shutil.copy2(source, destination)
         os.chmod(destination, 0o755)
+
+    for archive_path, source in plain_files.items():
+        destination = os.path.join(staging, archive_path)
+        os.makedirs(os.path.dirname(destination) or staging, exist_ok=True)
+        shutil.copy2(source, destination)
+        os.chmod(destination, 0o644)
 
     for archive_path, source in resolve_libs(binaries.values(), lib_dirs).items():
         destination = os.path.join(staging, archive_path)
@@ -447,9 +602,16 @@ def main(argv=None):
     parser.add_argument("--target-dir", required=True)
     parser.add_argument("--init", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--verifier",
+                        help="path to nd-verify (default: search --target-dir)")
+    parser.add_argument("--recui",
+                        help="path to nd-recui (default: search --target-dir)")
+    parser.add_argument("--bootbar",
+                        help="path to nd-bootbar (default: search --target-dir)")
     args = parser.parse_args(argv)
 
-    path = build(args.target_dir, args.init, args.output)
+    path = build(args.target_dir, args.init, args.output,
+                 verifier=args.verifier, recui=args.recui, bootbar=args.bootbar)
     print("mkinitramfs: %s (%.1f KiB)"
           % (path, os.path.getsize(path) / 1024.0))
     return 0

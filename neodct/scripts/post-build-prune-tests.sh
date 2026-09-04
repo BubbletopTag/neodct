@@ -59,6 +59,23 @@ if [ -n "$OVERLAY_ROOT" ]; then
         for path in "$target_apps"/*; do
             [ -d "$path" ] || continue
             name="$(basename "$path")"
+            # The confinement probes are built from neodct/src/apps like any
+            # other app, but deliberately have NO overlay directory -- they are
+            # staged into /NeoDCT/User/sdcard/apps instead, because being installed by
+            # the owner onto writable storage is the situation under test.
+            #
+            # That makes them look exactly like a stale app to the rule below,
+            # which duly deleted the freshly built .so before post-image could
+            # copy it, and the probes shipped as manifests with no code. Keep
+            # them here when the build asked for them; the block further down
+            # removes them when it did not.
+            case "$name" in
+                Pentest*)
+                    if [ "${NEODCT_PENTEST:-0}" = "1" ]; then
+                        continue
+                    fi
+                    ;;
+            esac
             if [ ! -d "$overlay_apps/$name" ]; then
                 if [ -f "$path/app.so" ]; then
                     echo "[post-build] dropping stale app (had a built app.so):" \
@@ -177,6 +194,28 @@ find "$TARGET_DIR/NeoDCT" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/
 # puts half-finished code on a device where it can only confuse whoever
 # finds it. It stays in the repository, which is the point of an icebox.
 rm -rf "$TARGET_DIR/NeoDCT/Development"
+
+# ---- the confinement test apps ----
+#
+# neodct/src/apps/Pentest*/ are apps that deliberately try things an app is not
+# allowed to do, so that the boundaries can be PROVEN rather than argued for.
+# The Makefile globs apps/*/, so building them also installs them here, into
+# the read-only system tree.
+#
+# In a release that is wrong twice over: they are dead weight, and an image
+# that ships apps probing its own confinement gives an attacker a tested
+# starting point. They are removed unless the build asked for them, and the
+# build that asks stages them somewhere else entirely -- the card, via
+# post-image-neodct.sh -- because being INSTALLED BY THE OWNER onto writable
+# storage is the situation being tested. An app in the signed system image is
+# not that situation and could not stand in for it.
+if [ "${NEODCT_PENTEST:-0}" != "1" ]; then
+    for pentest in "$TARGET_DIR/NeoDCT/System/apps"/Pentest*; do
+        [ -e "$pentest" ] || continue
+        echo "[post-build] pruning $(basename "$pentest") (set NEODCT_PENTEST=1 to keep)"
+        rm -rf "$pentest"
+    done
+fi
 
 if [ "${NEODCT_KEEP_PYTHON:-0}" != "1" ] && [ -d "$TARGET_DIR/NeoDCT" ]; then
     py_count=$(find "$TARGET_DIR/NeoDCT" \

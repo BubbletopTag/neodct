@@ -7,10 +7,17 @@
  * So this is a real app.so, dlopen()ed by the real nd-apprun, in a real child
  * process forked and exec'd by the real nd_proc_launch_app(), whose parent is
  * a real core holding a real nd_modem and nd_battery. It calls every one of
- * the six nd_svc_* entry points and writes what it got to a file the parent
- * then checks against its OWN live services -- so the test cannot pass by the
- * two sides agreeing on a wrong answer, only by them agreeing on the same
- * answer.
+ * the six service nd_svc_* entry points and writes what it got to a file the
+ * parent then checks against its OWN live services -- so the test cannot
+ * pass by the two sides agreeing on a wrong answer, only by them agreeing on
+ * the same answer.
+ *
+ * It also asks for a POWEROFF, which is the one request here whose honest
+ * success would be that this machine stopped. The parent installs
+ * nd_svc_halt_simulate() before launching, which replaces the core's spawn
+ * and nothing else -- so the request, the validation, the resolution and the
+ * reply are all real and only the last line is not. See
+ * docs/c-rewrite/spec-app-services.md section 9.9.
  *
  * It lives in test/apps/ rather than apps/ for the reason CrashApp does: no
  * shipped image may contain a program whose whole job is to poke at the OS.
@@ -117,6 +124,19 @@ int app_run(nd_ui *ui)
     /* 8. The one write on the channel. With no gauge it must answer false,
      *    which still proves the request reached nd_battery_quickstart(). */
     say("quickstart=%d", nd_svc_battery_quickstart(ui));
+
+    /* 9. THE VERB THAT ENDS THE SESSION. This is the one call in this file
+     *    whose real consequence is that the machine stops, so the PARENT --
+     *    which is the process that serves this request -- has replaced the
+     *    spawn with a fake before launching us (nd_svc_halt_simulate()).
+     *    Everything on this side is real: a genuine request from a genuine
+     *    child process, over the socket nd_proc_launch_app() handed us.
+     *
+     *    Poweroff and not reboot, so that a fake that was somehow NOT
+     *    installed would take the machine down in the way a developer
+     *    notices immediately rather than the way that looks like a flaky
+     *    CI runner. spec-app-services.md 9.9. */
+    say("poweroff=%d", nd_svc_poweroff());
 
     say("done=1");
     (void)fclose(g_out);

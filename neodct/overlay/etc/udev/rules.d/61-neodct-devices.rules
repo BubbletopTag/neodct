@@ -1,0 +1,148 @@
+# What ndusr may open once it stops being root.
+#
+# SECURITY-PLAN.md section 5 Phase 1, and the table in SECURITY-AUDIT.md
+# section 6: every device the UI touches, and the group that grants it.
+# Most of them need nothing here -- eudev's own 50-udev-default.rules already
+# puts /dev/fb0 in video, /dev/input/event* in input, /dev/snd/* in audio and
+# /dev/ttyUSB* in dialout, all at 0660. Those four are the common case and
+# they are already right.
+#
+# This file is the remainder: the nodes and attributes with no stock rule,
+# which are therefore root:root 0600 (a device node with no GROUP= gets 0600
+# from eudev, not 0660) or root-owned 0644 in sysfs.
+#
+# NOTHING HERE CHANGES ANYTHING TODAY. Every process on the phone is root and
+# root ignores all of it. It is here so that the users exist, the groups are
+# granted and the rules are proven before anything drops privilege -- which
+# is the order SECURITY-PLAN.md asks for, and the opposite of discovering on
+# a phone that the keypad stopped working.
+#
+# A wrong group name fails as a permission problem rather than a build error:
+# eudev logs one line and falls back to gid 0, which also drops the node to
+# 0600. Every group named below is created by neodct/configs/users-table.txt.
+
+# --- i2c: the keypad expander and the fuel gauge -------------------------
+#
+# The one device class with no stock rule at all, and the one the audit
+# predicted would bite. /dev/i2c-3 carries the PCF8575 the keypad matrix
+# hangs off (nd_pcf8575.c, nd_keypadsetup.c) and the MAX17048 fuel gauge
+# (nd_battery.c). Without this it is root:root 0600 and a non-root UI has no
+# keys and no battery reading.
+#
+# Not granted to ndusr_ut. An i2c bus is a bus: anything on it is reachable
+# by address, and "the browser can talk to the fuel gauge" is not a sentence
+# with a good ending.
+SUBSYSTEM=="i2c-dev", GROUP="i2c", MODE="0660"
+
+# ============ THE QUOTING RULES, WHICH ARE NOT THE SHELL'S ============
+#
+# Two different parsers read a RUN+= value, one after the other, and they do
+# not agree with each other. Both are in eudev 3.2.14:
+#
+#   get_key()          src/udev/udev-rules.c -- reads the RULE. A value runs
+#                      from one double quote to the next; \" inside it is
+#                      honoured and does not end the value. Line continuation
+#                      is backslash-newline, checked as line[len-2].
+#
+#   udev_build_argv()  src/udev/udev-event.c -- splits that value into ARGV,
+#                      and it has NO escapes whatsoever. It walks the string;
+#                      a quote character, single or double, starts an element
+#                      that ends at the next one of the same kind; anything
+#                      else is split on spaces.
+#
+# So the rule to follow is the second parser's, because it is the stricter
+# one: the script handed to `sh -c` must contain no quote character at all.
+# There is nothing to escape it WITH. One apostrophe inside the script ends
+# the argv element in the middle of itself, and the remainder becomes further
+# arguments that sh never looks at -- with no error, because both parsers
+# think they succeeded.
+#
+# Hence single quotes around the script and none inside it. Every path below
+# comes from sysfs and has no spaces in it, so nothing inside needs quoting
+# anyway.
+#
+# $$ is how a literal $ reaches the shell. A bare $ before a name eudev does
+# not recognise is copied through, so $b would happen to work today -- but
+# $id, $name, $links, $result and a dozen more ARE substitutions, and a
+# shell variable is one rename away from becoming one.
+#
+# A syntax error here costs this rule and not the file: parse_file() ignores
+# what add_rule() returns and reads the next line. Smaller blast radius than
+# it first looks, and still not one worth spending.
+
+# --- backlight ------------------------------------------------------------
+#
+# nd_backlight.c writes brightness. A udev rule is the ordinary way to hand
+# an attribute to a group; the alternative is a setuid helper for something
+# that is one integer.
+SUBSYSTEM=="backlight", ACTION=="add", \
+    RUN+="/bin/sh -c 'b=/sys%p/brightness; [ -e $$b ] && chgrp video $$b && chmod 0664 $$b'"
+
+# --- cpufreq --------------------------------------------------------------
+#
+# nd_cpufreq.c sets scaling_min_freq and scaling_max_freq -- the phone drops
+# its ceiling on the home screen and raises it for Koki. cpufreq attributes
+# are not a udev subsystem event on every kernel, so this hangs off the cpu
+# subsystem's add and checks for the directory rather than assuming it.
+#
+# The `[ -e ]` is not about log noise -- a RUN child's stderr goes to
+# /dev/null unless udevd is at LOG_INFO or above, and a non-zero exit is
+# logged at debug and otherwise discarded, so a rule that fails on every boot
+# fails SILENTLY. It is there because not every kernel exports all three
+# attributes: QEMU's virt machine has no cpufreq directory at all, and a
+# kernel built with one governor has no scaling_governor. Testing for each
+# one is what makes the rule mean the same thing on both.
+SUBSYSTEM=="cpu", ACTION=="add", \
+    RUN+="/bin/sh -c 'for f in scaling_min_freq scaling_max_freq scaling_governor; do p=/sys%p/cpufreq/$$f; [ -e $$p ] && { chgrp ndusr $$p; chmod 0664 $$p; }; done'"
+
+# --- uinput ---------------------------------------------------------------
+#
+# apps/Browser/main.c synthesises a uinput device so netsurf-fb sees the
+# arrow keys the core chose to give it and nothing else. The core is what
+# opens /dev/uinput, so this grants the group the core will run as -- not
+# ndusr_ut, which must keep receiving keys rather than injecting them.
+#
+# ndusr, therefore, and NOT `input`. This rule said GROUP="input" and the
+# comment above it said why that would be wrong, which is the whole lesson:
+# ndusr_ut is in `input`, and has to be, because that is how it RECEIVES keys
+# from /dev/input/event*. Granting uinput to the same group hands the
+# untrusted set key INJECTION as well, and those two are not the same
+# privilege at all.
+#
+# What it would have cost: the browser owns the whole screen while it is up --
+# there is no compositor on a 64 MB phone, see SECURITY.md -- and a process
+# that can both draw the UI and type into it can drive the real one. It cannot
+# open the modem; it would not need to. It could synthesise the keys that make
+# the PHONE open the modem, which is SECURITY-AUDIT.md section 4 Q1 reached
+# the long way round.
+#
+# Found by nd-selftest on the first real boot, not by reading this file.
+KERNEL=="uinput", GROUP="ndusr", MODE="0660"
+
+# --- rtc ------------------------------------------------------------------
+#
+# nd_clock.c sets the hardware clock after an SNTP sync. The stock rules
+# leave /dev/rtc0 root:root 0600. This is the smaller half of the problem --
+# the other half is clock_settime(), which is CAP_SYS_TIME and cannot be
+# given away with a mode bit; see SECURITY-PLAN.md section 5 Phase 1 on
+# preferring an auditable helper to a capability on the whole core.
+KERNEL=="rtc[0-9]*", GROUP="ndusr", MODE="0660"
+
+# --- ALSA capture ---------------------------------------------------------
+#
+# The uinput lesson again, in the other direction, and it took an audit to
+# see it: ndusr_ut is in `audio` because that is how the browser and the
+# media player PLAY sound, and eudev's stock rule puts every /dev/snd node in
+# `audio` at 0660 -- capture devices included. So the same group membership
+# that lets a web page play a video lets it open the microphone.
+#
+# Playing and recording are no more the same privilege than receiving and
+# injecting keys were. The `c` suffix is ALSA's own: pcmC0D0p is playback,
+# pcmC0D0c is capture, and the only things on this phone that legitimately
+# record are the modem's voice bridge (nd_modem_audio.c) and MicTest -- the
+# core and a stock app, both ndusr.
+#
+# Playback nodes are deliberately left alone. Taking `audio` off ndusr_ut
+# entirely would be the blunter fix and it would silence the browser, which
+# is a feature nobody asked to remove.
+SUBSYSTEM=="sound", KERNEL=="pcmC[0-9]*D[0-9]*c", GROUP="ndusr", MODE="0660"

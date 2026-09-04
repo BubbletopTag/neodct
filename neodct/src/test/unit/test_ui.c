@@ -51,11 +51,13 @@
 
 #include "nd_app.h"
 #include "nd_capture.h"
+#include "nd_clock.h"
 #include "nd_fb.h"
 #include "nd_image.h"
 #include "nd_json.h"
 #include "nd_keycodes.h"
 #include "nd_layout.h"
+#include "nd_modem.h"
 #include "nd_paths.h"
 #include "nd_settings.h"
 #include "nd_types.h"
@@ -334,9 +336,12 @@ static void test_layout_load(void)
         return;
     }
     CHECK(l->background == NULL, "shipped layout has background null");
-    CHECK_INT(l->n_elements, 4, "four elements");
-    if (l->n_elements == 4u) {
-        /* Array order is paint order: battery, carrier, clock, signal. */
+    CHECK_INT(l->n_elements, 5, "five elements");
+    if (l->n_elements == 5u) {
+        /* Array order is paint order: battery, carrier, ENGINEERING MODE,
+         * clock, signal. The red line was inserted after the carrier rather
+         * than appended, so it paints under the clock and the meters and
+         * cannot cover them. */
         CHECK_INT(l->elements[0].type, ND_EL_ICON_SET, "element 0 is an icon set");
         CHECK_STR(l->elements[0].prefix, "bat", "element 0 prefix");
         CHECK_INT(l->elements[0].x, 210, "element 0 x");
@@ -351,9 +356,23 @@ static void test_layout_load(void)
         CHECK_INT(l->elements[1].font_size, 12, "element 1 font_size");
         CHECK_INT(l->elements[1].color.r, 255, "element 1 colour is white");
 
-        CHECK_STR(l->elements[2].text, "12:00", "element 2 text");
-        CHECK_INT(l->elements[2].anchor, ND_ANCHOR_RIGHT, "element 2 anchor");
-        CHECK_STR(l->elements[3].prefix, "sig", "element 3 prefix");
+        /* The engineering-mode warning. Its text must match
+         * ND_UI_ENG_MODE_LABEL exactly: nd_ui_render_home() decides whether
+         * to draw it by strcmp against that macro, so a mismatch here would
+         * silently draw it always or never. That is the whole point of
+         * asserting the two against each other. */
+        CHECK_INT(l->elements[2].type, ND_EL_TEXT, "element 2 is text");
+        CHECK_STR(l->elements[2].text, ND_UI_ENG_MODE_LABEL, "element 2 text");
+        CHECK_INT(l->elements[2].anchor, ND_ANCHOR_CENTER_H, "element 2 anchor");
+        CHECK_INT(l->elements[2].color.r, 255, "element 2 is red: r");
+        CHECK_INT(l->elements[2].color.g, 0, "element 2 is red: g");
+        CHECK_INT(l->elements[2].color.b, 0, "element 2 is red: b");
+        /* One 14 px line box below the carrier's authored y of 71. */
+        CHECK_INT(l->elements[2].y, 95, "element 2 sits under the carrier");
+
+        CHECK_STR(l->elements[3].text, "12:00", "element 3 text");
+        CHECK_INT(l->elements[3].anchor, ND_ANCHOR_RIGHT, "element 3 anchor");
+        CHECK_STR(l->elements[4].prefix, "sig", "element 4 prefix");
     }
     nd_layout_free(l);
 }
@@ -1184,8 +1203,13 @@ static void shoot_home_frames(nd_capture *cap, const nd_json_doc *golden)
     }
     CHECK_INT(nd_ui_status_battery_level(&ui), 3, "simulated battery level");
     CHECK(!nd_ui_status_battery_hardware(&ui), "no fuel gauge");
-    CHECK_INT(nd_ui_status_signal_level(&ui), -1, "unknown signal, not zero bars");
-    CHECK_STR(nd_ui_status_carrier(&ui), "", "no carrier");
+    /* Simulation Mode, so a route-derived reading and the word "Simulation"
+     * -- not the -1/"" pair that used to draw a full meter beside "No
+     * Service". nd_modem.h's nd_modem_link. */
+    CHECK_INT(nd_ui_status_signal_level(&ui),
+              nd_clock_has_route() ? ND_MODEM_SIM_BARS_ONLINE : ND_MODEM_SIM_BARS_OFFLINE,
+              "simulated signal tracks the route");
+    CHECK_STR(nd_ui_status_carrier(&ui), ND_MODEM_SIM_CARRIER, "carrier says Simulation");
     nd_ui_update(&ui);
     check_frame(cap, golden, "home-simulation", nd_capture_recent(cap, 0u));
     nd_ui_teardown(&ui);

@@ -19,6 +19,11 @@
 #   neodct.user=DEV     user-data partition: a block device holding ext4,
 #                       or "ubiN:volume" for ubifs on raw NAND
 #   neodct.verity=MODE  enforce (default) | permissive | off
+#   neodct.unsigned=1   install a staged update whose manifest carries no
+#                       valid release signature. Developer escape hatch for
+#                       the unsigned packages engineering mode can build; it
+#                       lives on the cmdline precisely because a running
+#                       system cannot write there.
 #   neodct.debug=1      verbose, and a shell instead of a silent stop
 
 # The kernel hands init a PATH of its own; be explicit so dmsetup and the
@@ -29,6 +34,7 @@ export PATH
 SYS_DEV=""
 USER_DEV=""
 VERITY_MODE="enforce"
+ALLOW_UNSIGNED=""
 DEBUG=""
 FORCE_RECOVERY=""
 RECOVERY_TTY_OVERRIDE=""
@@ -83,6 +89,7 @@ for word in $(cat /proc/cmdline 2>/dev/null); do
         neodct.sys=*)    SYS_DEV="${word#neodct.sys=}" ;;
         neodct.user=*)   USER_DEV="${word#neodct.user=}" ;;
         neodct.verity=*) VERITY_MODE="${word#neodct.verity=}" ;;
+        neodct.unsigned=1) ALLOW_UNSIGNED=1 ;;
         neodct.debug=*)  DEBUG="${word#neodct.debug=}" ;;
         neodct.recovery=*) FORCE_RECOVERY="${word#neodct.recovery=}" ;;
         neodct.rectty=*) RECOVERY_TTY_OVERRIDE="${word#neodct.rectty=}" ;;
@@ -104,7 +111,20 @@ find_by_label() {
     blkid 2>/dev/null | sed -n "s/^\([^:]*\):.*LABEL=\"$1\".*/\1/p" | head -n1
 }
 
+# ndsys-apply.sh reads this rather than the cmdline: it is sourced by the
+# host test suite too, where there is no /proc/cmdline to read.
+NDSYS_ALLOW_UNSIGNED="$ALLOW_UNSIGNED"
+export NDSYS_ALLOW_UNSIGNED
+
 # The helpers below need to be available before the devices are resolved.
+#
+# ndsys-panel.sh comes FIRST because both of the others reach for it:
+# ndsys-apply.sh draws install progress on the panel and ndsys-recovery.sh
+# puts the sad face up, and neither should have to know about the other to get
+# at a screen. Optional in the same way the recovery script is -- an older or
+# hand-built initramfs without it still boots, just silently, which is exactly
+# where the phone is today.
+[ -r /ndsys-panel.sh ] && . /ndsys-panel.sh
 . /ndsys-apply.sh
 [ -r /ndsys-recovery.sh ] && . /ndsys-recovery.sh
 
@@ -138,6 +158,8 @@ USER_DEV="$(find_user_device "$USER_DEV")" || USER_DEV=""
 # Always log this: when something is wrong here, it is the first thing worth
 # knowing, and it is what the first real boot got wrong.
 log "system=${SYS_DEV:-NONE} user=${USER_DEV:-NONE} verity=$VERITY_MODE"
+[ -n "$ALLOW_UNSIGNED" ] && \
+    log "WARNING: neodct.unsigned=1 -- update signatures will not be enforced"
 
 if [ -z "$SYS_DEV" ]; then
     log "no system image found on any block device"
@@ -165,10 +187,30 @@ else
 fi
 
 # Not fatal: the phone can boot without it, it just has nowhere to save.
+#
+# nosuid,nodev on the only writable partition the phone has. Inert while
+# everything runs as root, and load-bearing the moment ndusr_ut exists: this
+# partition is where a compromised process writes, and without nosuid a
+# setuid-root file written there is a privilege escalation that survives a
+# reboot. Set here rather than in /etc/fstab because the partition never
+# appears there -- it is mounted before switch_root and mount --moved in.
+#
+# NOT noexec, and the reason moved. It was that /NeoDCT/User/apps would hold
+# user-installed apps, which nd-apprun loads with dlopen() -- and noexec
+# refuses mmap(PROT_EXEC) exactly as it refuses execve(). Those apps live on
+# the CARD now (nd_paths.h says why: this partition is eight megabytes), so
+# that argument belongs to the card's mount and not to this one.
+#
+# It stays off anyway. Mount flags do not propagate into a submount, so noexec
+# here would not reach the card mounted underneath it -- and the browser's
+# profile and the crash handler both live on this partition, where a rule that
+# has to be reasoned about per-subdirectory is a rule waiting to be wrong.
+# SECURITY-PLAN.md section 1.
+USER_OPTS="rw,noatime,nosuid,nodev"
 if [ -n "$USER_READY" ]; then
     if user_is_ubi "$USER_DEV"; then USER_FSTYPE=ubifs; else USER_FSTYPE=ext4; fi
-    if mount -t "$USER_FSTYPE" -o rw,noatime "$USER_DEV" "$MNT_USER" 2>/dev/null || \
-       mount -o rw,noatime "$USER_DEV" "$MNT_USER" 2>/dev/null; then
+    if mount -t "$USER_FSTYPE" -o "$USER_OPTS" "$USER_DEV" "$MNT_USER" 2>/dev/null || \
+       mount -o "$USER_OPTS" "$USER_DEV" "$MNT_USER" 2>/dev/null; then
         USER_MOUNTED=1
         mkdir -p "$MNT_USER/logs" "$STATE_DIR" 2>/dev/null
     else

@@ -31,6 +31,32 @@ TAG="$VERSION"
 
 say "version: $VERSION"
 
+# ============ THE OTHER TWO VERSION FIELDS HAVE TO AGREE ============
+#
+# os-release carries the version three times: VERSION_ID (what this script,
+# the manifest check and the workflow all read), VERSION, and PRETTY_NAME --
+# and PRETTY_NAME is the one the phone prints on its boot banner.
+#
+# Nothing kept them in step, so they drifted: PRETTY_NAME sat at v0.4.3a from
+# 0.4.4a all the way to 0.4.10a, which meant seven releases of a phone that
+# booted announcing a version it was not. Everything automated agreed and only
+# the human-visible string was wrong, which is exactly the kind of mismatch
+# that survives because nothing looks at it.
+#
+# Refusing to tag is the right response for the same reason the changelog
+# check below refuses: a release whose own image disagrees about what it is
+# should not be published, and the fix is one line in a file that is already
+# open.
+V_PLAIN="${VERSION#v}"
+for field in VERSION PRETTY_NAME; do
+    got=$(sed -n "s/^$field=//p" neodct/overlay/etc/os-release | tr -d '"' | head -n1)
+    case "$got" in
+        *"$V_PLAIN") ;;
+        *) die "os-release $field is \"$got\", which does not end in $V_PLAIN"\
+               "-- VERSION_ID says $VERSION; make them agree before tagging" ;;
+    esac
+done
+
 # A changelog section is not optional: it is the release's entire body.
 if ! grep -qx "$VERSION" neodct/overlay/NeoDCT/CHANGELOG.txt; then
     die "CHANGELOG.txt has no section headed exactly '$VERSION'"

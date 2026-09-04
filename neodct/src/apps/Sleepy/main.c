@@ -69,10 +69,8 @@ const char *const nd_sleepy_blank_item = "BLANK!";
  * arrives on the phone with its second half missing, which is worse than a
  * blunt one. The precise version of each of these is in the log line and in
  * docs/SLEEP.md. */
-const char *const nd_sleepy_no_cpufreq =
-    "No cpufreq.\n\nThis kernel does not scale the CPU, so there is nothing to pick.";
-const char *const nd_sleepy_no_backlight =
-    "No backlight.\n\nNo PWM device and no gpio53, so the panel cannot go off.";
+const char *const nd_sleepy_no_cpufreq = "No cpufreq.\n\nThis kernel does not scale the CPU.";
+const char *const nd_sleepy_no_backlight = "No backlight.\n\nNo PWM device and no gpio53.";
 
 /* Set for exactly as long as the panel is dark, and read by app_shutdown().
  * volatile sig_atomic_t would be the careful type for a flag a handler reads,
@@ -141,8 +139,7 @@ static void blank(nd_ui *ui)
          * this phone means the process is not root or somebody else holds the
          * pin. Worth its own words: "no backlight" and "backlight refused" send
          * an engineer to two different places. */
-        show_dialog(ui, "The backlight would not go off.\n\nNot root, or another process "
-                        "holds the pin.");
+        show_dialog(ui, "The backlight stayed on.\n\nNot root, or the pin is taken.");
         return;
     }
     g_blanked = true;
@@ -234,9 +231,7 @@ static void report(nd_ui *ui, int32_t requested_khz, nd_err set_result)
 
     if (set_result != ND_OK) {
         (void)nd_snprintf(message, sizeof message,
-                          "%s was refused.\n\nNot root, or the governor will not give up the "
-                          "range.",
-                          asked);
+                          "%s was refused.\n\nNot root, or the governor kept it.", asked);
         show_dialog(ui, message);
         return;
     }

@@ -243,6 +243,13 @@ it's purely player-level device contention. Reverted to the known-good
 all-mpv default; aplay/mpg123 remain opt-in for real hardware via
 NEODCT_KOKI_WAV_PLAYER / NEODCT_KOKI_MP3_PLAYER.
 
+(mpg123 has since left the image -- SECURITY-PLAN.md section 4 -- because the
+selection order made its rung unreachable while mpv is unconditional, and it
+had never been in the Luckfox defconfig, so the hardware this note is about
+never had it. The override still works: koki_audio.c looks the player up with
+which() at runtime, so a build that puts the package back needs no code
+change.)
+
 mpv memory reality check (measured): demuxer/cache flags do NOT shrink it
 (our tracks are <1MiB whole files); ~24MB private per process on a desktop
 build is codec/core init. The added flags (--no-config, --load-scripts=no,

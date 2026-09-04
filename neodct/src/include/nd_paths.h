@@ -30,8 +30,69 @@ extern "C" {
 #define ND_PATH_ND_APPRUN    "/NeoDCT/System/bin/nd-apprun"
 #define ND_PATH_APPS_DIR     "/NeoDCT/System/apps"
 #define ND_PATH_ENG_APPS_DIR "/NeoDCT/System/engineering/apps"
-#define ND_PATH_VERSION_PROP "/NeoDCT/System/version.prop"
-#define ND_PATH_DISPLAYD     "/NeoDCT/System/hw/neodct_displayd"
+
+/* ---- the memory card, and the apps the owner installed ------------ */
+
+/* ============ WHY APPS LIVE ON THE CARD AND NOT ON /NeoDCT/User ============
+ *
+ * They were briefly at /NeoDCT/User/apps, which does not fit: on the Luckfox
+ * the user partition is EIGHT MEGABYTES, shared with the databases, the
+ * settings, the logs, the browser profile and the pending update record. An
+ * app directory there is a feature that fills the partition the phone needs
+ * to save anything at all.
+ *
+ * So the card, which is also the honest place for it -- an installed app is
+ * removable media by nature, and putting it on removable media makes that
+ * true rather than merely said.
+ *
+ * ============ AND WHY THE CARD IS EXT4 ============
+ *
+ * FAT stores no ownership. Every permission on a FAT mount comes from uid=,
+ * gid=, fmask= and dmask=, applied uniformly to the WHOLE filesystem -- which
+ * is why the old card needed a second partition to give downloads a different
+ * regime from music, and why an app.so on the media side would have been
+ * 0640 ndusr:ndusr and therefore unreadable by the ndusr_ut process that has
+ * to dlopen it.
+ *
+ * ext4 records owner, group and mode per inode. One partition then carries
+ * directories with completely different rules, the second partition and the
+ * whole partition table go away, and app code becomes something an app can
+ * read and execute but not write. See neodct-sdcard's layout table.
+ *
+ * ============ WHAT IS UNTRUSTED, AND WHY IT IS THE PATH THAT SAYS SO ======
+ *
+ * Everything under the apps directory is UNTRUSTED, without exception and
+ * regardless of what its manifest claims. The card is removable and now
+ * readable on any Linux PC, so an app.so there is bytes a stranger chose --
+ * which is exactly why the rule is about LOCATION and not about the app's own
+ * assertions. nd_proc_app_is_untrusted() enforces it by prefix, the only
+ * place in the tree where a prefix decides a privilege; the comment there
+ * says why that is safe here and would not be elsewhere. */
+#define ND_PATH_CARD_DIR      "/NeoDCT/User/sdcard"
+#define ND_PATH_USER_APPS_DIR "/NeoDCT/User/sdcard/apps"
+
+/* The one directory on the card that ndusr_ut may WRITE: the browser's and
+ * the media player's own state, and where a download lands. Deliberately not
+ * inside apps/ -- it is shared, and app storage is not.
+ *
+ * An installed app's storage is its own <app>/data, created by the core at
+ * first launch (nd_proc_launch_app). The app never creates it, because a
+ * process that can create its own data directory can create siblings next to
+ * its app.so instead. */
+#define ND_PATH_CARD_UNTRUSTED "/NeoDCT/User/sdcard/untrusted"
+
+/* The subdirectory of an installed app that the app may write. Its parent is
+ * ndusr's, so the app cannot replace its own app.so -- which is the whole of
+ * "an app cannot rewrite itself", and the reason persistence needs the owner
+ * to install something rather than an app to decide to stay. */
+#define ND_PATH_APP_DATA_NAME "data"
+#define ND_PATH_VERSION_PROP  "/NeoDCT/System/version.prop"
+#define ND_PATH_DISPLAYD      "/NeoDCT/System/hw/neodct_displayd"
+/* The SD-card helper. Lives here rather than in settings_app.h because the
+ * CORE runs it now: formatting a card is a verb on the service socket
+ * (nd_svc.h), and the app that used to spawn it can no longer spawn
+ * anything. settings_app.h still names it, pointing at this. */
+#define ND_PATH_SDCARD_HELPER "/NeoDCT/System/hw/neodct-sdcard"
 
 #define ND_PATH_FONT             "/NeoDCT/System/ui/resources/fonts/font.ttf"
 #define ND_PATH_HOME_LAYOUT      "/NeoDCT/System/ui/resources/ui_home.json"
@@ -46,7 +107,25 @@ extern "C" {
 #define ND_PATH_T9_DICT   "/NeoDCT/System/core/t9.dict"
 
 /* ---- the writable user partition --------------------------------- */
-#define ND_PATH_USER          "/NeoDCT/User"
+#define ND_PATH_USER "/NeoDCT/User"
+
+/* The mode of that directory, and it is load-bearing rather than tidy.
+ *
+ * 0751 is o+x WITHOUT o+r: ndusr_ut can resolve a path THROUGH the partition
+ * to reach /NeoDCT/User/browser, and cannot list the partition to discover
+ * the ssh keys, the databases and the update records by name. Traversal and
+ * listing are different bits and the whole confinement in SECURITY-PLAN.md
+ * section 1 rests on the difference.
+ *
+ * Take o+x away and the browser has nowhere to write. Add o+r -- which is
+ * what 0755 does, and 0755 is the reflex -- and the boundary is gone with no
+ * other symptom. So anything that fixes this directory's mode fixes it to
+ * THIS, and says so by using this name.
+ *
+ * overlay/etc/init.d/S00userdata carries the same number in its own layout
+ * table, because it is shell and cannot include a header;
+ * tests/test_userdata_layout.py pins the two together. */
+#define ND_MODE_USER_DIR      0751u
 #define ND_PATH_SETTINGS_PROP "/NeoDCT/User/settings.prop"
 #define ND_PATH_KEYMAP        "/NeoDCT/User/keymap.json"
 #define ND_PATH_WALLPAPER     "/NeoDCT/User/wallpaper.jpg"
@@ -55,6 +134,7 @@ extern "C" {
 #define ND_PATH_DB_SMS_INBOX  "/NeoDCT/User/db/sms_inbox.db"
 #define ND_PATH_DB_SMS_OUTBOX "/NeoDCT/User/db/sms_outbox.db"
 #define ND_PATH_DB_CALL_LOG   "/NeoDCT/User/db/call_log.db"
+#define ND_PATH_DB_CALENDAR   "/NeoDCT/User/db/calendar.db"
 #define ND_PATH_LOG_DIR       "/NeoDCT/User/logs"
 #define ND_PATH_CRASH_LOG     "/NeoDCT/User/logs/crash.log"
 #define ND_PATH_CRASH_LOG_1   "/NeoDCT/User/logs/crash.log.1"

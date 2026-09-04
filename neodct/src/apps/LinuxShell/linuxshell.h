@@ -74,9 +74,17 @@ extern const char *const nd_linuxshell_hint;
 extern const char *const nd_linuxshell_t9_hint;
 
 /* shutil.which(): $PATH for a bare name, the path itself when it contains a
- * slash, false when nothing executable is found. Same lookup as
- * nd_power_which() and deliberately a second copy -- an app is a separate
- * .so and there is no shared "which" in libneodct to call. */
+ * slash, false when nothing executable is found.
+ *
+ * Still a copy, but no longer for the old reason. There IS a lookup in
+ * libneodct now -- nd_svc_halt_which(), which arrived when the halt moved
+ * out of the Power and Update apps and into the core -- and it is the same
+ * eighteen lines. It is named and documented for the halt candidate tables
+ * though, and pointing a shell's search for `sh` at a symbol with "halt" in
+ * its name would read worse than the duplication does. Collapsing the three
+ * remaining copies (this, nd_update_which(), nd_svc_halt_which()) onto one
+ * neutral name is a rename in a frozen header and belongs in its own
+ * change. */
 bool nd_linuxshell_which(const char *name, char *out, size_t out_sz);
 
 /* int(os.environ.get(name, str(fallback))).

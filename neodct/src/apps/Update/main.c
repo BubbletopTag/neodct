@@ -68,10 +68,20 @@
  * 3. subprocess.Popen(["reboot"]) LOOKS ALONG $PATH and nd_proc_spawn() takes
  *    a path, so nd_update_which() does the execvp lookup first and its
  *    failure is the OSError the Python's `except OSError: continue` catches.
- *    It is a copy of nd_power_which(); the two apps are separate shared
- *    objects and cannot share it, which is the same reason the two Python
- *    modules each have their own candidate list. power.h already says "Same
- *    shape as Update/main.py _reboot".
+ *
+ *    THE REBOOT NO LONGER USES IT. Resolving a program name along $PATH and
+ *    fork/exec'ing it with the privilege to power-cycle the machine was the
+ *    only reason this app, Power and Downgrade needed privilege the other
+ *    twenty-two do not, so nd_update_reboot() asks the core instead --
+ *    nd_svc_reboot(), one request with no arguments at all, over the service
+ *    channel every app child already has. The candidate list and the lookup
+ *    are in lib/nd_svc.c now, where the core is the only reader.
+ *    spec-app-services.md section 9.
+ *
+ *    nd_update_which() stays because STAGING still spawns `sync`, and that
+ *    is a different call site: it runs long before a reboot is in sight, it
+ *    has to complete before the staging record is written, and a `sync` that
+ *    is missing is survivable in a way a missing `reboot` is not.
  *
  * 4. _thumbnail() decodes the package's PNG IN MEMORY and hands the Image
  *    object to DetailPage. nd_detailpage_init() takes a path and nothing
@@ -101,6 +111,7 @@
 #include "nd_proc.h"
 #include "nd_settings.h"
 #include "nd_storage.h"
+#include "nd_svc.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
@@ -159,15 +170,10 @@ const char *const nd_update_msg_cannot_stage_prefix = "Could not stage the updat
 const char *const nd_update_msg_no_reader =
     "CANNOT OPEN UPDATES!\nThis build has no package reader.";
 
-/* _reboot's candidate list, in the Python's order. Which binary exists, and
- * where, differs between the qemu and luckfox images. */
-static const char *const REBOOT_0[] = {"reboot", NULL};
-static const char *const REBOOT_1[] = {"/sbin/reboot", NULL};
-static const char *const REBOOT_2[] = {"busybox", "reboot", NULL};
-
-const char *const *const nd_update_reboot_commands[ND_UPDATE_REBOOT_CANDIDATES] = {
-    REBOOT_0, REBOOT_1, REBOOT_2};
-
+/* _reboot's candidate list is gone from this file. It, and the $PATH lookup
+ * that walked it, are in lib/nd_svc.c now -- see the header comment and
+ * spec-app-services.md section 9. `sync` stays, because STAGING still spawns
+ * it, which is a different call site with a different argument. */
 static const char *const SYNC_CMD[] = {"sync", NULL};
 
 /* time.sleep(30): "init takes a moment to bring things down; sit here rather
@@ -421,22 +427,19 @@ static void dwell(double seconds)
 
 void nd_update_reboot(nd_ui *ui)
 {
-    size_t i;
-
     ND_UNUSED(ui); /* the Python takes it and never uses it either */
 
-    run_sync();
-    for (i = 0u; i < ND_UPDATE_REBOOT_CANDIDATES; i++) {
-        pid_t pid = -1;
+    /* The candidate walk and the sync that preceded it are the core's now.
+     * It resolves the binary, ANSWERS, syncs and only then spawns, which is
+     * why the ordinary five-second wait for that answer cannot abort a
+     * reboot that was about to happen. spec-app-services.md 9.4 and 9.5. */
+    (void)nd_svc_reboot();
 
-        if (spawn_inherit(nd_update_reboot_commands[i], &pid))
-            break;
-        /* `except OSError: continue` */
-    }
-    /* Note there is no failure dialog: unlike the Power app, _reboot() does
-     * not tell anybody when nothing could be spawned. It sits for thirty
-     * seconds either way. That is the Python's, and it is what a phone with
-     * no reboot binary looks like today. */
+    /* Note there is still no failure dialog: unlike the Power app, _reboot()
+     * does not tell anybody when nothing could be started, which is why the
+     * return is discarded rather than acted on. It sits for thirty seconds
+     * either way. That is the Python's, and it is what a phone with no
+     * reboot binary looks like today. */
     dwell(UPDATE_REBOOT_DWELL);
 }
 
@@ -790,9 +793,14 @@ void nd_update_restart_page(nd_ui *ui, const nd_upd_manifest *m, bool backed_up)
         return;
 
     (void)snprintf(subtitle, sizeof subtitle, "NeoDCT %s", m->version);
+    /* It used to say "the screen stays dark for part of it", which was an
+     * apology for the initramfs showing one unchanging logo for the whole of
+     * a 51 MB write. The boot screen now draws the same progress bar this app
+     * does -- see neodct/initramfs/ndsys-panel.sh and tools/nd_bootbar.c --
+     * so the apology is gone and the promise is one somebody can check. */
     (void)snprintf(body, sizeof body,
                    "The phone will restart to finish installing NeoDCT %s. It takes "
-                   "about a minute and the screen stays dark for part of it.",
+                   "about a minute and the screen shows how far along it is.",
                    m->version);
     if (!backed_up)
         (void)nd_strlcat(body,
@@ -1073,11 +1081,16 @@ bool nd_update_check_online(nd_ui *ui, char *out, size_t out_sz)
          * and a 60MB download is a long time to hold a weak bearer. Say that
          * the progress is kept -- otherwise trying again looks like starting
          * again, and nobody presses a button for that twice. */
-        (void)snprintf(body, sizeof body,
-                       "Download failed.\n%s\n\nWhat has downloaded so far "
-                       "is kept on the card. Choosing it again carries on "
-                       "from there.",
-                       why);
+        /* `why` is a network error string of unbounded length and it used to
+         * be interpolated into the dialog, which is what pushed the sentence
+         * about resuming off the bottom -- the one thing the message exists to
+         * say. It goes to the log instead; the dialog is now fixed at 4 of the
+         * 5 lines nd_msgdialog can show. */
+        nd_log_err(ND_LOG_UPDATE, "download failed: %s", why);
+        (void)nd_strlcpy(body,
+                         "Download failed.\n\nWhat downloaded is kept. Choosing it "
+                         "carries on.",
+                         sizeof body);
         nd_update_refuse(ui, body);
         out[0] = '\0';
         return false;

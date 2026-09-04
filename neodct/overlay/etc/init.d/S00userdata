@@ -4,13 +4,135 @@
 # The rootfs is a read-only squashfs, so every directory the runtime writes
 # to has to be created here, on the partition mounted at /NeoDCT/User. A
 # fresh partition is empty: there is no skeleton to copy because the
-# databases create their own schema (System/core/main.py init_databases)
-# and settings.prop is written from SettingsStorage.DEFAULTS on first read.
+# databases create their own schema and settings.prop is written from the
+# defaults on first read.
 #
 # Safe to run on the legacy ext4 image too -- then /NeoDCT/User is just a
 # directory and the mkdirs are no-ops.
+#
+# ============ AND THE OWNERSHIP, WHICH IS THE WHOLE OF SECTION 1 ==========
+#
+# SECURITY-PLAN.md section 1. On a 5.10 vendor kernel with no Landlock, DAC
+# is the primary confinement mechanism rather than a stopgap, and this file
+# is where it is expressed. The layout turns on a distinction that is easy to
+# get wrong:
+#
+#   TRAVERSAL AND LISTING ARE DIFFERENT BITS. `x` on a directory permits
+#   resolving a path THROUGH it; `r` permits reading the list of names IN it.
+#
+# So 0751 on /NeoDCT/User is load-bearing and slightly counter-intuitive: it
+# is what lets ndusr_ut reach browser/ by name while `ls /NeoDCT/User`
+# returns EACCES. Everything sensitive is then protected by removing o+x on
+# ITS OWN directory rather than by hiding the path -- because a path that is
+# guessed still fails at the directory that denies entry.
+#
+# This runs here, and not in the image build, for two reasons that both have
+# to be true:
+#
+#   1. /NeoDCT/User is a SEPARATE PARTITION. Nothing in the rootfs build
+#      touches it: the squashfs carries only the mountpoint.
+#   2. That partition is the one thing an update does not replace. A phone
+#      already in the field keeps whatever ownership it has forever unless
+#      something fixes it at boot. So the pass below is also the migration,
+#      and it runs once -- the top-level owner is the marker.
+#
+# It degrades to exactly the old behaviour on an image with no ndusr. That is
+# not politeness: an image built without BR2_ROOTFS_USERS_TABLES must still
+# boot, and a chown to a user that does not exist is a phone whose UI cannot
+# write to its own partition.
 
 USER_DIR=/NeoDCT/User
+
+# The layout. "<dir> <mode> <owner>:<group>", and the empty name is the root
+# of the partition itself.
+#
+#   .           0751  traverse, cannot list -- see above
+#   browser     0770  ndusr:ndusr_ut, the one directory the untrusted set may
+#                     write. Group-writable, and ndusr_ut's ONLY foothold.
+#   db          0750  contacts, messages, the call log
+#   .remote     0700  the ssh keys. SECURITY-AUDIT.md 4 Q5 vector 1 is an
+#                     attacker writing state.prop here and getting a reverse
+#                     shell on every boot
+#   .ndsys      0700  pending.prop and installed.prop -- vector 3, the one
+#                     that replaces the operating system
+#   .seedrng    0700  the entropy seed. Readable is predictable.
+#   sdcard      0751  a mountpoint; a mounted card brings its own modes, and
+#                     o+x is what lets a card path be reached at all.
+#
+#                     Apps the owner installed live UNDER here, at
+#                     sdcard/apps, and deliberately not at the root of this
+#                     partition: on the Luckfox /NeoDCT/User is EIGHT
+#                     MEGABYTES shared with the databases, the settings, the
+#                     logs and the pending update record, so an apps
+#                     directory here is a feature that fills the partition
+#                     the phone needs in order to save anything at all.
+#                     There is therefore no `apps` entry in this table --
+#                     the card's own layout owns it, in neodct-sdcard, where
+#                     it is restated on every mount because a card is
+#                     removable and its modes are a claim until the phone
+#                     has checked them
+#   the rest    0750  no reason for the untrusted set to see any of it
+NEODCT_USER_LAYOUT="
+:0751
+browser:0770:ndusr:ndusr_ut
+db:0750
+logs:0750
+tones:0750
+wallpapers:0750
+sdcard:0751
+.ndsys:0700
+.remote:0700
+.seedrng:0700
+.bluetooth:0750
+.bluealsa:0750
+"
+
+# Loose files at the root of the partition. 0751 stops ndusr_ut LISTING the
+# directory, not opening a name it already knows, and "settings.prop" is not
+# a hard name to guess. run_neodct.sh sets umask 0027 so anything written
+# from here on is 0640 already; this is for what is on the partition already
+# -- anything an older build wrote, on a phone that has been running since
+# before any of this existed.
+NEODCT_USER_FILES="settings.prop keymap.json wallpaper.jpg .clock
+.ack_security_warning env.sh"
+
+# True when this image has an ndusr at all. An image built without
+# BR2_ROOTFS_USERS_TABLES must still boot, and a chown to a user that does
+# not exist is a phone whose UI cannot write to its own partition.
+neodct_have_user() {
+    id -u ndusr > /dev/null 2>&1
+}
+
+# True when the partition has already been through the ownership pass.
+#
+# `find -user` rather than `stat -c %u`: busybox is built here without
+# CONFIG_STAT, so stat does not exist on the phone at all -- and it is the
+# kind of missing applet that fails as an empty string inside a command
+# substitution rather than as an error, which would silently run the
+# recursive chown on every single boot.
+neodct_owned_already() {
+    [ -n "$(find "$USER_DIR" -maxdepth 0 -user ndusr 2>/dev/null)" ]
+}
+
+apply_layout() {
+    for entry in $NEODCT_USER_LAYOUT; do
+        name="${entry%%:*}"
+        rest="${entry#*:}"
+        mode="${rest%%:*}"
+        owner="${rest#*:}"
+        [ "$owner" = "$mode" ] && owner="ndusr:ndusr"
+        path="$USER_DIR/$name"
+        [ -z "$name" ] && path="$USER_DIR"
+        [ -d "$path" ] || continue
+        chown "$owner" "$path" 2>/dev/null
+        chmod "$mode" "$path" 2>/dev/null
+    done
+    for name in $NEODCT_USER_FILES; do
+        [ -f "$USER_DIR/$name" ] || continue
+        chown ndusr:ndusr "$USER_DIR/$name" 2>/dev/null
+        chmod 0640 "$USER_DIR/$name" 2>/dev/null
+    done
+}
 
 case "$1" in
   start|"")
@@ -26,9 +148,40 @@ case "$1" in
     # .seedrng is where /var/lib/seedrng points: the image is read-only, and
     # seedrng needs somewhere persistent or entropy is reseeded from nothing
     # on every boot.
-    for dir in db logs .ndsys .seedrng sdcard tones wallpapers; do
+    # browser is where the untrusted set keeps its state. It is created here
+    # rather than by the browser itself because its OWNER is the point --
+    # ndusr:ndusr_ut, group-writable -- and a directory the browser makes for
+    # itself would belong to the browser alone.
+    for dir in db logs .ndsys .seedrng sdcard tones wallpapers browser; do
         mkdir -p "$USER_DIR/$dir" 2>/dev/null
     done
+
+    if ! neodct_have_user; then
+        # No ndusr in this image. Leave everything root-owned and 0755, which
+        # is what every build before SECURITY-PLAN.md section 1 shipped.
+        exit 0
+    fi
+
+    # Once, not on every boot. The top-level directory's owner is the marker:
+    # a partition that has been through this already is owned by ndusr, and a
+    # partition carried over from an older image is owned by root. Cheap
+    # enough to check every time, and it is what makes this the migration for
+    # phones already in the field as well as the setup for new ones.
+    #
+    # The recursive pass is deliberately narrow. Everything gets the right
+    # OWNER, because a file the UI cannot write is a phone that cannot save;
+    # the modes are set per-directory above rather than recursively, because
+    # a blanket chmod would take the 0600 ssh keys with it.
+    #
+    # -xdev rather than chown -R: a card mounted at sdcard/ is a FAT
+    # filesystem with no ownership to set and possibly gigabytes of it to
+    # walk. At boot S06sdcard has not run yet so there is nothing there, but
+    # this script is also something a developer runs by hand.
+    if ! neodct_owned_already; then
+        echo "[userdata] taking ownership of $USER_DIR for ndusr" >&2
+        find "$USER_DIR" -xdev -exec chown ndusr:ndusr {} + 2>/dev/null
+    fi
+    apply_layout
     ;;
   stop)
     ;;

@@ -3539,6 +3539,13 @@ The candidate ORDER is untouched: `poweroff`, `/sbin/poweroff`,
 `busybox poweroff`. On an image with both of the first two they are different
 programs.
 
+**Moved, not changed.** The lookup and the tables now live in `lib/nd_svc.c` as
+`nd_svc_halt_which()` and `nd_svc_reboot_commands` /
+`nd_svc_poweroff_commands`, because the *app* no longer resolves or spawns
+anything — it sends `ND_SVC_OP_REBOOT` or `ND_SVC_OP_POWEROFF` and the core
+does both. Everything above is still true of the code; only the process it runs
+in changed. `spec-app-services.md` section 9.
+
 ### PW-2. A missing `sync` is logged, not propagated
 
 **Found in:** `System/apps/Power/main.py:62`, `subprocess.call(["sync"])`.
@@ -3551,6 +3558,14 @@ the phone to switch off shows a **stack trace** instead. The C logs
 **This is a deliberate deviation.** No golden frame covers it, and the
 alternative is a crash screen on the one path whose entire job is to bring the
 system down cleanly. Flagging it rather than reproducing it.
+
+**Answered for the halt path.** The Power app no longer runs `sync` at all, and
+neither does `nd_update_reboot()`: the core calls `sync(2)` itself, between
+answering the request and spawning the halt. A syscall cannot be missing, so on
+the halt path the question stops existing rather than being deviated from — and
+the sync ends up closer to the halt than either of the app's two were.
+`spec-app-services.md` section 9.5. It stands unchanged for `Update`'s STAGING
+sync, which is still a spawned `sync` and still survives being absent.
 
 ### PW-3. `str(OSError)` has no C spelling
 
@@ -3573,6 +3588,18 @@ The hole is named in `power.h`, in the test's header comment and here.
 
 For the same reason `app_run()` is only ever driven with Back on the first
 screen.
+
+**Narrowed.** `nd_power_go_down()` is still not called by `test_power.c`, and
+for the same reason: a process with no service channel — which a unit test is —
+performs the halt itself, because as far as `nd_svc.h` can tell it *is* the
+core. But the composition is no longer untested, only untested *there*.
+`test_svc.c` drives the whole sequence over a real socket with
+`nd_svc_halt_simulate()` replacing the spawn and nothing else, including a case
+that fails if the core ever halts before it replies. The `$PATH` lookup and the
+candidate-walk cases moved there with the code. `spec-app-services.md` section
+9.9.
+
+What still has no test, and cannot: that `execve("/sbin/reboot")` reboots.
 
 ### TN-1. Three caps the Python does not have
 

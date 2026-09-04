@@ -52,9 +52,7 @@
 #include "nd_widgets.h"
 
 const char *const nd_mictest_title = "MicTest";
-const char *const nd_mictest_no_device =
-    "No capture device.\n\nNothing on this phone has a pcm*c node -- there is no "
-    "microphone for ALSA to offer.";
+const char *const nd_mictest_no_device = "No capture device.\n\nNothing here has a pcm*c node.";
 const char *const nd_mictest_no_arecord = "This build has no arecord.";
 
 #define MICTEST_KEY_BACK 14

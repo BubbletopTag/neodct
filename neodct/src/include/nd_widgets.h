@@ -386,6 +386,17 @@ void nd_msgdialog_set_keys(nd_msgdialog *d, const int32_t *accept, size_t n_acce
 /* Draw only, no key loop. The low-battery shutdown uses this. */
 void nd_msgdialog_render(nd_msgdialog *d);
 
+/* How many body lines the message wants, and how many this dialog can show.
+ * It FITS when needed <= fits. Draws nothing; the icon, title height, look and
+ * wrap all come from the same pass that draws, so the two cannot drift.
+ *
+ * Ask this about any message you ship. The clip is invisible -- the " …" the
+ * renderer appends is U+2026 and this font has no glyph for it -- so a message
+ * that is too long does not look broken, it looks like it ends there. That is
+ * how the modem fault notice came to ship reading "...if this does not fix the
+ * issue, there is" with nothing after it. */
+void nd_msgdialog_measure(nd_msgdialog *d, size_t *needed, size_t *fits);
+
 /* Draw, then return the key that dismissed it. Callers compare against
  * ND_KEY_ENTER to tell Yes from No. Any other key is ignored with no redraw.
  *

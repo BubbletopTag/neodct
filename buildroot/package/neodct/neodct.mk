@@ -30,6 +30,90 @@ define NEODCT_COPY_LICENSE
 endef
 NEODCT_POST_RSYNC_HOOKS += NEODCT_COPY_LICENSE
 
+# ============ THE USERS, AND WHY THEY ARE DECLARED HERE ============
+#
+# ndusr and ndusr_ut are what the whole privilege split rests on: without them
+# nd_priv_lookup() finds nothing, nd_priv_become() is a documented no-op, and
+# EVERY APP RUNS AS ROOT. Not a degraded mode -- the entire boundary, absent.
+#
+# They are ALSO configured the normal way, through BR2_ROOTFS_USERS_TABLES in
+# the defconfig. That was not enough, and the way it failed is worth writing
+# down because it will happen again to something else:
+#
+#   Buildroot generates output/.config from the defconfig ONCE. Adding a line
+#   to the defconfig does nothing to a tree that already has a .config, and
+#   `make` never mentions it. So a checkout that predates the users table
+#   keeps building images with no ndusr in them, forever, and the only signal
+#   is one line in a boot log. It was found with `top` on a real build,
+#   showing netsurf running as root.
+#
+# PACKAGES_USERS is collected from every enabled package regardless of the
+# .config's rootfs settings (fs/common.mk:80 prints it into
+# full_users_table.txt unconditionally; the configured table on line 82 is the
+# conditional one). Declaring the users at the package level therefore reaches
+# a stale .config, which the defconfig cannot.
+#
+# ---- and it is deliberately NOT guarded ----
+#
+# The obvious shape is `ifeq ($(BR2_ROOTFS_USERS_TABLES),)` so the two paths
+# cannot both fire. That shape assumes the reason the users are missing is a
+# .config without the line -- and if that assumption is ever wrong, the guard
+# switches the fallback OFF in exactly the case it was needed for. Since
+# support/scripts/mkusers accepts an entry it has already seen (verified: the
+# table listed twice gives rc=0 and two users, not four), being unguarded
+# costs nothing and removes the assumption.
+#
+# ---- and it does NOT use $(file <) ----
+#
+# $(file <...) is GNU make 4.0. Buildroot's stated minimum is 3.81
+# (buildroot/Makefile:103), where $(file <x) is not a function call at all: it
+# parses as an undefined variable and expands to THE EMPTY STRING. No error,
+# no users, an image where everything runs as root. $(shell) and $(subst) are
+# in every make that can build buildroot at all, so the file is read with
+# those: strip comments and blank lines, mark each surviving line, then turn
+# the marks back into the newlines mkusers parses on.
+NEODCT_USERS_TABLE = $(TOPDIR)/../neodct/configs/users-table.txt
+NEODCT_USERS = $(subst |,$(sep),$(shell sed -e 's/\#.*//' -e '/^[[:space:]]*$$/d' \
+	-e 's/$$/|/' $(NEODCT_USERS_TABLE) | tr -d '\n'))
+
+# rsync -au, which is what buildroot's local-site step runs, has NO --delete.
+# It copies files in and never takes one out. So a file that is deleted from
+# neodct/src -- or that belongs to a branch you are no longer on -- stays in
+# the build copy forever and keeps being compiled.
+#
+# The Makefile globs (LIB_SRCS := $(wildcard lib/*.c)), so a stale .c is not
+# ignored: it is picked up as if it were part of the tree. Checking out a
+# branch that adds lib/nd_calendar.c, building an image, then checking out one
+# that does not have it gives a build that fails on a file the working tree
+# does not contain -- and if the stale file happens to still compile, it is
+# worse, because it silently SHIPS.
+#
+# buildroot's own rsync is not ours to change, so the pruning happens here,
+# right after it. Three things must survive, and the third is the one that
+# bites:
+#
+#   ./build      the cross build's output directory, excluded from the rsync
+#                for the reason above;
+#   ./LICENSE    copied in from one level above NEODCT_SITE, so it is never in
+#                the source tree either;
+#   ./.*         BUILDROOT'S OWN BOOKKEEPING. .stamp_configured, .stamp_built
+#                and .files-list*.txt live in $(@D) alongside the sources, and
+#                none of them exist in neodct/src -- so a prune that only knew
+#                about the first two would delete the package's build state
+#                every time it ran. Found by writing exactly that.
+define NEODCT_PRUNE_STALE_SOURCES
+	cd $(@D) && find . -path ./build -prune -o -name '.?*' -prune -o -type f -print | \
+	while read -r f; do \
+	    rel="$${f#./}"; \
+	    if [ "$$rel" != LICENSE ] && [ ! -e "$(NEODCT_SITE)/$$rel" ]; then \
+	        printf 'neodct: dropping stale %s (not in neodct/src)\n' "$$rel" >&2; \
+	        rm -f "$$f"; \
+	    fi; \
+	done; \
+	:
+endef
+NEODCT_POST_RSYNC_HOOKS += NEODCT_PRUNE_STALE_SOURCES
+
 NEODCT_DEPENDENCIES = host-pkgconf freetype jpeg libpng sqlite zlib openssl
 
 # Make a plain `make` notice that the source changed.
@@ -109,6 +193,25 @@ endef
 
 define NEODCT_INSTALL_TARGET_CMDS
 	$(NEODCT_MAKE_ENV) $(MAKE) -C $(@D) DESTDIR=$(TARGET_DIR) install
+endef
+
+# nd-verify goes to BINARIES_DIR, not to the rootfs.
+#
+# It is the update signature check the initramfs runs before it dd's an image
+# over the system partition -- SECURITY-AUDIT.md section 3 -- and it is a
+# statically linked 4 MB binary because an initramfs cannot borrow the
+# rootfs's libcrypto. Nothing in the running system calls it: the Update app
+# checks the same signature through libneodct, which every process already
+# maps. So installing it into TARGET_DIR would put those 4 MB into the
+# read-only squashfs where they would never be executed.
+#
+# BINARIES_DIR is where boot artefacts live, beside the kernel and the
+# initramfs it gets packed into, and buildroot does not sweep it into any
+# filesystem image. post-image-neodct.sh hands the path to mkinitramfs.py.
+NEODCT_INSTALL_IMAGES = YES
+
+define NEODCT_INSTALL_IMAGES_CMDS
+	$(NEODCT_MAKE_ENV) $(MAKE) -C $(@D) BOOTDESTDIR=$(BINARIES_DIR) install-boot
 endef
 
 $(eval $(generic-package))

@@ -22,6 +22,8 @@
 
 #include "nd_settings.h"
 
+#include <pwd.h>
+#include "nd_priv.h"
 #include "platform_test.h"
 
 #define SETTINGS "/User/settings.prop"
@@ -186,6 +188,72 @@ static void test_the_splash_still_says_something_with_no_version_prop(void)
  * exactly those, so "missing" is permanently true and every read rewrites the
  * file. This asserts the CURRENT behaviour, and is the test that has to change
  * when the approved one-line fix lands in nd_settings_flush_if_needed(). */
+/* ============ AND THE ONE CASE THAT WRITE-ON-READ GETS WRONG ============
+ *
+ * nd-core is root for about a second at boot and reads a setting in that
+ * window -- the clock service and the remote shell both do, before the drop.
+ * Write-on-read then CREATES /NeoDCT/User/settings.prop as root, and the
+ * moment nd-core becomes ndusr it can never read its own settings again:
+ *
+ *     [Settings] Failed to read /NeoDCT/User/settings.prop: Permission denied
+ *
+ * Every preference on the phone silently falling back to its default, on a
+ * fresh user partition -- which is what a new phone is. It self-heals on the
+ * second boot when S00userdata chowns the file, which is why nobody saw it.
+ *
+ * This test could not have caught it before, and that is the interesting part:
+ * a unit test runs as ONE user for its whole life, so "and then the process
+ * became somebody else" is not a sentence it can say. What it CAN check is the
+ * decision that stands in for it -- root declining to create a file in a
+ * directory somebody else owns -- so that is what is asserted, on a real
+ * directory with a real owner.
+ *
+ * Skipped when not root, because there is no way to ask the question then. */
+static void test_root_does_not_create_the_settings_file_for_somebody_else(void)
+{
+    char resolved[ND_PATH_MAX];
+    struct passwd *pw;
+
+    if (geteuid() != 0)
+        return; /* the question cannot be asked; see above */
+
+    pw = getpwnam(ND_PRIV_USER);
+    if (pw == NULL)
+        return; /* no ndusr on this host: nothing owns the directory but root */
+
+    use_scratch_paths();
+    write_version("system.os.versionnumber=0.5.0b\n");
+
+    /* Force the directory into existence, then take the file back out of it:
+     * the scratch root is created lazily and there is nothing to chown until
+     * something has been written under it. */
+    pt_write_text(SETTINGS, "");
+    CHECK_INT(nd_path_resolve(resolved, sizeof resolved, SETTINGS), ND_OK);
+    CHECK_INT(unlink(resolved), 0);
+    {
+        char *slash = strrchr(resolved, '/');
+
+        CHECK(slash != NULL);
+        if (slash == NULL)
+            return;
+        *slash = '\0';
+        /* The directory belongs to the user nd-core is about to become, which
+         * is the whole of the condition being tested. */
+        CHECK_INT(chown(resolved, pw->pw_uid, pw->pw_gid), 0);
+    }
+
+    CHECK(!nd_path_exists(SETTINGS));
+    (void)nd_settings_get(ND_SET_UI_WALLPAPER, "NONE");
+    /* Root read a setting and declined to leave a file behind that the owner
+     * of the directory could not read. Without that, this file exists and is
+     * root's, and every later read as ndusr fails. */
+    CHECK(!nd_path_exists(SETTINGS));
+
+    /* And the value still comes back -- refusing to write is not refusing to
+     * work. A phone whose settings are the defaults still boots. */
+    CHECK_STR(nd_settings_get(ND_SET_UI_WALLPAPER, "NONE"), "NONE");
+}
+
 static void test_every_read_rewrites_settings_prop(void)
 {
     struct stat before;
@@ -293,6 +361,7 @@ int main(void)
     RUN(test_the_splash_still_says_something_with_no_version_prop);
 
     RUN(test_every_read_rewrites_settings_prop);
+    RUN(test_root_does_not_create_the_settings_file_for_somebody_else);
     RUN(test_effective_map_is_layered_lowest_to_highest);
     RUN(test_get_copy_and_absent_keys);
     RUN(test_the_three_boolean_parsers_disagree);

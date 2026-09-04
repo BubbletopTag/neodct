@@ -25,8 +25,49 @@ if TOOLS_DIR not in sys.path:
 import mkinitramfs
 
 HOST_BINARY = "/usr/bin/ls" if os.path.exists("/usr/bin/ls") else "/bin/ls"
-HOST_LIB_DIRS = [d for d in ("/usr/lib", "/lib", "/lib64", "/usr/lib64")
-                 if os.path.isdir(d)]
+
+
+def _host_lib_dirs():
+    """Where this machine keeps its shared libraries.
+
+    resolve_libs() searches a flat list, which is exactly right for the
+    target tree -- buildroot puts everything in lib/ and usr/lib/. A Debian
+    or Ubuntu build host does not: libc lives in /usr/lib/<triplet>/, so the
+    four fixed directories below find nothing and every test that resolves a
+    host binary fails for a reason that has nothing to do with the code.
+    Ask the machine instead of guessing.
+    """
+    dirs = [d for d in ("/usr/lib", "/lib", "/lib64", "/usr/lib64")
+            if os.path.isdir(d)]
+    for base in ("/usr/lib", "/lib"):
+        if not os.path.isdir(base):
+            continue
+        for entry in sorted(os.listdir(base)):
+            path = os.path.join(base, entry)
+            if "-linux-" in entry and os.path.isdir(path):
+                dirs.append(path)
+    return dirs
+
+
+HOST_LIB_DIRS = _host_lib_dirs()
+
+
+def boot_requirements(fake_target):
+    """Drop in the two files a real build path now insists on.
+
+    nd-verify and the release public key: without them the initramfs cannot
+    check an update signature and would install anything staged for it, so
+    mkinitramfs refuses to build one, exactly as it refuses without dmsetup.
+    Tests that are about something else still have to satisfy it.
+    """
+    verifier = fake_target / "usr" / "bin" / "nd-verify"
+    verifier.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(HOST_BINARY, verifier)
+    key = fake_target / "NeoDCT" / "System" / "keys" / "neodct-release.pub"
+    key.parent.mkdir(parents=True, exist_ok=True)
+    key.write_text("-----BEGIN PUBLIC KEY-----\nnot a real key\n"
+                   "-----END PUBLIC KEY-----\n")
+    return verifier, key
 
 
 def test_reads_the_libraries_a_binary_asks_for():
@@ -55,9 +96,17 @@ def test_resolves_the_whole_dependency_closure():
 
 
 def test_an_unresolvable_library_is_an_error_not_a_silent_omission(tmp_path):
-    """A missing .so means an initramfs that panics at boot instead."""
-    with pytest.raises(mkinitramfs.MissingLibrary, match="libc"):
+    """A missing .so means an initramfs that panics at boot instead.
+
+    Which library is named depends on the host binary's DT_NEEDED order, so
+    the assertion is that it names one of them -- not that it names libc.
+    """
+    needed, _ = mkinitramfs.elf_needed(HOST_BINARY)
+
+    with pytest.raises(mkinitramfs.MissingLibrary) as caught:
         mkinitramfs.resolve_libs([HOST_BINARY], [str(tmp_path)])
+
+    assert any(name in str(caught.value) for name in needed), caught.value
 
 
 def test_packs_a_cpio_containing_init_and_the_binaries(tmp_path):
@@ -123,6 +172,7 @@ def test_dmsetup_is_found_where_buildroot_actually_installs_it(tmp_path):
     (fake_target / "usr" / "lib").mkdir(parents=True)
     shutil.copy(HOST_BINARY, fake_target / "bin" / "busybox")
     shutil.copy(HOST_BINARY, fake_target / "usr" / "sbin" / "dmsetup")
+    boot_requirements(fake_target)
     for source in mkinitramfs.resolve_libs([HOST_BINARY], HOST_LIB_DIRS).values():
         shutil.copy(source, fake_target / "usr" / "lib" / os.path.basename(source))
     init = tmp_path / "init"
@@ -169,6 +219,7 @@ def test_the_library_search_aliases_the_loader_needs_are_present(tmp_path):
     (fake_target / "usr" / "sbin").mkdir(parents=True)
     shutil.copy(HOST_BINARY, fake_target / "bin" / "busybox")
     shutil.copy(HOST_BINARY, fake_target / "usr" / "sbin" / "dmsetup")
+    boot_requirements(fake_target)
     for source in mkinitramfs.resolve_libs([HOST_BINARY], HOST_LIB_DIRS).values():
         shutil.copy(source, fake_target / "usr" / "lib" / os.path.basename(source))
     init = tmp_path / "init"
@@ -192,6 +243,7 @@ def test_the_aliases_survive_into_the_archive(tmp_path):
     (fake_target / "usr" / "sbin").mkdir(parents=True)
     shutil.copy(HOST_BINARY, fake_target / "bin" / "busybox")
     shutil.copy(HOST_BINARY, fake_target / "usr" / "sbin" / "dmsetup")
+    boot_requirements(fake_target)
     for source in mkinitramfs.resolve_libs([HOST_BINARY], HOST_LIB_DIRS).values():
         shutil.copy(source, fake_target / "usr" / "lib" / os.path.basename(source))
     init = tmp_path / "init"
@@ -279,6 +331,7 @@ def _panel_tree(tmp_path, daemon_source):
     (fake_target / "usr" / "lib").mkdir(parents=True)
     shutil.copy(HOST_BINARY, fake_target / "bin" / "busybox")
     shutil.copy(HOST_BINARY, fake_target / "usr" / "sbin" / "dmsetup")
+    boot_requirements(fake_target)
     panel = fake_target / mkinitramfs.PANEL_DAEMON
     panel.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(daemon_source, panel)
@@ -339,3 +392,365 @@ def test_the_splash_lands_in_the_image_but_the_bitmap_does_not(tmp_path):
     names = _names_in(out)
     assert "splash.raw" in names
     assert not any(n.endswith(".bmp") for n in names), names
+
+
+# --- the update signature check ------------------------------------------
+#
+# SECURITY-AUDIT.md section 3: the applier writes a staged image to the
+# system partition, and before this it checked no signature. The check lives
+# in the initramfs because that is the one link in the chain a running system
+# cannot rewrite -- it is built into the kernel image. Which means the
+# verifier and the key have to actually be IN the cpio, and an initramfs
+# missing either of them is not a slightly worse initramfs, it is one that
+# installs whatever it is handed.
+
+def minimal_target(tmp_path, dmsetup=True):
+    fake_target = tmp_path / "target"
+    (fake_target / "bin").mkdir(parents=True)
+    (fake_target / "usr" / "lib").mkdir(parents=True)
+    shutil.copy(HOST_BINARY, fake_target / "bin" / "busybox")
+    if dmsetup:
+        (fake_target / "usr" / "sbin").mkdir(parents=True)
+        shutil.copy(HOST_BINARY, fake_target / "usr" / "sbin" / "dmsetup")
+    for source in mkinitramfs.resolve_libs([HOST_BINARY], HOST_LIB_DIRS).values():
+        shutil.copy(source, fake_target / "usr" / "lib" / os.path.basename(source))
+    return fake_target
+
+
+def archive_names(out):
+    raw = subprocess.run(["gzip", "-dc", str(out)], capture_output=True,
+                         check=True).stdout
+    return subprocess.run(["cpio", "-it", "--quiet"], input=raw,
+                          capture_output=True, check=True).stdout.decode().split()
+
+
+def test_the_verifier_and_the_key_are_both_in_the_image(tmp_path):
+    fake_target = minimal_target(tmp_path)
+    boot_requirements(fake_target)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "initramfs.cpio.gz"
+
+    mkinitramfs.build(fake_target, init, out)
+
+    names = archive_names(out)
+    assert "bin/nd-verify" in names, names
+    assert "neodct-release.pub" in names, names
+
+
+def test_the_key_in_the_image_is_the_key_the_phone_verifies_against(tmp_path):
+    """One file, taken from the target tree rather than committed twice. An
+    initramfs whose key had drifted from the rootfs's would refuse every
+    genuine update, and nothing would say why."""
+    fake_target = minimal_target(tmp_path)
+    _, key = boot_requirements(fake_target)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+
+    mkinitramfs.build(fake_target, init, tmp_path / "out.gz")
+
+    staged = os.path.join(mkinitramfs.LAST_STAGING, "neodct-release.pub")
+    assert open(staged, "rb").read() == key.read_bytes()
+
+
+def test_the_key_is_not_made_executable(tmp_path):
+    """It goes in as a plain file: it is not a binary and nothing resolves
+    DT_NEEDED against it."""
+    fake_target = minimal_target(tmp_path)
+    boot_requirements(fake_target)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+
+    mkinitramfs.build(fake_target, init, tmp_path / "out.gz")
+
+    staged = os.path.join(mkinitramfs.LAST_STAGING, "neodct-release.pub")
+    assert not os.access(staged, os.X_OK)
+
+
+def test_a_missing_verifier_fails_the_build(tmp_path):
+    """Not a warning. An initramfs without nd-verify cannot tell a release
+    image from one somebody staged, and it would apply either."""
+    fake_target = minimal_target(tmp_path)
+    key = fake_target / "NeoDCT" / "System" / "keys" / "neodct-release.pub"
+    key.parent.mkdir(parents=True)
+    key.write_text("x\n")
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+
+    with pytest.raises(SystemExit, match="nd-verify"):
+        mkinitramfs.build(fake_target, init, tmp_path / "out.gz")
+
+
+def test_a_missing_release_key_fails_the_build(tmp_path):
+    fake_target = minimal_target(tmp_path)
+    verifier = fake_target / "usr" / "bin" / "nd-verify"
+    verifier.parent.mkdir(parents=True)
+    shutil.copy(HOST_BINARY, verifier)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+
+    with pytest.raises(SystemExit, match="neodct-release.pub"):
+        mkinitramfs.build(fake_target, init, tmp_path / "out.gz")
+
+
+def test_the_verifier_can_come_from_outside_the_target_tree(tmp_path):
+    """It does: neodct.mk installs it into BINARIES_DIR, not into the rootfs,
+    because it is 4 MB of statically linked OpenSSL that nothing in the
+    running system calls. post-image-neodct.sh passes the path."""
+    fake_target = minimal_target(tmp_path)
+    key = fake_target / "NeoDCT" / "System" / "keys" / "neodct-release.pub"
+    key.parent.mkdir(parents=True)
+    key.write_text("x\n")
+    elsewhere = tmp_path / "images" / "nd-verify"
+    elsewhere.parent.mkdir()
+    shutil.copy(HOST_BINARY, elsewhere)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "out.gz"
+
+    mkinitramfs.build(fake_target, init, out, verifier=str(elsewhere))
+
+    assert "bin/nd-verify" in archive_names(out)
+
+
+def test_a_verifier_path_that_does_not_exist_is_an_error(tmp_path):
+    """Silently falling back to the target tree would produce an image whose
+    verifier is whatever happened to be lying around."""
+    fake_target = minimal_target(tmp_path)
+    key = fake_target / "NeoDCT" / "System" / "keys" / "neodct-release.pub"
+    key.parent.mkdir(parents=True)
+    key.write_text("x\n")
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+
+    with pytest.raises(SystemExit, match="nd-verify"):
+        mkinitramfs.build(fake_target, init, tmp_path / "out.gz",
+                          verifier=str(tmp_path / "not-here"))
+
+
+def test_the_post_image_hook_passes_the_verifier():
+    """The build wiring, not the script: if post-image stops passing it, the
+    build fails rather than shipping an unchecked initramfs -- but it should
+    not fail, so pin the argument."""
+    hook = open(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "scripts", "post-image-neodct.sh")).read()
+
+    assert "--verifier" in hook
+    assert "nd-verify" in hook
+
+
+# --- the on-screen recovery UI -------------------------------------------
+#
+# nd-recui is what makes the sixteen keys reach the recovery menu: they are on
+# a PCF8575 that no kernel driver binds, so without it a phone shows a menu
+# nobody can move. It is nevertheless OPTIONAL here, on the panel-daemon
+# precedent rather than the nd-verify one -- ndsys-recovery.sh falls back to
+# the text menu, which is today's behaviour, so its absence is a regression to
+# the status quo rather than a broken image.
+
+def _recui_tree(tmp_path, recui_source):
+    fake_target = minimal_target(tmp_path)
+    boot_requirements(fake_target)
+    recui = fake_target / "usr" / "bin" / "nd-recui"
+    recui.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(recui_source, recui)
+    return fake_target
+
+
+def test_the_recovery_ui_ships_when_it_matches_the_target(tmp_path):
+    fake_target = _recui_tree(tmp_path, HOST_BINARY)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "out.gz"
+
+    mkinitramfs.build(fake_target, init, out)
+
+    assert "bin/nd-recui" in archive_names(out)
+
+
+def test_a_recovery_ui_of_another_architecture_is_left_out(tmp_path):
+    """install-boot writes into BINARIES_DIR, which is not architecture-tagged,
+    so a stale cross build left over from another board is a real way to ship a
+    binary the kernel cannot exec. This one is reached from the screen a person
+    is standing in front of, where "nothing happened" is the whole failure
+    report."""
+    alien = tmp_path / "alien"
+    data = bytearray(open(HOST_BINARY, "rb").read(64))
+    data[18:20] = (0x28).to_bytes(2, "little")      # EM_ARM
+    alien.write_bytes(bytes(data))
+    fake_target = _recui_tree(tmp_path, alien)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "out.gz"
+
+    mkinitramfs.build(fake_target, init, out)
+
+    assert "bin/nd-recui" not in archive_names(out)
+
+
+def test_a_missing_recovery_ui_does_not_fail_the_build(tmp_path, capsys):
+    """The whole difference from nd-verify. An initramfs without a signature
+    check installs whatever it is handed; an initramfs without a nicer menu
+    still rescues a phone."""
+    fake_target = minimal_target(tmp_path)
+    boot_requirements(fake_target)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "out.gz"
+
+    mkinitramfs.build(fake_target, init, out)
+
+    assert "bin/nd-recui" not in archive_names(out)
+    assert "nd-recui" in capsys.readouterr().err
+
+
+def test_a_recovery_ui_path_that_does_not_exist_is_a_warning_not_an_error(tmp_path, capsys):
+    """post-image passes --recui unconditionally, and a tree built before this
+    existed has no nd-recui in BINARIES_DIR. That must not stop the build."""
+    fake_target = minimal_target(tmp_path)
+    boot_requirements(fake_target)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+
+    mkinitramfs.build(fake_target, init, tmp_path / "out.gz",
+                      recui=str(tmp_path / "not-here"))
+
+    assert "nd-recui" in capsys.readouterr().err
+
+
+def test_the_recovery_ui_can_come_from_outside_the_target_tree(tmp_path):
+    """It comes from BINARIES_DIR, beside nd-verify and for the same reason:
+    nothing in the running system calls it, so a copy in the verity-covered
+    squashfs would be bytes nobody executes."""
+    fake_target = minimal_target(tmp_path)
+    boot_requirements(fake_target)
+    outside = tmp_path / "binaries" / "nd-recui"
+    outside.parent.mkdir(parents=True)
+    shutil.copy(HOST_BINARY, outside)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "out.gz"
+
+    mkinitramfs.build(fake_target, init, out, recui=str(outside))
+
+    assert "bin/nd-recui" in archive_names(out)
+
+
+def test_the_post_image_hook_passes_the_recovery_ui():
+    hook = open(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "scripts", "post-image-neodct.sh")).read()
+
+    assert "--recui" in hook
+    assert "nd-recui" in hook
+
+
+# --- the install-progress bar --------------------------------------------
+#
+# nd-bootbar is OPTIONAL, and deliberately not in dmsetup's and nd-verify's
+# class: those two make the initramfs unable to do its job safely, so a build
+# without them fails. A missing progress bar makes it silent, which is where
+# the phone was before the bar existed -- failing an image build over that
+# would be the wrong default.
+#
+# The risk that it then quietly never ships at all is what these are for.
+
+def _bootbar_tree(tmp_path, bootbar_source=None):
+    fake_target = tmp_path / "target"
+    (fake_target / "bin").mkdir(parents=True)
+    (fake_target / "usr" / "sbin").mkdir(parents=True)
+    (fake_target / "usr" / "bin").mkdir(parents=True)
+    (fake_target / "usr" / "lib").mkdir(parents=True)
+    shutil.copy(HOST_BINARY, fake_target / "bin" / "busybox")
+    shutil.copy(HOST_BINARY, fake_target / "usr" / "sbin" / "dmsetup")
+    boot_requirements(fake_target)
+    if bootbar_source is not None:
+        shutil.copy(bootbar_source, fake_target / "usr" / "bin" / "nd-bootbar")
+    for source in mkinitramfs.resolve_libs([HOST_BINARY], HOST_LIB_DIRS).values():
+        shutil.copy(source, fake_target / "usr" / "lib" / os.path.basename(source))
+    return fake_target
+
+
+def test_the_progress_bar_ships_when_it_is_there(tmp_path):
+    fake_target = _bootbar_tree(tmp_path, HOST_BINARY)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "out.gz"
+
+    mkinitramfs.build(fake_target, init, out)
+
+    assert "bin/nd-bootbar" in _names_in(out)
+
+
+def test_a_missing_progress_bar_warns_but_still_builds(tmp_path, capsys):
+    """The whole point of it being optional. An image with no bar installs
+    updates exactly as it did before there was one."""
+    fake_target = _bootbar_tree(tmp_path, None)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "out.gz"
+
+    mkinitramfs.build(fake_target, init, out)
+
+    assert "bin/nd-bootbar" not in _names_in(out)
+    assert "nd-bootbar" in capsys.readouterr().err
+
+
+def test_a_progress_bar_of_another_architecture_is_left_out(tmp_path):
+    """Shipping a binary the kernel cannot exec is the failure this whole
+    file exists to avoid -- and here it would be worse than useless, because
+    the applier would exec it in the middle of the pipeline that carries the
+    system image."""
+    alien = tmp_path / "alien"
+    data = bytearray(open(HOST_BINARY, "rb").read(64))
+    data[18:20] = (0x28).to_bytes(2, "little")      # EM_ARM
+    alien.write_bytes(bytes(data))
+    fake_target = _bootbar_tree(tmp_path, alien)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "out.gz"
+
+    mkinitramfs.build(fake_target, init, out)
+
+    assert "bin/nd-bootbar" not in _names_in(out)
+
+
+def test_the_progress_bar_can_come_from_outside_the_target_tree(tmp_path):
+    """Same as nd-verify: install-boot puts it in BINARIES_DIR, not in the
+    rootfs, because nothing in the running system calls it."""
+    fake_target = _bootbar_tree(tmp_path, None)
+    elsewhere = tmp_path / "images" / "nd-bootbar"
+    elsewhere.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(HOST_BINARY, elsewhere)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    out = tmp_path / "out.gz"
+
+    mkinitramfs.build(fake_target, init, out, bootbar=elsewhere)
+
+    assert "bin/nd-bootbar" in _names_in(out)
+
+
+def test_the_post_image_hook_passes_the_progress_bar():
+    hook = open(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "scripts", "post-image-neodct.sh")).read()
+
+    assert "--bootbar" in hook
+
+
+def test_the_panel_helpers_land_in_the_image(tmp_path):
+    """ndsys-panel.sh is a plain file in neodct/initramfs/, so the builder
+    copies it verbatim and no build change was needed. That is only true as
+    long as the directory copy still happens."""
+    fake_target = _bootbar_tree(tmp_path, HOST_BINARY)
+    initramfs_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "initramfs")
+    out = tmp_path / "out.gz"
+
+    mkinitramfs.build(fake_target, initramfs_dir, out)
+
+    names = _names_in(out)
+    assert "ndsys-panel.sh" in names
+    assert "ndsys-apply.sh" in names

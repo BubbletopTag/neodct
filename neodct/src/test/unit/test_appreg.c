@@ -133,6 +133,23 @@ static const struct {
     /* A JSON NUMBER rather than the shipped string form. int() takes both. */
     {"Beta", "{\"id\": 7}"},
 
+    /* ============ THE MANIFEST IS THE APP'S OWN FILE ============
+     *
+     * Under /NeoDCT/User/sdcard/apps that means it is a file an attacker
+     * wrote, and "icon" was joined to the app directory with no containment
+     * at all -- so it named any path on the phone, and the CORE opened it,
+     * as ndusr, on the menu draw, with no app launched at all. The decoders
+     * are the interesting target; a failed decode is the good case.
+     *
+     * All three keep their app -- a bad icon is not a bad app -- and fall
+     * back to the default name, which is what a missing icon already did. */
+    {"Climber", "{\"name\": \"Climber\", \"id\": \"31\","
+                " \"icon\": \"../../../../etc/shadow\"}"},
+    {"Absolute", "{\"name\": \"Absolute\", \"id\": \"32\","
+                 " \"icon\": \"/NeoDCT/User/.remote/id_ed25519\"}"},
+    {"Sneaky", "{\"name\": \"Sneaky\", \"id\": \"33\","
+               " \"icon\": \"art/../../../NeoDCT/User/db/contacts.db\"}"},
+
     /* No id at all -> data.get("id", 999). */
     {"NoId", "{\"name\": \"No Id\"}"},
 
@@ -186,6 +203,11 @@ static const struct {
     {5, "Alpha App", "Alpha", "art/big.png", "app.so"},
     {7, "Beta", "Beta", "icon.png", "main.py"},
     {12, "Padded", "Padded", "icon.png", "main.py"},
+    /* Each asked for something outside its own directory and got the default
+     * instead. The app survives; the escape does not. */
+    {31, "Climber", "Climber", "icon.png", "main.py"},
+    {32, "Absolute", "Absolute", "icon.png", "main.py"},
+    {33, "Sneaky", "Sneaky", "icon.png", "main.py"},
     {42, "Tie A", "TieA", "icon.png", "main.py"},
     {42, "Tie B", "TieB", "icon.png", "main.py"},
     {999, "No Id", "NoId", "icon.png", "main.py"},
@@ -325,9 +347,28 @@ static void test_synthetic_manifests(void)
         CHECK_STR(e->exec, SURVIVORS[i].exec, "exec as written, else main.py");
     }
 
-    /* The two id-42 entries are adjacent and distinct. */
-    CHECK(apps[4].id == 42 && apps[5].id == 42, "the tied ids stayed adjacent");
-    CHECK(strcmp(apps[4].name, apps[5].name) != 0, "and are two distinct entries");
+    /* The two id-42 entries are adjacent and distinct.
+     *
+     * Found rather than indexed. This asserted apps[4] and apps[5], which
+     * made it a test of how many apps happen to sort before 42 -- adding
+     * three fixtures with lower ids broke it while the property it is about
+     * was never in question. */
+    {
+        size_t tie = 0u;
+        bool found = false;
+
+        for (i = 0u; i + 1u < n; i++) {
+            if (apps[i].id == 42 && apps[i + 1u].id == 42) {
+                tie = i;
+                found = true;
+                break;
+            }
+        }
+        CHECK(found, "the tied ids stayed adjacent");
+        if (found)
+            CHECK(strcmp(apps[tie].name, apps[tie + 1u].name) != 0,
+                  "and are two distinct entries");
+    }
 
     /* CODING-STANDARDS 1.5: the caller's array is a hard bound. Python's list
      * grows without one, which is the recorded deviation. */
@@ -509,7 +550,7 @@ static void test_icon_geometry(nd_ui *ui)
         }
         /* get_image() converts to RGBA unconditionally, which is what lets
          * the paste composite through the icon's own alpha. Three of the
-         * twenty-four icons are stored as palette PNGs (colour type 3). */
+         * twenty-six icons are stored as palette PNGs (colour type 3). */
         CHECK(full->fmt == ND_PIXFMT_RGBA8888, "the cache always hands back RGBA");
         fw = full->w;
         fh = full->h;
@@ -656,12 +697,13 @@ static void test_scrollbar_every_index(nd_capture *cap, nd_ui *ui)
         /* The notch's step is (track_bottom - track_top) / (n_apps - 1), so
          * every app added or removed moves it. 89 with twenty-two apps, 87
          * with the twenty-three MicTest made, 84 with the twenty-four
-         * Bluetooth makes, and 82 with the twenty-five Sleepy makes:
-         * 36 + 12 * 99/24 is 85.5 and the notch top is three rows above it.
+         * Bluetooth makes, 82 with the twenty-five Sleepy makes, and 80 with
+         * the twenty-six Calendar makes: 36 + 12 * 99/25 is 83.52 and the
+         * notch top is three rows above it, truncated.
          * Re-cut the menu-* frames whenever this number changes -- they are a
          * regression net for the screens that did NOT move, not a reason to
          * leave the app list alone. */
-        CHECK_INT(top, 82, "index 12 keeps the notch clear of both ends");
+        CHECK_INT(top, 80, "index 12 keeps the notch clear of both ends");
         CHECK(nd_image_get_px(frame, bar_x, track_bottom).r == 255u, "track reaches row 135");
         CHECK(nd_image_get_px(frame, bar_x + 1, track_bottom).r == 255u, "and column 233");
         CHECK(nd_image_get_px(frame, bar_x + 2, track_bottom).r == 0u, "but not column 234");
@@ -699,10 +741,14 @@ static void test_scrollbar_every_index(nd_capture *cap, nd_ui *ui)
     }
 }
 
-/* Engineering mode off is thirteen apps, so the step becomes 99/12 = 8.25 and
- * every notch lands somewhere the twenty-four-app sweep never visits. No
+/* Engineering mode off is fourteen apps, so the step becomes 99/13 = 7.615 and
+ * every notch lands somewhere the twenty-five-app sweep never visits. No
  * golden frame covers it -- shoot_docs.py captures with engineering on -- so
- * the arithmetic is all there is to check. */
+ * the arithmetic is all there is to check.
+ *
+ * It was thirteen and 99/12 until Calendar shipped. Both counts are the
+ * OVERLAY's, so a stock app added or removed lands here, which is the point:
+ * the number is what the scrollbar is divided by. */
 static void test_engineering_off_geometry(nd_capture *cap, nd_ui *ui)
 {
     nd_appsel s;
@@ -712,7 +758,7 @@ static void test_engineering_off_geometry(nd_capture *cap, nd_ui *ui)
     size_t i;
 
     n = nd_ui_scan_apps(ND_PATH_APPS_DIR, stock, ND_APP_MAX);
-    CHECK_INT(n, 13, "thirteen stock apps with engineering off");
+    CHECK_INT(n, 14, "fourteen stock apps with engineering off");
     if (n < 2u)
         return;
     sort_by_id_stable(stock, n);
@@ -761,7 +807,7 @@ static void run_overlay_half(void)
     }
 
     CHECK(nd_ui_engineering_mode(&ui), "engineering mode came from settings.prop");
-    CHECK_INT(nd_ui_app_count(&ui), 25, "twenty-five apps with engineering mode on");
+    CHECK_INT(nd_ui_app_count(&ui), 26, "twenty-six apps with engineering mode on");
     CHECK(nd_ui_wallpaper(&ui) == NULL, "no wallpaper configured, so the background is black");
 
     test_icon_geometry(&ui);

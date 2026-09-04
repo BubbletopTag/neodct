@@ -49,6 +49,7 @@
 #include "nd_app.h"
 #include "nd_battery.h"
 #include "nd_bench.h"
+#include "nd_calendar.h"
 #include "nd_crash.h"
 #include "nd_db.h"
 #include "nd_draw.h"
@@ -67,6 +68,7 @@
 #include "nd_proc.h"
 #include "nd_settings.h"
 #include "nd_svc.h"
+#include "nd_text.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_ui_sim.h"
@@ -81,6 +83,8 @@
 #pragma weak nd_modem_close
 #pragma weak nd_modem_signal_level
 #pragma weak nd_modem_operator_display
+#pragma weak nd_modem_link_state
+#pragma weak nd_modem_take_pending_fault
 #pragma weak nd_modem_state
 #pragma weak nd_modem_caller_id
 #pragma weak nd_modem_take_pending_event
@@ -108,9 +112,16 @@
 #pragma weak nd_notify_kind
 #pragma weak nd_notify_latest_data
 #pragma weak nd_notify_post_sms
+#pragma weak nd_notify_post_event
 #pragma weak nd_notify_start_ring
 #pragma weak nd_notify_stop_ring
 #pragma weak nd_notify_play_tone
+
+/* The calendar store. Weak for the same reason everything else here is: the
+ * core is linked in configurations that do not carry every module, and a
+ * phone with no calendar simply never notices one. */
+#pragma weak nd_cal_due
+#pragma weak nd_cal_mark_notified
 
 #pragma weak nd_appsel_init
 #pragma weak nd_appsel_show
@@ -266,6 +277,29 @@ bool nd_ui_status_notify_active(const nd_ui *ui)
     if (ui != NULL && ui->notify != NULL && nd_notify_active != NULL)
         return nd_notify_active(ui->notify);
     return g_sim.banner_active;
+}
+
+/* Which kind of banner is up, NULL for none. Not in nd_ui_sim.h because
+ * nothing outside this file asks: the home screen needs it to decide between
+ * an envelope and no envelope, the softkey needs it to decide between "Read"
+ * and "View", and _open_notification needs it to decide which app to launch.
+ *
+ * The simulation hook only ever stands in for a TEXT banner -- it is
+ * nd_ui_sim_sms_banner() and the golden frames it captures are message
+ * banners -- so the fallback says "sms" and the reference frames are
+ * untouched by any of this. */
+static const char *banner_kind(const nd_ui *ui)
+{
+    if (ui != NULL && ui->notify != NULL && nd_notify_kind != NULL)
+        return nd_notify_kind(ui->notify);
+    return g_sim.banner_active ? ND_NOTIFY_KIND_SMS : NULL;
+}
+
+static bool banner_is(const nd_ui *ui, const char *kind)
+{
+    const char *k = banner_kind(ui);
+
+    return k != NULL && strcmp(k, kind) == 0;
 }
 
 size_t nd_ui_status_banner_lines(const nd_ui *ui, char l1[ND_NOTIFY_LINE_MAX],
@@ -701,6 +735,39 @@ static bool manifest_id(const nd_json_val *o, int32_t *out)
     return false;
 }
 
+/* An icon is a file UNDER the app's own directory. A subdirectory is fine --
+ * "art/big.png" is a manifest the tree already contains -- so the rule is
+ * about escaping, not about shape:
+ *
+ *   absolute      "/etc/shadow" ignores appdir entirely
+ *   a ".." step   "../../../../etc/shadow" climbs out of it
+ *
+ * Rejecting rather than sanitising. A sanitiser has to be right about "..",
+ * "//", trailing dots and symlinks; a refusal only has to be right about
+ * what it refuses, and the caller falls back to the default name, so a
+ * hostile manifest gets exactly the treatment a missing one gets.
+ *
+ * Symlinks inside the app directory are NOT covered here and do not need to
+ * be: following one is the decoder opening a path the app owns, which it
+ * could have filled with the same bytes directly. */
+static bool icon_path_is_contained(const char *icon)
+{
+    const char *p;
+
+    if (icon == NULL || icon[0] == '\0' || icon[0] == '/')
+        return false;
+
+    for (p = icon; p != NULL; p = strchr(p, '/')) {
+        if (*p == '/')
+            p++;
+        if (p[0] == '.' && p[1] == '.' && (p[2] == '/' || p[2] == '\0'))
+            return false;
+        if (strchr(p, '/') == NULL)
+            break;
+    }
+    return true;
+}
+
 size_t nd_ui_scan_apps(const char *dir, nd_app_entry *out, size_t max)
 {
     char resolved[ND_PATH_MAX];
@@ -755,7 +822,18 @@ size_t nd_ui_scan_apps(const char *dir, nd_app_entry *out, size_t max)
         e = &out[written];
         memset(e, 0, sizeof *e);
         (void)nd_strlcpy(e->name, nd_json_get_str(root, "name", de->d_name), sizeof e->name);
+        /* The manifest is the APP's file, and under the user apps directory
+         * that means it is an attacker's file. "icon" was joined to appdir
+         * with no containment at all, so "../../../../etc/shadow" or an
+         * absolute path made the core's PNG and JPEG decoders read whatever
+         * the manifest named -- as ndusr, in the core, on the menu draw, with
+         * no app even launched. Failing to decode is the good case; the
+         * decoders are the interesting case.
+         *
+         * A name, not a path. That is all an icon ever was. */
         icon = nd_json_get_str(root, "icon", "icon.png");
+        if (!icon_path_is_contained(icon))
+            icon = "icon.png";
         (void)nd_snprintf(e->icon, sizeof e->icon, "%s/%s", appdir, icon);
         (void)nd_strlcpy(e->path, appdir, sizeof e->path);
         (void)nd_strlcpy(e->exec, nd_json_get_str(root, "exec", "main.py"), sizeof e->exec);
@@ -797,6 +875,17 @@ static void rescan_apps(nd_ui *ui)
     ui->home_.n_apps = n;
     if (nd_ui_engineering_mode(ui) && ui->home_.n_apps < ND_APP_MAX) {
         n = nd_ui_scan_apps(ND_PATH_ENG_APPS_DIR, &ui->home_.apps[ui->home_.n_apps],
+                            ND_APP_MAX - ui->home_.n_apps);
+        ui->home_.n_apps += n;
+    }
+    /* Apps the owner installed. Scanned unconditionally -- NOT behind
+     * engineering mode -- because this is meant to be an ordinary thing an
+     * owner does, and a feature only reachable in engineering mode is a feature
+     * nobody uses. What makes that safe is not a gate but the confinement:
+     * everything here runs as ndusr_ut with a private mount namespace and no
+     * service socket at all. See ND_PATH_USER_APPS_DIR. */
+    if (ui->home_.n_apps < ND_APP_MAX) {
+        n = nd_ui_scan_apps(ND_PATH_USER_APPS_DIR, &ui->home_.apps[ui->home_.n_apps],
                             ND_APP_MAX - ui->home_.n_apps);
         ui->home_.n_apps += n;
     }
@@ -1135,9 +1224,11 @@ void nd_ui_paint_chrome_content(nd_ui *ui)
  * Construction step 13 -- the alpha security notice
  * ------------------------------------------------------------------ */
 
-#define ALPHA_NOTICE                                                        \
-    "This is alpha software. Consider it extremely insecure and unstable. " \
-    "Don't store important data on this device."
+/* Exactly 5 lines of 5 before, which is to say one word from being cut off
+ * without saying so. 4 now. */
+#define ALPHA_NOTICE                                                  \
+    "This is alpha software. Extremely insecure and unstable. Don't " \
+    "store important data on it."
 
 /* ErrorScreen.show_alpha_security_notice_once(). Returns true when it showed.
  * The ack file is written ONLY after the dialog was actually displayed -- if
@@ -1424,6 +1515,9 @@ nd_err nd_ui_init_app(nd_ui *ui, nd_fb *fb, int keypad_fd)
      * hand-run nd-apprun has no core to ask, and every nd_svc_* call answers
      * "not present", which is the sentence Messages and the Modem app already
      * draw. OPEN-QUESTIONS.md MSG-1. */
+    /* Before the adopt, so it holds even when there is no socket to adopt --
+     * which is exactly the case that needs it. */
+    nd_svc_mark_app_process();
     nd_svc_client_open_from_env();
     if (keypad_fd >= 0 && nd_input_open_pipe(&ui->input, keypad_fd) != ND_OK)
         ui->input = NULL;
@@ -1567,6 +1661,52 @@ static void modem_tick(nd_ui *ui)
     }
 }
 
+/* The calendar's own tick. There is no Python equivalent -- the diary is new
+ * -- so the shape follows the two above rather than a port: cheap, silent,
+ * and safe to call from the key-read path on every frame.
+ *
+ * ============ WHY THE CORE POLLS INSTEAD OF THE APP TELLING IT ============
+ *
+ * A reminder has to arrive while the Calendar app is closed, which is almost
+ * always. The app is a separate process that has usually already exited by
+ * the time an appointment comes round, so there is nobody to send the
+ * message; the core is the only thing still running, and it is also the only
+ * thing that owns NotifyService (nd_app.h). So the core reads the table.
+ *
+ * ============ AND WHY IT IS RATE-LIMITED HERE, NOT INSIDE ============
+ *
+ * The battery service rate-limits its own poll because the i2c read is the
+ * expensive part and every caller wants the cached answer. Here the
+ * expensive part is opening sqlite, which nothing else wants, so the clock
+ * lives at the one call site. ND_CAL_POLL_S is 15 s; a phone with no
+ * calendar.db pays one stat() for each of them. */
+static void calendar_tick(nd_ui *ui)
+{
+    static double next_poll; /* monotonic; 0.0 means "the first frame" */
+    nd_cal_event ev;
+    int64_t occurrence = 0;
+    double now;
+
+    if (ui->shutting_down || ui->notify == NULL || nd_cal_due == NULL ||
+        nd_notify_post_event == NULL)
+        return;
+
+    now = nd_time_monotonic();
+    if (next_poll != 0.0 && now < next_poll)
+        return;
+    next_poll = now + ND_CAL_POLL_S;
+
+    /* One per poll. A phone catching up on several missed reminders shows
+     * the earliest first (nd_cal_due picks it), and the rest arrive over the
+     * following polls -- which is what the banner's own counter is for. */
+    if (!nd_cal_due(nd_time_now(), &ev, &occurrence))
+        return;
+
+    nd_notify_post_event(ui->notify, ev.id, ev.title, ev.start, true);
+    if (nd_cal_mark_notified != NULL)
+        nd_cal_mark_notified(ev.id, occurrence);
+}
+
 /* _ring_tick. Returns true when the Python would have raised IncomingCall. */
 static bool ring_tick(nd_ui *ui)
 {
@@ -1657,6 +1797,7 @@ int32_t nd_ui_read_keypress(nd_ui *ui, double timeout_s)
      * promises. */
     battery_tick(ui);
     modem_tick(ui);
+    calendar_tick(ui);
     if (ring_tick(ui))
         return ND_KEY_INCOMING_CALL;
 
@@ -1700,6 +1841,36 @@ int32_t nd_ui_wait_for_key(nd_ui *ui)
         if (key != ND_KEY_NONE)
             return key;
     }
+}
+
+/* Why an app did not open, when the reason is that the core would have had to
+ * hand it root. See nd_proc_launch_app(): an image with no ndusr_ut cannot
+ * confine the browser, and the answer to that is not to run it.
+ *
+ * The wording says what happened and what it means, and stops. The cause --
+ * a buildroot tree older than the users table -- is a developer's problem and
+ * goes to the console, where the log line names the exact rebuild command.
+ *
+ * It fits: 4 lines against nd_msgdialog's budget of 5. Measured with
+ * nd_msgdialog_measure() rather than guessed, which is the whole reason that
+ * accessor exists. */
+static void show_cannot_confine(nd_ui *ui, const char *app_name)
+{
+    nd_msgdialog dlg;
+
+    nd_log_err(ND_LOG_OS, "%s was not launched: it cannot be confined on this image.",
+               (app_name != NULL) ? app_name : "an app");
+
+    if (nd_msgdialog_init == NULL || nd_msgdialog_show == NULL)
+        return;
+    nd_msgdialog_init(&dlg, ui, ND_UI_CANNOT_CONFINE_MESSAGE);
+    if (nd_msgdialog_set_title != NULL)
+        nd_msgdialog_set_title(&dlg, "Blocked");
+    if (nd_msgdialog_set_icon != NULL)
+        nd_msgdialog_set_icon(&dlg, ND_PATH_WARNING_ICON);
+    if (nd_msgdialog_set_button != NULL)
+        nd_msgdialog_set_button(&dlg, "OK");
+    (void)nd_msgdialog_show(&dlg);
 }
 
 /* ------------------------------------------------------------------ *
@@ -1746,6 +1917,40 @@ void nd_ui_render_home(nd_ui *ui)
              * banner, like on the 3310. */
             if (notify_active && el->type == ND_EL_TEXT && strcmp(el->text, "No Service") == 0)
                 continue;
+
+            /* A FAULTED modem gets no carrier line at all. The element's
+             * authored text is the literal "No Service", and leaving that
+             * standing on a phone whose radio has died would be the most
+             * misleading thing on the screen: "No Service" is what a working
+             * phone says in a tunnel. Nothing is the honest answer, and the
+             * empty meter beside it plus the notice say the rest. */
+            if (el->type == ND_EL_TEXT && strcmp(el->text, "No Service") == 0 &&
+                nd_ui_status_modem_faulted(ui))
+                continue;
+
+            /* THE RED LINE UNDER THE CARRIER, and the two reasons it is
+             * skipped.
+             *
+             * It says "Eng. Mode" because that mode gives every app
+             * under /NeoDCT/System/engineering/apps root (nd_proc.h), and a
+             * phone handing out root should look different from a phone that
+             * is not. So the rule is the plain one: draw it exactly when the
+             * privilege is actually being granted.
+             *
+             * Skipped when the mode is OFF, obviously. Skipped ALSO while the
+             * message banner is up, for the same reason the carrier is: the
+             * banner is drawn at rows 49..96 and this line sits at row 69,
+             * squarely underneath it. Two strings painted over each other is
+             * worse than either alone, and the banner is the more urgent of
+             * the two.
+             *
+             * Matching on el->text is the mechanism nd_layout.c already uses
+             * for the clock and the carrier -- "there is no marker syntax;
+             * these exact strings are the whole mechanism". */
+            if (el->type == ND_EL_TEXT && strcmp(el->text, ND_UI_ENG_MODE_LABEL) == 0 &&
+                (notify_active || !nd_ui_engineering_mode(ui)))
+                continue;
+
             nd_home_render_element(ui, el);
         }
     } else if (ui->font_s != NULL) {
@@ -1755,8 +1960,14 @@ void nd_ui_render_home(nd_ui *ui)
     }
 
     /* --- 3. notification layer: a flashing envelope while unread mail
-     * exists, a banner while it is undismissed --- */
-    if (notify_active || nd_ui_unread_sms(ui) > 0) {
+     * exists, a banner while it is undismissed ---
+     *
+     * The envelope is the INBOX's icon and follows the text banner only. A
+     * reminder gets the two lines and nothing else: an envelope over an
+     * appointment would be saying the wrong thing, and the phone has no
+     * calendar glyph in ui/resources to say the right one with. The banner
+     * names itself, which on two lines of 20 px type is enough. */
+    if (banner_is(ui, ND_NOTIFY_KIND_SMS) || nd_ui_unread_sms(ui) > 0) {
         /* 500 ms on, 500 ms off. */
         if (((int64_t)(nd_time_now() * 2.0)) % 2 == 0) {
             double icon_scale = (double)h / 240.0;
@@ -1774,11 +1985,24 @@ void nd_ui_render_home(nd_ui *ui)
         size_t n = nd_ui_status_banner_lines(ui, l1, l2);
         const char *lines[2];
         int32_t y = nd_max32(46, nd_trunc32((double)nd_ui_content_bottom(ui) * 0.34));
+        /* The banner shares its rows with the signal meter, which
+         * ui_home.json puts at x = 210 -- thirty in from the right edge,
+         * mirroring the banner's own left margin. Four more for a gap.
+         *
+         * "10 messages" is 130 px at 20 px and could never have reached it,
+         * which is why the Python drew the lines unmeasured. AN EVENT'S NAME
+         * CAN: "Parents evening at school" runs straight through the bars. So
+         * the lines are fitted now -- which changes nothing for a message
+         * banner, and is why home-sms-banner still matches. */
+        int32_t max_w = nd_ui_width(ui) - 30 - 34;
 
         lines[0] = l1;
         lines[1] = l2;
         for (i = 0u; i < n && i < 2u; i++) {
-            (void)nd_draw_text(ui->draw, 30, y, lines[i], ui->font_n, ND_WHITE);
+            char fitted[ND_TEXT_LINE_MAX];
+
+            (void)nd_text_ellipsize(fitted, sizeof fitted, lines[i], ui->font_n, max_w);
+            (void)nd_draw_text(ui->draw, 30, y, fitted, ui->font_n, ND_WHITE);
             y += 24;
         }
     }
@@ -1843,7 +2067,15 @@ void nd_ui_render_menu(nd_ui *ui)
          * shipped manifest still says "main.py". See U-6 in
          * OPEN-QUESTIONS.md. */
         if (nd_proc_launch_app != NULL) {
-            (void)nd_proc_launch_app(ui, &apps[choice], NULL, NULL, NULL);
+            /* ND_ERR_PERM is the ONE launch failure the owner has to be told
+             * about, because it means an untrusted app was refused rather
+             * than run with the core's privileges. Every other failure leaves
+             * the app not running, which is its own message; this one leaves
+             * the phone SAFER than it would otherwise be and looks identical
+             * from the outside. A screen that flashes and returns home is
+             * what hid the browser being broken once already. */
+            if (nd_proc_launch_app(ui, &apps[choice], NULL, NULL, NULL) == ND_ERR_PERM)
+                show_cannot_confine(ui, apps[choice].name);
         } else {
             nd_log_err(ND_LOG_OS, "App launcher not linked; ignoring %s", apps[choice].name);
         }
@@ -1867,7 +2099,13 @@ void nd_ui_update(nd_ui *ui)
         nd_ui_render_home(ui);
         /* present=false: the softkey bar's own flush is suppressed so exactly
          * ONE framebuffer write happens per home frame. */
-        nd_softkey_update(ui->softkey, nd_ui_status_notify_active(ui) ? "Read" : "Menu", false);
+        /* "Read" is what you do to a message and "View" is what you do to an
+         * appointment. One word each, because the strip has room for one. */
+        nd_softkey_update(ui->softkey,
+                          !nd_ui_status_notify_active(ui)       ? "Menu"
+                          : banner_is(ui, ND_NOTIFY_KIND_EVENT) ? "View"
+                                                                : "Read",
+                          false);
         (void)nd_ui_present(ui);
         break;
     case ND_UI_STATE_HOME_DIALING:
@@ -1911,40 +2149,45 @@ static void play_dtmf(nd_ui *ui, char ch)
     (void)nd_notify_play_tone(ui->notify, path);
 }
 
+/* The installed app of that name, or NULL.
+ *
+ * ============ IT ASKS FOR THE LIST RATHER THAN READING THE FIELD ============
+ *
+ * _open_notification read ui->home_.apps directly, and that field is EMPTY
+ * until something has called nd_ui_app_list() -- which, since the app list
+ * became lazy, is only nd_ui_render_menu(). The home screen does not need it,
+ * so it does not load it.
+ *
+ * On a phone that had booted and never had its menu opened, the count was
+ * therefore zero, "Messages" was not found, and pressing Read dismissed the
+ * banner and opened nothing. Going through the accessor loads the list at the
+ * one moment it is wanted, which is the same directory scan the menu would
+ * have paid for anyway. */
+static const nd_app_entry *find_app(nd_ui *ui, const char *name)
+{
+    size_t n = 0u;
+    const nd_app_entry *apps = nd_ui_app_list(ui, &n);
+    size_t i;
+
+    if (apps == NULL)
+        return NULL;
+    for (i = 0u; i < n; i++) {
+        if (strcmp(apps[i].name, name) == 0)
+            return &apps[i];
+    }
+    return NULL;
+}
+
 /* NotifyService "Read" softkey: jump to the new message, or the inbox.
  *
  * _open_notification reads kind, count and latest_data BEFORE dismissing --
  * dismiss() zeroes all three -- and only then decides which of Messages' two
  * entry points to call. Keep that order. */
-static void open_notification(nd_ui *ui)
+static void open_sms_notification(nd_ui *ui, int32_t count, int64_t target)
 {
-    const nd_app_entry *messages = NULL;
-    const char *kind = ND_NOTIFY_KIND_SMS;
-    int32_t count = 1;
-    int64_t target = -1;
+    const nd_app_entry *messages = find_app(ui, "Messages");
     char arg[32];
-    size_t i;
 
-    if (ui->notify != NULL) {
-        kind = nd_notify_kind != NULL ? nd_notify_kind(ui->notify) : NULL;
-        count = nd_notify_count != NULL ? nd_notify_count(ui->notify) : 0;
-        target = nd_notify_latest_data != NULL ? nd_notify_latest_data(ui->notify) : -1;
-        if (nd_notify_dismiss != NULL)
-            nd_notify_dismiss(ui->notify);
-    } else {
-        nd_ui_sim_sms_banner(ui, 0);
-    }
-
-    /* `if kind != "sms": return` -- the banner is dismissed either way. */
-    if (kind == NULL || strcmp(kind, ND_NOTIFY_KIND_SMS) != 0)
-        return;
-
-    for (i = 0u; i < ui->home_.n_apps; i++) {
-        if (strcmp(ui->home_.apps[i].name, "Messages") == 0) {
-            messages = &ui->home_.apps[i];
-            break;
-        }
-    }
     if (messages == NULL || nd_proc_launch_app == NULL) {
         /* The Python falls back to the hard-coded Messages path here; with
          * process-per-app there is nothing to fall back to, so all that is
@@ -1962,6 +2205,56 @@ static void open_notification(nd_ui *ui)
         (void)nd_proc_launch_app(ui, messages, ND_APP_ENTRY_OPEN_INBOX, NULL, NULL);
     }
     ui->home_.unread_sms_ready = false;
+}
+
+/* The same shape one level down for a reminder: the event that came due when
+ * there is exactly one, and the diary itself when there are several -- which
+ * is the same "the one thing, or the list" decision Messages makes, and the
+ * reason app_open_event() takes an id at all.
+ *
+ * A phone with no Calendar app installed simply loses the banner, which is
+ * already what happens to a text banner with no Messages app. */
+static void open_event_notification(nd_ui *ui, int32_t count, int64_t target)
+{
+    const nd_app_entry *calendar = find_app(ui, "Calendar");
+    char arg[32];
+
+    if (calendar == NULL || nd_proc_launch_app == NULL)
+        return;
+
+    if (count == 1 && target >= 0 &&
+        nd_snprintf(arg, sizeof arg, "%lld", (long long)target) == ND_OK)
+        (void)nd_proc_launch_app(ui, calendar, ND_APP_ENTRY_OPEN_EVENT, arg, NULL);
+    else
+        (void)nd_proc_launch_app(ui, calendar, ND_APP_ENTRY_RUN, NULL, NULL);
+}
+
+static void open_notification(nd_ui *ui)
+{
+    const char *kind = ND_NOTIFY_KIND_SMS;
+    int32_t count = 1;
+    int64_t target = -1;
+
+    if (ui->notify != NULL) {
+        kind = nd_notify_kind != NULL ? nd_notify_kind(ui->notify) : NULL;
+        count = nd_notify_count != NULL ? nd_notify_count(ui->notify) : 0;
+        target = nd_notify_latest_data != NULL ? nd_notify_latest_data(ui->notify) : -1;
+        if (nd_notify_dismiss != NULL)
+            nd_notify_dismiss(ui->notify);
+    } else {
+        nd_ui_sim_sms_banner(ui, 0);
+    }
+
+    /* `if kind != "sms": return` was the whole of the Python's dispatch,
+     * because "sms" was the only kind. The banner is still dismissed either
+     * way, whatever the kind turns out to be -- including one this build has
+     * never heard of. */
+    if (kind == NULL)
+        return;
+    if (strcmp(kind, ND_NOTIFY_KIND_SMS) == 0)
+        open_sms_notification(ui, count, target);
+    else if (strcmp(kind, ND_NOTIFY_KIND_EVENT) == 0)
+        open_event_notification(ui, count, target);
 }
 
 void nd_ui_handle_input(nd_ui *ui, int32_t code)
@@ -2123,6 +2416,60 @@ void nd_ui_show_pending_battery_warning(nd_ui *ui)
     nd_msgdialog_init(&dlg, ui, message);
     if (nd_msgdialog_set_title != NULL)
         nd_msgdialog_set_title(&dlg, "Battery");
+    if (nd_msgdialog_set_icon != NULL)
+        nd_msgdialog_set_icon(&dlg, ND_PATH_WARNING_ICON);
+    if (nd_msgdialog_set_button != NULL)
+        nd_msgdialog_set_button(&dlg, "OK");
+    (void)nd_msgdialog_show(&dlg);
+}
+
+/* Is the radio faulted? Used by the home renderer to drop the carrier line.
+ *
+ * Weak-linked like every other modem entry point here, so a build without the
+ * modem module still links; a core with no ModemService reports false, which
+ * is right -- no service is not a broken service. */
+bool nd_ui_status_modem_faulted(nd_ui *ui)
+{
+    if (ui == NULL || ui->modem == NULL || nd_modem_link_state == NULL)
+        return false;
+    return nd_modem_link_state(ui->modem) == ND_MODEM_LINK_FAULT;
+}
+
+/* The modem's fault notice, and it is a copy of the battery one above on
+ * purpose -- same latch, same deferral, same modal, so there is one shape in
+ * this file for "a service needs to tell the user something" rather than two.
+ *
+ * The deferral is the load-bearing part: ModemService discovers the fault on
+ * its own thread, at whatever moment a read() fails, and a modal drawn from
+ * there would land in the middle of somebody else's frame. So the service
+ * only LATCHES, and this runs on the UI thread from the home loop, where
+ * putting a dialog on the screen is safe and where the user is looking. */
+void nd_ui_show_pending_modem_fault(nd_ui *ui)
+{
+    const char *why;
+    nd_msgdialog dlg;
+
+    if (ui == NULL)
+        return;
+    if (ui->state != ND_UI_STATE_HOME && ui->state != ND_UI_STATE_HOME_DIALING)
+        return;
+    if (ui->modem == NULL || nd_modem_take_pending_fault == NULL)
+        return;
+    why = nd_modem_take_pending_fault(ui->modem);
+    if (why == NULL)
+        return;
+
+    /* The reason goes to the console, not to the screen. "port read failed:
+     * Input/output error" is what a developer needs and is no help at all to
+     * somebody holding a phone; the screen gets the sentence that tells them
+     * what to actually do. */
+    nd_log_err(ND_LOG_MODEM, "Modem fault reported to the user: %s", why);
+
+    if (nd_msgdialog_init == NULL || nd_msgdialog_show == NULL)
+        return;
+    nd_msgdialog_init(&dlg, ui, ND_UI_MODEM_FAULT_MESSAGE);
+    if (nd_msgdialog_set_title != NULL)
+        nd_msgdialog_set_title(&dlg, "Modem");
     if (nd_msgdialog_set_icon != NULL)
         nd_msgdialog_set_icon(&dlg, ND_PATH_WARNING_ICON);
     if (nd_msgdialog_set_button != NULL)

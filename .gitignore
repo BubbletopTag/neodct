@@ -3,6 +3,10 @@
 ############################
 buildroot/output/
 buildroot/dl/
+# A `make` run redirected to a file, which is how a headless agent watches
+# one. It is build output like the rest of this section, and it lands at the
+# top of the tree where it is easy to commit by accident.
+buildroot/build.log
 
 # Out-of-tree build dirs
 build-*/
@@ -49,7 +53,14 @@ neodct/overlay/tests/*.mkv
 ############################
 # Agent tooling (local only)
 ############################
-.claude/
+# Settings, session state and whatever an agent leaves behind stay local --
+# but .claude/skills/ is the exception on purpose. A skill is shared knowledge
+# about how to work on THIS repo, and it is written by an agent in a container
+# that is thrown away, so anything not committed is lost the moment the session
+# ends. Ignoring the directory is what excludes it; the negation cannot reach
+# inside a directory git has already excluded, hence the /* form.
+.claude/*
+!.claude/skills/
 
 ############################
 # Editor droppings in the overlay

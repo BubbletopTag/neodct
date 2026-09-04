@@ -1,0 +1,94 @@
+# NeoDCT users. Fed to buildroot's mkusers by BR2_ROOTFS_USERS_TABLES.
+#
+#   username uid group gid password home shell groups comment
+#
+# SECURITY-PLAN.md section 1. Two users, and the reasoning for why DAC rather
+# than something more expressive is worth repeating here because it is the
+# thing that decides everything below:
+#
+#   DAC is the only confinement mechanism on this phone that needs no kernel
+#   configuration at all. It cannot be missing from the Rockchip BSP kernel,
+#   it cannot be compiled out, and it does not need a single line of the
+#   vendor tree to cooperate. Landlock does not exist before 5.13 and the
+#   phone runs 5.10. On a vendor kernel nobody controls, "works with no
+#   kernel support" is worth more than "more expressive".
+#
+# ============ WHY THE IDS ARE WRITTEN OUT ============
+#
+# -1 and -2 ask mkusers to allocate. They must not be used here.
+#
+# /NeoDCT/User is ext4 (ubifs on the phone) and stores NUMERIC ids on the
+# medium. It is also the one thing an update does not replace -- an .ndsw is
+# the whole rootfs and nothing else -- so every file on it outlives the
+# /etc/passwd that named its owner. Buildroot's own manual warns about this:
+# adding or removing a package shifts every automatic id, and a phone that
+# takes such an update finds its contacts, messages and settings owned by
+# somebody else. Explicit ids, above 1000 so they can never collide with the
+# 100-999 block mkusers allocates sshd, input, kvm and sgx out of.
+#
+# ============ WHY ndusr_ut'S GROUP LIST IS WHAT IT IS ============
+#
+# It is NOT in group ndusr. That membership is the whole boundary: it is what
+# separates "trusted apps share the user's data" from "the browser does not",
+# and the mode-bit layout in S00userdata rests entirely on it.
+#
+# video, audio and input it does have, and that is deliberate rather than
+# reluctant. The untrusted set is netsurf-fb and mpv; both draw on the panel
+# and mpv plays sound, so denying those would not confine them, it would
+# break ringtones and video playback and nothing else. Devices are not what
+# Phase 1 is for -- section 2 of the plan gives untrusted processes a minimal
+# /dev in a mount namespace, which removes the nodes from existence rather
+# than arguing about their group.
+#
+# What ndusr_ut does NOT get is dialout, and that one is the point:
+# SECURITY-AUDIT.md section 4 Q1 is `echo ATD1900555xxxx; > /dev/ttyUSB2`
+# from any process, and premium-rate dialling is the classic feature-phone
+# attack because it costs the owner real money. A browser that cannot open
+# the modem cannot do it. Nor i2c, so it cannot read the fuel gauge or scan
+# the keypad matrix directly.
+#
+# The password field is `*`, never `-`. `-` writes an EMPTY shadow field,
+# which is a passwordless login rather than no login.
+#
+# And no field, comment included, may contain a colon. mkusers does not check:
+# it prints the comment straight into /etc/passwd, where a colon is the field
+# separator, so one turns the shell field into something else entirely.
+
+# --- groups that have to exist before a rule can name one -----------------
+#
+# eudev resolves GROUP= at rule-parse time and, when the name is unknown,
+# logs one line and falls back to gid 0 -- which also drops the node to 0600.
+# A missing group here is a permission bug on the phone, not a build error,
+# so the group comes first and 61-neodct-devices.rules names it second.
+#
+# video, audio, dialout and input already exist: the first three from
+# buildroot's skeleton, input from the udev package's own users table. i2c
+# does not exist anywhere in the image, which is why /dev/i2c-3 -- the keypad
+# expander and the fuel gauge -- is root:root 0600 today.
+#
+# ============ AND WHY disk IS NOT HERE ANY MORE ============
+#
+# It was, and it should not have been. Every block node on this phone is
+# root:disk 0660, so group disk is read AND WRITE on the raw storage: the
+# system partition, the userdata partition, the SD card. `dd if=/dev/mmcblk0`
+# reads the lot; `dd of=` rewrites it. That is not a smaller privilege than
+# root, it is most of root with extra steps.
+#
+# It was granted on the assumption that formatting a card needs it. It does
+# not. /NeoDCT/System/hw/neodct-sdcard MOUNTS, and mount(2) needs CAP_SYS_ADMIN
+# rather than a group -- so the helper never worked by being in disk, it worked
+# by being run by a root core. It is now run by the broker instead
+# (ND_BROKER_ROOT_EXEC), which is where that privilege belongs.
+#
+# Nothing else in the tree opens a block device at all: no /dev/mmcblk*,
+# /dev/sd*, /dev/vd* or /dev/ubi* anywhere in neodct/src or the overlay. The
+# group bought nothing and cost everything.
+#
+# 1002 rather than a number in the system range on purpose: mkusers assigns
+# every explicit gid before any automatic one, so pinning i2c inside 100-999
+# would silently renumber input, kvm and sgx on the next build.
+- -1 i2c 1002 * - - - i2c nodes -- the keypad expander and the fuel gauge
+
+# --- the two users -------------------------------------------------------
+ndusr 1000 ndusr 1000 * /NeoDCT/User /bin/false video,audio,dialout,input,i2c NeoDCT UI and trusted apps
+ndusr_ut 1001 ndusr_ut 1001 * - /bin/false video,audio,input NeoDCT untrusted apps -- the browser and the media player

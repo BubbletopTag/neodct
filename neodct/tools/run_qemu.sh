@@ -19,6 +19,8 @@
 #   NEODCT_VERITY=permissive ...              boot even if verity fails
 #   NEODCT_VERITY=off ...                     skip verity entirely
 #   NEODCT_DEBUG=1 ...                        verbose initramfs, no quiet
+#   NEODCT_DEVENV=0 ...                       do NOT source /NeoDCT/User/env.sh
+#   NEODCT_UNSIGNED=1 ...                     install unsigned updates
 #   NEODCT_APPEND="printk.time=1" ...         extra kernel cmdline (see below)
 #   NEODCT_SD=share ...                       host folder as the card (virtiofs)
 #   NEODCT_SD=none ...                        no card inserted
@@ -27,10 +29,16 @@
 #   NEODCT_MODEM=1 ...                        pass the SIM7600 through
 #   NEODCT_BT=1 ...                           pass the UB500 dongle through
 #   NEODCT_NET=1 ...                          add a virtio NIC (browser testing)
-#   NEODCT_AUDIO=none ...                     no audio device
+#   NEODCT_AUDIO=none ...                     no audio device (the default when
+#                                             no PulseAudio server is running)
+#   NEODCT_AUDIO=pa ...                       force PulseAudio even if the
+#                                             probe below found no server
 #   NEODCT_DISPLAY=none ...                   no panel at all (the UI cannot
 #                                             boot; serial/recovery only)
 #   NEODCT_DISPLAY=offscreen ...              panel present, no window
+#   NEODCT_DISPLAY=vnc ...                    panel over VNC, no desktop needed
+#                                             (127.0.0.1:5901; NEODCT_VNC to move it)
+#   NEODCT_MONITOR=/tmp/ndmon ...             QEMU monitor socket -- screendump
 #
 # Persistence matters for update testing: SystemUpdate stages an update, the
 # phone reboots and the initramfs applies it. With NEODCT_SNAPSHOT=1 that
@@ -45,10 +53,56 @@ MEMORY="${NEODCT_MEM:-72}"
 VERITY="${NEODCT_VERITY:-enforce}"
 SD_MODE="${NEODCT_SD:-image}"
 DISPLAY_MODE="${NEODCT_DISPLAY:-gtk}"
-AUDIO="${NEODCT_AUDIO:-pa}"
 SHARE_DIR="${NEODCT_SHARE:-$HOME/neodct-sdcard}"
 MONITOR="${NEODCT_MONITOR:-}"
+
+# Where a vnc display listens. See the `vnc` case below for why the default
+# is a loopback address and not a bare ":1".
+VNC_ADDR="${NEODCT_VNC:-127.0.0.1:1}"
 EXTRA="${NEODCT_QEMU_EXTRA:-}"
+
+# ============ WHY THE AUDIO BACKEND IS PROBED AND NOT ASSUMED ============
+#
+# This used to be plain `${NEODCT_AUDIO:-pa}`, and on any machine without a
+# PulseAudio daemon QEMU refuses to start AT ALL -- not "the phone boots
+# silently", but two fatal errors before the kernel is even loaded:
+#
+#     qemu-system-aarch64: XDG_RUNTIME_DIR not set
+#     qemu-system-aarch64: could not stat pidfile /run/xdg/pulse/pid
+#
+# Neither says the word "audio", so the obvious reading is that the image or
+# the script is broken. Setting XDG_RUNTIME_DIR by hand only advances it from
+# the first error to the second, because the real problem is that there is no
+# sound server behind the socket.
+#
+# That is every headless box: a CI runner, a container, a VPS over SSH -- and
+# a phone emulator with no speakers is worth far more than one that will not
+# boot. So the default is now "pa if something is actually listening,
+# otherwise none".
+#
+# An EXPLICIT NEODCT_AUDIO is still obeyed verbatim, `pa` included: someone
+# debugging their own audio setup wants QEMU's real complaint, not this
+# script's guess.
+pick_audio() {
+    # PULSE_SERVER wins wherever it is set -- it can name a TCP server or a
+    # socket somewhere else entirely, and probing the default path would
+    # wrongly conclude there is nothing there.
+    [ -n "${PULSE_SERVER:-}" ] && { echo pa; return; }
+    for sock in "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/pulse/native" \
+                "/run/user/$(id -u)/pulse/native"; do
+        [ -S "$sock" ] && { echo pa; return; }
+    done
+    echo none
+}
+
+if [ -n "${NEODCT_AUDIO:-}" ]; then
+    AUDIO="$NEODCT_AUDIO"
+else
+    AUDIO="$(pick_audio)"
+    [ "$AUDIO" = none ] && printf '%s\n' \
+        "run_qemu: no PulseAudio server; starting without audio." \
+        "run_qemu: set NEODCT_AUDIO=pa to force it and see QEMU's own error." >&2
+fi
 
 # SIM7600 as seen on the USB bus.
 MODEM_VENDOR="${NEODCT_MODEM_VENDOR:-0x1e0e}"
@@ -117,6 +171,24 @@ if [ -n "${NEODCT_DEBUG:-}" ]; then
 else
     APPEND="$APPEND quiet loglevel=0"
 fi
+# /NeoDCT/User/env.sh is sourced as root before the UI starts, which is why
+# run_neodct.sh now refuses to do it unless something OUTSIDE the writable
+# partition says to -- SECURITY-AUDIT.md section 4 Q5 vector 2. In QEMU that
+# something is this line, and it is on by default because the whole point of
+# the emulator is to flip switches without rebuilding an image.
+#
+# NEODCT_DEVENV=0 takes it away, which is how to see what a shipped phone
+# does with an env.sh somebody left on the partition.
+[ "${NEODCT_DEVENV:-1}" = "0" ] || APPEND="$APPEND neodct.devenv=1"
+
+# The initramfs now refuses to install a staged update whose manifest is not
+# signed by the release key -- SECURITY-AUDIT.md section 3, the critical
+# finding. Engineering mode can still build and stage an UNSIGNED package on
+# purpose, and testing that path end to end needs the boot side to allow it.
+#
+# Off by default here as well as on the phone: an unsigned update installing
+# silently in QEMU is how a signature check stops being tested.
+[ -n "${NEODCT_UNSIGNED:-}" ] && APPEND="$APPEND neodct.unsigned=1"
 
 # Anything else you want on the kernel command line, appended last so it wins.
 # The reason this exists: printk.time=1. CONFIG_PRINTK_TIME is off in both
@@ -140,6 +212,43 @@ case "$DISPLAY_MODE" in
             -device virtio-gpu-pci \
             -device virtio-keyboard-pci \
             -display none \
+            -serial stdio
+        APPEND="$APPEND video=Virtual-1:240x175M"
+        ;;
+    vnc)
+        # The panel over the wire: a real, clickable phone with no desktop on
+        # the machine running it. What `offscreen` is for smoke tests, this is
+        # for actually using the thing -- over ssh, in a container, on a build
+        # box.
+        #
+        #     NEODCT_DISPLAY=vnc neodct/tools/run_qemu.sh
+        #     vncviewer localhost:5901          (display :1 is port 5901)
+        #
+        # THE ADDRESS DEFAULTS TO LOOPBACK, DELIBERATELY. `-vnc :1` on its own
+        # binds every interface, and a QEMU VNC server has no password unless
+        # one is configured -- so the bare form publishes an interactive
+        # console, as root, to the whole network. For a remote box the right
+        # move is an ssh tunnel to the loopback listener:
+        #
+        #     ssh -L 5901:127.0.0.1:5901 the-box
+        #
+        # NEODCT_VNC overrides it if you really do want to listen wider; it is
+        # passed to -vnc verbatim, so NEODCT_VNC="0.0.0.0:1,password=on" and
+        # the like work.
+        #
+        # virtio-tablet-pci matters here in a way it does not for gtk: VNC
+        # sends absolute pointer positions, and without a tablet QEMU has to
+        # guess at relative motion, which puts the cursor nowhere near where
+        # you clicked.
+        #
+        # -serial stdio still applies, so the console is in the terminal you
+        # started it from while the panel is in the viewer. That combination
+        # is the reason to prefer this over gtk even where a desktop exists.
+        set -- "$@" \
+            -device virtio-gpu-pci \
+            -device virtio-keyboard-pci \
+            -device virtio-tablet-pci \
+            -vnc "$VNC_ADDR" \
             -serial stdio
         APPEND="$APPEND video=Virtual-1:240x175M"
         ;;

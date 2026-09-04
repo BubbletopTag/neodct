@@ -58,6 +58,17 @@
 #define ND_MODEM_SIM_RING   "/tmp/neodct_sim_ring"
 #define ND_MODEM_SIM_OPS    "/tmp/neodct_sim_operator"
 #define ND_MODEM_SIM_SMS    "/tmp/neodct_sim_sms"
+/* The fifth hook, and the only one that simulates a FAILURE rather than a
+ * success. Touch it and the service behaves as though the modem it was
+ * talking to had died: zero bars, no carrier, and the fault notice. It exists
+ * because the fault path is otherwise unreachable without breaking real
+ * hardware, and an error screen nobody can make appear is an error screen
+ * nobody has ever seen. Delete the file and the next TICK undoes it -- not
+ * the next probe, which on a box with no modem never finds anything.
+ *
+ * nd_modem_poll() must test this BEFORE its no-hardware early return, or the
+ * hook is dead on exactly the machines it was written for. It was, once. */
+#define ND_MODEM_SIM_FAULT "/tmp/neodct_sim_fault"
 
 #define ND_MODEM_PCM_FORMAT       "S16_LE"
 #define ND_MODEM_PCM_RATE_DEFAULT 16000
@@ -190,6 +201,43 @@ struct nd_modem {
     int32_t csq;      /* -1 is Python's None, 99 is the modem's "unknown" */
     int32_t reg_stat; /* -1 is Python's None                              */
 
+    /* ---- the link state, which is THREE things and not two ----
+     *
+     * `hardware` above answers "am I talking to a modem right now". It cannot
+     * tell the two ways of answering no apart, and they are not the same
+     * thing at all:
+     *
+     *   never found one     a QEMU box, or a phone with the modem unplugged.
+     *                       Simulation is the CORRECT behaviour and the phone
+     *                       should say so calmly.
+     *   found one, lost it  a modem that answered AT and then stopped. That
+     *                       is a fault, and dressing it up as Simulation --
+     *                       which is what this service did until now -- tells
+     *                       the owner of a broken phone that everything is
+     *                       fine.
+     *
+     * `faulted` is the second case. It is set ONLY in nd_modem__drop_hardware(),
+     * which is reachable only from a hard I/O errno on a port we had already
+     * adopted, or from the watchdog below; and it is cleared in
+     * nd_modem__init_modem(), i.e. when a probe adopts a modem again. So it
+     * is exactly "we had one and we do not any more".
+     *
+     * fault_pending is the one-shot latch the UI drains, following
+     * nd_battery_take_pending_warning() -- see nd_modem_take_pending_fault(). */
+    bool faulted;
+    bool fault_pending;
+    /* This fault came from ND_MODEM_SIM_FAULT rather than from a real modem
+     * dying, so removing the file undoes it. A real fault has no undo short
+     * of adopting a modem again. */
+    bool fault_from_hook;
+    char fault_why[ND_MODEM_PROBE_WHY_MAX];
+
+    /* When the last AT transaction on a LIVE modem succeeded, for the
+     * watchdog in nd_modem_poll(). 0.0 means "nothing has succeeded yet on
+     * this adoption"; nd_modem__init_modem() stamps it at adoption so a
+     * modem that goes quiet immediately still gets its full grace period. */
+    double last_ok_at;
+
     nd_mev ev[ND_MODEM_EVENT_QUEUE_MAX];
     size_t ev_head;
     size_t ev_count;
@@ -204,6 +252,7 @@ struct nd_modem {
      * Written under st_mu, read by the caller immediately afterwards. */
     char op_display[32];
     char cid_display[ND_MODEM_NUMBER_MAX];
+    char fault_display[ND_MODEM_PROBE_WHY_MAX];
 
     /* ---- the modem thread's own, no lock ---- */
     int fd;
@@ -285,6 +334,16 @@ void nd_modem__destroy(nd_modem *m);
 
 /* --- locking (flock(2), because busybox flock in S45modem uses it) --- */
 void nd_modem__lock(nd_modem *m);
+
+/* Drop the cached answer to "is there a default route", so the next
+ * nd_modem_signal_level() in Simulation Mode re-reads /proc/net/route.
+ *
+ * TESTS ONLY, and it exists because the cache would otherwise make the
+ * ONLINE branch untestable: nd_clock_has_route() is ND_ROOT-resolved, so
+ * under the harness it reads $NEODCT_ROOT/proc/net/route -- a file a fixture
+ * can write, but only if the two-second cache can be told to forget what it
+ * saw before the fixture existed. */
+void nd_modem__sim_route_forget(void);
 void nd_modem__unlock(nd_modem *m);
 
 bool nd_modem__acquire(nd_modem *m);

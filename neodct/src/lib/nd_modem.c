@@ -54,6 +54,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "nd_clock.h"
 #include "nd_log.h"
 #include "nd_modem_priv.h"
 #include "nd_paths.h"
@@ -842,6 +843,16 @@ void nd_modem__init_modem(nd_modem *m)
 
     lock_state(m);
     m->hardware = true;
+    /* Adoption is the ONLY way out of a fault. Clearing fault_pending too
+     * matters: a modem that dies and recovers before the UI ever drains the
+     * latch should not pop a notice about a fault that is already over. */
+    m->faulted = false;
+    m->fault_pending = false;
+    m->fault_why[0] = '\0';
+    /* Stamped here, not left at 0.0, so the watchdog measures "quiet since we
+     * adopted it" rather than "quiet since the epoch" -- a modem that goes
+     * silent the instant it is adopted still gets its full grace period. */
+    m->last_ok_at = nd_modem__now();
     unlock_state(m);
 
     for (i = 0u; i < ND_ARRAY_LEN(INIT_SEQUENCE); i++)
@@ -1032,7 +1043,12 @@ bool nd_modem__probe_hardware(nd_modem *m)
 
 void nd_modem__drop_hardware(nd_modem *m, const char *why)
 {
-    nd_log(ND_LOG_MODEM, "Lost the modem (%s); back to Simulation Mode.", why);
+    /* NOT "back to Simulation Mode" any more, because it never was: getting
+     * here means a modem we had ALREADY ADOPTED stopped working. Every call
+     * site is a hard errno on that port, or the watchdog in nd_modem_poll().
+     * A phone that has never seen a modem does not come through here at all
+     * -- it simply never leaves ND_MODEM_LINK_SIM. See nd_modem.h. */
+    nd_log_err(ND_LOG_MODEM, "MODEM FAULT: lost the modem (%s).", why);
     if (m->fd >= 0)
         (void)close(m->fd);
     m->fd = -1;
@@ -1047,6 +1063,17 @@ void nd_modem__drop_hardware(nd_modem *m, const char *why)
     m->reg_stat = -1;
     m->operator_name[0] = '\0';
     m->operator_known = false;
+    /* The latch is armed only on the EDGE into fault. A modem that fails, is
+     * re-probed, fails again and again would otherwise put a modal in front
+     * of the user every ten seconds for ever, which is not a diagnosis, it is
+     * a denial of service. `faulted` staying true is what suppresses the
+     * repeat; nd_modem__init_modem() clears both on a successful adoption, so
+     * a modem that really does come back can fault again later and be
+     * reported again. */
+    if (!m->faulted)
+        m->fault_pending = true;
+    m->faulted = true;
+    (void)nd_strlcpy(m->fault_why, why != NULL ? why : "", sizeof m->fault_why);
     unlock_state(m);
 
     /* caller_id, imei, _call_stat and the audio pipes are deliberately NOT
@@ -1081,9 +1108,75 @@ void nd_modem_poll(nd_modem *m)
         queue_simple(m, ND_MEV_CONNECTED, NULL);
     }
 
+    /* THE SIMULATED FAULT, and it is checked BEFORE the no-hardware early
+     * return below rather than after it. That ordering is the whole point:
+     * this hook exists so the fault screen can be seen on QEMU, and QEMU
+     * NEVER HAS HARDWARE -- so a check on the far side of `if (!m->hardware)
+     * return;` could only ever fire on the one platform it was written to
+     * avoid touching. It was on the wrong side of that return until a
+     * screenshot of the fault notice turned out to be a screenshot of the
+     * ordinary home screen.
+     *
+     * The `!m->faulted` guard is what stops it re-dropping, and re-logging,
+     * on every one of the ten ticks a second. */
+    if (nd_path_exists(ND_MODEM_SIM_FAULT)) {
+        if (!m->faulted) {
+            nd_modem__drop_hardware(m, "simulated fault (" ND_MODEM_SIM_FAULT ")");
+            lock_state(m);
+            m->fault_from_hook = true;
+            unlock_state(m);
+        }
+        return;
+    }
+    if (m->fault_from_hook) {
+        /* The file is gone, so undo what it did. A REAL fault is not cleared
+         * here and must not be: it is cleared only by nd_modem__init_modem(),
+         * i.e. by actually adopting a modem again. This branch exists purely
+         * so `touch` then `rm` is a loop a person can run twice. */
+        lock_state(m);
+        m->fault_from_hook = false;
+        m->faulted = false;
+        m->fault_pending = false;
+        m->fault_why[0] = '\0';
+        unlock_state(m);
+        nd_log(ND_LOG_MODEM, "Simulated fault cleared; back to Simulation Mode.");
+    }
+
     if (!m->hardware) {
         nd_modem__poll_sim(m, now); /* NOT rate limited: full tick rate */
         return;
+    }
+
+    /* THE WATCHDOG, and why it is here rather than at the failure sites.
+     *
+     * Every AT timeout in this service returns a bare `false` that nobody
+     * looks at, on purpose -- one missed AT+CSQ is normal on a modem that is
+     * busy registering, and the whole design treats it as nothing. That is
+     * right, and it is also how a modem could die completely and keep its
+     * bars on screen for ever: read() returning 0 or EAGAIN is a `break`, not
+     * an errno, so drop_hardware never fires and the last good CSQ just sits
+     * there.
+     *
+     * So the question is not "did that one fail" but "has ANYTHING succeeded
+     * lately", which is one comparison against one timestamp, fed from the
+     * single choke point every transaction passes through. No counter, no
+     * per-command state, and nothing to reset in five places.
+     *
+     * The simulated fault hook is handled above, before the no-hardware
+     * return, for the reason given there. */
+    {
+        double quiet_since;
+
+        lock_state(m);
+        quiet_since = m->last_ok_at;
+        unlock_state(m);
+        if (quiet_since > 0.0 && now - quiet_since > ND_MODEM_FAULT_AFTER_S) {
+            char why[64];
+
+            (void)nd_snprintf(why, sizeof why, "no reply for %.0fs", now - quiet_since);
+            nd_modem__drop_hardware(m, why);
+            return;
+        }
     }
 
     if (now < m->next_urc)
@@ -2053,6 +2146,79 @@ bool nd_modem_registered(nd_modem *m)
     return reg == 1 || reg == 5; /* 1 home, 5 roaming */
 }
 
+/* ------------------------------------------------------------------ *
+ * Simulation: how many bars, and what the carrier is called
+ * ------------------------------------------------------------------ */
+
+/* Cached, because nd_modem_signal_level() is called once per rendered frame
+ * -- ten times a second -- and nd_clock_has_route() opens and reads two files
+ * in /proc each time. Two seconds is far shorter than anyone can plug an
+ * Ethernet cable in and look at the screen, and it takes the syscall rate
+ * from 20/s to 1/s.
+ *
+ * A plain file-static with no lock, following g_sim in nd_ui.c: the readouts
+ * are called from the UI thread, and the worst a race could do is serve a
+ * two-second-old answer to a question about a cable. */
+static double g_route_checked_at;
+static bool g_route_present;
+static bool g_route_known;
+
+static int32_t sim_route_bars(void)
+{
+    double now = nd_modem__now();
+
+    if (!g_route_known || now - g_route_checked_at > ND_MODEM_SIM_ROUTE_TTL_S) {
+        g_route_present = nd_clock_has_route();
+        g_route_checked_at = now;
+        g_route_known = true;
+    }
+    return g_route_present ? ND_MODEM_SIM_BARS_ONLINE : ND_MODEM_SIM_BARS_OFFLINE;
+}
+
+void nd_modem__sim_route_forget(void)
+{
+    g_route_known = false;
+}
+
+nd_modem_link nd_modem_link_state(nd_modem *m)
+{
+    bool hw;
+    bool bad;
+
+    /* A core with no ModemService is not a core with a broken one. */
+    if (m == NULL)
+        return ND_MODEM_LINK_SIM;
+
+    lock_state(m);
+    hw = m->hardware;
+    bad = m->faulted;
+    unlock_state(m);
+
+    if (hw)
+        return ND_MODEM_LINK_LIVE;
+    return bad ? ND_MODEM_LINK_FAULT : ND_MODEM_LINK_SIM;
+}
+
+const char *nd_modem_take_pending_fault(nd_modem *m)
+{
+    bool pending;
+
+    if (m == NULL)
+        return NULL;
+
+    lock_state(m);
+    pending = m->fault_pending;
+    m->fault_pending = false;
+    /* Copied into the same kind of snapshot buffer the other two const char *
+     * readouts use, and for the same reason: the caller reads it immediately
+     * and the lock is not held across the draw. */
+    if (pending)
+        (void)nd_strlcpy(m->fault_display, m->fault_why, sizeof m->fault_display);
+    unlock_state(m);
+
+    return pending ? m->fault_display : NULL;
+}
+
 int32_t nd_modem_signal_level(nd_modem *m)
 {
     int32_t csq;
@@ -2069,12 +2235,39 @@ int32_t nd_modem_signal_level(nd_modem *m)
     if (!hw) {
         int32_t sim;
 
+        /* A FAULTED modem has no signal, and says so with an empty meter
+         * rather than with the full one the layout's sim_val would draw. This
+         * is checked before the hook so that a stale /tmp/neodct_sim_csq
+         * cannot paint bars onto a broken phone. */
+        if (nd_modem_link_state(m) == ND_MODEM_LINK_FAULT)
+            return 0;
+
         /* Read outside the state lock: one open/read/close per rendered
          * frame is how the hook stays live, but it must never be a thing the
          * modem thread can be blocked behind. */
-        if (!nd_modem__sim_read_int(ND_MODEM_SIM_CSQ, &sim))
-            return -1; /* None: the layout keeps its sim_val */
-        return nd_modem__bars(sim);
+        if (nd_modem__sim_read_int(ND_MODEM_SIM_CSQ, &sim))
+            return nd_modem__bars(sim);
+
+        /* NO HOOK, NO HARDWARE: SIMULATION. This used to return -1, which the
+         * home layout renders as sim_val -- a FULL meter, four bars, next to
+         * the words "No Service". That pair is nonsense in both directions
+         * and it is what this branch exists to stop.
+         *
+         * What a simulated modem can actually do decides the number. Calls
+         * and texts are simulated inside this service and work with no
+         * network at all, so the meter is never empty. But the browser, the
+         * clock sync and every download need a real route, so a box with no
+         * network is meaningfully worse off than one with -- and the meter is
+         * the only place on the home screen that can say so.
+         *
+         *   a default route   4 -- full, and honest: everything works
+         *   none              1 -- one bar: you can still fake a call or a
+         *                          text, and nothing else will load
+         *
+         * nd_clock_has_route() is the same /proc/net/route reader ClockService
+         * waits on before its first SNTP sync, so "has a route" means exactly
+         * what it means everywhere else in this tree. */
+        return sim_route_bars();
     }
 
     lock_state(m);
@@ -2101,13 +2294,32 @@ const char *nd_modem_operator_display(nd_modem *m)
     if (!hw) {
         char text[32];
 
-        if (!nd_modem__sim_read_text(ND_MODEM_SIM_OPS, text, sizeof text))
+        /* A faulted modem gets NO carrier name at all -- not the operator,
+         * not "Simulation", and not the "No Service" placeholder either. The
+         * home screen drops the line entirely (nd_ui_render_home), because a
+         * broken radio has nothing truthful to put there. */
+        if (nd_modem_link_state(m) == ND_MODEM_LINK_FAULT)
             return NULL;
-        py_strip(text);
-        if (text[0] == '\0')
-            return NULL;
+
+        if (nd_modem__sim_read_text(ND_MODEM_SIM_OPS, text, sizeof text)) {
+            py_strip(text);
+            if (text[0] != '\0') {
+                lock_state(m);
+                (void)nd_strlcpy(m->op_display, text, sizeof m->op_display);
+                unlock_state(m);
+                return m->op_display;
+            }
+        }
+
+        /* The hook is unset or blank, so this is plain Simulation Mode and it
+         * says so. It used to return NULL, which the layout leaves as its
+         * authored placeholder -- the literal words "No Service" -- on a
+         * phone that will happily place a call and send a text. There IS a
+         * service here; it is a pretend one, and naming it is both more
+         * honest and the only way a tester can tell simulated bars from real
+         * ones at a glance. */
         lock_state(m);
-        (void)nd_strlcpy(m->op_display, text, sizeof m->op_display);
+        (void)nd_strlcpy(m->op_display, ND_MODEM_SIM_CARRIER, sizeof m->op_display);
         unlock_state(m);
         return m->op_display;
     }

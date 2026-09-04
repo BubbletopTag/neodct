@@ -59,6 +59,7 @@
 #include "nd_keypad.h"
 #include "nd_log.h"
 #include "nd_paths.h"
+#include "nd_priv.h"
 #include "nd_proc.h"
 #include "nd_t9.h"
 #include "nd_types.h"
@@ -1054,13 +1055,68 @@ int app_run(nd_ui *ui)
     }
 
     argv[0] = ND_BROWSER_BIN;
-    argv[1] = ND_BROWSER_HOME;
+    {
+        /* See ND_BROWSER_HOME_ENV. An empty value is treated as unset, so
+         * exporting the variable blank cannot leave netsurf with no URL. */
+        const char *want = getenv(ND_BROWSER_HOME_ENV);
+        bool overridden = want != NULL && want[0] != '\0';
+
+        argv[1] = overridden ? want : ND_BROWSER_HOME;
+        if (overridden)
+            nd_log(ND_LOG_BROWSER, "start URL overridden by " ND_BROWSER_HOME_ENV ": %s", argv[1]);
+    }
     argv[2] = NULL;
 
     memset(&spec, 0, sizeof spec);
     spec.argv = argv;
     spec.envp = envp;
     spec.owner = ND_OWNER_SYSTEM;
+
+    /* The browser runs as ndusr_ut. SECURITY-PLAN.md section 1, and the
+     * single most valuable line in Phase 1: a NetSurf RCE stops yielding
+     * root and starts yielding a process that can browse the web and write
+     * to one directory.
+     *
+     * Concretely, after this it cannot read /NeoDCT/User/db (contacts,
+     * messages, the call log), /NeoDCT/User/.remote (the ssh keys) or
+     * /NeoDCT/User/.ndsys (the update records), and it cannot open
+     * /dev/ttyUSB2 -- so `echo ATD1900555xxxx; > /dev/ttyUSB2`, which
+     * SECURITY-AUDIT.md section 4 Q1 answers "yes, trivially", becomes
+     * EACCES. It keeps the screen and the keys, because a browser that
+     * cannot draw is not a browser; section 2's mount namespace is what
+     * narrows THAT, by giving it a /dev with almost nothing in it.
+     *
+     * The lookup is here, in the parent, because getpwnam allocates and
+     * reads a file and neither is allowed after a fork. An image with no
+     * ndusr_ut leaves run_as.valid false, which nd_priv_become() treats as a
+     * no-op -- the browser then runs exactly as it did before, rather than
+     * refusing to open.
+     *
+     * Everything the browser starts inherits this, which is the point:
+     * neodct-play is exec'd BY netsurf when a <video> is clicked, so the
+     * media player -- the other half of the plan's untrusted set, and the
+     * one an MMS attachment will reach -- is confined by the same line. */
+    /* THIS APP NO LONGER DOES THE CONFINING, AND CANNOT.
+     *
+     * It used to call nd_priv_lookup(ND_PRIV_USER_UT) here and ask for a
+     * mount namespace, back when apps were root. Apps are ndusr now, and both
+     * of those need capabilities ndusr does not have -- so the drop failed
+     * with EPERM inside nd_priv_become() and the child _exit(122)d BEFORE
+     * execve. netsurf did not start at all, and the phone said "no mount
+     * namespaces in this kernel" on a kernel that has them.
+     *
+     * The core does it instead, when it launches THIS app: nd_proc.c's
+     * UNTRUSTED_APPS runs /NeoDCT/System/apps/Browser as ndusr_ut, inside a
+     * namespace with ND_PROC_UNTRUSTED_HIDE_PATHS emptied, and with no
+     * service socket. So by the time this code runs the whole process is
+     * already the untrusted one, and netsurf inherits all of it across the
+     * plain fork below -- uid, namespace, no_new_privs -- with nothing left
+     * here to ask for or to get wrong.
+     *
+     * spec.run_as is deliberately left invalid: nd_priv_become() treats that
+     * as a documented no-op, which is exactly right when there is nobody left
+     * to become. */
+
     if (devnull >= 0) {
         spec.fds[spec.n_fds].child_fd = 1; /* stdout=DEVNULL */
         spec.fds[spec.n_fds].our_fd = devnull;

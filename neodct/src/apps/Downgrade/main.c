@@ -66,6 +66,19 @@
  * points into is a segfault with a confusing backtrace. An app process is
  * torn down after run() returns anyway, so the leak lasts microseconds.
  *
+ * ============ THIS APP HAS NO HALT OF ITS OWN, AND NEVER DID ============
+ *
+ * It is named alongside Power and Update wherever the reboot is discussed,
+ * because it is the third app that can end the session -- but it reaches
+ * that through nd_update_install() -> nd_update_reboot(), inside the Update
+ * app.so it dlopen()s, and it has never spawned anything itself. So when the
+ * halt moved into the core (nd_svc_reboot(), spec-app-services.md section 9)
+ * this file needed no change: the code it borrows was converted, and the
+ * service channel nd_svc_reboot() writes to is THIS process's, opened by
+ * nd_ui_init_app() from NEODCT_SERVICE_FD like any other app's. The reason
+ * Downgrade needed privilege was never in this file, and it is gone from the
+ * file it was in.
+ *
  * ============ ONE THING IN THE PYTHON WORTH KNOWING ============
  *
  * THE RUNNING VERSION IS MARKED, NOT HIDDEN. "Seeing where you are in the

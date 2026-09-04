@@ -62,6 +62,7 @@
 #include "nd_paths.h"
 #include "nd_proc.h"
 #include "nd_t9.h"
+#include "nd_priv.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 
@@ -925,6 +926,113 @@ static void t_run_keeps_existing_home(void)
     nd_log_set_colour(was);
 }
 
+/* SECURITY-PLAN.md section 1, and SECURITY-AUDIT.md 2.5. HOME is where
+ * netsurf writes its cookie jar, its URL database and its cache, and it used
+ * to be the ROOT of the writable partition -- the same directory that holds
+ * the SMS databases, the ssh keys and the update records. */
+static void t_home_is_a_directory_of_its_own(void)
+{
+    /* Not the whole user partition -- which is where it used to be. */
+    CHECK(strcmp(ND_BROWSER_HOME_DIR, "/NeoDCT/User") != 0);
+    /* But still on the only writable storage there is. */
+    CHECK(strncmp(ND_BROWSER_HOME_DIR, "/NeoDCT/User/", 13u) == 0);
+}
+
+/* An image built without BR2_ROOTFS_USERS_TABLES has no ndusr_ut, and the
+ * browser must then start anyway -- as the core, exactly as every build
+ * before this one did. A phone that refuses to open its browser because a
+ * user is missing is a worse phone than one that opens it as root.
+ *
+ * This is also what the test suite itself exercises on any build host: the
+ * users are in the IMAGE, not on the machine running the tests. */
+static void t_run_without_the_untrusted_user_still_starts(void)
+{
+    const char *out;
+    bool was = nd_log_colour_enabled();
+    nd_priv_id id;
+    char expect[64];
+
+    if (nd_priv_lookup(ND_PRIV_USER_UT, &id)) {
+        /* This machine really does have one. Nothing to prove here, and
+         * dropping to it would need root. */
+        return;
+    }
+
+    nd_log_set_colour(false);
+    make_devices();
+    write_exec(ND_BROWSER_BIN, "#!/bin/sh\necho \"uid=$(id -u)\" >&2\nexit 0\n");
+
+    CHECK_INT(g_api.app_run(bare_ui()), 0);
+
+    out = console_text();
+    (void)nd_snprintf(expect, sizeof expect, "[Browser] uid=%lu\r\n",
+                      (unsigned long)getuid());
+    check_has(out, expect);
+    nd_log_set_colour(was);
+}
+
+/* And the other half of that fork: on a machine that DOES have an ndusr_ut
+ * and is running as root -- a phone, a QEMU image, a developer who made the
+ * users -- the browser must really become it.
+ *
+ * This is the assertion the tree did not have. apps/Browser's
+ * nd_priv_lookup(ND_PRIV_USER_UT, &spec.run_as) is the single line that
+ * confines the browser, and on an ordinary build host run_as.valid is false,
+ * so every run of the suite took the no-op path and the line was never
+ * executed. A test that cannot fail is not coverage, and this is exactly the
+ * kind of gap SECURITY-PLAN.md section 3 is about: the permission field was
+ * built before anything proved it was load-bearing.
+ *
+ * It still cannot run everywhere -- creating a user needs root and CI has
+ * neither -- so where it cannot, it says so rather than passing. nd-selftest
+ * asks the same question on the phone, where the answer is always available.
+ */
+/* THE DROP MOVED, AND THIS TEST MOVED WITH IT.
+ *
+ * It used to assert that app_run() dropped netsurf to ndusr_ut, because the
+ * app did that itself. It cannot any anymore and must not: apps run as ndusr,
+ * and setgroups()/unshare() need capabilities ndusr does not have. When that
+ * changed, the app's drop began failing with EPERM inside nd_priv_become(),
+ * the child _exit(122)d BEFORE execve, and NETSURF STOPPED STARTING AT ALL --
+ * on a real phone, silently, for several commits.
+ *
+ * The confinement now happens one level up: nd_proc.c's UNTRUSTED_APPS makes
+ * the CORE launch /NeoDCT/System/apps/Browser as ndusr_ut inside a mount
+ * namespace with no service socket, and netsurf inherits all of it across the
+ * plain fork this app does.
+ *
+ * So what is asserted here is the new contract, which is the inverse of the
+ * old one: THIS APP CHANGES NOBODY'S UID. Whatever it is launched as, netsurf
+ * gets. The old assertion has two replacements, and both are stronger than
+ * what it could check:
+ *
+ *   test_proc.c  t_only_the_browser_is_untrusted() pins the policy, whole
+ *                path, both directions, with no root needed.
+ *   nd-selftest  reports FAIL on the phone when a running netsurf is not
+ *                ndusr_ut -- the end-to-end answer, on the machine where it
+ *                actually matters. */
+static void t_run_does_not_change_the_uid_itself(void)
+{
+    const char *out;
+    bool was = nd_log_colour_enabled();
+    char expect[64];
+
+    nd_log_set_colour(false);
+    make_devices();
+    write_exec(ND_BROWSER_BIN, "#!/bin/sh\necho \"uid=$(id -u)\" >&2\nexit 0\n");
+
+    CHECK_INT(g_api.app_run(bare_ui()), 0);
+
+    out = console_text();
+    /* Whatever WE are, the child is. On a root CI runner that is uid 0; as an
+     * ordinary developer it is theirs. Either way it is unchanged, and that
+     * is the claim. */
+    (void)nd_snprintf(expect, sizeof expect, "[Browser] uid=%lu\r\n",
+                      (unsigned long)geteuid());
+    check_has(out, expect);
+    nd_log_set_colour(was);
+}
+
 static void t_run_nonzero_exit(void)
 {
     const char *out;
@@ -1030,6 +1138,9 @@ int main(void)
     RUN(t_run_missing_browser);
     RUN(t_run_normal_exit);
     RUN(t_run_keeps_existing_home);
+    RUN(t_home_is_a_directory_of_its_own);
+    RUN(t_run_without_the_untrusted_user_still_starts);
+    RUN(t_run_does_not_change_the_uid_itself);
     RUN(t_run_nonzero_exit);
     RUN(t_run_killed_dumps_dmesg);
     RUN(t_run_without_a_console);

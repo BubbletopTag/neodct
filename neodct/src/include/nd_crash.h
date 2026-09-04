@@ -43,6 +43,14 @@ extern "C" {
 
 /* BACKSPACE, ENTER, C, M, KP_ENTER. Any of them dismisses the crash screen. */
 #define ND_CRASH_CONTINUE_KEY_COUNT 5
+
+/* How long the core waits for a dying app's report before drawing the crash
+ * screen without it. The write end of that pipe belongs to the app, and an
+ * app that forks a helper leaves it open after it dies -- so "read until EOF"
+ * is a phone an untrusted app can stop. Long enough for a signal handler that
+ * has already run to have written one 88-byte record; short enough that
+ * nobody waits for it. */
+#define ND_CRASH_REPORT_WAIT_MS 250
 extern const int32_t ND_CRASH_CONTINUE_KEYS[ND_CRASH_CONTINUE_KEY_COUNT];
 
 #define ND_CRASH_DETAIL_MAX 512

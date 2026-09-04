@@ -79,8 +79,12 @@ else
     MA_INC=""
     [ -n "$MULTIARCH" ] && [ -d "/usr/include/$MULTIARCH" ] && \
         MA_INC="-idirafter /usr/include/$MULTIARCH"
+    # recovery/ is in the list even though it is built with its own rule and
+    # without -Iinclude: nd-recui runs in the initramfs, where musl's libc.so
+    # is the only one there is, so it is the source in this tree with the
+    # LEAST latitude about which libc it compiles against.
     for c in $(find "$SRC/lib" "$SRC/core" "$SRC/apprun" "$SRC/apps" "$SRC/tools" \
-                    -name '*.c' 2>/dev/null); do
+                    "$SRC/recovery" -name '*.c' 2>/dev/null); do
         # -idirafter, NOT -I: musl's own headers must win every lookup, so a
         # glibc-only libc call still fails here -- that is the entire point of
         # the check. /usr/include is searched only as a last resort, for
@@ -136,8 +140,12 @@ else
     fi
     # Compile-only sweep, which needs no 32-bit libraries to link against.
     M32_FAIL=0
+    # recovery/ is in the list for the same reason everything else is, and
+    # with more at stake: nd-recui does its own pixel arithmetic against a
+    # framebuffer's line_length, which is exactly the sort of thing that is
+    # right on a 64-bit desktop and off by a row on 32-bit ARM.
     for c in $(find "$SRC/lib" "$SRC/core" "$SRC/apprun" "$SRC/apps" "$SRC/tools" \
-                    -name '*.c' 2>/dev/null); do
+                    "$SRC/recovery" -name '*.c' 2>/dev/null); do
         if ! gcc -m32 -funsigned-char -std=c11 -c "$c" -o /dev/null -I"$SRC/include" \
              $(pkg-config --cflags freetype2 libpng sqlite3 2>/dev/null) \
              -D_GNU_SOURCE -Wall -Wextra -Werror -Wshadow -Wconversion \

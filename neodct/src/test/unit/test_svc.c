@@ -37,23 +37,28 @@
 #include <ftw.h>
 #include <poll.h>
 #include <pthread.h>
+#include <pwd.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "nd_app.h"
 #include "nd_battery.h"
+#include "nd_clock.h"
 #include "nd_draw.h"
 #include "nd_font.h"
 #include "nd_image.h"
 #include "nd_input.h"
 #include "nd_modem.h"
 #include "nd_paths.h"
+#include "nd_priv.h"
 #include "nd_proc.h"
+#include "nd_storage.h"
 #include "nd_svc.h"
 #include "nd_types.h"
 #include "nd_ui.h"
@@ -191,6 +196,36 @@ static bool stage_app(const char *built, const char *virtual_dir)
     return copy_file(built, resolved);
 }
 
+/* /NeoDCT/User belongs to ndusr on a phone -- S00userdata takes ownership of
+ * it on the first boot -- and nd_proc_launch_app() now drops an ordinary app
+ * to ndusr. A fixture that creates the directory root-owned therefore gives
+ * the app a partition it cannot write, which is not what any phone looks
+ * like, and the failure is indirect: the app exits non-zero and the test
+ * waits for a reply that is never sent.
+ *
+ * Best-effort on purpose. It needs root to chown, and on a machine without
+ * root the drop does not happen either -- so the case where this matters and
+ * the case where it works are the same case. */
+static void stage_user_owner(void)
+{
+    struct passwd *pw;
+    char resolved[ND_PATH_MAX];
+
+    if (geteuid() != 0u)
+        return;
+    pw = getpwnam(ND_PRIV_USER);
+    if (pw == NULL)
+        return;
+    if (nd_path_resolve(resolved, sizeof resolved, ND_PATH_USER) != ND_OK)
+        return;
+    /* Assigned rather than (void)cast: glibc marks chown warn_unused_result
+     * and -Werror rejects the cast. Nothing is done with it -- a fixture
+     * that cannot chown is a fixture on a machine where the drop will not
+     * happen either. */
+    if (chown(resolved, pw->pw_uid, pw->pw_gid) != 0)
+        return;
+}
+
 static bool stage_root(void)
 {
     char overlay[ND_PATH_MAX];
@@ -214,6 +249,14 @@ static bool stage_root(void)
         STAGE_FAIL(4);
     if (mkdtemp(tmpl) == NULL)
         STAGE_FAIL(5);
+    /* 0711, because nd_proc_launch_app() drops an ordinary app to ndusr and
+     * the app it launches lives under here. See test_proc.c's stage_root()
+     * for the long version; the short one is that a 0700 fixture makes the
+     * dropped child unable to reach nd-apprun, and this test then HANGS
+     * rather than failing, because it waits for a reply from a process that
+     * never started. */
+    if (chmod(tmpl, 0711) != 0)
+        STAGE_FAIL(5);
     (void)nd_strlcpy(g_stage, tmpl, sizeof g_stage);
 
     if (nd_snprintf(neodct, sizeof neodct, "%s/NeoDCT", g_stage) != ND_OK)
@@ -229,6 +272,7 @@ static bool stage_root(void)
         STAGE_FAIL(10);
     if (nd_mkdir_p(ND_PATH_USER, 0755u) != ND_OK)
         STAGE_FAIL(11);
+    stage_user_owner();
 
     if (nd_snprintf(built, sizeof built, "%s/../test/apps/SvcApp/app.so", g_bindir) != ND_OK)
         STAGE_FAIL(12);
@@ -944,7 +988,727 @@ static void test_hardware_true_survives_the_wire(void)
 }
 
 /* ------------------------------------------------------------------ *
- * 5. A real child process, launched by the real launcher
+ * 5. The two verbs that end the session
+ * ------------------------------------------------------------------ *
+ *
+ * A reboot verb cannot be tested by rebooting. So the simulation below
+ * replaces STEP 5 of the core's sequence -- the spawn -- and nothing else:
+ * the record is really validated, the binary is really resolved, the reply
+ * is really sent, and sync(2) really runs. What is left out is the one line
+ * whose success would be that this process stopped existing.
+ *
+ * That is enough to prove the thing section 9 is actually about, which is
+ * the ORDER -- everything reportable before the reply, the unbounded sync
+ * after it. See halt_fake_spawn().
+ */
+
+typedef struct {
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    int32_t calls;
+    bool reboot; /* which verb the last call was for */
+    char exe[ND_PATH_MAX];
+
+    /* The ordering proof. With `want_reply_first` set, the fake refuses to
+     * return until the CLIENT says its answer is already in. So if the core
+     * ever halted BEFORE replying, the client would still be sitting in
+     * recv(), the fake would never be released, and `saw_reply_first` would
+     * come back false when the deadline expired -- a failed case rather than
+     * a hung suite. Same trick as test_loopback_over_a_live_server(). */
+    bool want_reply_first;
+    bool reply_seen;
+    bool saw_reply_first;
+} halt_fake;
+
+#define HALT_FAKE_WAIT_S 2
+
+static void halt_fake_init(halt_fake *f)
+{
+    memset(f, 0, sizeof *f);
+    (void)pthread_mutex_init(&f->mu, NULL);
+    (void)pthread_cond_init(&f->cv, NULL);
+}
+
+static void halt_fake_free(halt_fake *f)
+{
+    (void)pthread_cond_destroy(&f->cv);
+    (void)pthread_mutex_destroy(&f->mu);
+}
+
+/* Runs on the CORE's serving thread, in place of nd_proc_spawn(). */
+static void halt_fake_spawn(bool reboot, const char *exe, void *user)
+{
+    halt_fake *f = user;
+
+    (void)pthread_mutex_lock(&f->mu);
+    f->calls++;
+    f->reboot = reboot;
+    (void)nd_strlcpy(f->exe, (exe != NULL) ? exe : "", sizeof f->exe);
+
+    if (f->want_reply_first) {
+        struct timespec deadline;
+
+        (void)clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec += HALT_FAKE_WAIT_S;
+        while (!f->reply_seen) {
+            if (pthread_cond_timedwait(&f->cv, &f->mu, &deadline) != 0)
+                break;
+        }
+        f->saw_reply_first = f->reply_seen;
+    }
+    (void)pthread_cond_broadcast(&f->cv);
+    (void)pthread_mutex_unlock(&f->mu);
+}
+
+/* The client half of that handshake: "my answer is in". */
+static void halt_fake_reply_landed(halt_fake *f)
+{
+    (void)pthread_mutex_lock(&f->mu);
+    f->reply_seen = true;
+    (void)pthread_cond_broadcast(&f->cv);
+    (void)pthread_mutex_unlock(&f->mu);
+}
+
+/* Wait for the serving thread to have finished its fake spawn, so the
+ * assertions read settled fields instead of racing them. */
+static bool halt_fake_wait_called(halt_fake *f)
+{
+    struct timespec deadline;
+    bool called;
+
+    (void)clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += HALT_FAKE_WAIT_S;
+    (void)pthread_mutex_lock(&f->mu);
+    while (f->calls == 0) {
+        if (pthread_cond_timedwait(&f->cv, &f->mu, &deadline) != 0)
+            break;
+    }
+    called = f->calls > 0;
+    (void)pthread_mutex_unlock(&f->mu);
+    return called;
+}
+
+/* ---- 5a. the tables and the lookup, moved here out of test_power.c ---- */
+
+static void test_the_halt_tables_are_the_pythons(void)
+{
+    /* THE ORDER DECIDES WHICH OF TWO PROGRAMS RUNS on an image carrying both
+     * `poweroff` and `/sbin/poweroff`, so it is asserted rather than assumed.
+     * These were nd_power_halt_commands, nd_power_reboot_commands and
+     * nd_update_reboot_commands -- three tables in two shared objects that
+     * could not see each other -- until the halt moved into the core. */
+    CHECK_STR(nd_svc_poweroff_commands[0][0], "poweroff");
+    CHECK(nd_svc_poweroff_commands[0][1] == NULL);
+    CHECK_STR(nd_svc_poweroff_commands[1][0], "/sbin/poweroff");
+    CHECK_STR(nd_svc_poweroff_commands[2][0], "busybox");
+    CHECK_STR(nd_svc_poweroff_commands[2][1], "poweroff");
+    CHECK(nd_svc_poweroff_commands[2][2] == NULL);
+
+    CHECK_STR(nd_svc_reboot_commands[0][0], "reboot");
+    CHECK(nd_svc_reboot_commands[0][1] == NULL);
+    CHECK_STR(nd_svc_reboot_commands[1][0], "/sbin/reboot");
+    CHECK_STR(nd_svc_reboot_commands[2][0], "busybox");
+    CHECK_STR(nd_svc_reboot_commands[2][1], "reboot");
+    CHECK(nd_svc_reboot_commands[2][2] == NULL);
+}
+
+/* An executable that does nothing, so a lookup can succeed without anything
+ * being spawned even if it were. */
+static bool make_stub_program(const char *dir, const char *name, char *out, size_t out_sz)
+{
+    FILE *f;
+
+    if (nd_snprintf(out, out_sz, "%s/%s", dir, name) != ND_OK)
+        return false;
+    f = fopen(out, "w");
+    if (f == NULL)
+        return false;
+    (void)fputs("#!/bin/sh\nexit 0\n", f);
+    (void)fclose(f);
+    return chmod(out, 0755) == 0;
+}
+
+/* <stage>/halt-bin, made once and used by both of the cases below. */
+static char g_haltbin[ND_PATH_MAX];
+
+static bool halt_bin_dir(void)
+{
+    if (g_haltbin[0] != '\0')
+        return true;
+    if (nd_snprintf(g_haltbin, sizeof g_haltbin, "%s/halt-bin", g_stage) != ND_OK)
+        return false;
+    if (mkdir(g_haltbin, 0755) != 0 && errno != EEXIST) {
+        g_haltbin[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
+static void test_the_halt_lookup_is_execvps(void)
+{
+    char out[ND_PATH_MAX];
+    char expect[ND_PATH_MAX];
+    char keep[ND_PATH_MAX];
+    const char *saved = getenv("PATH");
+
+    CHECK(halt_bin_dir());
+    if (g_haltbin[0] == '\0')
+        return;
+
+    (void)nd_strlcpy(keep, (saved != NULL) ? saved : "", sizeof keep);
+    CHECK(make_stub_program(g_haltbin, "nd-fake-halt", expect, sizeof expect));
+    (void)setenv("PATH", g_haltbin, 1);
+
+    CHECK(nd_svc_halt_which("nd-fake-halt", out, sizeof out));
+    CHECK_STR(out, expect);
+
+    /* Python's `except OSError: continue`, which is what walks the table on
+     * to the next candidate. */
+    CHECK(!nd_svc_halt_which("nd-there-is-no-such-program", out, sizeof out));
+
+    /* A name containing a slash is a path, not a name -- execvp's rule, and
+     * the reason /sbin/poweroff can be a candidate at all. */
+    CHECK(nd_svc_halt_which(expect, out, sizeof out));
+    CHECK_STR(out, expect);
+    CHECK(!nd_svc_halt_which("/nd/no/such/path", out, sizeof out));
+
+    /* A file that is not executable does not count, which is what stops a
+     * README called `reboot` being run. */
+    {
+        char plain[ND_PATH_MAX];
+        FILE *f;
+
+        if (nd_snprintf(plain, sizeof plain, "%s/nd-not-exec", g_haltbin) == ND_OK) {
+            f = fopen(plain, "w");
+            if (f != NULL) {
+                (void)fputs("not a program\n", f);
+                (void)fclose(f);
+                (void)chmod(plain, 0644);
+            }
+        }
+        CHECK(!nd_svc_halt_which("nd-not-exec", out, sizeof out));
+    }
+
+    CHECK(!nd_svc_halt_which(NULL, out, sizeof out));
+    CHECK(!nd_svc_halt_which("", out, sizeof out));
+
+    (void)setenv("PATH", keep, 1);
+}
+
+/* ---- 5b. the wire, with the consequence injected out ---- */
+
+/* Two candidate tables of one entry each, pointing at stub programs this
+ * test writes. Substituted for the shipped tables so that the case does not
+ * depend on the host having a real /sbin/reboot -- a container often does
+ * not -- and so that the path the core resolves is one this file knows
+ * exactly. The shipped tables are asserted separately above; what is under
+ * test here is the sequence, not the spelling. */
+static char g_stub_reboot[ND_PATH_MAX];
+static char g_stub_poweroff[ND_PATH_MAX];
+static const char *g_stub_reboot_argv[2];
+static const char *g_stub_poweroff_argv[2];
+static const char *const *const g_stub_reboot_tab[1] = {g_stub_reboot_argv};
+static const char *const *const g_stub_poweroff_tab[1] = {g_stub_poweroff_argv};
+
+static bool stub_halt_programs(void)
+{
+    if (!halt_bin_dir())
+        return false;
+    if (!make_stub_program(g_haltbin, "nd-stub-reboot", g_stub_reboot, sizeof g_stub_reboot))
+        return false;
+    if (!make_stub_program(g_haltbin, "nd-stub-poweroff", g_stub_poweroff, sizeof g_stub_poweroff))
+        return false;
+    g_stub_reboot_argv[0] = g_stub_reboot;
+    g_stub_reboot_argv[1] = NULL;
+    g_stub_poweroff_argv[0] = g_stub_poweroff;
+    g_stub_poweroff_argv[1] = NULL;
+    return true;
+}
+
+/* The fake the two LAUNCH cases share, so that SvcApp's poweroff request is
+ * caught by the launcher's own serving thread. Lives here rather than in
+ * main() so halt_fake_spawn() can reach it by address. */
+static halt_fake g_child_halt;
+
+/* Candidates that certainly do not exist, so "nothing resolved" is reachable
+ * on a host where /sbin/poweroff really does. */
+static const char *const NOHALT_A[] = {"nd-no-such-halt-a", NULL};
+static const char *const NOHALT_B[] = {"/nd/no/such/halt-b", NULL};
+static const char *const NOHALT_C[] = {"nd-no-such-halt-c", "poweroff", NULL};
+static const char *const *const NOHALT[3] = {NOHALT_A, NOHALT_B, NOHALT_C};
+
+static void test_a_halt_over_the_wire(core_fixture *fx)
+{
+    nd_svc_halt_sim sim;
+    halt_fake fake;
+    nd_svc_server *s = NULL;
+    nd_ui app; /* an APP's context: no handles, as nd_app.h says */
+    int child_fd;
+
+    memset(&app, 0, sizeof app);
+    CHECK(stub_halt_programs());
+    if (g_stub_reboot[0] == '\0')
+        return;
+
+    halt_fake_init(&fake);
+    memset(&sim, 0, sizeof sim);
+    sim.spawn = halt_fake_spawn;
+    sim.user = &fake;
+    sim.reboot = g_stub_reboot_tab;
+    sim.poweroff = g_stub_poweroff_tab;
+    sim.n = 1u;
+
+    CHECK_INT(nd_svc_server_open(&s), ND_OK);
+    if (s == NULL) {
+        halt_fake_free(&fake);
+        return;
+    }
+    child_fd = dup(nd_svc_server_child_fd(s));
+    CHECK(child_fd >= 0);
+    if (child_fd < 0) {
+        nd_svc_server_free(s);
+        halt_fake_free(&fake);
+        return;
+    }
+    CHECK(client_from_fd(child_fd));
+
+    /* Installed BEFORE the thread exists and cleared after it is joined.
+     * pthread_create() and pthread_join() are what make a plain global safe
+     * to read from the serving thread; nd_svc.h says so. */
+    fake.want_reply_first = true;
+    nd_svc_halt_simulate(&sim);
+    CHECK_INT(nd_svc_server_start(s, &fx->ui), ND_OK);
+
+    /* The call returns when the REPLY lands -- by which time the core has
+     * already committed: it has resolved a binary and is about to sync and
+     * spawn. There is nothing left to un-ask. */
+    CHECK(nd_svc_reboot());
+    halt_fake_reply_landed(&fake);
+
+    CHECK(halt_fake_wait_called(&fake));
+    CHECK_INT(fake.calls, 1);
+    CHECK(fake.reboot);
+    CHECK_STR(fake.exe, g_stub_reboot);
+    /* THE ORDERING CLAIM. False here means the core halted before it
+     * answered, which on a tired flash is the screen that says "Reboot
+     * failed." and then reboots. spec-app-services.md 9.4. */
+    CHECK(fake.saw_reply_first);
+
+    /* The other verb, over the same live channel, with the handshake off so
+     * that this half is a plain round trip. */
+    (void)pthread_mutex_lock(&fake.mu);
+    fake.want_reply_first = false;
+    fake.calls = 0;
+    (void)pthread_mutex_unlock(&fake.mu);
+
+    CHECK(nd_svc_poweroff());
+    CHECK(halt_fake_wait_called(&fake));
+    CHECK(!fake.reboot);
+    CHECK_STR(fake.exe, g_stub_poweroff);
+
+    /* Neither verb is a service that can be absent, so neither can answer
+     * "no such service": the channel is still good for anything else. */
+    CHECK(nd_svc_modem_present(&app));
+
+    nd_svc_client_close();
+    nd_svc_server_stop(s);
+    nd_svc_halt_simulate(NULL);
+    (void)close(child_fd);
+    halt_fake_free(&fake);
+}
+
+/* The other branch: an image with no halt binary on it anywhere. The app is
+ * told false -- which is what Power turns into "Reboot failed." -- and
+ * NOTHING is spawned, faked or otherwise. */
+static void test_a_halt_with_nothing_to_spawn(core_fixture *fx)
+{
+    nd_svc_halt_sim sim;
+    halt_fake fake;
+    nd_svc_server *s = NULL;
+    nd_ui app;
+    int child_fd;
+
+    memset(&app, 0, sizeof app);
+    halt_fake_init(&fake);
+    memset(&sim, 0, sizeof sim);
+    sim.spawn = halt_fake_spawn;
+    sim.user = &fake;
+    sim.poweroff = NOHALT;
+    sim.reboot = NOHALT;
+    sim.n = 3u;
+
+    CHECK_INT(nd_svc_server_open(&s), ND_OK);
+    if (s == NULL) {
+        halt_fake_free(&fake);
+        return;
+    }
+    child_fd = dup(nd_svc_server_child_fd(s));
+    CHECK(child_fd >= 0);
+    if (child_fd < 0) {
+        nd_svc_server_free(s);
+        halt_fake_free(&fake);
+        return;
+    }
+    CHECK(client_from_fd(child_fd));
+    nd_svc_halt_simulate(&sim);
+    CHECK_INT(nd_svc_server_start(s, &fx->ui), ND_OK);
+
+    CHECK(!nd_svc_reboot());
+    CHECK(!nd_svc_poweroff());
+    CHECK_INT(fake.calls, 0);
+
+    /* A refused halt leaves the channel open, exactly as a refused SEND_SMS
+     * does: this is a failed operation, not a protocol error. */
+    CHECK(nd_svc_modem_present(&app));
+
+    nd_svc_client_close();
+    nd_svc_server_stop(s);
+    nd_svc_halt_simulate(NULL);
+    (void)close(child_fd);
+    halt_fake_free(&fake);
+}
+
+/* ---- 5c. the clock, over the wire ---- */
+
+/* The WINDOW is pinned in test_clock.c, which is the file that can stage a
+ * version.prop and therefore the only one that can say what the window is to
+ * the second. What is under test here is the other half: that the request
+ * crosses the socket at all, that the core -- not the app -- decides, and
+ * that a refusal is a failed operation rather than a protocol error.
+ *
+ * So this needs one value INSIDE the window and two certainly outside it,
+ * and it derives the first the way the implementation does rather than
+ * hard-coding a year that stops being true. */
+static time_t clock_window_floor(void)
+{
+    time_t epoch = 0;
+
+    if (!nd_clock_build_epoch(&epoch) || epoch < (time_t)ND_CLOCK_SANE_MIN)
+        epoch = (time_t)ND_CLOCK_SANE_MIN;
+    return epoch;
+}
+
+static time_t a_time_this_build_will_believe(void)
+{
+    return clock_window_floor() + 86400;
+}
+
+static void test_the_clock_over_the_wire(core_fixture *fx)
+{
+    nd_svc_server *s = NULL;
+    nd_ui app; /* an APP's context: no handles, as nd_app.h says */
+    int child_fd;
+
+    memset(&app, 0, sizeof app);
+    CHECK_INT(nd_svc_server_open(&s), ND_OK);
+    if (s == NULL)
+        return;
+    child_fd = dup(nd_svc_server_child_fd(s));
+    CHECK(child_fd >= 0);
+    if (child_fd < 0) {
+        nd_svc_server_free(s);
+        return;
+    }
+    CHECK(client_from_fd(child_fd));
+    CHECK_INT(nd_svc_server_start(s, &fx->ui), ND_OK);
+
+    /* Nothing here moves the machine's clock: nd_clock.c refuses to call
+     * clock_settime() while NEODCT_ROOT is set, and stage_root() set it. */
+    CHECK(nd_svc_set_clock(a_time_this_build_will_believe()));
+
+    /* The epoch, and a date past 2100. Both are outside every window this
+     * build could compute, whatever version.prop says -- and both are refused
+     * by the CLIENT half, before a record is built, because they are outside
+     * the coarse 2020-2100 range as well. */
+    CHECK(!nd_svc_set_clock((time_t)0));
+    CHECK(!nd_svc_set_clock((time_t)ND_CLOCK_SANE_MAX + 1));
+
+    /* A day past the ceiling: inside 2020-2100, so this one CROSSES THE WIRE
+     * and is refused by the core. Without it the two cases above would pass
+     * on a build whose server-side bound had been deleted entirely, since
+     * they never reach it. */
+    {
+        time_t past_the_ceiling = clock_window_floor() + ND_SVC_CLOCK_MAX_SKEW_S + 86400;
+
+        if (past_the_ceiling <= (time_t)ND_CLOCK_SANE_MAX)
+            CHECK(!nd_svc_set_clock(past_the_ceiling));
+    }
+
+    /* A refused clock leaves the channel open, exactly as a refused SEND_SMS
+     * does: this is a failed operation, not a protocol error. */
+    CHECK(nd_svc_modem_present(&app));
+
+    nd_svc_client_close();
+    nd_svc_server_stop(s);
+    (void)close(child_fd);
+}
+
+/* ---- 5d. formatting a card, with the mkfs injected out ---- */
+
+/* Where this case's fake /run/neodct/sdcard.prop lives. ND_ROOT keeps it
+ * inside the stage, exactly as test_storage.c does it. */
+#define FMT_MOUNT "/sdcard"
+#define FMT_STATE "/sdcard.prop"
+
+typedef struct {
+    pthread_mutex_t mu;
+    int32_t calls;
+    char device[64]; /* what the CORE resolved, which is the whole point */
+    int result;      /* what the fake helper exits with */
+} format_fake;
+
+/* Runs on the CORE's serving thread, in place of the spawn-and-wait.
+ *
+ * No handshake, unlike halt_fake_spawn(): the format's answer DEPENDS on the
+ * helper's exit status, so the reply cannot precede the work and there is no
+ * ordering claim to prove. The client returning is already proof that this
+ * ran. */
+static int format_fake_run(const char *device, void *user)
+{
+    format_fake *f = user;
+    int rc;
+
+    (void)pthread_mutex_lock(&f->mu);
+    f->calls++;
+    (void)nd_strlcpy(f->device, (device != NULL) ? device : "", sizeof f->device);
+    rc = f->result;
+    (void)pthread_mutex_unlock(&f->mu);
+    return rc;
+}
+
+static int format_fake_calls(format_fake *f)
+{
+    int n;
+
+    (void)pthread_mutex_lock(&f->mu);
+    n = (int)f->calls;
+    (void)pthread_mutex_unlock(&f->mu);
+    return n;
+}
+
+static void format_fake_device(format_fake *f, char *out, size_t out_sz)
+{
+    (void)pthread_mutex_lock(&f->mu);
+    (void)nd_strlcpy(out, f->device, out_sz);
+    (void)pthread_mutex_unlock(&f->mu);
+}
+
+/* neodct-sdcard's own output format, which nd_storage.c parses. */
+static void write_card_state(const char *state, const char *device, const char *fstype)
+{
+    char body[256];
+
+    CHECK_INT(nd_snprintf(body, sizeof body, "state=%s\ndevice=%s\nfstype=%s\nlabel=NEODCT\n",
+                          state, device, fstype),
+              ND_OK);
+    pt_write_text(FMT_STATE, body);
+}
+
+static void test_a_format_over_the_wire(core_fixture *fx)
+{
+    nd_svc_format_sim sim;
+    format_fake fake;
+    nd_svc_server *s = NULL;
+    nd_ui app;
+    char device[64];
+    int child_fd;
+
+    memset(&app, 0, sizeof app);
+    memset(&fake, 0, sizeof fake);
+    (void)pthread_mutex_init(&fake.mu, NULL);
+    memset(&sim, 0, sizeof sim);
+    sim.run = format_fake_run;
+    sim.user = &fake;
+
+    nd_storage_set_paths(FMT_MOUNT, FMT_STATE);
+
+    CHECK_INT(nd_svc_server_open(&s), ND_OK);
+    if (s == NULL) {
+        (void)pthread_mutex_destroy(&fake.mu);
+        nd_storage_set_paths(NULL, NULL);
+        return;
+    }
+    child_fd = dup(nd_svc_server_child_fd(s));
+    CHECK(child_fd >= 0);
+    if (child_fd < 0) {
+        nd_svc_server_free(s);
+        (void)pthread_mutex_destroy(&fake.mu);
+        nd_storage_set_paths(NULL, NULL);
+        return;
+    }
+    CHECK(client_from_fd(child_fd));
+    nd_svc_format_simulate(&sim);
+    CHECK_INT(nd_svc_server_start(s, &fx->ui), ND_OK);
+
+    /* THE ASSERTION THIS WHOLE CASE EXISTS FOR. nd_svc_format_card() takes no
+     * argument -- the app could not name a device if it wanted to -- and the
+     * device the helper is pointed at comes out of the state file the CORE
+     * read. Settings used to pass card->device across the boundary; this is
+     * what replaced it. */
+    write_card_state("mounted", "/dev/vdc1", "vfat");
+    fake.result = 0;
+    CHECK(nd_svc_format_card());
+    CHECK_INT(format_fake_calls(&fake), 1);
+    format_fake_device(&fake, device, sizeof device);
+    CHECK_STR(device, "/dev/vdc1");
+
+    /* A helper that ran and failed. Settings draws "Formatting failed." */
+    (void)pthread_mutex_lock(&fake.mu);
+    fake.result = 1;
+    (void)pthread_mutex_unlock(&fake.mu);
+    CHECK(!nd_svc_format_card());
+    CHECK_INT(format_fake_calls(&fake), 2);
+
+    /* The QEMU share. `removable` is (fstype != "virtiofs") and the refusal
+     * happens BEFORE the helper is reached -- the call count is the proof,
+     * because mkfs on a directory of the developer's machine is not something
+     * a "did it work" boolean could take back. */
+    write_card_state("share", "/dev/vdc", "virtiofs");
+    CHECK(!nd_svc_format_card());
+    CHECK_INT(format_fake_calls(&fake), 2);
+
+    /* No card: ABSENT blanks the device, so there is nothing to point at and
+     * again nothing is spawned. */
+    write_card_state("nocard", "/dev/vdc", "vfat");
+    CHECK(!nd_svc_format_card());
+    CHECK_INT(format_fake_calls(&fake), 2);
+
+    /* ============ AND THE CARD THIS IS MOSTLY FOR ============
+     *
+     * `legacy` is a NeoDCT card in the pre-0.5.0b FAT format: it mounts, the
+     * owner's music plays, and it cannot hold an installed app because FAT
+     * records no ownership. It is therefore the card an owner is most likely
+     * to be sitting in front of when they choose Format.
+     *
+     * It is a state of its own in nd_storage.h, which is the shape that could
+     * go wrong here: a new state that the format path had not been taught
+     * about would blank the device or refuse, and the one card the UI offers
+     * to reformat would be the one it cannot. So the whole trip is made
+     * again, and the device the helper is pointed at is checked. */
+    write_card_state("legacy", "/dev/mmcblk1p1", "vfat");
+    (void)pthread_mutex_lock(&fake.mu);
+    fake.result = 0;
+    (void)pthread_mutex_unlock(&fake.mu);
+    CHECK(nd_svc_format_card());
+    CHECK_INT(format_fake_calls(&fake), 3);
+    format_fake_device(&fake, device, sizeof device);
+    CHECK_STR(device, "/dev/mmcblk1p1");
+
+    /* Every one of those refusals is a failed operation, not a protocol
+     * error: the channel is still good. */
+    CHECK(nd_svc_modem_present(&app));
+
+    nd_svc_client_close();
+    nd_svc_server_stop(s);
+    nd_svc_format_simulate(NULL);
+    (void)close(child_fd);
+    (void)pthread_mutex_destroy(&fake.mu);
+    nd_storage_set_paths(NULL, NULL);
+}
+
+/* ---- 5e. what an UNTRUSTED process can do with this socket ---- */
+
+/* THE UID IS NOT THE BOUNDARY. THE SOCKET IS.
+ *
+ * nd_svc validates the RECORD and never the SENDER: there is no SO_PEERCRED,
+ * no SCM_CREDENTIALS, no peer-uid check anywhere in nd_svc.c. So a process
+ * that holds the descriptor is served, whoever it has become -- and the
+ * descriptor survives a uid change, because an open file keeps the access it
+ * was opened with.
+ *
+ * This case proves that, deliberately, so that the fact is written down as an
+ * assertion rather than as an assumption. It is the reason nd_proc.c gives an
+ * UNTRUSTED app NO SERVICE SOCKET AT ALL rather than trying to check who is
+ * calling: a check the caller can be on the wrong side of is not a boundary,
+ * and an fd that was never created cannot be inherited.
+ *
+ * It needs root (to become somebody else) and an ndusr_ut in /etc/passwd, so
+ * it announces itself as skipped when it cannot run rather than passing
+ * quietly -- a confinement test that silently did not run is the failure mode
+ * this whole file exists against. */
+static void test_an_untrusted_uid_is_still_served(core_fixture *fx)
+{
+    nd_priv_id ut;
+    nd_svc_server *s = NULL;
+    int child_fd;
+    int pipefd[2];
+    pid_t pid;
+
+    if (geteuid() != 0u || !nd_priv_lookup(ND_PRIV_USER_UT, &ut) || !ut.valid) {
+        fprintf(stderr, "SKIP an untrusted uid on the service socket: "
+                        "needs root and " ND_PRIV_USER_UT "\n");
+        return;
+    }
+
+    CHECK_INT(nd_svc_server_open(&s), ND_OK);
+    if (s == NULL)
+        return;
+    child_fd = dup(nd_svc_server_child_fd(s));
+    CHECK(child_fd >= 0);
+    if (child_fd < 0) {
+        nd_svc_server_free(s);
+        return;
+    }
+    CHECK_INT(nd_svc_server_start(s, &fx->ui), ND_OK);
+
+    if (pipe(pipefd) != 0) {
+        CHECK(false);
+        nd_svc_server_stop(s);
+        (void)close(child_fd);
+        return;
+    }
+
+    pid = fork();
+    if (pid == 0) {
+        /* The child: become ndusr_ut, then use the socket it inherited. This
+         * is exactly what netsurf would have been able to do while the
+         * Browser app still had a channel to leak to it. */
+        char detail[ND_MODEM_DETAIL_MAX];
+        nd_ui app;
+        uint8_t ok = 0u;
+
+        (void)close(pipefd[0]);
+        memset(&app, 0, sizeof app);
+        if (nd_priv_become(&ut) != 0)
+            _exit(70);
+        if (getuid() != ut.uid)
+            _exit(71);
+        if (!client_from_fd(child_fd))
+            _exit(72);
+        detail[0] = '\0';
+        ok = nd_svc_send_sms(&app, "0871234567", "Test", detail, sizeof detail) ? 1u : 0u;
+        if (write(pipefd[1], &ok, 1u) != 1)
+            _exit(73);
+        (void)close(pipefd[1]);
+        _exit(0);
+    }
+    CHECK(pid > 0);
+    (void)close(pipefd[1]);
+
+    if (pid > 0) {
+        uint8_t ok = 0xFFu;
+        ssize_t n = read(pipefd[0], &ok, 1u);
+        nd_proc_status st;
+
+        memset(&st, 0, sizeof st);
+        (void)nd_proc_wait(pid, 10.0, &st);
+
+        CHECK_INT((int)n, 1);
+        /* THE ASSERTION, and it is deliberately the uncomfortable one: an
+         * ndusr_ut process holding this descriptor gets its text sent, by the
+         * root core, through the real ModemService. Nothing about the uid
+         * stopped it, because nothing about the uid was ever consulted. */
+        CHECK_INT((int)ok, 1);
+    }
+    (void)close(pipefd[0]);
+
+    nd_svc_client_close();
+    nd_svc_server_stop(s);
+    (void)close(child_fd);
+}
+
+/* ------------------------------------------------------------------ *
+ * 6. A real child process, launched by the real launcher
  * ------------------------------------------------------------------ */
 
 static void app_entry_for(nd_app_entry *e, const char *dir, const char *name)
@@ -1025,6 +1789,17 @@ static void test_a_real_child_reaches_the_core(core_fixture *fx)
      * having travelled to the core and back to say it. */
     check_kv(report, "batt_ok", "0");
     check_kv(report, "quickstart", "0");
+
+    /* AND THE VERB THAT ENDS THE SESSION. A real child process asked this
+     * core to switch the phone off; the core validated it, resolved a
+     * binary, answered, synced, and reached the spawn -- which the fake
+     * installed around this launch caught instead of performing. Both halves
+     * are checked: the child was told yes, and this side really was asked.
+     * spec-app-services.md 9.9. */
+    check_kv(report, "poweroff", "1");
+    CHECK(halt_fake_wait_called(&g_child_halt));
+    CHECK(!g_child_halt.reboot);
+    CHECK_STR(g_child_halt.exe, g_stub_poweroff);
 }
 
 /* Launching twice must work: the socketpair and the thread are per launch,
@@ -1049,6 +1824,35 @@ static void test_two_launches_in_a_row(core_fixture *fx)
 /* ------------------------------------------------------------------ *
  * main
  * ------------------------------------------------------------------ */
+
+/* ============ "NO SOCKET" MUST NOT MEAN "I AM THE CORE" ============
+ *
+ * Every verb works on both sides of the boundary, and the side used to be
+ * decided by "do I have a client socket?". An untrusted app has none BECAUSE
+ * nd_proc_launch_app refused it one -- so it fell through into the core's
+ * branch and tried to act locally.
+ *
+ * Nothing was ever actually rebooted: the kernel stopped an ndusr_ut process
+ * with no_new_privs from gaining anything by exec'ing setuid busybox. But
+ * halt_perform() does not check its child, so nd_svc_reboot() RETURNED TRUE,
+ * and the confinement probe printed "*** ALLOWED ***" for rebooting the phone.
+ * The boundary held and the library lied about it.
+ *
+ * Found by running the probe on a phone, not by reading the code. */
+static void test_an_app_with_no_socket_is_not_the_core(void)
+{
+    /* No NEODCT_SERVICE_FD, and marked as an app: the untrusted case exactly. */
+    (void)unsetenv(ND_ENV_SERVICE_FD);
+    nd_svc_client_open_from_env();
+    CHECK(!nd_svc_client_active());
+    nd_svc_mark_app_process();
+
+    /* Each of the three that can act locally must refuse rather than try. */
+    CHECK(!nd_svc_reboot());
+    CHECK(!nd_svc_poweroff());
+    CHECK(!nd_svc_set_clock((time_t)1893456000)); /* 2030, comfortably in range */
+    CHECK(!nd_svc_format_card());
+}
 
 int main(void)
 {
@@ -1078,8 +1882,40 @@ int main(void)
     test_loopback_over_a_live_server(&fx);
     test_garbage_does_not_take_the_core_down(&fx);
     test_hardware_true_survives_the_wire();
-    test_a_real_child_reaches_the_core(&fx);
-    test_two_launches_in_a_row(&fx);
+    test_the_halt_tables_are_the_pythons();
+    test_the_halt_lookup_is_execvps();
+    test_a_halt_over_the_wire(&fx);
+    test_a_halt_with_nothing_to_spawn(&fx);
+    test_the_clock_over_the_wire(&fx);
+    test_a_format_over_the_wire(&fx);
+    test_an_untrusted_uid_is_still_served(&fx);
+    test_an_app_with_no_socket_is_not_the_core();
+
+    /* SvcApp asks for a poweroff, and the launcher's own server thread is
+     * the one that serves it -- so the fake has to be installed around the
+     * launch and not around a server this file opened. Non-blocking: the
+     * ordering handshake belongs to the loopback case, which can hold both
+     * ends; here the child is a separate process and there is nobody to
+     * release it. */
+    {
+        nd_svc_halt_sim sim;
+
+        halt_fake_init(&g_child_halt);
+        memset(&sim, 0, sizeof sim);
+        sim.spawn = halt_fake_spawn;
+        sim.user = &g_child_halt;
+        sim.reboot = g_stub_reboot_tab;
+        sim.poweroff = g_stub_poweroff_tab;
+        sim.n = 1u;
+        if (g_stub_poweroff[0] != '\0')
+            nd_svc_halt_simulate(&sim);
+
+        test_a_real_child_reaches_the_core(&fx);
+        test_two_launches_in_a_row(&fx);
+
+        nd_svc_halt_simulate(NULL);
+        halt_fake_free(&g_child_halt);
+    }
 
     /* Whatever the cases did, the client must be shut before the process
      * ends -- an app's nd_ui_teardown() is what does this on the phone. */

@@ -37,19 +37,29 @@
  * invisible until the app returned, both reference frames stop at a
  * VerticalList well before it, and neither needed re-cutting.
  *
- * ============ THE HELPER IS EXEC'D WITH AN UNRESOLVED PATH ============
+ * ============ THE HELPER IS NO LONGER THIS APP'S TO RUN ============
  *
- * _show_memory_card()'s last resort is subprocess.call([SDCARD_HELPER,
- * "format", card.device]). PathRemap intercepts open(), not execve(), so the
- * Python hands the kernel the literal "/NeoDCT/System/hw/neodct-sdcard" even
- * under the test harness -- and nd_proc.h says the same thing from the other
- * side: "The path is NOT ND_ROOT-resolved: it is an executable". So it is
- * passed through verbatim. See OPEN-QUESTIONS.md ST-3 for the one behaviour
- * that differs when it is missing.
+ * _show_memory_card()'s last resort was subprocess.call([SDCARD_HELPER,
+ * "format", card.device]) -- a fork/exec of a program that repartitions a
+ * disk, made by the app, with the app's privilege. It was the only thing on
+ * any Settings screen that needed privilege at all, and therefore the whole
+ * reason this app was named in nd_proc.c's ROOT_STOCK_APPS.
+ *
+ * It is now nd_svc_format_card(): the CORE runs the helper, on whichever card
+ * the core itself can see. The device is not a parameter, which is the point
+ * -- a verb that took one would let any app on the phone name a block device,
+ * and the two most interesting ones here are the partitions the phone is
+ * running from. nd_svc.h has the argument; spec-app-services.md section 10
+ * has the working.
+ *
+ * What is left of the old note is still true of the core's spawn: the path is
+ * handed to execve verbatim, because PathRemap intercepts open() and not
+ * execve(), and nd_proc.h says an executable path is not ND_ROOT-resolved.
+ * See OPEN-QUESTIONS.md ST-3 for the one behaviour that differs when the
+ * helper is missing.
  */
 
 #include <dirent.h>
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -64,9 +74,9 @@
 #include "nd_keycodes.h"
 #include "nd_log.h"
 #include "nd_paths.h"
-#include "nd_proc.h"
 #include "nd_settings.h"
 #include "nd_storage.h"
+#include "nd_svc.h"
 #include "nd_text.h"
 #include "nd_types.h"
 #include "nd_ui.h"
@@ -89,8 +99,9 @@ const char *const nd_setapp_get_more_label = "Get more...";
 const char *const nd_setapp_get_more_help =
     "Get more wallpapers by adding an SD card!\n"
     "\n"
-    "Format a card as FAT32, make a folder called \"wallpapers\" on it, and "
-    "copy your .jpg or .gif files into it.\n"
+    "Let the phone format a card for you, or format one as ext4 yourself, "
+    "make a folder called \"wallpapers\" on it, and copy your .jpg or .gif "
+    "files into it.\n"
     "\n"
     "240x175 pictures look best, and a .gif that size animates. Put the card "
     "in the phone and they appear in this list. The phone can set a blank "
@@ -107,17 +118,101 @@ const char *const nd_setapp_get_more_help_with_card =
  * _show_about() and _show_memory_card(), which is why it reads as an
  * afterthought there. The two leading spaces in the folder table are load
  * bearing -- TextScroller draws them. */
+/* Shown before anything is written, on every route to a format -- the card
+ * that cannot be read, the card that can, and now the card in the old FAT
+ * format.
+ *
+ * ============ AND THE ARGUMENT THAT LOST ============
+ *
+ * This said that the card stays FAT32 on purpose, so it keeps reading on any
+ * PC, and that this was why two FAT partitions beat one ext filesystem.
+ *
+ * That was the wrong trade and the card is ext4 now. The reason is the one
+ * the old design was working around: FAT records no ownership, so every
+ * permission on a FAT card comes from mount options applied to the WHOLE
+ * filesystem. "This app may read its own program but not rewrite it" cannot
+ * be said on FAT at all, and "downloads are writable but your music is not"
+ * needed a second partition to say. On ext4 both are one chmod, and the
+ * partition table goes away with the problem.
+ *
+ * What it costs is real and worth stating plainly rather than defending:
+ * Windows and macOS need a helper to read an ext4 card. Linux does not. The
+ * SD card help says so.
+ */
+/* ============ A CONFIRMATION HAS TO FIT, MORE THAN MOST ============
+ *
+ * This one did not. It ran to nine lines in a dialog that shows five, so the
+ * phone asked "Format this card? EVERYTHING ON IT WILL BE ERASED!" and then
+ * cut its own explanation mid-sentence at "It is split in two: one part" --
+ * with no ellipsis, because nd_msgdialog's is a codepoint this font cannot
+ * draw. A truncated sentence on the screen that destroys somebody's photos is
+ * the worst place in this tree for that bug to have been.
+ *
+ * What the card ends up looking like is not what a person needs while their
+ * thumb is over the key. It is in the SD card help, which is an
+ * nd_scroller_init() and therefore PAGES rather than clipping -- the right
+ * widget for text that will not fit, and the reason this could be cut down
+ * rather than crammed in. 4 lines of 5. */
+const char *const nd_setapp_format_warning = "Format this card?\n"
+                                             "\n"
+                                             "EVERYTHING ON IT WILL BE ERASED!";
+
 const char *const nd_setapp_sdcard_help =
-    "A NeoDCT memory card is a FAT32 card with these folders on it:\n"
+    "A NeoDCT memory card is an ext4 card with these folders on it:\n"
     "\n"
     "  wallpapers   .jpg and .gif pictures\n"
     "  tones        .mp3 ringtones\n"
     "  music        your music\n"
     "  backup_db    copies of your contacts\n"
     "  update       UPDATE.ndsw system updates\n"
+    "  apps         apps you installed\n"
+    "  untrusted    downloads and picture messages\n"
     "\n"
     "You can make one on a computer, or let the phone do it. Setting up only "
-    "adds the folders. Formatting erases everything on the card.";
+    "adds the folders. Formatting erases everything on the card.\n"
+    "\n"
+    "The card is ext4 because ext4 remembers who owns each file and FAT32 "
+    "does not. That is what lets one card keep your music private from an "
+    "app, let an app read its own program without being able to change it, "
+    "and give downloads a corner of their own. On a FAT32 card every file "
+    "has to be treated the same way, so none of that can be said.\n"
+    "\n"
+    "Linux reads ext4 everywhere. Windows and macOS need a helper to read "
+    "one, which is the cost of the card knowing who owns what.\n"
+    "\n"
+    "Anything in untrusted arrived on its own rather than being chosen by "
+    "you. It cannot reach your music and nothing there can run. Apps you "
+    "install live in apps, each in its own folder, with a data folder inside "
+    "it that only that app writes to -- so removing the folder removes the "
+    "app and everything it kept.";
+
+/* Five lines is the whole dialog. See settings_app.h. */
+const char *const nd_setapp_sdcard_legacy =
+    "Card uses the old format.\n"
+    "Music and photos work.\n"
+    "Apps need a reformat,\n"
+    "which erases the card.";
+
+const char *const nd_setapp_sdcard_legacy_help =
+    "This card was set up by an older version of NeoDCT, when cards were "
+    "FAT32. It still works for everything it did before: your music, your "
+    "wallpapers, your ringtones and system updates all read normally.\n"
+    "\n"
+    "What it cannot do is hold an app you installed.\n"
+    "\n"
+    "FAT32 does not record who owns a file. Every file on a FAT32 card has "
+    "to be treated identically, so there is no way to say that an app may "
+    "read its own program but not rewrite it, and no way to keep your music "
+    "private from something you installed. Those rules are the whole of how "
+    "the phone keeps an app in its place, and on this card they cannot be "
+    "written down.\n"
+    "\n"
+    "Formatting the card makes it ext4, which does record ownership. It also "
+    "ERASES EVERYTHING ON THE CARD. Copy anything you want to keep to a "
+    "computer first.\n"
+    "\n"
+    "There is no hurry. A card in the old format is not unsafe -- it simply "
+    "has nowhere for apps to live.";
 
 size_t nd_setapp_bt_lines(char lines[][ND_SETAPP_BT_LINE_MAX], size_t max, bool enabled,
                           bool connected)
@@ -1128,56 +1223,53 @@ static void show_about(nd_ui *ui)
  * _show_memory_card()
  * ------------------------------------------------------------------ */
 
-/* The format helper, so app_shutdown() can kill it. subprocess.call() blocks
- * until the child is done, so this is -1 except while a format is running --
- * but an incoming call during a format is exactly the case nd_app.h's
- * teardown contract is written for. */
-static pid_t g_format_pid = -1;
-
-/* subprocess.call([SDCARD_HELPER, "format", device]) -- spawn, wait, return
- * the exit status. See the file header for why the path is not resolved.
+/* The destructive one, on both routes to it.
  *
- * subprocess.call INHERITS stdin/stdout/stderr; nd_proc_spec closes anything
- * it is not given, so the three are mapped through explicitly. The helper
- * logs to stderr and the serial console is where that has to land. */
-static int sdcard_format(const char *device)
+ * It used to be reachable ONLY from the "this card cannot be read" branch,
+ * which was fine while a format just laid down one filesystem: a card that
+ * already mounted had nothing to gain. That stopped being true with
+ * SECURITY-PLAN.md section 1. A NeoDCT card is now two FAT32 partitions, and
+ * the second one -- the arrival side, where downloads and picture messages
+ * land -- can only come from the phone partitioning the card. Leaving the
+ * format behind the unreadable-card branch would mean an owner with a
+ * perfectly good FAT32 card could never get one, which is the whole feature
+ * unreachable for the people most likely to want it.
+ */
+static void offer_format(nd_ui *ui, const nd_card *card)
 {
-    const char *argv[4];
-    nd_proc_spec spec;
-    nd_proc_status st;
-    pid_t pid = -1;
-    int fd;
+    nd_msgdialog dialog;
 
-    argv[0] = ND_SETAPP_SDCARD_HELPER;
-    argv[1] = "format";
-    argv[2] = device;
-    argv[3] = NULL;
-
-    memset(&spec, 0, sizeof spec);
-    spec.argv = argv;
-    spec.owner = ND_OWNER_SYSTEM;
-    for (fd = 0; fd <= 2; fd++) {
-        spec.fds[spec.n_fds].child_fd = fd;
-        spec.fds[spec.n_fds].our_fd = fd;
-        spec.n_fds++;
+    nd_msgdialog_init(&dialog, ui, nd_setapp_format_warning);
+    nd_msgdialog_set_button(&dialog, "Format");
+    if (nd_msgdialog_show(&dialog) != ND_KEY_ENTER)
+        return;
+    if (card->device[0] == '\0') {
+        nd_msgdialog_init(&dialog, ui, "No card device to format.");
+        nd_msgdialog_set_button(&dialog, "OK");
+        nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
+        (void)nd_msgdialog_show(&dialog);
+        return;
     }
-
-    if (nd_proc_spawn(ND_SETAPP_SDCARD_HELPER, &spec, &pid) != ND_OK) {
-        nd_log_err(ND_LOG_OS, "cannot run %s: %s", ND_SETAPP_SDCARD_HELPER, strerror(errno));
-        return -1;
+    /* `card` is read again by the core, which is not a duplicated lookup but
+     * the whole design: the check above is what this SCREEN knows, and the
+     * device the helper is pointed at is what the CORE knows. The app never
+     * names it. nd_svc.h.
+     *
+     * This blocks for as long as the format takes, exactly as the spawn it
+     * replaced did. What it can no longer do is cancel: the pid lives in the
+     * core now, so app_shutdown() has nothing to kill and an incoming call
+     * during a format no longer interrupts an mkfs half way through. */
+    if (nd_svc_format_card()) {
+        nd_msgdialog_init(&dialog, ui, "Card formatted and ready.");
+        nd_msgdialog_set_button(&dialog, "OK");
+    } else {
+        nd_msgdialog_init(&dialog, ui,
+                          "Formatting failed.\nThe card may be write "
+                          "protected.");
+        nd_msgdialog_set_button(&dialog, "OK");
+        nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
     }
-    g_format_pid = pid;
-
-    memset(&st, 0, sizeof st);
-    if (nd_proc_wait(pid, -1.0, &st) != ND_OK) {
-        g_format_pid = -1;
-        return -1;
-    }
-    g_format_pid = -1;
-    if (st.exited)
-        return st.exit_status;
-    /* subprocess.call returns -signo for a signalled child. */
-    return -st.signo;
+    (void)nd_msgdialog_show(&dialog);
 }
 
 static void show_memory_card(nd_ui *ui)
@@ -1209,6 +1301,12 @@ static void show_memory_card(nd_ui *ui)
         (void)nd_msgdialog_show(&dialog);
         nd_scroller_init(&help, ui, nd_setapp_sdcard_help, NULL, NULL);
         nd_scroller_show(&help);
+        /* A card that already works can still be missing the arrival
+         * partition -- every card made on a computer is. Offer, do not
+         * insist: the answer for a card that is doing its job is usually no,
+         * and the dialog's cancel key is what says it. */
+        if (card.untrusted[0] == '\0')
+            offer_format(ui, &card);
         return;
     }
 
@@ -1236,32 +1334,27 @@ static void show_memory_card(nd_ui *ui)
         return;
     }
 
+    if (card.state == ND_CARD_LEGACY_FORMAT) {
+        /* A NeoDCT card from before 0.5.0b. It mounted, the owner's music is
+         * on it and plays; what it cannot do is hold an installed app,
+         * because FAT records no ownership and the confinement is expressed
+         * entirely in ownership (nd_storage.h).
+         *
+         * So this says what is true rather than reusing the generic "nothing
+         * we can mount" below, which would be a lie about a working card --
+         * and it says the cost out loud, because the remedy erases it. */
+        nd_msgdialog_init(&dialog, ui, nd_setapp_sdcard_legacy);
+        nd_msgdialog_set_button(&dialog, "More");
+        (void)nd_msgdialog_show(&dialog);
+        nd_scroller_init(&help, ui, nd_setapp_sdcard_legacy_help, NULL, NULL);
+        nd_scroller_show(&help);
+        offer_format(ui, &card);
+        return;
+    }
+
     /* "Nothing we can mount: the only way forward is to reformat, which is
      * destructive, so make that unmistakable." */
-    nd_msgdialog_init(&dialog, ui,
-                      "This card cannot be read.\n"
-                      "Format it? EVERYTHING ON IT WILL BE ERASED!");
-    nd_msgdialog_set_button(&dialog, "Format");
-    if (nd_msgdialog_show(&dialog) != ND_KEY_ENTER)
-        return;
-    if (card.device[0] == '\0') {
-        nd_msgdialog_init(&dialog, ui, "No card device to format.");
-        nd_msgdialog_set_button(&dialog, "OK");
-        nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
-        (void)nd_msgdialog_show(&dialog);
-        return;
-    }
-    if (sdcard_format(card.device) == 0) {
-        nd_msgdialog_init(&dialog, ui, "Card formatted and ready.");
-        nd_msgdialog_set_button(&dialog, "OK");
-    } else {
-        nd_msgdialog_init(&dialog, ui,
-                          "Formatting failed.\nThe card may be write "
-                          "protected.");
-        nd_msgdialog_set_button(&dialog, "OK");
-        nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
-    }
-    (void)nd_msgdialog_show(&dialog);
+    offer_format(ui, &card);
 }
 
 /* ------------------------------------------------------------------ *
@@ -1304,14 +1397,13 @@ int app_run(nd_ui *ui)
     }
 }
 
-/* Nothing here holds the sound card. The one child this app can have is the
- * SD-card format helper, and it is running only while sdcard_format() is
- * blocked in nd_proc_wait() -- which is precisely when an incoming call would
- * arrive with a mkfs in flight. */
-void app_shutdown(void)
-{
-    if (g_format_pid > 0) {
-        (void)nd_proc_terminate(g_format_pid, 0.2, NULL);
-        g_format_pid = -1;
-    }
-}
+/* Nothing here holds the sound card, and since the format moved to the core
+ * this app has no children at all -- so there is nothing to tear down.
+ *
+ * It is kept, empty, rather than deleted: nd_app.h makes app_shutdown() part
+ * of the contract every app answers, and an app that answers it with "nothing
+ * to do" is saying something. What it used to do was SIGTERM the SD-card
+ * helper when an incoming call arrived mid-format, and losing that is a real
+ * change -- for the better, since a mkfs killed half way leaves a card that
+ * mounts nowhere, but a change. spec-app-services.md 10.3. */
+void app_shutdown(void) {}

@@ -43,6 +43,7 @@
 #include <unistd.h>
 
 #include "nd_app.h"
+#include "nd_broker.h"
 #include "nd_crash.h"
 #include "nd_fb_priv.h"
 #include "nd_input.h"
@@ -50,6 +51,12 @@
 #include "nd_log.h"
 #include "nd_paths.h"
 #include "nd_proc.h"
+
+#include <sched.h>
+#include <sys/mount.h>
+#include <sys/wait.h>
+
+#include "nd_priv.h"
 #include "nd_svc.h"
 #include "nd_types.h"
 #include "nd_ui.h"
@@ -113,6 +120,32 @@ static void on_sigchld(int signo)
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0)
         remember(pid, status);
     errno = saved;
+}
+
+bool nd_proc_namespaces_available(void)
+{
+    /* -1 not yet asked, 0 no, 1 yes. Asked at most once per process: the
+     * answer is a property of the kernel and cannot change under us. */
+    static int known = -1;
+    pid_t pid;
+    int status = 0;
+
+    if (known >= 0)
+        return known == 1;
+
+    /* In a child, because unshare(CLONE_NEWNS) SUCCEEDS -- and the core
+     * would then be in a mount namespace of its own for the rest of the
+     * boot, which is not a thing to do by accident while asking a question. */
+    (void)fflush(NULL);
+    pid = fork();
+    if (pid < 0)
+        return false; /* not remembered: a failed fork says nothing */
+    if (pid == 0)
+        _exit(unshare(CLONE_NEWNS) == 0 ? 0 : 1);
+    if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status))
+        return false;
+    known = (WEXITSTATUS(status) == 0) ? 1 : 0;
+    return known == 1;
 }
 
 nd_err nd_proc_reaper_start(void)
@@ -285,7 +318,15 @@ nd_err nd_proc_spawn(const char *path, const nd_proc_spec *spec, pid_t *pid_out)
     char *const *argv;
     char *const *envp;
     bool close_others;
+    bool no_new_privs;
+    bool private_mounts;
+    nd_priv_id run_as;
     int fd_limit;
+    /* Copied out of the spec before the fork, and filtered to what exists:
+     * a hide that fails in the child is then always a bug rather than a
+     * path RemoteShell has not created yet. */
+    const char *hide[ND_PROC_MAX_HIDE];
+    size_t n_hide;
 
     if (path == NULL || spec == NULL || spec->argv == NULL || pid_out == NULL)
         return ND_ERR_INVAL;
@@ -294,6 +335,25 @@ nd_err nd_proc_spawn(const char *path, const nd_proc_spec *spec, pid_t *pid_out)
 
     n_fds = spec->n_fds;
     close_others = spec->close_others;
+    no_new_privs = spec->no_new_privs;
+    private_mounts = spec->private_mounts;
+    n_hide = 0u;
+    if (spec->hide_paths != NULL) {
+        size_t h;
+
+        for (h = 0u; spec->hide_paths[h] != NULL && n_hide < ND_PROC_MAX_HIDE; h++) {
+            /* access() rather than a stat of the type: what matters is that
+             * mount() will have a target, and a path we cannot even reach is
+             * one the child cannot reach either. Done HERE because access()
+             * is not on the async-signal-safe list. */
+            if (access(spec->hide_paths[h], F_OK) == 0)
+                hide[n_hide++] = spec->hide_paths[h];
+        }
+    }
+    /* A copy, like everything else here: after the fork the child may not
+     * dereference anything that could have been mid-update in another
+     * thread, and nd_priv_id is plain integers precisely so this works. */
+    run_as = spec->run_as;
     /* sysconf() BEFORE the fork: it is not on the async-signal-safe list, and
      * the child between fork and execve may call nothing that is not. */
     fd_limit = close_others ? (int)sysconf(_SC_OPEN_MAX) : 0;
@@ -367,6 +427,62 @@ nd_err nd_proc_spawn(const char *path, const nd_proc_spec *spec, pid_t *pid_out)
                 if (!keep)
                     (void)close(fd);
             }
+        }
+
+        /* The mount namespace, BEFORE the privilege drop, because unsharing
+         * one and mounting inside it both need CAP_SYS_ADMIN -- which is
+         * exactly the privilege about to be given away.
+         *
+         * unshare failing is not fatal: CONFIG_MNT_NS is a vendor kernel
+         * question and a phone without it must still open its browser. The
+         * uid boundary is what carries the confinement; this is defence on
+         * top of it. A hide failing after the namespace exists IS fatal,
+         * because that one is a bug and the alternative is a child that
+         * believes it cannot see something it can. */
+        if (private_mounts && unshare(CLONE_NEWNS) == 0) {
+            size_t h;
+
+            /* Without this every mount below propagates back into the
+             * parent's namespace, which would hide these paths from the
+             * whole phone rather than from this child. */
+            if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0)
+                _exit(123);
+            for (h = 0u; h < n_hide; h++) {
+                /* An empty, read-only, mode-0000 tmpfs. The directory still
+                 * exists and is empty, which is a quieter failure inside the
+                 * child than a missing path and just as final. */
+                if (mount("none", hide[h], "tmpfs", MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC,
+                          "size=0k,mode=0000") != 0)
+                    _exit(124);
+            }
+        }
+
+        /* Become somebody else, LAST, immediately before the execve.
+         *
+         * Last because everything above needs the privilege the caller had:
+         * dup2 onto a descriptor the child could not have opened for itself
+         * is the whole point of the inherited-fd design, and close() on a
+         * range is cheaper before the uid changes than after. Immediately
+         * before, because the window between dropping and exec'ing is code
+         * running as the target user with the parent's memory still mapped,
+         * and it should be as close to nothing as it can be.
+         *
+         * nd_priv_become() is four syscalls on integers copied before the
+         * fork, and every one of them is read back -- see nd_priv.h on why
+         * the order is the whole of it. A failure is not recoverable and
+         * must not be ignored: continuing would run untrusted code with
+         * whatever privilege happened to be left. 120 + the step, so a
+         * caller's waitpid can tell WHICH call failed apart from the 126 of
+         * a failed dup2 and the 127 of a failed execve. */
+        if (no_new_privs && !run_as.valid) {
+            if (nd_priv_no_new_privs() != 0)
+                _exit(121);
+        }
+        {
+            int step = nd_priv_become(&run_as);
+
+            if (step != 0)
+                _exit(120 + step);
         }
 
         (void)execve(path, argv, envp);
@@ -560,6 +676,174 @@ static void pump_keys(nd_ui *ui, nd_input_channel *ch)
     }
 }
 
+/* ------------------------------------------------------------------ *
+ * Which user an app runs as -- see nd_proc.h for the reasoning
+ * ------------------------------------------------------------------ */
+
+/* Stock apps that hold root because their one privileged operation has no
+ * route through nd_svc.
+ *
+ * ============ IT IS EMPTY, AND THAT IS THE POINT ============
+ *
+ * NO STOCK APP RUNS AS ROOT. Every one of them is launched as ndusr with
+ * no_new_privs set, and the only apps on this phone that are not are the
+ * engineering ones, when engineering mode is on, deliberately.
+ *
+ * The five that used to be here, and what each was traded for:
+ *
+ *   Power, Update, Downgrade   all three wanted only reboot and poweroff, and
+ *                              both are now verbs on the service socket
+ *                              (spec-app-services.md section 9). Downgrade
+ *                              cost nothing extra -- it has no halt code of
+ *                              its own and reaches Update's through dlopen.
+ *   Clock                      settimeofday(), now nd_svc_set_clock(), which
+ *                              the core performs after refusing any date
+ *                              outside what this build will believe.
+ *   Settings                   the SD-card format helper, now
+ *                              nd_svc_format_card() -- and note that the verb
+ *                              takes NO DEVICE: the core reads the card
+ *                              itself, so there is no block-device name for
+ *                              an app to choose. Section 10.
+ *
+ * ============ IF YOU ARE ABOUT TO ADD ONE ============
+ *
+ * Don't, until the verb has been tried and found impossible; the five above
+ * all looked like they needed root and none of them did. If a name really
+ * must go here, WRITE IT AS A WHOLE PATH, as every entry above was written,
+ * because the name alone is not safe to match on:
+ *
+ * "Does this app's directory end in /Power" grants root to a directory called
+ * Power ANYWHERE -- and while nothing today can create one outside the two
+ * read-only directories the scanner reads, the moment a third app directory
+ * exists (a user-installed set is the obvious one) a folder named Power in it
+ * inherits reboot. That is a privilege grant arriving as a side effect of a
+ * feature nobody connected to privilege, which is exactly how this kind of
+ * hole gets made.
+ *
+ * A full-path match cannot do that. /NeoDCT/System/apps/Power is a specific
+ * directory on a dm-verity'd squashfs, and being called Power buys nothing at
+ * all anywhere else.
+ *
+ * The NULL is the whole array. C forbids a zero-length one, and the loop
+ * below reads the terminator, so an empty policy costs a pointer and no
+ * special case. */
+static const char *const ROOT_STOCK_APPS[] = {
+    NULL,
+};
+
+/* Is `path` inside `dir`? A prefix test that stops at a component boundary,
+ * because a plain strncmp would also match /NeoDCT/System/engineering/appsX
+ * -- which nothing creates today, and which would be a privilege grant if
+ * anything ever did. */
+static bool path_under(const char *path, const char *dir)
+{
+    size_t n;
+
+    if (path == NULL || dir == NULL)
+        return false;
+    n = strlen(dir);
+    if (strncmp(path, dir, n) != 0)
+        return false;
+    return path[n] == '/' && path[n + 1u] != '\0';
+}
+
+/* Apps that run as ndusr_ut inside a mount namespace. See nd_proc.h for why
+ * this is the core's job and not the app's, and for why it is whole paths.
+ *
+ * One entry, and it is the browser. The media player is not listed because it
+ * is not an app -- netsurf exec's neodct-play when a <video> is clicked, and
+ * it inherits both the uid and the namespace from its parent, which is the
+ * whole point of confining the parent. */
+static const char *const UNTRUSTED_APPS[] = {
+    ND_PATH_APPS_DIR "/Browser",
+    NULL,
+};
+
+bool nd_proc_app_is_untrusted(const nd_app_entry *app)
+{
+    size_t i;
+
+    /* Fail closed means something DIFFERENT here from what it means in
+     * nd_proc_app_needs_root(), and the asymmetry is deliberate. There, an
+     * unknown app must not get root, so the safe answer is false. Here, an
+     * unknown app is a normal app: answering true would confine something
+     * that was never meant to be confined and break it in ways nobody
+     * predicted. Both defaults are "an app we cannot identify is an ordinary
+     * ndusr app". */
+    if (app == NULL)
+        return false;
+
+    for (i = 0u; UNTRUSTED_APPS[i] != NULL; i++) {
+        if (strcmp(app->path, UNTRUSTED_APPS[i]) == 0)
+            return true;
+    }
+
+    /* ============ AND EVERYTHING THE OWNER INSTALLED ============
+     *
+     * This is the ONE prefix test in the tree that decides a privilege, and
+     * everywhere else the rule is whole-path comparison precisely to stop
+     * "/NeoDCT/System/apps/../../tmp/Evil" reading as a stock app. So why is a
+     * prefix safe here?
+     *
+     * Because it is the direction that matters. Everywhere else the prefix
+     * would GRANT something, and a traversal that escapes the prefix would
+     * grant it wrongly. Here the prefix TAKES something away, so the only thing
+     * a traversal can achieve is to escape into being confined -- which is the
+     * safe side. An attacker gains nothing by making a path look like it is
+     * under the apps directory.
+     *
+     * The direction it could be attacked from is the other one: a path that IS
+     * under the user apps directory but does not look like it, and so escapes
+     * confinement. That cannot happen from here, because app->path is not
+     * attacker-supplied text -- it is built by nd_ui_scan_apps() from the
+     * directory it was asked to read, so an app found under
+     * ND_PATH_USER_APPS_DIR has that string as its literal prefix.
+     *
+     * A symlink under the apps directory pointing into /NeoDCT/System is the
+     * remaining case, and it does not help either: the app would still be
+     * launched by its apps-directory path, still match here, and still be
+     * confined. It would run stock code with LESS privilege, not more.
+     *
+     * ============ AND IT IS A CARD NOW ============
+     *
+     * The directory moved to /NeoDCT/User/sdcard/apps, which strengthens the
+     * argument rather than complicating it. A card comes out of the phone and
+     * goes into a PC, so an app.so there is bytes a stranger chose in the most
+     * literal sense available -- and every mode on the card is a claim until
+     * neodct-sdcard's apply_layout() has restated it. A rule about WHERE code
+     * lives survives all of that; a rule about what the code says about itself
+     * would not. */
+    {
+        static const char PREFIX[] = ND_PATH_USER_APPS_DIR "/";
+
+        if (strncmp(app->path, PREFIX, sizeof PREFIX - 1u) == 0)
+            return true;
+    }
+    return false;
+}
+
+bool nd_proc_app_needs_root(const nd_app_entry *app, bool engineering_mode)
+{
+    size_t i;
+
+    /* Fail closed. A caller with no app to describe gets the confined answer,
+     * because the alternative is that a bug hands out root. */
+    if (app == NULL)
+        return false;
+
+    /* The second gate goes here: `engineering_mode && nd_boot_engmode() &&`.
+     * See the header on why one of these lives on the writable partition and
+     * the other must not. */
+    if (engineering_mode && path_under(app->path, ND_PATH_ENG_APPS_DIR))
+        return true;
+
+    for (i = 0u; ROOT_STOCK_APPS[i] != NULL; i++) {
+        if (strcmp(app->path, ROOT_STOCK_APPS[i]) == 0)
+            return true;
+    }
+    return false;
+}
+
 nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry, const char *arg,
                           nd_crash_info *crash_out)
 {
@@ -577,6 +861,11 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
     int crash_pipe[2] = {-1, -1};
     nd_svc_server *svc = NULL;
     int svc_fd = -1;
+    bool untrusted;
+    /* Which user the child becomes, by NAME. The broker looks the uid up on
+     * its own side rather than being handed one: nd-core is unprivileged, so a
+     * uid on that wire would be a uid the caller chose. NULL means no drop. */
+    const char *run_user = NULL;
     int fb_fd = -1;
     nd_proc_spec spec;
     nd_proc_status st;
@@ -588,6 +877,12 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
         return ND_ERR_INVAL;
     if (crash_out != NULL)
         memset(crash_out, 0, sizeof *crash_out);
+
+    /* Decided once, up here, because it changes two things far apart: whether
+     * a service socket is created at all (below) and which user the child
+     * becomes (further below). Reading the policy twice would let the two
+     * drift. */
+    untrusted = nd_proc_app_is_untrusted(app);
 
     if (nd_input_channel_open(&ch) != ND_OK) {
         nd_log_err(ND_LOG_OS, "App load failed: no key channel for %s", app->name);
@@ -616,7 +911,21 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
      * A failure is not fatal: the app runs without a channel and every
      * nd_svc_* call answers "not present", which is the sentence Messages
      * and the Modem app drew before this existed. */
-    if (nd_svc_server_open(&svc) == ND_OK)
+    /* ...and an UNTRUSTED app gets none at all.
+     *
+     * nd_svc validates the RECORD, never the SENDER -- there is no
+     * SO_PEERCRED, no SCM_CREDENTIALS, nothing (spec-app-services.md 5). So
+     * the socket is a straight line from whoever holds the descriptor to a
+     * root thread that will send an SMS, format the card or power the phone
+     * off on their behalf. Handing one to the process whose job is to render
+     * whatever the internet sends it would make every one of those verbs
+     * reachable from a web page.
+     *
+     * Withholding it is not a check that can be got round: an fd that was
+     * never created cannot be inherited, and netsurf inherits its whole
+     * environment from this app -- NEODCT_SERVICE_FD included -- so anything
+     * short of "there is no socket" would have leaked it one level down. */
+    if (!untrusted && nd_svc_server_open(&svc) == ND_OK)
         svc_fd = nd_svc_server_child_fd(svc);
 
     path = apprun_path(runner, sizeof runner);
@@ -646,6 +955,105 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
     spec.envp = envp;
     spec.owner = ND_OWNER_APP;
     spec.n_fds = 0u;
+
+    /* Become ndusr unless this app is one of the two exceptions in
+     * nd_proc_app_needs_root().
+     *
+     * Nothing an ordinary app needs is lost by this, and that is a property
+     * of the design rather than luck: the framebuffer, the key channel, the
+     * crash pipe and the service socket all arrive as INHERITED DESCRIPTORS,
+     * and an open file keeps the access it was opened with no matter who the
+     * process becomes afterwards. nd_app.h has said so since it was written
+     * -- "the already-open framebuffer, so the child does not need /dev/fb0
+     * permission" -- and this is the line that finally makes that sentence
+     * do something.
+     *
+     * The lookup is here, in the parent, because getpwnam() allocates and
+     * reads files and neither is allowed between fork and execve. An image
+     * built without the users table leaves run_as.valid false, which
+     * nd_priv_become() treats as a documented no-op: the app then runs
+     * exactly as every build before this one did, rather than refusing to
+     * open. */
+    if (untrusted) {
+        /* Confined by the core, because only the core still has the privilege
+         * to do it. nd_proc.h carries the whole argument.
+         *
+         * Two lists, not one. The browser and an app the owner installed are
+         * both untrusted and are not untrusted in the same WAY: the browser
+         * is stock code with a hostile input, and an installed app is code
+         * from a card. The one thing that separates them here is the
+         * browser's own profile directory, which an installed app has no
+         * business in -- see ND_PROC_INSTALLED_HIDE_EXTRA. */
+        static const char *const hide_common[] = ND_PROC_UNTRUSTED_HIDE_PATHS;
+        const char *hide[ND_ARRAY_LEN(hide_common) + 1u];
+        size_t h = 0u;
+
+        while (hide_common[h] != NULL && h + 2u < ND_ARRAY_LEN(hide)) {
+            hide[h] = hide_common[h];
+            h++;
+        }
+        /* Under the apps directory means the owner installed it, which is the
+         * one case that does not get to see the browser's profile. */
+        {
+            static const char PREFIX[] = ND_PATH_USER_APPS_DIR "/";
+
+            if (strncmp(app->path, PREFIX, sizeof PREFIX - 1u) == 0)
+                hide[h++] = ND_PROC_INSTALLED_HIDE_EXTRA;
+        }
+        hide[h] = NULL;
+
+        run_user = ND_PRIV_USER_UT;
+
+        /* ============ THIS ONE REFUSES ============
+         *
+         * It used to log and carry on, which meant an image without the users
+         * table ran NETSURF AS ROOT -- the single process on this phone that
+         * most needs not to be, parsing HTML off the network with every
+         * capability the core has. One nd_log_err line in a boot log is not a
+         * fair warning for that; it was missed for exactly as long as you
+         * would expect, and the first anyone knew was a `top` on a real build
+         * showing `root ... /usr/bin/netsurf-fb file:///NeoDCT/...`.
+         *
+         * An untrusted app that cannot be confined does not run. Not opening
+         * is a bad outcome; opening with root is a worse one, and unlike the
+         * first it is invisible. The log line says what to do about it,
+         * because the cause is nearly always a buildroot output/ tree older
+         * than the users table -- .config is generated from the defconfig
+         * ONCE, so a stale one never grows the BR2_ROOTFS_USERS_TABLES line
+         * no matter how many times it is rebuilt. */
+        if (!nd_priv_lookup(ND_PRIV_USER_UT, &spec.run_as)) {
+            nd_log_err(ND_LOG_OS,
+                       "REFUSING to launch %s: there is no " ND_PRIV_USER_UT
+                       " in this image, so it cannot be confined, and an "
+                       "untrusted app is not run with the core's privileges. "
+                       "Rebuild with the users table: cd buildroot && make "
+                       "neodct_qemu_defconfig && make. nd-selftest reports the "
+                       "same thing.",
+                       app->name);
+            rc = ND_ERR_PERM;
+            goto done;
+        }
+        spec.no_new_privs = true;
+        spec.private_mounts = true;
+        spec.hide_paths = hide;
+    } else if (!nd_proc_app_needs_root(app, nd_ui_engineering_mode(ui))) {
+        run_user = ND_PRIV_USER;
+        /* A trusted app still runs -- refusing here would brick every app on
+         * the phone rather than confine anything -- but it is an ERROR and it
+         * says so. It was nd_log(), an ordinary informational line, which is
+         * how a whole phone came to be running every app as root with nothing
+         * in the log that looked like a problem. */
+        if (!nd_priv_lookup(ND_PRIV_USER, &spec.run_as))
+            nd_log_err(ND_LOG_OS,
+                       "SECURITY: no " ND_PRIV_USER " in this image, so %s runs "
+                       "as ROOT. Every app does. Rebuild with the users table: "
+                       "cd buildroot && make neodct_qemu_defconfig && make.",
+                       app->name);
+        /* Only on the dropped ones. On a root app it would forbid nothing
+         * that root cannot already do, and an engineering app is the one
+         * place something might legitimately want to exec a setuid helper. */
+        spec.no_new_privs = true;
+    }
     /* The three inherited descriptors keep the numbers they already have; the
      * child is told what they are rather than being given fixed slots, which
      * is what nd_app.h means by "the numbers themselves are not fixed". Each
@@ -670,7 +1078,17 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
 
     nd_log(ND_LOG_OS, "Launching %s: %s %s %s", app->name, path, app->path, argv[2]);
 
-    rc = nd_proc_spawn(path, &spec, &pid);
+    /* THE ONE OPERATION THE UI CANNOT DO ANY MORE.
+     *
+     * setgroups() needs CAP_SETGID, and an ndusr nd-core has none -- measured,
+     * not assumed: dropping the core and launching an app fails at exit 122,
+     * ND_PRIV_STEP_SETGROUPS, before execve. Everything else on this path the
+     * unprivileged core still does itself, which is why only the fork and the
+     * reap cross the socket. */
+    if (nd_broker_default() != NULL)
+        rc = nd_broker_spawn(nd_broker_default(), path, &spec, run_user, &pid);
+    else
+        rc = nd_proc_spawn(path, &spec, &pid);
     if (rc != ND_OK)
         goto done;
 
@@ -707,7 +1125,18 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
         restore = sigaction(SIGPIPE, &ign, &prev) == 0;
 
         for (;;) {
-            if (nd_proc_wait(pid, 0.0, &st) == ND_OK)
+            /* The app is the BROKER's child when there is one, so only the
+             * broker can reap it -- waitpid() here would return ECHILD for a
+             * process this one never forked. */
+            nd_err w = (nd_broker_default() != NULL)
+                           ? nd_broker_wait(nd_broker_default(), pid, 0.0, &st)
+                           : nd_proc_wait(pid, 0.0, &st);
+
+            if (w == ND_OK)
+                break;
+            /* A broker that has died takes the app's exit status with it.
+             * Stop rather than spin: the child is unreachable either way. */
+            if (nd_broker_default() != NULL && w != ND_ERR_TIMEOUT)
                 break;
             pump_keys(ui, &ch);
         }

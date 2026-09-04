@@ -26,6 +26,25 @@ if ! command -v log > /dev/null 2>&1; then
     }
 fi
 
+# --- the panel -----------------------------------------------------------
+#
+# progress_filter, progress_frame and progress_fail live in ndsys-panel.sh,
+# which init sources before this file. The applier is ALSO sourced on its own
+# -- by neodct/tests/test_initramfs_apply.py, and by
+# neodct/tools/test_update_ubi.sh on a running phone -- so provide no-ops
+# rather than depend on it.
+#
+# progress_filter's no-op is `exec cat`, not `return 0`: it is a pipeline
+# stage, and a stage that is not there would change the shape of the pipeline
+# and the bytes reaching the flash. `cat` changes neither the shape nor the
+# exit status, which is why every existing test in test_initramfs_apply.py
+# keeps passing without being touched.
+if ! command -v progress_filter > /dev/null 2>&1; then
+    progress_filter() { exec cat; }
+    progress_frame() { return 0; }
+    progress_fail() { return 0; }
+fi
+
 # --- finding the right block device --------------------------------------
 #
 # Device names from the kernel cmdline are a hint, nothing more. virtio-mmio
@@ -204,6 +223,16 @@ getprop() {
 # mount_card -- mount the first candidate that is not system or user.
 # Read-only: nothing at boot has any business writing to the card, and a
 # card pulled out mid-write is a card someone loses their messages from.
+#
+# nosuid,nodev,noexec as well, because this is the one mount in the whole boot
+# path whose contents were chosen by whoever last held the card. Nothing here
+# runs anything off it -- unzip reads the .ndsw and that is all -- so noexec
+# costs nothing and closes the crafted-card path SECURITY-AUDIT.md finding 9
+# describes. The card is FAT, which cannot represent a setuid bit or a device
+# node in the first place; these options are what makes that true for an ext
+# card somebody hands the phone as well.
+: "${NDSYS_CARD_MOUNT_OPTS:=ro,nosuid,nodev,noexec}"
+
 mount_card() {
     [ -n "$NDSYS_CARD_PREMOUNTED" ] && return 0
     mkdir -p "$MNT_SDCARD" 2>/dev/null
@@ -213,7 +242,8 @@ mount_card() {
         [ "$device" = "${USER_DEV:-}" ] && continue
         is_squashfs "$device" && continue
         for fstype in $NDSYS_CARD_FSTYPES; do
-            if mount -t "$fstype" -o ro "$device" "$MNT_SDCARD" 2>/dev/null; then
+            if mount -t "$fstype" -o "$NDSYS_CARD_MOUNT_OPTS" "$device" \
+                    "$MNT_SDCARD" 2>/dev/null; then
                 return 0
             fi
         done
@@ -285,13 +315,26 @@ EOF
 }
 
 clear_pending() {
-    rm -f "$STATE_DIR/pending.prop" "$STATE_DIR/pending.img" 2>/dev/null
+    rm -f "$STATE_DIR/pending.prop" "$STATE_DIR/pending.img" \
+          "$STATE_DIR/pending.manifest.json" "$STATE_DIR/pending.manifest.sig" \
+          2>/dev/null
     sync
     return 0
 }
 
 # sha256 of the image inside a .ndsw, read without unpacking it anywhere.
+#
+# package_image_sha PACKAGE [STEP PHASE TOTAL] -- with a step name the bytes
+# are counted through progress_filter on their way to sha256sum, so the bar
+# measures the read that is actually happening. Without one this is what it
+# has always been.
 package_image_sha() {
+    if [ -n "${2:-}" ]; then
+        unzip -p "$1" rootfs.squashfs 2>/dev/null \
+            | progress_filter "$2" "$3" "$4" \
+            | sha256sum | cut -d' ' -f1
+        return 0
+    fi
     unzip -p "$1" rootfs.squashfs 2>/dev/null | sha256sum | cut -d' ' -f1
 }
 
@@ -301,10 +344,178 @@ package_image_size() {
         | awk '$NF == "rootfs.squashfs" {print $1; exit}'
 }
 
+# hash_prefix DEV BYTES [FILTER | STEP PHASE]
+#
 # sha256 of the first $2 bytes of $1, which may be a file or a block device.
+#
+# Two callers arrived at this needing a bar over the read-back, and they
+# arrived by different routes, so it takes either shape rather than forcing
+# one of them to pretend:
+#
+#   FILTER        one word, the name of a shell function spliced between the
+#                 read and the hash. ndsys-recovery.sh uses it, because
+#                 recovery owns its own screen and meters onto it.
+#   STEP PHASE    ndsys-apply.sh's own boot-time bar, drawn by progress_filter.
+#
+# With neither it is byte-identical to what it was before either of them
+# existed, which is what keeps every other caller unchanged.
+#
+# THE TOTAL IS `blocks * 4096` AND NOT BYTES, and that is not a rounding
+# nicety: dd emits exactly that many, so dividing by image_bytes would leave
+# the read-back bar stuck at 99% on any image whose size is not a multiple of
+# 4096 -- which is most of them.
 hash_prefix() {
     blocks=$((${2} / 4096))
+    if [ -n "${4:-}" ]; then
+        dd if="$1" bs=4096 count="$blocks" 2>/dev/null \
+            | progress_filter "$3" "$4" "$((blocks * 4096))" \
+            | sha256sum | cut -d' ' -f1
+        return 0
+    fi
+    if [ -n "${3:-}" ]; then
+        dd if="$1" bs=4096 count="$blocks" 2>/dev/null | "$3" | sha256sum | cut -d' ' -f1
+        return 0
+    fi
     dd if="$1" bs=4096 count="$blocks" 2>/dev/null | sha256sum | cut -d' ' -f1
+}
+
+# --- the release signature -----------------------------------------------
+#
+# SECURITY-AUDIT.md section 3, the critical finding, and the reason this
+# section exists at all:
+#
+#     the running system checks the signature, writes pending.prop and
+#     installed.prop to the WRITABLE partition, and the initramfs then
+#     believes both.
+#
+# So a process that can write /NeoDCT/User stages its own image, records its
+# own verity root hash, and every boot after that verifies cleanly against
+# it. dm-verity was an integrity guarantee and not an authenticity one, and
+# an update replaces only the rootfs, so nothing removes the result.
+#
+# The check belongs HERE because the initramfs is the one link in that chain
+# an attacker cannot rewrite: it is built into the kernel image and replaced
+# only by a reflash, and so are the verifier and the public key it carries.
+# SECURITY-PLAN.md section 5 puts it in Phase 0.
+#
+# What is verified is manifest.json against manifest.sig -- the same detached
+# RSA/SHA-256 signature the Update app checked, over the same bytes, with the
+# same key. Then every field the record claims is compared against the field
+# the SIGNED manifest actually carries, so pending.prop stops being a trust
+# input and becomes a cache that has to agree with something signed.
+: "${NDSYS_VERIFY_BIN:=/bin/nd-verify}"
+: "${NDSYS_RELEASE_KEY:=/neodct-release.pub}"
+: "${NDSYS_TMPDIR:=/run/ndsys}"
+
+# Set from neodct.unsigned=1 on the kernel cmdline by init. The cmdline is
+# the U-Boot environment on the phone and -append in QEMU: not writable from
+# a running system, which is the whole point -- an escape hatch reachable
+# from the partition being defended would not be one.
+#
+# It exists because engineering mode can install an unsigned package on
+# purpose (apps/Update/main.c), and that is a real developer workflow. What
+# it cannot be is the default.
+: "${NDSYS_ALLOW_UNSIGNED:=}"
+
+# One field out of a manifest.json, by exact line.
+#
+# The manifest is json.dumps(indent=2), so a value is always alone on its
+# line at a known indent and a JSON string can never contain a raw newline.
+# Anchoring on the indent and the key name is therefore exact, and no line
+# other than the real one can match -- a changelog full of escaped quotes and
+# braces is still one line beginning with "changelog".
+#
+# This runs only on a manifest whose signature has ALREADY been checked, so
+# the parsing is of our own generator's output, not of a stranger's file.
+manifest_str() {   # manifest_str FILE INDENT KEY
+    sed -n "s/^$2\"$3\": \"\(.*\)\",\{0,1\}$/\1/p" "$1" 2>/dev/null | head -n1
+}
+
+manifest_num() {   # manifest_num FILE INDENT KEY
+    sed -n "s/^$2\"$3\": \([0-9][0-9]*\),\{0,1\}$/\1/p" "$1" 2>/dev/null | head -n1
+}
+
+# Put manifest.json and manifest.sig somewhere readable and echo the
+# directory. A .ndsw carries both; a loose staged image has them written
+# beside it by the staging code that produced it.
+manifest_pair() {   # manifest_pair IMAGE PACKAGE
+    dir="$NDSYS_TMPDIR/manifest"
+    rm -rf "$dir" 2>/dev/null
+    mkdir -p "$dir" 2>/dev/null || return 1
+    if [ -n "$2" ]; then
+        unzip -p "$1" manifest.json > "$dir/manifest.json" 2>/dev/null
+        unzip -p "$1" manifest.sig  > "$dir/manifest.sig"  2>/dev/null
+    else
+        cat "$STATE_DIR/pending.manifest.json" > "$dir/manifest.json" 2>/dev/null
+        cat "$STATE_DIR/pending.manifest.sig"  > "$dir/manifest.sig"  2>/dev/null
+    fi
+    [ -s "$dir/manifest.json" ] || return 1
+    [ -s "$dir/manifest.sig" ] || return 1
+    echo "$dir"
+}
+
+# Every field of the record that the signature covers. A mismatch means the
+# record was written by something other than the code that read this signed
+# manifest -- which is exactly the attack.
+#
+# An extraction that comes back EMPTY is a mismatch too, for every field but
+# the salt. The manifest is json.dumps(indent=2), so the patterns above are
+# exact for what mkupdate.py writes; if that formatting ever changes, this
+# fails closed and refuses the update rather than quietly comparing "" with
+# "" and letting a forged record through.
+field_agrees() {   # field_agrees KEY SIGNED-VALUE RECORD [may-be-empty]
+    _got="$(getprop "$1" "$3")"
+    if [ -z "$2" ] && [ -z "${4:-}" ]; then
+        log "$1: nothing readable in the signed manifest"
+        return 1
+    fi
+    if [ "$2" != "$_got" ]; then
+        log "$1: the record says '$_got', the signed manifest says '$2'"
+        return 1
+    fi
+    return 0
+}
+
+record_matches_manifest() {   # record_matches_manifest MANIFEST RECORD
+    _bad=0
+    field_agrees sha256 "$(manifest_str "$1" '  ' sha256)" "$2" || _bad=1
+    field_agrees version "$(manifest_str "$1" '  ' version)" "$2" || _bad=1
+    field_agrees platform "$(manifest_str "$1" '  ' platform)" "$2" || _bad=1
+    field_agrees buildtime "$(manifest_num "$1" '  ' buildtime)" "$2" || _bad=1
+    field_agrees verity_root_hash \
+        "$(manifest_str "$1" '    ' root_hash)" "$2" || _bad=1
+    field_agrees verity_block_size \
+        "$(manifest_num "$1" '    ' block_size)" "$2" || _bad=1
+    field_agrees verity_image_blocks \
+        "$(manifest_num "$1" '    ' image_blocks)" "$2" || _bad=1
+    # The one optional field: verity.salt may genuinely be absent, and then
+    # both sides are empty and that agreement is the right answer.
+    field_agrees verity_salt "$(manifest_str "$1" '    ' salt)" "$2" empty || _bad=1
+    [ "$_bad" = 0 ]
+}
+
+# The gate. True means "this image is the one the release key signed, and the
+# record describing it says what the signed manifest says".
+release_signature_ok() {   # release_signature_ok IMAGE PACKAGE RECORD
+    if [ ! -x "$NDSYS_VERIFY_BIN" ]; then
+        log "no signature verifier at $NDSYS_VERIFY_BIN"
+        return 1
+    fi
+    if [ ! -r "$NDSYS_RELEASE_KEY" ]; then
+        log "no release key at $NDSYS_RELEASE_KEY"
+        return 1
+    fi
+    dir="$(manifest_pair "$1" "$2")" || {
+        log "the update carries no manifest and signature to check"
+        return 1
+    }
+    if ! "$NDSYS_VERIFY_BIN" "$dir/manifest.json" "$dir/manifest.sig" \
+            "$NDSYS_RELEASE_KEY" > /dev/null 2>&1; then
+        log "manifest.sig is not a release signature over manifest.json"
+        return 1
+    fi
+    record_matches_manifest "$dir/manifest.json" "$3" || return 1
+    return 0
 }
 
 # The dm-verity table for the installed image. Data and hash share one
@@ -399,6 +610,7 @@ apply_pending() {
     if [ -z "$image_bytes" ] || [ -z "$want_sha" ]; then
         log "staged update is incomplete; discarding"
         record_result failed "$version" "incomplete staging record"
+        progress_fail "Update not installed" "The update was incomplete" 3
         clear_pending
         return 0
     fi
@@ -421,6 +633,7 @@ apply_pending() {
     elif [ -z "$image" ] || [ ! -f "$image" ]; then
         log "staged update is incomplete; discarding"
         record_result failed "$version" "incomplete staging record"
+        progress_fail "Update not installed" "The update was incomplete" 3
         clear_pending
         return 0
     fi
@@ -428,11 +641,49 @@ apply_pending() {
     if [ "$attempts" -ge "$MAX_ATTEMPTS" ]; then
         log "staged update failed $attempts times; gave up on $version"
         record_result failed "$version" "gave up after $attempts attempts"
+        # Not in spec-boot-progress.md section 3.3's table, and added anyway:
+        # the three boots that got here each ended on "It will try again", and
+        # this is the one where that stops being true. Leaving it silent would
+        # make the last screen the owner saw a lie.
+        progress_fail "Update not installed" "It has been given up on" 3
         clear_pending
         return 0
     fi
     sed "s/^attempts=.*/attempts=$((attempts + 1))/" "$PENDING" > "$PENDING.new" \
         && mv -f "$PENDING.new" "$PENDING" && sync
+
+    # The first pixel change, and it happens BEFORE the signature check, the
+    # size check and the hash -- so something is on the panel within a
+    # fraction of a second of the update starting rather than after the first
+    # megabyte. panel_start is idempotent ([ -z "$PANEL_UP" ] || return 0), so
+    # calling it here costs nothing on a boot where the logo already did.
+    command -v panel_start > /dev/null 2>&1 && panel_start
+    progress_frame "Checking the update" 1 0
+
+    # Before the size and the hash, because both of those check the image
+    # against the RECORD and the record is the thing being distrusted here.
+    # See the section above: this is what stops /NeoDCT/User from choosing
+    # which operating system the phone runs.
+    #
+    # A refusal clears the pending update rather than retrying. An unsigned
+    # image will not become signed on the next boot, and leaving it staged
+    # means three boots spent hashing 51 MB to reach the same answer.
+    if release_signature_ok "$image" "$package" "$PENDING"; then
+        :
+    elif [ -n "$NDSYS_ALLOW_UNSIGNED" ]; then
+        log "WARNING: neodct.unsigned=1 -- installing $version with no signature check"
+    else
+        log "refusing to install $version: not signed by the release key"
+        record_result failed "$version" "not signed by the release key"
+        # The longest hold of the six, because this is the one with a person
+        # behind it: somebody handed this phone a package that is not a NeoDCT
+        # release, and the owner has to be told to their face rather than in
+        # last_result.prop.
+        progress_fail "Update refused" "Not signed by NeoDCT" 5
+        umount_card
+        clear_pending
+        return 0
+    fi
 
     if [ -n "$package" ]; then
         actual_size="$(package_image_size "$image")"
@@ -442,6 +693,7 @@ apply_pending() {
     if [ "$actual_size" != "$image_bytes" ]; then
         log "staged image is $actual_size bytes, expected $image_bytes"
         record_result failed "$version" "staged image truncated"
+        progress_fail "Update not installed" "The update is damaged" 3
         umount_card
         clear_pending
         return 0
@@ -452,13 +704,14 @@ apply_pending() {
     # written are the ones that was said about. A card swapped between
     # staging and reboot fails here rather than installing.
     if [ -n "$package" ]; then
-        got_sha="$(package_image_sha "$image")"
+        got_sha="$(package_image_sha "$image" "Checking the update" 1 "$image_bytes")"
     else
-        got_sha="$(hash_prefix "$image" "$image_bytes")"
+        got_sha="$(hash_prefix "$image" "$image_bytes" "Checking the update" 1)"
     fi
     if [ "$got_sha" != "$want_sha" ]; then
         log "staged image sha256 mismatch; refusing to install $version"
         record_result failed "$version" "image sha256 mismatch before write"
+        progress_fail "Update not installed" "The update is damaged" 3
         umount_card
         clear_pending
         return 0
@@ -476,15 +729,25 @@ apply_pending() {
     if [ -n "$package" ]; then
         # Straight from the zip to the partition. No copy is made anywhere:
         # there is nowhere on this phone to put one.
-        if ! unzip -p "$image" rootfs.squashfs 2>/dev/null | write_system "$image_bytes"; then
+        # The counting stage goes on write_system's STDIN, so the UBI and dd
+        # branches both get a bar for free and neither knows about one.
+        if ! unzip -p "$image" rootfs.squashfs 2>/dev/null \
+                | progress_filter "Installing" 2 "$image_bytes" \
+                | write_system "$image_bytes"; then
             log "write to ${UBI_VOL:-$SYS_DEV} failed; retrying on the next boot"
+            progress_fail "Install did not finish" "It will try again" 3
             umount_card
             return 0
         fi
-    elif ! write_system "$image_bytes" < "$image"; then
+    elif ! progress_filter "Installing" 2 "$image_bytes" < "$image" \
+            | write_system "$image_bytes"; then
         log "write to ${UBI_VOL:-$SYS_DEV} failed; retrying on the next boot"
+        progress_fail "Install did not finish" "It will try again" 3
         return 0
     fi
+    # Before the sync, not after: flushing 51 MB with the bar sitting at 99%
+    # would look exactly like the hang this feature exists to remove.
+    progress_frame "Installing" 2 100 "$image_bytes"
     sync
     umount_card
 
@@ -505,8 +768,15 @@ apply_pending() {
     #     on a write that was perfectly good.
     #   - Reading the character device is what the write did in reverse, so
     #     the check is over the same bytes through the same path.
-    if [ "$(hash_prefix "${UBI_VOL:-$SYS_DEV}" "$image_bytes")" != "$want_sha" ]; then
+    if [ "$(hash_prefix "${UBI_VOL:-$SYS_DEV}" "$image_bytes" \
+            "Checking the phone" 3)" != "$want_sha" ]; then
         log "read-back mismatch on ${UBI_VOL:-$SYS_DEV}; retrying on the next boot"
+        # "It will try again" is true -- the pending record is kept -- but the
+        # next thing the owner sees is recovery: installed.prop still describes
+        # the OLD image, so setup_verity fails and init calls recovery_or_panic.
+        # That is pre-existing, recovery's own screen takes over, and it is
+        # written down here so nobody wonders later.
+        progress_fail "Install did not finish" "It will try again" 3
         return 0
     fi
 
@@ -524,5 +794,9 @@ EOF
     clear_pending
     record_result ok "$version" "installed"
     log "installed $version"
+    # Nothing is drawn and nothing is held on success. The 100% frame from
+    # before the sync is still on the panel and stays there by itself -- as
+    # init says, "The logo stays on the panel -- nothing clears it -- until
+    # the UI draws over it" -- so a successful update boot gets no slower.
     return 0
 }

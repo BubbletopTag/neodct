@@ -1,5 +1,269 @@
 # NeoDCT OS Changelog
 
+0.5.0b
+The phone stops running as root, the browser stops being the phone, memory
+cards change format, the phone keeps a diary, and it says so when it falls
+over.
+
+IF YOU HAVE A MEMORY CARD, READ THE "Apps you install" SECTION BELOW. Cards
+are ext4 now instead of FAT32. Yours still plays its music and shows its
+wallpapers, and the phone will offer to convert it -- which erases it, so
+copy anything you want to keep to a computer first.
+
+--- The phone stops running as root ---
+
+The user interface -- the home screen, the menus, the modem and battery
+services, everything you see -- no longer runs with full permissions. It runs
+as an ordinary user called ndusr, the same as the apps.
+
+What is left with full permissions is one small helper that does four things:
+start an app, wait for it to finish, turn the phone off, and set the clock.
+It will not run anything as root outside a fixed list of three programs, all
+of them on the read-only part of the disk where nothing can replace them.
+
+How much the interface actually needed those permissions was measured rather
+than guessed: it was made to give them up and then run on a real phone. The
+screen, the keypad, the modem, the battery, the settings and the fonts all
+carried on working. One thing broke -- starting an app -- and that is the
+whole reason the helper exists.
+
+Two smaller things came with it. The phone no longer grants itself access to
+raw storage; it never needed it, and that access was enough to read or rewrite
+every partition. And the microphone is no longer reachable by the browser: on
+Linux every sound device sits in one group, so the permission that lets a web
+page play a video was also the permission to record you. Playing and recording
+are now separate.
+
+--- Apps you install, and a card that can hold them ---
+
+Apps you install yourself now have a home, on the memory card, at
+/NeoDCT/User/sdcard/apps. Everything there is untrusted, always: a card comes
+out of the phone and goes into a computer, so an app on one is bytes a stranger
+could have chosen.
+
+For that to work the card had to change. A NeoDCT card is now ONE ext4
+partition instead of two FAT32 ones.
+
+FAT32 does not record who owns a file. Permissions on a FAT card are decided
+once when it is plugged in and applied identically to everything on it, so
+"this app may read its own program but not change it" is not a sentence such a
+card can hold -- and "downloads are writable but your music is not" needed a
+whole second partition to say. ext4 records an owner and permissions for every
+file separately, so one card says all of it, and the second partition is gone.
+
+What that buys, concretely: an app can read and run its own program but cannot
+change it, cannot put a second program beside it, cannot install or delete
+another app, cannot read your music or wallpapers, and cannot list the card at
+all. It gets one folder it may write -- its own data folder -- which the phone
+creates for it. Removing the app's folder removes the app and everything it
+kept.
+
+The phone re-applies the card's permissions every time it mounts it, because a
+card can be carried to a computer and changed there.
+
+The cost is real: Windows and macOS need a helper to read an ext4 card, where
+Linux reads one out of the box. A card from an older NeoDCT still works for
+music, wallpapers, ringtones and updates -- Settings will tell you it is in the
+old format and offer to reformat it, which erases it, and will never do that on
+its own.
+
+Formatting a card now works at all, which it did not. The phone refused to
+format anything that was currently in use, and a memory card is always in use
+-- that is what makes it a card rather than an empty slot. So every attempt on
+a card the phone could actually read came back as "Formatting failed. The card
+may be write protected." on a card that was neither. The phone still refuses to
+format the parts of itself it is running from; it no longer mistakes your card
+for one of them.
+
+--- The browser stops being the phone ---
+
+Until now every process on this phone was root, which meant the security
+boundary between an app and the rest of the phone was the app's own good
+manners. The browser is the sharpest case: NetSurf is 300,000 lines of C
+parsing bytes chosen by strangers, and a bug anywhere in it was a bug
+everywhere on the phone.
+
+It now runs as its own user, with its own directory, and cannot read your
+contacts, your messages, your call log or the phone's ssh keys. It cannot
+open the modem, so it cannot dial or send an SMS. The one place it may write
+is its own folder.
+
+The other half is the update system. An update was signed and the signature
+was checked -- by the app, in userspace, with the result written to the same
+writable partition anything on the phone could rewrite. So anything that
+could write one file could install its own operating system, permanently,
+and every boot afterwards would verify it as genuine. The check now happens
+before the write, in the initramfs, which lives inside the kernel image and
+can only be replaced by reflashing the phone.
+
+Added
+- A NeoDCT card the phone formats is now split in two: one part for your
+  music, pictures and ringtones, one for downloads and picture messages.
+  Things that arrive on their own land in the second part, cannot reach your
+  media, and cannot be run. Installing something you downloaded is a
+  deliberate copy you make. Both parts still read on any computer. A card
+  made on a computer works as it always did, with nowhere for downloads to
+  go.
+- Settings offers to format a card that already works, not only one it
+  cannot read -- otherwise a card made on a computer could never gain the
+  second part.
+- The screen shows an update installing. Restarting to finish an update used
+  to put the boot logo up and leave it there for a minute, which is exactly
+  what a phone that has stopped working looks like. There is now a progress
+  bar, in three steps -- checking the update, installing, checking the phone
+  -- and it counts real bytes rather than guessing. An update that is refused
+  now says so on the screen and holds it long enough to read: before this, a
+  package that was not signed by NeoDCT was turned away silently, and all you
+  saw was a phone that restarted and had not changed.
+
+Fixed
+- Updates are checked against the release key before they are written,
+  not only before they are staged. A staged update whose record disagrees
+  with what was signed is refused.
+- /NeoDCT/User/env.sh is no longer run automatically. It was a developer
+  convenience that was also a way for anything that could write one file to
+  run as root on every boot. It still works when the phone is booted with
+  neodct.devenv=1.
+- Everything writable is mounted so that a program on it cannot gain
+  privilege: the user partition, /tmp, /dev/shm and every memory card.
+- Removed four packages nothing used, including a second, complete web
+  browser that was in every image and that nothing could launch.
+- Turning on the remote shell no longer loosens the permissions on your
+  data. It tidied up the folder your contacts and messages live in, and
+  tidied it up slightly too far -- enough that the browser could have seen
+  the names of what was in there. It only did this on phones whose folder
+  had been left loose by an older version, which are the phones that needed
+  the protection most.
+
+--- A calendar, and a second thing the banner can say ---
+
+The phone keeps a diary now, and it can tell you about it the same way it
+tells you a text arrived.
+
+The notification half is the point. NotifyService has had exactly one kind
+of banner since the beginning -- "N message(s) received" mid-left on the
+home screen, the carrier line hidden behind it, the softkey turning into
+Read, C dismissing it. A reminder uses that, unchanged: same two lines,
+same position, same keys. It says the event's name and the time it is due
+instead of a message count, and the softkey says View instead of Read.
+There is no second notification idea to learn, because inventing one would
+have made the first one mean less.
+
+Added
+- Calendar, app 5 -- the slot the phone being imitated gave to Call
+  Divert, which this one has never had. It opens on the month, because a
+  calendar's front page is the month. Six rows of seven, always six even
+  for a month that fits in five, so that paging does not move every cell
+  under your thumb. Today is outlined, the day you are on is filled, the
+  neighbouring month's days are grey, and a day with something on it gets
+  a one-pixel bar underneath the number.
+  NaviKey opens Options: View day, New event, Go to date, Delete all.
+  A day is a list with New event at the top of it, so an empty day is an
+  offer rather than a dead end. An event opens as a page with its name,
+  its time and its rules on it, and Options there is Edit or Delete.
+- Reminders. An event can carry an alarm -- at the time, or 5, 15 or 30
+  minutes, an hour or a day before it. The core checks the diary every
+  fifteen seconds and puts the banner up when one comes due. It fires once
+  per occurrence, so a daily reminder comes round again tomorrow and an
+  edited event rings again because moving a meeting makes it a different
+  appointment.
+  A reminder that was missed while the phone was off still appears, for
+  twelve hours after its moment: long enough that a phone left off
+  overnight tells you about this morning, short enough that it never
+  surfaces one from last week as though it were news.
+  Pressing View on a single reminder opens that event. On several it opens
+  the calendar, which is the same choice Messages makes between a message
+  and the inbox.
+- Five kinds of note (reminder, meeting, call, birthday, note) and five
+  repeat rules (once, daily, weekly, monthly, yearly). A monthly note on
+  the 31st SKIPS the months that have no 31st and a yearly one on 29
+  February happens in leap years only -- neither silently moves an
+  appointment to a day nobody chose.
+
+Notes
+- The whole grid is reachable on the sixteen keys the 5190 has. There is
+  no left and no right on this keypad, so the second axis comes from the
+  number pad, which is sitting right there: 4 and 6 are a day either way,
+  2 and 8 (and Up and Down) are a week, 1 and 3 (and * and #) are a
+  month, 7 and 9 are a year, and 5 is today. Left and Right, which only a
+  development keyboard has, do what 4 and 6 do.
+- No sync of any kind: no CalDAV, no Google, no network. Events live in
+  one sqlite table on the user partition. A calendar that quietly fails to
+  sync would be worse than one that never claimed it could.
+- The date of an existing event cannot be edited; everything else about it
+  can. A masked field that is already full ignores every keypress until
+  something is deleted, so prefilling a date would cost eight presses of C
+  before the first useful one. Moving an appointment is delete and re-make
+  on the day you want it.
+
+Changed
+- The flashing envelope on the home screen follows the INBOX now rather
+  than any banner. It was drawn whenever a banner was up, which was the
+  same thing while a text was the only thing a banner could be about.
+- Banner lines are fitted to the screen before they are drawn. A message
+  count could never reach the signal meter; an event's name can.
+
+--- A crash screen for the phone itself, and a way back from it ---
+
+When an app crashed you got the sick Nokia and a way back to the menu. When
+the operating system crashed you got a red block of text on a console and the
+phone sat there until the battery came out -- the boot script printed
+"CRITICAL SYSTEM FAILURE" and then ended, and inittab starts that script
+`once`, so nothing was ever going to bring the UI back.
+
+The same artwork now appears for a core crash, pinned to the left with live
+text beside it: "Core System Crashed!", what killed it, which attempt this
+was, and "Restarting in 3... 2... 1...". Then the phone brings the UI back.
+
+Crash, restart, crash, restart forever would be worse than the frozen screen
+it replaces, so consecutive crashes are counted. Three in a row without the
+phone ever working in between and it stops, says so, and leaves the message
+up. "Working in between" means the UI ran for two minutes, measured from
+/proc/uptime rather than from the clock -- this phone boots at 1970 and may
+have its time corrected halfway through the run being measured.
+
+Added
+- A core crash shows a real screen and restarts the UI by itself. The screen
+  is drawn by a separate small program, so almost nothing it needs is code
+  that could have died with the core; if even that will not run, the old red
+  banner still appears and the phone still restarts.
+- The screen says which try this was, and the crash log records it.
+
+Fixed
+- Application crash history survives a reboot. The boot script was sending
+  the UI's error output to /NeoDCT/User/logs/crash.log with a truncating
+  redirect -- the same file the crash handler appends its reports to -- so
+  every boot wiped every crash that had ever been recorded, and afterwards
+  the two writers overwrote each other. The UI's output has its own file
+  now, /NeoDCT/User/logs/core.log, kept across a restart loop so the crash
+  before the one on screen is still there to read.
+
+--- Recovery mode you can actually use ---
+
+Recovery is the screen the phone shows when it cannot start: the sad face,
+and a menu that installs an update from an SD card. It has always been
+readable on the phone's own screen. It has never been usable on one -- the
+keypad is wired to a chip the phone only talks to once the system is
+running, and recovery runs before that, so every key press went nowhere.
+Recovery worked if you had a USB serial cable and a computer.
+
+The keypad now works in recovery. Up, Down, the NaviKey, C and the number
+keys all do what they do everywhere else on the phone, and the menu is drawn
+in the phone's own typeface rather than the small console lettering.
+
+Added
+- Installing an update from recovery shows a progress bar. It fills three
+  times -- once while the package is checked, once while it is written, and
+  once while what was written is read back and checked again -- with the
+  file name, the percentage and how many megabytes have gone by. Wiping the
+  system is instant and so has no bar; it says what happened instead.
+- The two questions that erase something now open with neither Yes nor No
+  chosen, so a stray press cannot answer them.
+
+Fixed
+- Recovery on a phone with no serial cable attached is no longer a menu you
+  can read and cannot move.
+
 0.4.10a
 Red and blue, the right way round.
 

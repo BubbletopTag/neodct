@@ -917,9 +917,11 @@ the default applies: **`-O2`** (`Config.in:521`).
 | `BR2_PACKAGE_OPENSSH` (+client, server, key-utils) | `openssl`, `zlib`, `libxcrypt` | Keep (engineering Remote Shell). **It is why openssl and zlib survive today.** |
 | `BR2_PACKAGE_LIBCURL` (+`CURL`) | openssl by default (`BR2_PACKAGE_LIBCURL_OPENSSL`) | Keep |
 | `BR2_PACKAGE_NETSURF` (+`FRAMEBUFFER`) | the browser — **netsurf-fb, not WebKitGTK** | Keep, out of scope |
-| `BR2_PACKAGE_LINKS` (+`GRAPHICS`) | second text browser | Keep |
-| `BR2_PACKAGE_MPV`, `BR2_PACKAGE_MPG123`, `BR2_PACKAGE_ALSA_UTILS` (+alsamixer, amixer, aplay) | external audio players Koki falls back to | Keep — `Koki/engine.py:340` probes `{"aplay", "mpg123", "mpv"}` |
-| `BR2_PACKAGE_DEJAVU`, `BR2_PACKAGE_GPM` | fonts and mouse server for the browsers | Keep |
+| ~~`BR2_PACKAGE_LINKS` (+`GRAPHICS`)~~ | a second **graphical** web browser, never launched | **Removed** — SECURITY-PLAN.md section 4. Nothing in the tree runs it; every apparent reference is the English word. It shipped a whole second HTML/CSS/image parser and TLS client, as root, that nothing could reach. |
+| `BR2_PACKAGE_MPV`, `BR2_PACKAGE_ALSA_UTILS` (+amixer, aplay) | MediaWidget, and the audio tools S17audio and Koki actually run | Keep. The `Koki/engine.py` citation was to the Python reference, which no longer ships; the shipped probe is `koki_audio.c`. |
+| ~~`BR2_PACKAGE_ALSA_UTILS_ALSAMIXER`~~ | the interactive ncurses mixer | **Removed** — SECURITY-PLAN.md section 4. No reference anywhere in the tree. The scriptable `amixer` is a separate sub-option and stays. Note it is `default y` upstream, so the defconfig has to say `is not set` rather than drop the line. |
+| `BR2_PACKAGE_DEJAVU` | the font | Keep |
+| ~~`BR2_PACKAGE_GPM`~~ | a console **mouse** daemon, on a phone with no pointer | **Removed** — SECURITY-PLAN.md section 4. Its only consumer in the enabled set was `LINKS_GRAPHICS`; netsurf-fb has no reference to it in the package, the makefile or the vendored source, and `netsurf-fb` carries no `libgpm` DT_NEEDED. ncurses `dlopen`s it and does not need it. |
 | `BR2_PACKAGE_UQMI` | modem data session | Keep |
 | `BR2_PACKAGE_LVM2` **without** `STANDARD_INSTALL` | dmsetup + libdevmapper only (~400 KB) instead of the whole LVM suite; the initramfs needs it for the verity table | Keep exactly as-is |
 | `BR2_PACKAGE_DOSFSTOOLS` (+mkfs.fat, fatlabel, fsck.fat) | FAT32 SD cards | Keep |
