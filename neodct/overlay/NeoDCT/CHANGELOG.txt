@@ -7,8 +7,9 @@ The phone gets a map.
 
 A new app, OsmAnd, in the main menu after Update. It draws OpenStreetMap
 data in OpenStreetMap's own colours -- beige land, blue water, white streets
-with grey edges, pink motorways, grey buildings up close -- inside the same
-title, divider and softkey bar as every other screen.
+with grey edges, pink motorways, grey buildings up close -- over the whole
+screen above the softkey bar. There is no title on the map: like Koki and
+the games it gives those rows to the picture.
 
 There is no GPS yet, so the cross in the middle of the map is the only
 cursor. The number pad moves it: 2, 4, 6 and 8 pan, 1 and 3 (or * and #)

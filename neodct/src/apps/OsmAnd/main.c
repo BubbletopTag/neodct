@@ -24,7 +24,7 @@
  *
  * ============ WHAT IS DELIBERATELY NOT HERE ============
  *
- * No tiles. A raster tile is 256x256 for a screen that is 240x114 of map,
+ * No tiles. A raster tile is 256x256 for a screen that is 240x145 of map,
  * the tile servers' policy forbids bulk download, and a tile cannot be
  * routed over. Vector data drawn here serves the map, the search and the
  * router from one download.
@@ -166,7 +166,7 @@ typedef struct {
     nd_osm_route route;
     size_t route_map;
     nd_osm_mode mode;
-    nd_image *surface; /* the map rows, 240 x 114 RGB888 = 82,080 bytes */
+    nd_image *surface; /* the map rows, 240 x 145 RGB888 = 104,400 bytes */
     nd_osm_scratch *scratch;
 } app_state;
 

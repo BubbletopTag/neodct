@@ -1,27 +1,29 @@
 /* apps/OsmAnd/render.c -- drawing a map the way openstreetmap.org draws
- * one, inside the chrome every other NeoDCT screen has.
+ * one, above the softkey bar every other NeoDCT screen has.
  *
  * ============ TWO STYLES ON ONE SCREEN, DELIBERATELY ============
  *
- * The rows between the header divider and the softkey bar are OpenStreetMap
- * Carto: the beige land, the blue water, the pink motorways and the yellow
- * primaries, the white residential streets with grey casings, the grey
- * buildings that appear at zoom 16. Every colour below is that
- * stylesheet's, so that a person who knows the web map recognises this one.
+ * Every row above the softkey bar is OpenStreetMap Carto: the beige land,
+ * the blue water, the pink motorways and the yellow primaries, the white
+ * residential streets with grey casings, the grey buildings that appear at
+ * zoom 16. Every colour below is that stylesheet's, so that a person who
+ * knows the web map recognises this one.
  *
- * Everything around those rows is NeoDCT: the title at y = 0 in font_xl
- * trimmed against the breadcrumb, the one-pixel divider, the black softkey
- * strip. The map does not bleed into them, because a map screen that looked
- * like a different phone from the menu it was opened from would be wrong on
- * this phone, however good the map.
+ * What is left of NeoDCT on this screen is the softkey bar, and that is on
+ * purpose. The title, breadcrumb and divider every list draws would cost
+ * thirty-one of the panel's 145 content rows -- more than a fifth of the
+ * map -- to say "OsmAnd 13" on a screen whose picture already says which
+ * app it is. Koki and the games give the same rows up for the same reason.
+ * The map does not bleed into the softkey strip, because the strip is
+ * what makes the screen belong to this phone rather than to a web browser.
  *
  * ============ WHY THE MAP HAS ITS OWN SURFACE ============
  *
- * The map is rendered into a caller-owned RGB image the size of those rows
- * and blitted onto the canvas. That is what clips it: a road that runs off
- * the top of the map stops at the divider by construction rather than by
- * every primitive knowing where the header is, and the header can be drawn
- * first or last without the map painting over it.
+ * The map is rendered into a caller-owned RGB image the size of the
+ * content area and blitted onto the canvas. That is what clips it: a road
+ * that runs off the bottom of the map stops at the softkey bar by
+ * construction rather than by every primitive knowing where the bar is,
+ * and the frame test can look at the map alone.
  *
  * ============ WHY THE POLYGON FILLER IS NOT nd_draw_polygon ============
  *
@@ -52,7 +54,6 @@
 #include "nd_text.h"
 #include "nd_types.h"
 #include "nd_ui.h"
-#include "nd_widgets.h"
 
 /* ------------------------------------------------------------------ *
  * The palette -- openstreetmap-carto, by hex
@@ -95,14 +96,14 @@
 
 void nd_osm_map_geometry(const nd_ui *ui, int32_t *top, int32_t *w, int32_t *h)
 {
-    int32_t t = nd_ui_header_divider_y(ui) + 1;
-
+    /* Row 0 down to the softkey bar: 145 rows on this panel. The framework
+     * draws no title, breadcrumb or divider here -- see the file header. */
     if (top != NULL)
-        *top = t;
+        *top = 0;
     if (w != NULL)
         *w = nd_ui_width(ui);
     if (h != NULL)
-        *h = nd_max32(1, nd_ui_content_bottom(ui) - t);
+        *h = nd_max32(1, nd_ui_content_bottom(ui));
 }
 
 /* Floor division, so a node just left of the centre lands on the pixel to
@@ -943,11 +944,7 @@ void nd_osm_render(const nd_osm_scene *s, nd_image *surface)
 void nd_osm_scene_draw(const nd_osm_scene *s, nd_image *surface)
 {
     nd_ui *ui;
-    nd_header header;
-    char title[ND_TEXT_LINE_MAX];
-    int32_t reserved;
     int32_t top;
-    int32_t divider;
 
     if (s == NULL || s->ui == NULL || surface == NULL)
         return;
@@ -955,25 +952,11 @@ void nd_osm_scene_draw(const nd_osm_scene *s, nd_image *surface)
     if (ui->draw == NULL || ui->canvas == NULL)
         return;
 
-    /* 1. Clear rows 0..content_bottom only -- the softkey strip is the
-     *    caller's and must survive (nd_widgets.h rule 1). */
-    nd_ui_paint_chrome_content(ui);
-
-    /* 2. Title and breadcrumb, exactly as nd_vlist_draw() places them. */
-    nd_header_init(&header, ui, ND_OSMAND_APP_ROOT);
-    reserved = nd_header_width(&header, -1);
-    if (ui->font_xl != NULL) {
-        (void)nd_text_fit(title, sizeof title, nd_osmand_app_title, ui->font_xl,
-                          nd_ui_width(ui) - 5 - reserved - 6);
-        (void)nd_draw_text(ui->draw, 5, 0, title, ui->font_xl, ND_WHITE);
-    }
-    nd_header_draw(&header, -1);
-
-    /* 3. Divider. */
-    divider = nd_ui_header_divider_y(ui);
-    (void)nd_draw_line(ui->draw, 0, divider, nd_ui_width(ui), divider, ND_WHITE, 1);
-
-    /* 4. The map. */
+    /* The map covers rows 0..content_bottom-1 exactly, so there is no
+     * chrome to paint under it and no clear to do: the blit IS the clear.
+     * The softkey strip below is the caller's and survives (nd_widgets.h
+     * rule 1), which is what lets nd_softkey_update(..., false) and this
+     * make one framebuffer write instead of two. */
     nd_osm_render(s, surface);
     nd_osm_map_geometry(ui, &top, NULL, NULL);
     (void)nd_image_blit(ui->canvas, surface, 0, top);

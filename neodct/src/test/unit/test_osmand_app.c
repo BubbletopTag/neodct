@@ -362,7 +362,7 @@ static void test_tags_become_kinds(void)
  * ------------------------------------------------------------------ */
 
 #define MAP_W 240
-#define MAP_H 114
+#define MAP_H 145
 
 static nd_osm_view centred_view(int32_t zoom)
 {
@@ -1142,9 +1142,9 @@ static void test_the_town_renders_in_carto_colours(void)
         return;
     }
     api.map_geometry(&fx.ui, &top, &w, &h);
-    CHECK_INT(top, 31, "the map starts under the divider");
+    CHECK_INT(top, 0, "the map starts at the top of the panel: no title, no divider");
     CHECK_INT(w, 240, "the panel's width");
-    CHECK_INT(h, 114, "down to the softkey bar");
+    CHECK_INT(h, 145, "down to the softkey bar");
 
     surface = nd_image_new_filled(w, h, ND_PIXFMT_RGB888, ND_BLACK);
     maps[0] = m;
@@ -1161,7 +1161,7 @@ static void test_the_town_renders_in_carto_colours(void)
     }
 
     /* Zoom 14 is 5.7 m a pixel here: the whole grid, the park and the
-     * lake's eastern half fit on 240 px. */
+     * lake's eastern half fit on 240 by 145 px. */
     api.render(&s, surface);
     land = count_colour(surface, 0xf2, 0xef, 0xe9);
     water = count_colour(surface, 0xaa, 0xd3, 0xdf);
@@ -1210,13 +1210,16 @@ static void test_the_town_renders_in_carto_colours(void)
         frame = nd_capture_recent(fx.cap, 0u);
         CHECK(frame != NULL, "a frame was presented");
         if (frame != NULL) {
+            /* Row 0 is map, not title: every pixel of it is a map colour
+             * or a label's halo, and none of it is the chrome black a list
+             * would have there. */
             for (x = 0; x < frame->w; x++) {
-                nd_color c = nd_image_get_px(frame, x, 30);
+                nd_color c = nd_image_get_px(frame, x, 0);
 
-                if (c.r == 255u && c.g == 255u && c.b == 255u)
+                if (same_colour(c, 0, 0, 0))
                     white_title++;
             }
-            CHECK_INT(white_title, 240, "the divider is one white row at y = 30");
+            CHECK_INT(white_title, 0, "no chrome on the top row: the map owns it");
             /* The strip is the app's opaque bar over the chrome background
              * -- the wallpaper here, as in every stock app's frame -- with
              * "Options" on it. What it must not be is map. */
@@ -1238,9 +1241,8 @@ static void test_the_town_renders_in_carto_colours(void)
                 }
                 CHECK(label > 10, "and the softkey label is on it");
             }
-            CHECK(same_colour(nd_image_get_px(frame, 120, 31 + 3), 0xf2, 0xef, 0xe9) ||
-                      !same_colour(nd_image_get_px(frame, 120, 31 + 3), 0, 0, 0),
-                  "the map begins on the row under the divider");
+            CHECK(!same_colour(nd_image_get_px(frame, 120, 144), 0, 0, 0),
+                  "the map runs down to the row above the softkey bar");
         }
     }
 

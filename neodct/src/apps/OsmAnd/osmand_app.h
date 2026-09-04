@@ -61,7 +61,8 @@
 extern "C" {
 #endif
 
-/* App id 13 -- manifest.json, and the "13" the header draws. The first free
+/* App id 13 -- manifest.json, and the "13" the options list's header
+ * draws. The first free
  * slot after the stock 1..12. A string as well as a number because the
  * widgets take the root id as text and the two must not be able to drift. */
 #define ND_OSMAND_APP_ID   13
@@ -375,8 +376,9 @@ typedef enum {
 nd_osm_nav nd_osm_map_key(int32_t key, nd_osm_view *v, int32_t map_w, int32_t map_h,
                           const nd_osm_mark *jump);
 
-/* The map surface: the rows between the header divider and the softkey bar,
- * the full panel width. */
+/* The map surface: every row above the softkey bar, the full panel width.
+ * There is no title, breadcrumb or divider on this screen -- render.c's
+ * header says why -- so `top` is 0 on every panel. */
 void nd_osm_map_geometry(const nd_ui *ui, int32_t *top, int32_t *w, int32_t *h);
 
 /* Reference-zoom point -> pixel on a map surface of w x h under `v`. Pure. */
@@ -411,9 +413,9 @@ typedef struct {
     size_t route_map;
 } nd_osm_scene;
 
-/* Draw the whole map screen -- chrome, title, divider, the map, the marks,
- * the route, the crosshair, the scale bar -- and present it. Clears rows
- * 0..content_bottom ONLY, so a caller's nd_softkey_update(..., false)
+/* Draw the whole map screen -- the map, the marks, the route, the
+ * crosshair, the scale bar -- and present it. Paints rows
+ * 0..content_bottom-1 ONLY, so a caller's nd_softkey_update(..., false)
  * survives into the frame, the same contract nd_vlist_draw() offers.
  * `surface` is the caller's map-sized RGB image, so nothing is allocated
  * per frame. */
