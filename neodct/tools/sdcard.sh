@@ -169,20 +169,39 @@ case "$ACTION" in
 
     put)
         [ $# -ge 1 ] || usage
+        TMPOUT="${TMPDIR:-/tmp}/.neodct-sdcard.$$"
         SOURCE="$1"
         DEST_DIR="${2:-update}"
         [ -f "$SOURCE" ] || { echo "sdcard: no such file: $SOURCE" >&2; exit 1; }
         BASE="$(basename "$SOURCE")"
         # mkdir first in case the folder is absent, then write, then set the
         # owner -- debugfs's `write` makes the file owned by uid 0.
+        #
+        # `cd` FIRST, and it is not decoration. debugfs's `write` takes a
+        # destination NAME, not a path: `write src /update/x.ndsw` does not
+        # write into /update, it creates a file in the CURRENT directory --
+        # which is the root of the card -- and reports success either way.
+        # The package then sat at the top of the card while the phone looked
+        # for it in update/ and said it was not there.
         {
             printf 'mkdir /%s\n' "$DEST_DIR"
-            printf 'rm /%s/%s\n' "$DEST_DIR" "$BASE"
-            printf 'write %s /%s/%s\n' "$SOURCE" "$DEST_DIR" "$BASE"
-            printf 'sif /%s/%s uid %s\n' "$DEST_DIR" "$BASE" "$ND_UID"
-            printf 'sif /%s/%s gid %s\n' "$DEST_DIR" "$BASE" "$ND_GID"
-            printf 'sif /%s/%s mode 0100640\n' "$DEST_DIR" "$BASE"
-        } | run_debugfs rw > /dev/null
+            printf 'cd /%s\n' "$DEST_DIR"
+            printf 'rm %s\n' "$BASE"
+            printf 'write %s %s\n' "$SOURCE" "$BASE"
+            printf 'sif %s uid %s\n' "$BASE" "$ND_UID"
+            printf 'sif %s gid %s\n' "$BASE" "$ND_GID"
+            printf 'sif %s mode 0100640\n' "$BASE"
+        } | run_debugfs rw > "$TMPOUT" 2>&1
+        # debugfs exits 0 whatever happened, so the only way to know is to
+        # look. A `put` that did not put is the bug this whole file just
+        # spent an end-to-end update test finding.
+        if ! grep -q "Allocated inode" "$TMPOUT"; then
+            echo "sdcard: FAILED to copy $BASE -- debugfs said:" >&2
+            sed 's/^/  /' "$TMPOUT" >&2
+            rm -f "$TMPOUT"
+            exit 1
+        fi
+        rm -f "$TMPOUT"
         echo "sdcard: copied $BASE to /$DEST_DIR/ (ndusr, 0640)"
         ;;
 
