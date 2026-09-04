@@ -9,7 +9,8 @@ A new app, OsmAnd, in the main menu after Update. It draws OpenStreetMap
 data in OpenStreetMap's own colours -- beige land, blue water, white streets
 with grey edges, pink motorways, grey buildings up close -- over the whole
 screen above the softkey bar. There is no title on the map: like Koki and
-the games it gives those rows to the picture.
+the games it gives those rows to the picture, and like them it draws no
+wallpaper behind its softkey bar or its menus -- they are black.
 
 There is no GPS yet, so the cross in the middle of the map is the only
 cursor. The number pad moves it: 2, 4, 6 and 8 pan, 1 and 3 (or * and #)

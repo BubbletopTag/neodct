@@ -1238,16 +1238,19 @@ static void test_the_town_renders_in_carto_colours(void)
                     white_title++;
             }
             CHECK_INT(white_title, 0, "no chrome on the top row: the map owns it");
-            /* The strip is the app's opaque bar over the chrome background
-             * -- the wallpaper here, as in every stock app's frame -- with
-             * "Options" on it. What it must not be is map. */
+            /* The strip is the app's opaque bar with "Options" on it, and
+             * it is BLACK: manifest.json says "useWallpaper": false, as
+             * Browser, Games and Koki do, so the framework paints no
+             * wallpaper behind this app's chrome. The fixture reads the
+             * real manifest, so this is the shipped behaviour and not a
+             * test setting. */
             for (x = 0; x < frame->w; x++) {
                 nd_color c = nd_image_get_px(frame, x, 160);
 
-                if (same_colour(c, 0xf2, 0xef, 0xe9) || same_colour(c, 0xe0, 0xdf, 0xdf))
+                if (same_colour(c, 0, 0, 0))
                     black_strip++;
             }
-            CHECK_INT(black_strip, 0, "no map colour reaches the softkey strip");
+            CHECK(black_strip > 150, "the softkey strip is black, not wallpaper and not map");
             {
                 int32_t label = 0;
 
@@ -1257,7 +1260,7 @@ static void test_the_town_renders_in_carto_colours(void)
                     if (c.r == 255u && c.g == 255u && c.b == 255u)
                         label++;
                 }
-                CHECK(label > 10, "and the softkey label is on it");
+                CHECK(label > 10, "with the softkey label on it");
             }
             CHECK(!same_colour(nd_image_get_px(frame, 120, 144), 0, 0, 0),
                   "the map runs down to the row above the softkey bar");

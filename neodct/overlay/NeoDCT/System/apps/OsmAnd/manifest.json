@@ -1,5 +1,6 @@
 {
     "name": "OsmAnd",
+    "useWallpaper": false,
     "id": "13",
     "icon": "icon.png",
     "exec": "main.py"
