@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="hand-written fixture for test_osmand_app">
+<note>A synthetic town in the shape an Overpass API answer has: nodes first, ways after, one element per line. The grid is three residential streets by three lanes, 222 m by 333 m a cell, at Dublin's latitude. Mid Lane is one-way northbound. See test/unit/test_osmand_app.c for what each way is there to prove.</note>
+  <node id="100" lat="53.3480000" lon="-6.2650000"/>
+  <node id="101" lat="53.3480000" lon="-6.2600000"/>
+  <node id="102" lat="53.3480000" lon="-6.2550000"/>
+  <node id="110" lat="53.3500000" lon="-6.2650000"/>
+  <node id="111" lat="53.3500000" lon="-6.2600000"/>
+  <node id="112" lat="53.3500000" lon="-6.2550000"/>
+  <node id="120" lat="53.3520000" lon="-6.2650000"/>
+  <node id="121" lat="53.3520000" lon="-6.2600000"/>
+  <node id="122" lat="53.3520000" lon="-6.2550000"/>
+  <node id="200" lat="53.3470000" lon="-6.2700000"/>
+  <node id="201" lat="53.3470000" lon="-6.2500000"/>
+  <node id="202" lat="53.3470000" lon="-6.2650000"/>
+  <node id="203" lat="53.3470000" lon="-6.2550000"/>
+  <node id="300" lat="53.3540000" lon="-6.2700000"/>
+  <node id="301" lat="53.3540000" lon="-6.2500000"/>
+  <node id="400" lat="53.3510000" lon="-6.2575000"/>
+  <node id="500" lat="53.3505000" lon="-6.2595000"/>
+  <node id="501" lat="53.3505000" lon="-6.2555000"/>
+  <node id="502" lat="53.3515000" lon="-6.2555000"/>
+  <node id="503" lat="53.3515000" lon="-6.2595000"/>
+  <node id="600" lat="53.3490000" lon="-6.2720000"/>
+  <node id="601" lat="53.3490000" lon="-6.2680000"/>
+  <node id="602" lat="53.3510000" lon="-6.2680000"/>
+  <node id="603" lat="53.3510000" lon="-6.2720000"/>
+  <node id="700" lat="53.3496000" lon="-6.2610000"/>
+  <node id="701" lat="53.3496000" lon="-6.2605000"/>
+  <node id="702" lat="53.3499000" lon="-6.2605000"/>
+  <node id="703" lat="53.3499000" lon="-6.2610000"/>
+  <node id="800" lat="53.3460000" lon="-6.2730000"/>
+  <node id="801" lat="53.3475000" lon="-6.2650000"/>
+  <node id="802" lat="53.3465000" lon="-6.2520000"/>
+  <node id="900" lat="53.3530000" lon="-6.2720000"/>
+  <node id="901" lat="53.3530000" lon="-6.2480000"/>
+  <node id="1000" lat="53.3500000" lon="-6.2600000">
+    <tag k="name" v="Ballytown"/>
+    <tag k="place" v="town"/>
+  </node>
+  <node id="1001" lat="53.3525000" lon="-6.2560000">
+    <tag k="name" v="Northside &amp; Co"/>
+    <tag k="place" v="suburb"/>
+  </node>
+  <node id="1002" lat="53.3470000" lon="-6.2500000">
+    <tag k="name" v="Nowhere"/>
+    <tag k="place" v="continent"/>
+  </node>
+  <node id="1100" lat="53.3485000" lon="-6.2620000"/>
+  <node id="1200" lat="53.3475000" lon="-6.2660000"/>
+  <node id="1201" lat="53.3475000" lon="-6.2540000"/>
+  <node id="1202" lat="53.3525000" lon="-6.2540000"/>
+  <node id="1203" lat="53.3525000" lon="-6.2660000"/>
+  <node id="1300" lat="53.3450000" lon="-6.2600000"/>
+  <node id="1301" lat="53.3450000" lon="-6.2580000"/>
+  <node id="1400" lat="53.3455000" lon="-6.2500000"/>
+  <way id="1">
+    <nd ref="100"/>
+    <nd ref="101"/>
+    <nd ref="102"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="First Street"/>
+  </way>
+  <way id="2">
+    <nd ref="110"/>
+    <nd ref="111"/>
+    <nd ref="112"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="Second Street"/>
+  </way>
+  <way id="3">
+    <nd ref="120"/>
+    <nd ref="121"/>
+    <nd ref="122"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="Third Street"/>
+  </way>
+  <way id="4">
+    <nd ref="100"/>
+    <nd ref="110"/>
+    <nd ref="120"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="West Lane"/>
+  </way>
+  <way id="5">
+    <nd ref="101"/>
+    <nd ref="111"/>
+    <nd ref="121"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="Mid Lane"/>
+    <tag k="oneway" v="yes"/>
+  </way>
+  <way id="6">
+    <nd ref="102"/>
+    <nd ref="112"/>
+    <nd ref="122"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="East Lane"/>
+  </way>
+  <way id="7">
+    <nd ref="200"/>
+    <nd ref="202"/>
+    <nd ref="203"/>
+    <nd ref="201"/>
+    <tag k="highway" v="primary"/>
+    <tag k="name" v="Main Road"/>
+  </way>
+  <way id="8">
+    <nd ref="100"/>
+    <nd ref="202"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="Link Street"/>
+  </way>
+  <way id="9">
+    <nd ref="102"/>
+    <nd ref="203"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="Link Street"/>
+  </way>
+  <way id="10">
+    <nd ref="300"/>
+    <nd ref="301"/>
+    <tag k="highway" v="motorway"/>
+    <tag k="ref" v="M50"/>
+    <tag k="oneway" v="yes"/>
+  </way>
+  <way id="11">
+    <nd ref="111"/>
+    <nd ref="400"/>
+    <nd ref="122"/>
+    <tag k="highway" v="footway"/>
+    <tag k="name" v="Park Path"/>
+  </way>
+  <way id="12">
+    <nd ref="500"/>
+    <nd ref="501"/>
+    <nd ref="502"/>
+    <nd ref="503"/>
+    <nd ref="500"/>
+    <tag k="leisure" v="park"/>
+    <tag k="name" v="Green Park"/>
+  </way>
+  <way id="13">
+    <nd ref="600"/>
+    <nd ref="601"/>
+    <nd ref="602"/>
+    <nd ref="603"/>
+    <nd ref="600"/>
+    <tag k="natural" v="water"/>
+    <tag k="name" v="Round Lake"/>
+  </way>
+  <way id="14">
+    <nd ref="700"/>
+    <nd ref="701"/>
+    <nd ref="702"/>
+    <nd ref="703"/>
+    <nd ref="700"/>
+    <tag k="building" v="yes"/>
+  </way>
+  <way id="15">
+    <nd ref="800"/>
+    <nd ref="801"/>
+    <nd ref="802"/>
+    <tag k="waterway" v="river"/>
+    <tag k="name" v="Liffey"/>
+  </way>
+  <way id="16">
+    <nd ref="900"/>
+    <nd ref="901"/>
+    <tag k="railway" v="rail"/>
+  </way>
+  <way id="17">
+    <nd ref="110"/>
+    <nd ref="1100"/>
+    <tag k="highway" v="service"/>
+  </way>
+  <way id="18">
+    <nd ref="1200"/>
+    <nd ref="1201"/>
+    <nd ref="1202"/>
+    <nd ref="1203"/>
+    <nd ref="1200"/>
+    <tag k="landuse" v="residential"/>
+  </way>
+  <way id="19">
+    <nd ref="1300"/>
+    <nd ref="1301"/>
+    <tag k="landuse" v="grass"/>
+  </way>
+  <way id="20">
+    <nd ref="1400"/>
+    <nd ref="9999"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="Ghost Street"/>
+  </way>
+  <way id="21">
+    <nd ref="1300"/>
+    <nd ref="1301"/>
+    <tag k="highway" v="proposed"/>
+  </way>
+</osm>

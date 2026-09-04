@@ -1,5 +1,33 @@
 # NeoDCT OS Changelog
 
+Unreleased
+The phone gets a map.
+
+--- OsmAnd ---
+
+A new app, OsmAnd, in the main menu after Update. It draws OpenStreetMap
+data in OpenStreetMap's own colours -- beige land, blue water, white streets
+with grey edges, pink motorways, grey buildings up close -- inside the same
+title, divider and softkey bar as every other screen.
+
+There is no GPS yet, so the cross in the middle of the map is the only
+cursor. The number pad moves it: 2, 4, 6 and 8 pan, 1 and 3 (or * and #)
+zoom out and in, and 5 jumps to the point you last marked. NaviKey opens
+the options and C leaves.
+
+Maps live on the memory card and are downloaded once, from the map's
+Options: "Download map" fetches a 2, 5 or 10 km square around the cross
+from the OpenStreetMap Overpass service over mobile data, and keeps it as
+one file at /NeoDCT/User/sdcard/apps/OsmAnd/data. After that nothing needs
+a network. Up to six maps are loaded at a time; "Installed maps" lists them
+and deletes them.
+
+Routes are planned on the phone, by car or on foot: "Start here" and "Route
+to here" mark the two ends under the cross, the route is drawn in blue, and
+"Directions" pages through the turns with the road and the distance under
+each. "Find" searches street and place names on the loaded maps; "Go to"
+takes a latitude and longitude.
+
 0.5.0b
 The phone stops running as root, the browser stops being the phone, memory
 cards change format, the phone keeps a diary, and it says so when it falls

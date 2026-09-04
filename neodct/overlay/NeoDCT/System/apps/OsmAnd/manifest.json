@@ -1,0 +1,6 @@
+{
+    "name": "OsmAnd",
+    "id": "13",
+    "icon": "icon.png",
+    "exec": "main.py"
+}
