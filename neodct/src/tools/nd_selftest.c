@@ -709,15 +709,37 @@ static void section_mounts(void)
         report(R_SKIP, "the SD card is mounted", "no card in the slot");
     }
 
-    if (mount_options(ND_SD_UNTRUSTED_MOUNT, opts, sizeof opts)) {
-        /* This one is the point of the split: downloads and MMS attachments
-         * land here, and nothing that lands here may be executed. */
-        check_option(ND_SD_UNTRUSTED_MOUNT, opts, "noexec", 1);
-        check_option(ND_SD_UNTRUSTED_MOUNT, opts, "nosuid", 1);
-        check_option(ND_SD_UNTRUSTED_MOUNT, opts, "nodev", 1);
-    } else {
-        report(R_SKIP, ND_SD_UNTRUSTED_MOUNT " is mounted",
-               "no arrival partition -- a card formatted elsewhere, or no card");
+    /* ============ AND IT IS A DIRECTORY NOW, NOT A PARTITION ============
+     *
+     * This asked whether the arrival area was MOUNTED, because on a FAT card
+     * it had to be: FAT records no ownership, so the only way to give
+     * downloads a different regime from the owner's music was a second
+     * filesystem with its own uid= and gid=.
+     *
+     * On ext4 the ownership is on the inode, so untrusted/ is an ordinary
+     * directory on the one partition -- and the old check answered SKIP
+     * ("no arrival partition") on a perfectly correct card, which is a test
+     * quietly reporting nothing on the thing it was written to guard.
+     *
+     * What matters has not changed, only where it is written down: ndusr owns
+     * it, ndusr_ut may write it, and nobody else may read it. */
+    {
+        struct stat st;
+        nd_priv_id ut_id;
+
+        if (stat(ND_PATH_CARD_UNTRUSTED, &st) != 0) {
+            report(R_SKIP, ND_PATH_CARD_UNTRUSTED " is 0770 " ND_PRIV_USER ":" ND_PRIV_USER_UT,
+                   "not present -- no card, or a card the phone has not laid out");
+        } else if ((unsigned)(st.st_mode & 07777) != 0770u) {
+            report(R_FAIL, ND_PATH_CARD_UNTRUSTED " is 0770 " ND_PRIV_USER ":" ND_PRIV_USER_UT,
+                   "the untrusted set writes here and nobody else may read it");
+        } else if (!nd_priv_lookup(ND_PRIV_USER_UT, &ut_id) || st.st_gid != ut_id.gid) {
+            report(R_FAIL, ND_PATH_CARD_UNTRUSTED " is 0770 " ND_PRIV_USER ":" ND_PRIV_USER_UT,
+                   "wrong group -- the untrusted set cannot write its own area");
+        } else {
+            report(R_PASS, ND_PATH_CARD_UNTRUSTED " is 0770 " ND_PRIV_USER ":" ND_PRIV_USER_UT,
+                   NULL);
+        }
     }
 }
 

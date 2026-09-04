@@ -61,6 +61,14 @@ music, wallpapers, ringtones and updates -- Settings will tell you it is in the
 old format and offer to reformat it, which erases it, and will never do that on
 its own.
 
+Formatting a card now works at all, which it did not. The phone refused to
+format anything that was currently in use, and a memory card is always in use
+-- that is what makes it a card rather than an empty slot. So every attempt on
+a card the phone could actually read came back as "Formatting failed. The card
+may be write protected." on a card that was neither. The phone still refuses to
+format the parts of itself it is running from; it no longer mistakes your card
+for one of them.
+
 --- The browser stops being the phone ---
 
 Until now every process on this phone was root, which meant the security
