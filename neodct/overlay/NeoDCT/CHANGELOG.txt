@@ -1,8 +1,14 @@
 # NeoDCT OS Changelog
 
 0.5.0b
-The phone stops running as root, the browser stops being the phone, the phone
-keeps a diary, and the phone says so when it falls over.
+The phone stops running as root, the browser stops being the phone, memory
+cards change format, the phone keeps a diary, and it says so when it falls
+over.
+
+IF YOU HAVE A MEMORY CARD, READ THE "Apps you install" SECTION BELOW. Cards
+are ext4 now instead of FAT32. Yours still plays its music and shows its
+wallpapers, and the phone will offer to convert it -- which erases it, so
+copy anything you want to keep to a computer first.
 
 --- The phone stops running as root ---
 
