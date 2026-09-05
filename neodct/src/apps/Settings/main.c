@@ -1403,12 +1403,67 @@ static void show_memory_card(nd_ui *ui)
  * dismiss it. */
 static void install_notice(nd_ui *ui, const char *message)
 {
+    static const int32_t ok_key = ND_KEY_ENTER;
     nd_msgdialog dialog;
 
     nd_msgdialog_init(&dialog, ui, message);
     nd_msgdialog_set_button(&dialog, "OK");
-    nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
+    /* OK dismisses; C deliberately does not, so a result the owner should
+     * read is acknowledged rather than backed past. The accept set MUST stay
+     * non-empty: passing (NULL, 0, NULL, 0) -- as this once did -- leaves the
+     * notice with no dismiss key at all, and nd_msgdialog_show() then never
+     * returns (its documented un-cancellable case, meant for the low-battery
+     * shutdown). That froze the phone on the "Installed ..." notice after
+     * every install. Keep ND_KEY_ENTER here. */
+    nd_msgdialog_set_keys(&dialog, &ok_key, 1u, NULL, 0u);
     (void)nd_msgdialog_show(&dialog);
+}
+
+/* The install screen: a scrolling page like the software-update one, showing
+ * the app before anything is unpacked -- its icon, name, version, author and
+ * description. Only the name is required; every other field is optional in the
+ * manifest and falls back here, so a package that carries none still installs.
+ * Returns true when the owner pressed Install/Replace (ND_KEY_ENTER); C backs
+ * out with nothing written. */
+static bool confirm_install(nd_ui *ui, const char *path, const nd_nap_info *info)
+{
+    nd_detailpage page;
+    char icon_tmp[ND_PATH_MAX];
+    char body[ND_NAP_DESC_MAX + 64];
+    const char *image = NULL;
+    const char *subtitle = (info->author[0] != '\0') ? info->author : NULL;
+    const char *badge = (info->version[0] != '\0') ? info->version : NULL;
+    bool replacing = nd_nap_is_installed(ND_PATH_USER_APPS_DIR, info->dir);
+    int32_t key;
+
+    /* The icon lives inside the package; pull it to a spot ndusr_ut can write
+     * and the framebuffer image cache can read. A card with a huge or missing
+     * icon simply shows no picture -- nd_nap_extract_icon() says which. */
+    if (info->has_icon &&
+        nd_snprintf(icon_tmp, sizeof icon_tmp, "/tmp/neodct-nap-%s.png", info->dir) == ND_OK &&
+        nd_nap_extract_icon(path, icon_tmp) == ND_OK)
+        image = icon_tmp;
+
+    if (info->description[0] != '\0')
+        (void)nd_strlcpy(body, info->description, sizeof body);
+    else
+        (void)nd_strlcpy(body, "No description provided.", sizeof body);
+    /* The one thing an owner should hear before replacing an app they have. */
+    if (replacing)
+        (void)nd_strlcat(body, "\n\nReplacing this app keeps its saved data.", sizeof body);
+
+    if (nd_detailpage_init(&page, ui, info->name, subtitle, body, image, badge,
+                           replacing ? "REPLACE APP" : "INSTALL APP",
+                           replacing ? "Replace" : "Install") != ND_OK) {
+        if (image != NULL)
+            (void)remove(icon_tmp);
+        return false;
+    }
+    key = nd_detailpage_show(&page);
+    nd_detailpage_free(&page);
+    if (image != NULL)
+        (void)remove(icon_tmp);
+    return key == ND_KEY_ENTER;
 }
 
 /* Inspect, confirm, install, and say what happened. The app never names the
@@ -1420,7 +1475,6 @@ static void install_notice(nd_ui *ui, const char *message)
 static bool install_one(nd_ui *ui, const char *path)
 {
     nd_nap_info info;
-    nd_msgdialog dialog;
     char why[ND_NAP_WHY_MAX];
     char message[ND_APP_NAME_MAX + 64];
     const char *arch = nd_nap_phone_arch();
@@ -1435,14 +1489,7 @@ static bool install_one(nd_ui *ui, const char *path)
         return false;
     }
 
-    (void)nd_snprintf(message, sizeof message,
-                      nd_nap_is_installed(ND_PATH_USER_APPS_DIR, info.dir)
-                          ? nd_setapp_install_replace
-                          : nd_setapp_install_confirm,
-                      info.name);
-    nd_msgdialog_init(&dialog, ui, message);
-    nd_msgdialog_set_button(&dialog, "Install");
-    if (nd_msgdialog_show(&dialog) != ND_KEY_ENTER)
+    if (!confirm_install(ui, path, &info))
         return false;
 
     /* Unpacking a large package off a slow card takes a moment, and a screen

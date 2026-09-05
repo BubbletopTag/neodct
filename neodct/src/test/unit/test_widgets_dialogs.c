@@ -832,6 +832,79 @@ static void test_msgdialog_keys(void)
     fx_free(&fx);
 }
 
+/* One evdev key press plus the SYN that flushes it, into a pipe the fixture's
+ * nd_input reads. value=1 is the press; nd_input emits the key on it and needs
+ * no release, and the zeroed record after is SYN_REPORT. */
+static void feed_key(int fd, int32_t code)
+{
+    struct {
+        long tv_sec;
+        long tv_usec;
+        uint16_t type;
+        uint16_t code;
+        int32_t value;
+    } ev;
+
+    memset(&ev, 0, sizeof ev);
+    ev.type = 0x01;
+    ev.code = (uint16_t)code;
+    ev.value = 1;
+    CHECK_INT(write(fd, &ev, sizeof ev), (int)sizeof ev);
+    memset(&ev, 0, sizeof ev);
+    CHECK_INT(write(fd, &ev, sizeof ev), (int)sizeof ev);
+}
+
+/* Settings' install_notice() builds exactly this dialog: an OK button, ENTER
+ * accepts, C does not. It once passed set_keys(NULL, 0, NULL, 0), clearing the
+ * accept set as well, which nd_msgdialog_show() treats as the un-cancellable
+ * notice the low-battery shutdown wants -- so the "Installed ..." notice had
+ * no dismiss key and never returned, freezing the phone after every install.
+ * This pins both halves: C is ignored, ENTER returns. A regression to the old
+ * behaviour would time the suite out here rather than pass quietly. */
+static void test_msgdialog_notice_dismisses_on_enter_not_clear(void)
+{
+    fixture fx;
+    nd_msgdialog dlg;
+    static const int32_t OK[] = {ND_KEY_ENTER};
+    nd_input *in = NULL;
+    int fds[2];
+
+    if (!fx_init(&fx)) {
+        CHECK(false);
+        return;
+    }
+    if (pipe(fds) != 0) {
+        CHECK(false);
+        fx_free(&fx);
+        return;
+    }
+    if (nd_input_open_fd(&in, fds[0]) != ND_OK) {
+        CHECK(false);
+        (void)close(fds[0]);
+        (void)close(fds[1]);
+        fx_free(&fx);
+        return;
+    }
+    nd_input_set_repeat(in, 0.0, 0.0);
+    fx.ui.input = in;
+
+    /* C first: it must be ignored. Then ENTER, which must dismiss. */
+    feed_key(fds[1], ND_KEY_CLEAR);
+    feed_key(fds[1], ND_KEY_ENTER);
+
+    nd_msgdialog_init(&dlg, &fx.ui, "Installed Bible.\nIt is in the menu.");
+    nd_msgdialog_set_button(&dlg, "OK");
+    nd_msgdialog_set_keys(&dlg, OK, ND_ARRAY_LEN(OK), NULL, 0u);
+    CHECK_INT(dlg.n_accept, 1);
+    CHECK_INT(dlg.n_cancel, 0);
+    CHECK_INT(nd_msgdialog_show(&dlg), ND_KEY_ENTER);
+
+    fx.ui.input = NULL;
+    (void)close(fds[1]);
+    nd_input_close(in);
+    fx_free(&fx);
+}
+
 /* ------------------------------------------------------------------ *
  * 3. TextScroller
  * ------------------------------------------------------------------ */
@@ -1411,6 +1484,7 @@ int main(void)
     test_the_modem_fault_message_fits();
     test_the_cannot_confine_message_fits();
     test_msgdialog_keys();
+    test_msgdialog_notice_dismisses_on_enter_not_clear();
 
     test_scroller_blank_line_is_a_gap();
     test_scroller_empty();

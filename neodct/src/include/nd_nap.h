@@ -140,6 +140,13 @@ extern "C" {
  * it becomes part of an nd_app_entry path (ND_APP_PATH_MAX). */
 #define ND_NAP_DIR_MAX 48
 
+/* manifest "version", "author" and "description": all optional, shown on the
+ * install screen, which falls back to sensible text when a field is absent. */
+#define ND_NAP_VERSION_MAX 24
+#define ND_NAP_AUTHOR_MAX  48
+#define ND_NAP_DESC_MAX    256
+#define ND_NAP_ICON_MAX    100 /* the icon file's name; a ustar name at most */
+
 /* Bounds on the archive itself. 4096 entries is forty times the largest
  * stock app; 64 MiB per file is the biggest thing a card this phone takes
  * could sensibly carry as one file, and the point of both is that a crafted
@@ -167,6 +174,10 @@ typedef struct {
     bool has_icon;   /* the manifest's icon is in the package   */
     size_t n_files;  /* regular files, lib/ and manifest included */
     uint64_t bytes;  /* their total size                        */
+    char version[ND_NAP_VERSION_MAX];  /* manifest "version"; "" when absent */
+    char author[ND_NAP_AUTHOR_MAX];    /* manifest "author"; "" when absent  */
+    char description[ND_NAP_DESC_MAX]; /* manifest "description"; "" absent   */
+    char icon[ND_NAP_ICON_MAX];        /* the icon file's name in the package */
 } nd_nap_info;
 
 /* ---- what phone is this ---------------------------------------------- */
@@ -212,6 +223,13 @@ nd_err nd_nap_install(const char *path, const char *apps_dir, const char *arch, 
 /* Is there already an app in apps_dir/<dir>? "Already" means a manifest is
  * there -- a directory with no manifest is a dead install, not an app. */
 bool nd_nap_is_installed(const char *apps_dir, const char *dir);
+
+/* Write the manifest's icon file from the package to `dest` -- a path the
+ * caller can write and the framebuffer image cache can read -- so the install
+ * screen can show it before anything is unpacked. ND_OK when the icon was in
+ * the package and written; an error (leaving no `dest`) when it was not, so
+ * the caller shows the app with no picture. Writes only `dest`. */
+nd_err nd_nap_extract_icon(const char *path, const char *dest);
 
 /* ---- the card ------------------------------------------------------------ */
 

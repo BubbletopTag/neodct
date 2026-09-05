@@ -17,6 +17,12 @@ anything is written, as is one that is damaged or that tries to put a file
 somewhere it should not go. Installing a .nap for an app you already have
 replaces the app and keeps what it saved.
 
+Before it installs, the phone shows the app on a page of its own -- its
+icon, its name, its version, who made it and what it does -- the same kind
+of page a software update gets, so you can see what you are about to install
+and back out if it is not what you wanted. An app that does not fill those
+in still installs; the page just shows what it has.
+
 Nothing about how an installed app is kept in its place has changed: it
 still lives on the card, still runs as the untrusted user, still cannot see
 your music or your messages, and still gets one folder of its own to write

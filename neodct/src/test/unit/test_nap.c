@@ -330,6 +330,76 @@ static void expect_refused(const char *path, const char *fragment)
     CHECK(!nd_path_exists("/card/apps/.DemoApp.installing"));
 }
 
+/* version, author and description are optional; present, they reach the info
+ * the install screen draws from, and absent they are empty rather than junk.
+ * The icon's own name is carried too, so nd_nap_extract_icon() knows what to
+ * pull. */
+static void test_inspect_reads_optional_metadata(void)
+{
+    nd_nap_info info;
+    tw t;
+
+    tw_init(&t);
+    tw_file(&t, "manifest.json",
+            "{\"name\":\"Demo App\",\"id\":13,\"icon\":\"icon.png\","
+            "\"arch\":\"luckfox-armv7\",\"version\":\"2.3\","
+            "\"author\":\"Someone\",\"description\":\"Does a thing.\"}");
+    tw_file(&t, "icon.png", "PNG");
+    tw_file(&t, "app.so", "SO");
+    tw_write(&t, "/card/Meta.nap");
+    tw_free(&t);
+    CHECK_INT(nd_nap_inspect("/card/Meta.nap", &info, NULL, 0u), ND_OK);
+    CHECK_STR(info.version, "2.3");
+    CHECK_STR(info.author, "Someone");
+    CHECK_STR(info.description, "Does a thing.");
+    CHECK_STR(info.icon, "icon.png");
+
+    /* The package the other tests use carries none of the three. */
+    write_single("/card/Bare.nap");
+    CHECK_INT(nd_nap_inspect("/card/Bare.nap", &info, NULL, 0u), ND_OK);
+    CHECK_STR(info.version, "");
+    CHECK_STR(info.author, "");
+    CHECK_STR(info.description, "");
+    CHECK_STR(info.icon, "icon.png");
+}
+
+/* nd_nap_extract_icon() copies just the icon out, so the install screen can
+ * show it before anything is unpacked. It writes a real path (no ND_ROOT
+ * redirect, since the caller hands it a scratch file), so the test resolves
+ * one; a package whose manifest names an icon it does not contain reports so
+ * rather than writing a truncated file. */
+static void test_extract_icon(void)
+{
+    static const char ICONBYTES[] = "PNGDATA-and-more-1234567890";
+    char dest[ND_PATH_MAX];
+    char got[64];
+    tw t;
+
+    tw_init(&t);
+    tw_file(&t, "manifest.json",
+            "{\"name\":\"Demo App\",\"id\":13,\"icon\":\"icon.png\",\"arch\":\"luckfox-armv7\"}");
+    tw_file(&t, "icon.png", ICONBYTES);
+    tw_file(&t, "app.so", "SO");
+    tw_write(&t, "/card/Ico.nap");
+    tw_free(&t);
+
+    CHECK_INT(nd_path_resolve(dest, sizeof dest, "/card/out.png"), ND_OK);
+    CHECK_INT(nd_nap_extract_icon("/card/Ico.nap", dest), ND_OK);
+    CHECK_INT((int)read_file("/card/out.png", got, sizeof got), (int)strlen(ICONBYTES));
+    CHECK_STR(got, ICONBYTES);
+
+    /* A manifest naming an icon the package does not hold: no file written. */
+    tw_init(&t);
+    tw_file(&t, "manifest.json",
+            "{\"name\":\"Demo App\",\"id\":13,\"icon\":\"icon.png\",\"arch\":\"luckfox-armv7\"}");
+    tw_file(&t, "app.so", "SO");
+    tw_write(&t, "/card/NoIco.nap");
+    tw_free(&t);
+    CHECK_INT(nd_path_resolve(dest, sizeof dest, "/card/none.png"), ND_OK);
+    CHECK(nd_nap_extract_icon("/card/NoIco.nap", dest) != ND_OK);
+    CHECK(!nd_path_exists("/card/none.png"));
+}
+
 static void test_refusals(void)
 {
     tw t;
@@ -787,6 +857,8 @@ int main(void)
     RUN(test_inspect_single);
     RUN(test_inspect_universal);
     RUN(test_inspect_joins_the_prefix);
+    RUN(test_inspect_reads_optional_metadata);
+    RUN(test_extract_icon);
     RUN(test_refusals);
     RUN(test_install_single);
     RUN(test_install_universal_picks_this_phone);

@@ -609,6 +609,16 @@ static nd_err inspect_manifest(inspect_ctx *c, char *why, size_t why_sz)
         goto done;
     }
     (void)nd_strlcpy(c->icon, nd_json_get_str(root, "icon", "icon.png"), sizeof c->icon);
+    (void)nd_strlcpy(c->info.icon, c->icon, sizeof c->info.icon);
+
+    /* Optional, all shown on the install screen, all falling back there when
+     * absent: a package that carries none installs exactly as before. */
+    (void)nd_strlcpy(c->info.version, nd_json_get_str(root, "version", ""),
+                     sizeof c->info.version);
+    (void)nd_strlcpy(c->info.author, nd_json_get_str(root, "author", ""),
+                     sizeof c->info.author);
+    (void)nd_strlcpy(c->info.description, nd_json_get_str(root, "description", ""),
+                     sizeof c->info.description);
 
     /* The one-phone shape: app.so at the root is meaningless without a tag
      * saying which phone it is for, and a tag without the file is a lie. */
@@ -695,6 +705,89 @@ nd_err nd_nap_inspect(const char *path, nd_nap_info *out, char *why, size_t why_
         memset(out, 0, sizeof *out);
     inspect_free(&c);
     return rc;
+}
+
+/* An icon larger than this is treated as if the package had none: the install
+ * screen draws the app with no picture rather than spend the card's memory on
+ * a hostile file. A 120x120 RGBA icon is ~57 KB; this is generous. */
+#define NAP_ICON_PREVIEW_MAX (512u * 1024u)
+
+typedef struct {
+    const char *icon; /* the file name to pull out of the archive */
+    const char *dest; /* where to write it */
+    bool wrote;
+} extract_icon_ctx;
+
+static nd_err extract_icon_entry(FILE *f, const tar_entry *e, void *ctx, char *why, size_t why_sz)
+{
+    extract_icon_ctx *c = ctx;
+    FILE *out;
+    uint64_t size = e->size;
+    char buf[8192];
+
+    ND_UNUSED(why);
+    ND_UNUSED(why_sz);
+    if (e->kind != ENT_FILE || strcmp(e->name, c->icon) != 0)
+        return ND_OK;
+    if (size == 0u || size > NAP_ICON_PREVIEW_MAX)
+        return ND_OK; /* absent as far as the preview is concerned */
+
+    out = fopen(c->dest, "wb");
+    if (out == NULL)
+        return ND_ERR_IO;
+    while (size > 0u) {
+        size_t want = (size > sizeof buf) ? sizeof buf : (size_t)size;
+        size_t got = fread(buf, 1u, want, f);
+
+        if (got == 0u || fwrite(buf, 1u, got, out) != got) {
+            (void)fclose(out);
+            (void)remove(c->dest);
+            return ND_ERR_IO;
+        }
+        size -= got;
+    }
+    if (fclose(out) != 0) {
+        (void)remove(c->dest);
+        return ND_ERR_IO;
+    }
+    c->wrote = true;
+    return ND_OK;
+}
+
+nd_err nd_nap_extract_icon(const char *path, const char *dest)
+{
+    inspect_ctx c;
+    extract_icon_ctx ec;
+    char iconname[ND_NAP_ICON_MAX];
+    nd_err rc;
+
+    if (path == NULL || dest == NULL)
+        return ND_ERR_INVAL;
+
+    /* One inspection to learn the icon's name and that the package has it,
+     * then a second walk to copy just that member out. The archive is read
+     * twice, which for a preview of one small file off a card is cheaper to
+     * reason about than carrying the bytes through inspect(), which promises
+     * to write nothing. */
+    rc = inspect(path, &c, NULL, 0u);
+    if (rc != ND_OK) {
+        inspect_free(&c);
+        return rc;
+    }
+    if (!c.info.has_icon) {
+        inspect_free(&c);
+        return ND_ERR_NOTFOUND;
+    }
+    (void)nd_strlcpy(iconname, c.info.icon, sizeof iconname);
+    inspect_free(&c);
+
+    ec.icon = iconname;
+    ec.dest = dest;
+    ec.wrote = false;
+    rc = walk(path, extract_icon_entry, &ec, NULL, 0u);
+    if (rc != ND_OK)
+        return rc;
+    return ec.wrote ? ND_OK : ND_ERR_NOTFOUND;
 }
 
 /* ------------------------------------------------------------------ *
