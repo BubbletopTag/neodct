@@ -1,0 +1,7 @@
+{
+    "name": "Fetch",
+    "useWallpaper": false,
+    "id": "9009",
+    "icon": "icon.png",
+    "exec": "main.py"
+}

@@ -1,6 +1,30 @@
 # NeoDCT OS Changelog
 
 Unreleased
+--- Fetch: download from your own server ---
+
+There is a new app in engineering mode called Fetch. Give it the password to
+an FTP server you run and it lists what is on it, three lines at a time, and
+downloads whatever you pick straight onto the memory card -- and it puts each
+file where the phone already looks for that kind of thing. Music goes in the
+music folder and shows up in the player. A PlayStation disc goes into the PSX
+app, in a folder of its own, with a cue sheet written beside it if it needs
+one. A .nap goes where Settings looks for apps to install. Anything else
+lands in downloads, beside whatever the browser has fetched.
+
+The password is asked for every time the app opens and is never written down
+anywhere on the phone. The connection is encrypted, and the phone refuses to
+talk to a server that will not encrypt it -- although it does not check the
+server's certificate, so it protects the password from being read on the way
+and not from a server pretending to be yours.
+
+A download can be stopped by leaving the app, and a call coming in stops it
+too; a half-finished file never takes its real name, so the music player and
+the app installer never see one.
+
+The server side is a script in the source tree, tools/ftp-server-setup.sh,
+which sets one up on a Debian or Ubuntu box in a couple of minutes.
+
 --- Install apps from the memory card ---
 
 Apps now come as .nap files, and Settings has an "Install apps" row that

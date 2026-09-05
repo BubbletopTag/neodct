@@ -401,7 +401,7 @@ static void test_engineering_off(void)
     stock = nd_ui_scan_apps(ND_PATH_APPS_DIR, apps, ND_APP_MAX);
     eng = nd_ui_scan_apps(ND_PATH_ENG_APPS_DIR, apps, ND_APP_MAX);
     CHECK_INT(stock, 14, "fourteen stock apps");
-    CHECK_INT(eng, 12, "twelve engineering apps");
+    CHECK_INT(eng, 13, "thirteen engineering apps");
 }
 
 /* ------------------------------------------------------------------ *

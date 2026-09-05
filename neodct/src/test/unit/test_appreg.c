@@ -550,7 +550,7 @@ static void test_icon_geometry(nd_ui *ui)
         }
         /* get_image() converts to RGBA unconditionally, which is what lets
          * the paste composite through the icon's own alpha. Three of the
-         * twenty-six icons are stored as palette PNGs (colour type 3). */
+         * twenty-seven icons are stored as palette PNGs (colour type 3). */
         CHECK(full->fmt == ND_PIXFMT_RGBA8888, "the cache always hands back RGBA");
         fw = full->w;
         fh = full->h;
@@ -697,13 +697,14 @@ static void test_scrollbar_every_index(nd_capture *cap, nd_ui *ui)
         /* The notch's step is (track_bottom - track_top) / (n_apps - 1), so
          * every app added or removed moves it. 89 with twenty-two apps, 87
          * with the twenty-three MicTest made, 84 with the twenty-four
-         * Bluetooth makes, 82 with the twenty-five Sleepy makes, and 80 with
-         * the twenty-six Calendar makes: 36 + 12 * 99/25 is 83.52 and the
-         * notch top is three rows above it, truncated.
+         * Bluetooth makes, 82 with the twenty-five Sleepy makes, 80 with the
+         * twenty-six Calendar makes, and 78 with the twenty-seven Fetch
+         * makes: 36 + 12 * 99/26 is 81.69 and the notch top is three rows
+         * above it, truncated.
          * Re-cut the menu-* frames whenever this number changes -- they are a
          * regression net for the screens that did NOT move, not a reason to
          * leave the app list alone. */
-        CHECK_INT(top, 80, "index 12 keeps the notch clear of both ends");
+        CHECK_INT(top, 78, "index 12 keeps the notch clear of both ends");
         CHECK(nd_image_get_px(frame, bar_x, track_bottom).r == 255u, "track reaches row 135");
         CHECK(nd_image_get_px(frame, bar_x + 1, track_bottom).r == 255u, "and column 233");
         CHECK(nd_image_get_px(frame, bar_x + 2, track_bottom).r == 0u, "but not column 234");
@@ -807,7 +808,7 @@ static void run_overlay_half(void)
     }
 
     CHECK(nd_ui_engineering_mode(&ui), "engineering mode came from settings.prop");
-    CHECK_INT(nd_ui_app_count(&ui), 26, "twenty-six apps with engineering mode on");
+    CHECK_INT(nd_ui_app_count(&ui), 27, "twenty-seven apps with engineering mode on");
     CHECK(nd_ui_wallpaper(&ui) == NULL, "no wallpaper configured, so the background is black");
 
     test_icon_geometry(&ui);

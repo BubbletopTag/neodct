@@ -1,0 +1,12 @@
+total 24
+drwxr-xr-x    2 1001     1001         4096 Sep 05 12:00 music
+drwxr-xr-x    2 1001     1001         4096 Sep 05 12:00 roms
+-rw-r--r--    1 1001     1001      4194304 Sep 05 12:01 A Forest.mp3
+-rw-r--r--    1 1001     1001    734003200 Sep 04 09:12 Crash Bandicoot.bin
+-rw-r--r--    1 1001     1001        61440 Sep 01 18:30 Bible-qemu-aarch64.nap
+-rw-r--r--    1 1001     1001            0 Sep 01 18:30 empty.txt
+-rw-r--r--    1 1001     1001         nnnn Sep 01 18:30 unreadable-size.mp3
+lrwxrwxrwx    1 1001     1001           12 Sep 01 18:30 shortcut -> /etc/passwd
+crw-rw-rw-    1 0        0        1,   3 Sep 01 18:30 null
+-rw-r--r--    1 1001     1001          512 Sep 01 18:30 -o
+-rw-r--r--    1 1001     1001          512 Sep 01 18:30 ../escape.mp3
