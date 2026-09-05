@@ -2862,3 +2862,23 @@ where work lands now.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_016gPhyhm5QBEn3NLPBBoTHd
+
+Addendum, same change: Fetch had to be added to STUB_ENG_APPS in
+neodct/src/Makefile. That list is not decoration -- the install rule uses it
+to decide whether an app.so goes to System/apps/<Name> or to
+System/engineering/apps/<Name>, and an app missing from it is installed as a
+STOCK app while the overlay puts its manifest under engineering. The result
+in the image was a Fetch icon in engineering with no app.so beside it. Found
+by looking in the built squashfs rather than at the source, which is the only
+place the split is visible.
+
+================================================================================
+
+version: 0.5.3b
+
+Slight tweaks to the Fetch engineering app: a bios.bin now installs into the
+emulator's bios folder. The 0.5.2b Fetch note that named the emulator is
+generalised in the same pass, since it is not public yet.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gPhyhm5QBEn3NLPBBoTHd

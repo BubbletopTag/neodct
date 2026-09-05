@@ -1,5 +1,8 @@
 # NeoDCT OS Changelog
 
+0.5.3b
+Slight tweaks to the Fetch engineering app.
+
 0.5.2b
 Apps now install from a package, and the phone shows you what an app is
 before it goes on. In engineering mode there is a new way to get files onto
@@ -11,10 +14,10 @@ There is a new app in engineering mode called Fetch. Give it the password to
 an FTP server you run and it lists what is on it, three lines at a time, and
 downloads whatever you pick straight onto the memory card -- and it puts each
 file where the phone already looks for that kind of thing. Music goes in the
-music folder and shows up in the player. A PlayStation disc goes into the PSX
-app, in a folder of its own, with a cue sheet written beside it if it needs
-one. A .nap goes where Settings looks for apps to install. Anything else
-lands in downloads, beside whatever the browser has fetched.
+music folder and shows up in the player. A .nap goes where Settings looks for
+apps to install. Files that belong to an app you have installed are put where
+that app keeps them, and anything else lands in downloads, beside whatever the
+browser has fetched.
 
 The password is asked for every time the app opens and is never written down
 anywhere on the phone. The connection is encrypted, and the phone refuses to
