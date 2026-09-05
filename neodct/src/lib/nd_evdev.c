@@ -223,7 +223,21 @@ static void device_name_or_unknown(const char *path, char *out, size_t out_sz)
         (void)nd_strlcpy(out, "unknown", out_sz);
 }
 
-nd_err nd_evdev_discover(char *out_path, size_t out_sz)
+/* ============ WHY THIS TAKES A quiet FLAG ============
+ *
+ * nd_input.c retries discovery once a second for as long as it has no
+ * device, which is how a keyboard that udev had not finished publishing at
+ * startup is picked up rather than lost (see try_reopen_evdev). Every one of
+ * those attempts walks the same steps and would print the same line, so a
+ * phone that genuinely has no keyboard -- a Luckfox, where the keypad is an
+ * i2c matrix -- would write one log line a second forever, and the racing
+ * boot it exists for would bury its own recovery in three copies of
+ * "Selected keyboard device" printed while it was still failing.
+ *
+ * The first call, from nd_input_open(), is the one worth reading, and it
+ * still logs. The retries do the same work silently and speak only when they
+ * succeed, which nd_input.c logs itself. */
+static nd_err discover_impl(char *out_path, size_t out_sz, bool quiet)
 {
     char candidates[DEVLIST_MAX][DEVPATH_MAX];
     char seen[DEVLIST_MAX][DEVPATH_MAX];
@@ -246,11 +260,13 @@ nd_err nd_evdev_discover(char *out_path, size_t out_sz)
 
             virtual_realpath(override, selected, sizeof selected);
             device_name_or_unknown(selected, name, sizeof name);
-            nd_log(ND_LOG_INPUT, "Using %s: %s (%s)", ND_ENV_KEYPAD_DEVICE, selected, name);
+            if (!quiet)
+                nd_log(ND_LOG_INPUT, "Using %s: %s (%s)", ND_ENV_KEYPAD_DEVICE, selected, name);
             (void)nd_strlcpy(out_path, selected, out_sz);
             return ND_OK;
         }
-        nd_log(ND_LOG_INPUT, "%s not found: %s", ND_ENV_KEYPAD_DEVICE, override);
+        if (!quiet)
+            nd_log(ND_LOG_INPUT, "%s not found: %s", ND_ENV_KEYPAD_DEVICE, override);
     }
 
     /* 2, 3 and 4, concatenated in that order. */
@@ -283,7 +299,8 @@ nd_err nd_evdev_discover(char *out_path, size_t out_sz)
             continue;
 
         device_name_or_unknown(resolved, name, sizeof name);
-        nd_log(ND_LOG_INPUT, "Selected keyboard device: %s (%s)", resolved, name);
+        if (!quiet)
+            nd_log(ND_LOG_INPUT, "Selected keyboard device: %s (%s)", resolved, name);
         (void)nd_strlcpy(out_path, resolved, out_sz);
         return ND_OK;
     }
@@ -295,7 +312,8 @@ nd_err nd_evdev_discover(char *out_path, size_t out_sz)
 
         virtual_realpath(candidates[0], fallback, sizeof fallback);
         device_name_or_unknown(fallback, name, sizeof name);
-        nd_log(ND_LOG_INPUT, "Fallback input device: %s (%s)", fallback, name);
+        if (!quiet)
+            nd_log(ND_LOG_INPUT, "Fallback input device: %s (%s)", fallback, name);
         (void)nd_strlcpy(out_path, fallback, out_sz);
         return ND_OK;
     }
@@ -303,9 +321,20 @@ nd_err nd_evdev_discover(char *out_path, size_t out_sz)
     /* 6. nothing at all. Returning the legacy path rather than failing is
      * deliberate: the caller's open() then produces the one error message
      * that says what is actually wrong. */
-    nd_log(ND_LOG_INPUT, "No input event device found; defaulting to %s", ND_PATH_KEYPAD);
+    if (!quiet)
+        nd_log(ND_LOG_INPUT, "No input event device found; defaulting to %s", ND_PATH_KEYPAD);
     (void)nd_strlcpy(out_path, ND_PATH_KEYPAD, out_sz);
     return ND_ERR_NOTFOUND;
+}
+
+nd_err nd_evdev_discover(char *out_path, size_t out_sz)
+{
+    return discover_impl(out_path, out_sz, false);
+}
+
+nd_err nd_evdev_discover_quiet(char *out_path, size_t out_sz)
+{
+    return discover_impl(out_path, out_sz, true);
 }
 
 int nd_evdev_open(const char *path)

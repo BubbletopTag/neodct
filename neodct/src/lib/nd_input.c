@@ -58,6 +58,16 @@
  * more than the hardware can produce in one scan and costs 256 bytes. */
 #define QUEUE_MAX 16
 
+/* How often a core with no evdev descriptor looks for one again. See
+ * try_reopen_evdev(). One second is chosen against a person's patience
+ * rather than against the race it exists for, which is over in a few
+ * hundred milliseconds: it has to be short enough that a phone which came
+ * up keyless is typing before the owner has finished wondering, and long
+ * enough that a phone which genuinely has no keyboard -- every Luckfox,
+ * where the keypad is an i2c matrix -- is not opening a directory sixty
+ * times a second forever. */
+#define ND_REOPEN_INTERVAL_US 1000000u
+
 typedef struct {
     int32_t code;
     bool used;
@@ -70,6 +80,13 @@ struct nd_input {
     int fd; /* evdev or pipe; -1 when there is none */
     bool owns_fd;
     char path[ND_PATH_MAX];
+
+    /* Only an input opened by nd_input_open() may go looking for a device on
+     * its own. A wrapped pipe or fd belongs to the caller -- an app's channel
+     * is the obvious one -- and must never turn into an evdev reader behind
+     * its back. */
+    bool may_reopen;
+    uint64_t reopen_after_us;
 
     bool have_matrix;
     nd_matrix_input matrix;
@@ -320,6 +337,8 @@ static void input_defaults(nd_input *in)
 
     in->fd = -1;
     in->backend = ND_INPUT_NONE;
+    in->may_reopen = false;
+    in->reopen_after_us = 0u;
     in->repeat_delay_us = (uint64_t)(ND_REPEAT_DELAY_S * 1e6);
     in->repeat_interval_us = (uint64_t)(ND_REPEAT_INTERVAL_S * 1e6);
     /* Arrows only. See the reasoning in nd_keypad.h -- a repeat on a digit
@@ -373,6 +392,66 @@ static void try_open_matrix(nd_input *in)
            (unsigned)cfg.n_cols);
 }
 
+/* ============ WHEN THE KEYBOARD IS LATE, AND NOT ABSENT ============
+ *
+ * A device node exists before udev has touched it. devtmpfs creates
+ * /dev/input/event0 the moment the kernel registers the device, owned
+ * root:root and mode 0600; the group and the 0660 that make it readable by
+ * ndusr are applied afterwards, when udevd processes the uevent and
+ * 50-udev-default.rules' `SUBSYSTEM=="input", GROUP="input"` runs. Between
+ * those two instants the node is present, correctly named, and unopenable by
+ * anything that is not root.
+ *
+ * The core opens input AFTER dropping to ndusr (nd_main.c step 4b), so it can
+ * land in that window, and S10udevd cannot close it on its own: it triggers
+ * and settles the input subsystem, but a device that has not registered YET
+ * is not in the set the trigger replays, so settle returns having waited for
+ * nothing. Measured at roughly one boot in five under QEMU, where the keypad
+ * is a virtio-input device on the PCI bus. It was invisible for as long as
+ * the UI ran as root, because root ignores the mode.
+ *
+ * A failure to open therefore does not mean there is no keyboard. It means
+ * there is no keyboard YET, and the difference is the whole bug: giving up
+ * once at startup is what turned a race measured in milliseconds into a
+ * phone with no keys until it was rebooted.
+ *
+ * So the descriptor is looked for again, at ND_REOPEN_INTERVAL_US, from the
+ * read path -- which is the one place that is already awake and already
+ * knows the difference between "waiting for a key" and "spinning". It costs
+ * nothing on a phone whose keyboard opened, because it never runs there.
+ *
+ * It stays enabled after the first success is impossible to need, because
+ * the phone that needs it most is the one with no evdev device at all: a USB
+ * keyboard plugged into a real handset arrives through exactly this path,
+ * which is what nd_input_open()'s "both backends can coexist" comment
+ * promises and could not previously deliver. */
+static void try_reopen_evdev(nd_input *in, uint64_t now)
+{
+    char path[ND_PATH_MAX];
+    int fd;
+
+    if (!in->may_reopen || in->fd >= 0)
+        return;
+    if (in->reopen_after_us != 0u && now < in->reopen_after_us)
+        return;
+    in->reopen_after_us = now + ND_REOPEN_INTERVAL_US;
+
+    (void)nd_evdev_discover_quiet(path, sizeof path);
+    fd = nd_evdev_open(path);
+    if (fd < 0)
+        return;
+
+    in->fd = fd;
+    in->owns_fd = true;
+    (void)nd_strlcpy(in->path, path, sizeof in->path);
+    if (!in->have_matrix)
+        in->backend = ND_INPUT_EVDEV;
+    /* Deliberately at the same level as the failure that preceded it: a phone
+     * that started keyless and then got keys has to say so, or the warning in
+     * the log is the last word on a problem that fixed itself. */
+    nd_log(ND_LOG_INPUT, "Input recovered: listening on %s", path);
+}
+
 nd_err nd_input_open(nd_input **out)
 {
     /* owned by the caller; free with nd_input_close() */
@@ -414,6 +493,11 @@ nd_err nd_input_open(nd_input **out)
     } else if (!in->have_matrix) {
         nd_log(ND_LOG_INPUT, "WARNING: no active input backend.");
     }
+
+    /* Set last, and for both outcomes: a phone that opened its keyboard can
+     * still lose it, and one that has a matrix can still be handed a USB
+     * keyboard. See try_reopen_evdev(). */
+    in->may_reopen = true;
 
     *out = in;
     return ND_OK;
@@ -532,6 +616,13 @@ bool nd_input_read_event(nd_input *in, double timeout_s, nd_key_event *out)
             if (in->q_len > 0u)
                 continue;
         }
+
+        /* Not there YET, rather than not there at all: the window between
+         * devtmpfs making the node and udev making it readable. Rate-limited
+         * inside, so this costs one comparison on every phone that already
+         * has its keyboard. */
+        if (in->fd < 0)
+            try_reopen_evdev(in, now_us());
 
         if (in->fd >= 0) {
             double slice;

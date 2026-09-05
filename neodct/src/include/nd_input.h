@@ -66,8 +66,19 @@ typedef struct nd_input nd_input;
 
 /* The core's path: try the matrix keypad (only when /NeoDCT/User/keymap.json
  * exists and names a driver that is present), then evdev. Both may fail, in
- * which case reads always return ND_KEY_NONE and the core logs
- * "[INPUT] WARNING: no active input backend." -- boot continues. */
+ * which case reads return ND_KEY_NONE and the core logs
+ * "[INPUT] WARNING: no active input backend." -- boot continues.
+ *
+ * That warning is not final. An input opened this way keeps looking for an
+ * evdev device from the read path, once a second, for as long as it has
+ * none, and logs "Input recovered: listening on ..." if one turns up. Two
+ * different things need that. The one it was written for is a boot race: the
+ * core opens input after it has stopped being root, and a node devtmpfs has
+ * just created is root:root 0600 until udev applies its group -- so an open
+ * can fail with EACCES on a keyboard that is about to be perfectly usable.
+ * The other is a USB keyboard plugged into a running phone. A wrapped pipe
+ * or fd (the two calls below) never does this; it is not that input's
+ * device to find. */
 nd_err nd_input_open(nd_input **out);
 
 /* An app's path: wrap the inherited channel. Takes ownership of fd. */
@@ -173,6 +184,12 @@ void nd_input_channel_close_write(nd_input_channel *ch);
  * Sort with strcmp, not strcoll -- Python's sorted() is code-point order and a
  * locale must never reorder the device list. */
 nd_err nd_evdev_discover(char *out_path, size_t out_sz);
+
+/* The same search, logging nothing. For a caller that repeats it -- the
+ * core's retry after a keyboard that was not published yet -- where one line
+ * per attempt would be a line a second forever on a phone that has no evdev
+ * keyboard at all. */
+nd_err nd_evdev_discover_quiet(char *out_path, size_t out_sz);
 
 /* EVIOCGNAME, for the log line. Empty string when the ioctl fails. */
 nd_err nd_evdev_device_name(const char *path, char *out, size_t out_sz);

@@ -21,6 +21,10 @@ PIDFILE="/var/run/$DAEMON.pid"
 
 SETTLE_TIMEOUT=30
 UDEVD_ARGS=""
+# How long to wait for udev to publish a keyboard before giving up on it and
+# letting the UI start anyway. Overridable in /etc/default/udevd; see the long
+# comment in start(). Never a hard failure -- the core keeps looking.
+KBD_WAIT_MS=1500
 
 # shellcheck source=/dev/null
 [ -r "/etc/default/$DAEMON" ] && . "/etc/default/$DAEMON"
@@ -64,6 +68,71 @@ start() {
 	# which rcS runs in the background while the phone is already up.
 	udevadm trigger --type=devices --action=add --subsystem-match=input
 	udevadm settle --timeout=$SETTLE_TIMEOUT || echo "udevadm settle failed"
+
+	# ============ AND THEN WAIT FOR ONE TO ACTUALLY BE THERE ============
+	#
+	# settle waits for the QUEUE, not for the device. A trigger replays an
+	# add event for every input device that is in /sys at that instant, and
+	# one that has not registered yet is not in that set -- so on a boot
+	# where the kernel is a few milliseconds behind, both commands above
+	# succeed having waited for nothing at all. The tell is in the timing:
+	# a boot that lost this race shows "S10udevd took 0.31s" against 0.43s
+	# for one that won it, because settling an empty queue is instant.
+	#
+	# What follows is a phone with a keypad it cannot open. devtmpfs creates
+	# /dev/input/event0 as soon as the device registers, root:root 0600; the
+	# group that makes it readable by ndusr is applied afterwards, when udevd
+	# processes the uevent. The core opens input after it has stopped being
+	# root, lands in between, and gets EACCES. Roughly one boot in five under
+	# QEMU. Invisible until the UI stopped running as root, because root
+	# ignores the mode.
+	#
+	# So wait for the SYMLINK rather than for the queue. /dev/input/by-path/
+	# is made by udev's own persistent-input rules, so its existence proves
+	# the device has been processed -- and *-kbd is the exact thing
+	# nd_evdev_discover() looks for first, which is the property worth
+	# waiting on rather than a proxy for it.
+	#
+	# Cost, which is the reason for the shape: a boot that already won the
+	# race pays one `set --` and no sleep at all. Only the losing boot waits,
+	# and it waits in 50 ms steps rather than seconds.
+	#
+	# Skipped entirely where the keypad is an i2c matrix -- every Luckfox --
+	# because there the by-path link is never going to appear and the wait
+	# would be a second and a half of boot spent proving it. keymap.json is
+	# the same file nd_input.c's try_open_matrix() gates on, so the two
+	# cannot disagree about which phone this is.
+	#
+	# ============ AND IT RE-TRIGGERS, BECAUSE WAITING IS NOT ENOUGH =====
+	#
+	# The first shape of this waited for the link and nothing else, and it
+	# timed out every time it was needed -- 1500 ms of boot spent proving
+	# that nothing was coming. The reason is that the uevent is not late,
+	# it is GONE: udevd is started just above with start-stop-daemon
+	# --background, and a device that registers between the fork and udevd
+	# having read its rules generates an event with nobody listening. No
+	# amount of waiting produces a second one. That is also why the phone
+	# recovered only when S11udevall ran, four seconds later: a trigger is
+	# what replays it, and that was the next one.
+	#
+	# So each pass triggers again. The device exists by then, so the replay
+	# is the thing that was missing, and the loop is normally one pass long.
+	KBD_TRIES=$((KBD_WAIT_MS / 250))
+	if [ ! -e /NeoDCT/User/keymap.json ]; then
+		tries=0
+		while :; do
+			set -- /dev/input/by-path/*-kbd
+			[ -e "$1" ] && break
+			[ "$tries" -ge "$KBD_TRIES" ] && {
+				echo "no keyboard after $tries tries; the core will keep looking"
+				break
+			}
+			tries=$((tries + 1))
+			sleep 0.05
+			udevadm trigger --type=devices --action=add --subsystem-match=input
+			udevadm settle --timeout=$SETTLE_TIMEOUT
+		done
+	fi
 	return "$status"
 }
 
