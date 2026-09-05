@@ -7,6 +7,9 @@ field name inside it -- so this compares not just the verdict but the message.
 
     make -C neodct/src test && python3 -m pytest neodct/tests/test_c_manifest_matches_python.py
 
+The driver is a test binary, so it runs the only way one may: inside the
+test harness's sandbox, through c_driver.run().
+
 `DIVERGENT` below is the complete list of inputs where the two deliberately
 disagree, each with the reason. Every one of them is a manifest Python
 ACCEPTS and the C REFUSES: the C reads an SD card that arrived from
@@ -19,17 +22,18 @@ rather than letting it hide in a list of expected differences.
 import copy
 import json
 import os
-import subprocess
 
 import pytest
 
 from System.core.UpdateService import IncompatibleUpdate, InvalidUpdate
 from System.core.UpdateService import manifest as manifest_mod
 
+import c_driver  # noqa: E402
+from c_driver import tmp_path  # noqa: E402,F401 -- a scratch dir the sandbox can see
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD = os.path.join(REPO, "src", "build", "default")
 DRIVER = os.path.join(BUILD, "test", "test_manifest")
-LIBDIR = os.path.join(BUILD, "lib")
 
 pytestmark = pytest.mark.skipif(
     not os.path.exists(DRIVER),
@@ -111,11 +115,7 @@ NUMERIC = ("buildtime", "block_size", "image_blocks", "image_bytes", "raw_len")
 def c_run(tmp_path, raw, *args):
     path = tmp_path / "manifest.json"
     path.write_bytes(raw)
-    env = dict(os.environ)
-    env["LD_LIBRARY_PATH"] = LIBDIR
-    env.pop("NEODCT_ROOT", None)
-    out = subprocess.run([DRIVER] + list(args[:1]) + [str(path)] + [str(a) for a in args[1:]],
-                         capture_output=True, check=True, env=env)
+    out = c_driver.run(DRIVER, *(list(args[:1]) + [str(path)] + [str(a) for a in args[1:]]))
     verdict = None
     fields = {}
     for line in out.stdout.decode().splitlines():
