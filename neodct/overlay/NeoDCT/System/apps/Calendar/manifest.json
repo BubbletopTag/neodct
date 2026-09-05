@@ -1,6 +1,8 @@
 {
-	"name":	"Calendar",
-	"id":	"5",
-	"icon": "icon.png",
-	"exec": "main.py"
+    "name": "Calendar",
+    "id": "5",
+    "icon": "icon.png",
+    "exec": "main.py",
+    "author": "Aiden/BubbletopTag",
+    "description": "NeoDCT Core System application"
 }

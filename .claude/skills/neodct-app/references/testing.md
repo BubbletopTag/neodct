@@ -7,6 +7,11 @@
     make test            # ~70 binaries, one per test file, in the sandbox
     make ASAN=1 test     # before pushing; AGENTS.md asks for it
 
+Where the two test lines may run is `AGENTS.md`'s call, and on the owner's
+own workstation the answer is nowhere: build there, run inside QEMU or a
+disposable VM, or say the tests are unrun. The rest of this file is about
+what a run does once it is allowed.
+
 Both test targets run inside `test/harness/sandbox.sh` -- bubblewrap with no
 D-Bus, no network and a minimal `/dev` -- with fake `poweroff`, `reboot` and
 `systemctl` first on `$PATH`, because the suite once reached `poweroff(8)`
@@ -24,9 +29,11 @@ a timeout, rather than assuming you broke something:
             && echo "ok   $(basename $t)" || echo "FAIL $(basename $t)"
     done
 
-`test_bluetooth` blocks indefinitely in a container with no bluetooth stack.
-That is pre-existing. Verify against a stashed clean tree before blaming a
-change for a hang.
+`test_bluetooth` skips its adapter-dependent cases inside the sandbox, where
+Bluetooth sockets do not exist (they live only in the initial network
+namespace). On a box with no bluetooth stack at all it can still block; that
+is pre-existing. Verify against a stashed clean tree before blaming a change
+for a hang.
 
 ## Two fixtures
 

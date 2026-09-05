@@ -82,6 +82,15 @@ and the phone rings silently in the meantime.
 Pick an app id that is free; `neodct/overlay/NeoDCT/System/apps/*/manifest.json`
 lists what is taken. The id orders the menu and appears in the breadcrumb.
 
+An app does not have to be stock. The same directory -- manifest, icon, files
+-- plus a cross-built `app.so` can be packed into a `.nap` (a NeoDCT
+Application Package) with
+`neodct/tools/mknap.py` and installed from **Settings → Install apps** onto
+the memory card, where it runs confined as `ndusr_ut` and may write only its
+own `data/`. `docs/NAP-PACKAGES.md` is the format; `neodct/contrib/Bible` is
+the worked example, including a cross build that needs no Buildroot. Adding
+an app that way moves no golden frame and changes no menu count.
+
 ## Making a new screen look native
 
 Most screens should be a widget. When you genuinely need to draw one -- a grid,
@@ -139,20 +148,26 @@ recipe for adding a new kind; the shape is:
 
 ## Testing
 
-Run the suite before and after every change:
+Build before and after every change; run the suite where `AGENTS.md`'s Tests
+section allows it -- **not on the owner's own workstation**, where the answer
+is to build, then run inside QEMU or a disposable VM, or say the tests are
+unrun:
 
 ```sh
-cd neodct/src && make && make test       # sandboxed -- AGENTS.md's Tests section
+cd neodct/src && make                    # on the host: compile and link only
+make test                                # in the guest or VM: the whole suite
 make test-one T=test_modem               # one binary, the same way
 ```
 
-`make ASAN=1 test` before pushing -- `AGENTS.md` asks for it and it catches
-real leaks. Both targets run inside `test/harness/sandbox.sh` (bubblewrap: no
-D-Bus, no network, a minimal `/dev`) with fake system verbs on `$PATH`,
-because the suite once reached `poweroff(8)` and switched off the developer's
-machine. A test binary started by hand refuses before `main()`; use
-`make test-one`. If a test hangs, `make test-one T=...` it under a timeout;
-`test_bluetooth` blocks in containers with no bluetooth stack and that is
+`make ASAN=1 test` before pushing, in the same place -- `AGENTS.md` asks for
+it and it catches real leaks. Both test targets run inside
+`test/harness/sandbox.sh` (bubblewrap: no D-Bus, no network, a minimal
+`/dev`) with fake system verbs on `$PATH`, because the suite once reached
+`poweroff(8)` and switched off the developer's machine. A test binary started
+by hand refuses before `main()`; use `make test-one`. If a test hangs,
+`make test-one T=...` it under a timeout. `test_bluetooth` skips its
+adapter-dependent cases inside the sandbox, where Bluetooth sockets do not
+exist; on a box with no bluetooth stack at all it can still block, and that is
 pre-existing, not something you broke.
 
 Write two tests for a new app, following the existing pairs:

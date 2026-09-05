@@ -17,7 +17,11 @@
 #   --unshare-net          no network: no relay tunnel, no SNTP, no sshd
 #                          listening on the developer's ports, and no
 #                          default route -- which the simulated signal bars
-#                          treat as offline, deterministically
+#                          treat as offline, deterministically. Also no
+#                          Bluetooth: AF_BLUETOOTH sockets exist only in the
+#                          initial network namespace, so from in here the
+#                          kernel looks as if CONFIG_BT were off, and
+#                          test_bluetooth skips the cases that need it.
 #   --dev /dev             a fresh minimal /dev: no /dev/snd (the speakers),
 #                          no /dev/uinput (the keyboard), no /dev/fb0, no
 #                          ttyUSB (the modem), no i2c, no input devices

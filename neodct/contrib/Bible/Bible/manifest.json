@@ -1,0 +1,9 @@
+{
+ "name": "Bible",
+ "id": "13",
+ "icon": "icon.png",
+ "exec": "main.py",
+ "version": "1.0",
+ "author": "Aiden/BubbletopTag",
+ "description": "The whole Bible, offline: all 81 books, readable in a plain web translation or a gen-z paraphrase. Jump to any book, chapter and verse from the keypad."
+}

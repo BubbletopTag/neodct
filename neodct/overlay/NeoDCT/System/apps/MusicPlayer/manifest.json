@@ -2,5 +2,7 @@
     "name": "Music",
     "id": "970",
     "icon": "icon.png",
-    "exec": "main.py"
+    "exec": "main.py",
+    "author": "Aiden/BubbletopTag",
+    "description": "NeoDCT Core System application"
 }

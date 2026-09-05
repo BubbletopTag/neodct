@@ -1,6 +1,8 @@
 {
-	"name":	"Settings",
-	"id":	"4",
-	"icon": "icon.png",
-	"exec": "main.py"
+    "name": "Settings",
+    "id": "4",
+    "icon": "icon.png",
+    "exec": "main.py",
+    "author": "Aiden/BubbletopTag",
+    "description": "NeoDCT Core System application"
 }

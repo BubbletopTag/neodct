@@ -68,7 +68,14 @@ An update built without bumping it installs but shows no change on screen.
 
 ## Tests
 
-Run the C suite, freely and often, with `make test` -- and only that way:
+**On the owner's own workstation, build the suite but do not run it -- not
+even through the sandbox described below.** The owner has asked (2026-09-05)
+for the C tests to run only inside QEMU or a disposable VM, because a test
+switched this machine off twice before the harness existed. So on this host:
+`cd neodct/src && make` compiles and links everything; the run happens in the
+guest (`ssh` in, `cd neodct/src && make test`) or in a VM the owner has set
+up, and if neither is reachable, stop after the build and say the tests are
+unrun. Where a run is allowed, `make test` is the only way to do it:
 
 ```sh
 cd neodct/src && make test              # the whole suite, in the sandbox

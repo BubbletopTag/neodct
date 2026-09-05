@@ -43,6 +43,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "nd_bt.h"
 #include "smallapp_test.h"
 
 #include "../../apps/Bluetooth/bluetooth.h"
@@ -353,9 +354,18 @@ static void test_the_self_test_stops_at_the_first_failure(void)
     }
     /* This machine's kernel has Bluetooth -- the test binary is running on
      * it and test_bt.c already listed its adapters -- so step one passes
-     * everywhere `make test` runs. */
-    CHECK_INT(checks[ND_BTAPP_STEP_KERNEL].verdict, ND_BTAPP_PASS,
-              "this kernel has CONFIG_BT");
+     * everywhere `make test` runs... except inside the test sandbox. Bluetooth
+     * sockets exist only in the initial network namespace (bt_sock_create
+     * answers EAFNOSUPPORT anywhere else), and sandbox.sh gives the suite its
+     * own. From in there the kernel really is out of reach, the app is right
+     * to say so, and it is only this claim about the machine that does not
+     * apply. */
+    if (nd_bt_available())
+        CHECK_INT(checks[ND_BTAPP_STEP_KERNEL].verdict, ND_BTAPP_PASS,
+                  "this kernel has CONFIG_BT");
+    else
+        printf("  (no AF_BLUETOOTH here -- the sandbox's network namespace -- so the "
+               "kernel step is not judged)\n");
 }
 
 /* ------------------------------------------------------------------ *
@@ -374,6 +384,15 @@ static void test_the_menu_draws_and_back_leaves(void)
 {
     sa_fixture fx;
 
+    /* With no AF_BLUETOOTH the app opens on its refusal dialog instead of the
+     * menu, and MessageDialog drains the channel before it draws -- so the
+     * queued Back never arrives and app_run() waits for ever. Inside the test
+     * sandbox that is every run (see above); say so and step over it rather
+     * than sit in the harness's timeout. */
+    if (!nd_bt_available()) {
+        printf("  (no AF_BLUETOOTH here -- the sandbox -- so the menu cannot be driven)\n");
+        return;
+    }
     if (!sa_fx_init(&fx)) {
         CHECK(false, "fixture");
         sa_fx_free(&fx);

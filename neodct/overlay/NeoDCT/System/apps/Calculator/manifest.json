@@ -1,6 +1,8 @@
 {
-	"name":	"Calculator",
-	"id":	"7",
-	"icon": "icon.png",
-	"exec": "main.py"
+    "name": "Calculator",
+    "id": "7",
+    "icon": "icon.png",
+    "exec": "main.py",
+    "author": "Aiden/BubbletopTag",
+    "description": "NeoDCT Core System application"
 }

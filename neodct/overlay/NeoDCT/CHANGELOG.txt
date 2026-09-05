@@ -1,5 +1,66 @@
 # NeoDCT OS Changelog
 
+0.5.2b
+Apps now install from a package, and the phone shows you what an app is
+before it goes on. In engineering mode there is a new way to get files onto
+the phone: download them from a server you run.
+
+--- Fetch: download from your own server ---
+
+There is a new app in engineering mode called Fetch. Give it the password to
+an FTP server you run and it lists what is on it, three lines at a time, and
+downloads whatever you pick straight onto the memory card -- and it puts each
+file where the phone already looks for that kind of thing. Music goes in the
+music folder and shows up in the player. A PlayStation disc goes into the PSX
+app, in a folder of its own, with a cue sheet written beside it if it needs
+one. A .nap goes where Settings looks for apps to install. Anything else
+lands in downloads, beside whatever the browser has fetched.
+
+The password is asked for every time the app opens and is never written down
+anywhere on the phone. The connection is encrypted, and the phone refuses to
+talk to a server that will not encrypt it -- although it does not check the
+server's certificate, so it protects the password from being read on the way
+and not from a server pretending to be yours.
+
+A download can be stopped by leaving the app, and a call coming in stops it
+too; a half-finished file never takes its real name, so the music player and
+the app installer never see one.
+
+The server side is a script in the source tree, tools/ftp-server-setup.sh,
+which sets one up on a Debian or Ubuntu box in a couple of minutes.
+
+--- Install apps from the memory card ---
+
+Apps now come as .nap files, and Settings has an "Install apps" row that
+installs one from the memory card. Copy a .nap anywhere onto the card -- its
+root, its apps folder, or let the browser download one into untrusted -- put
+the card in the phone, and pick it from the list. The app appears in the menu
+the moment you leave Settings.
+
+A .nap -- a NeoDCT Application Package -- is an ordinary uncompressed tar
+file holding one app: its manifest,
+its icon, its program and its files. It can be made for one phone or for
+several at once, and one that is not for this phone is refused before
+anything is written, as is one that is damaged or that tries to put a file
+somewhere it should not go. Installing a .nap for an app you already have
+replaces the app and keeps what it saved.
+
+Before it installs, the phone shows the app on a page of its own -- its
+icon, its name, its version, who made it and what it does -- the same kind
+of page a software update gets, so you can see what you are about to install
+and back out if it is not what you wanted. An app that does not fill those
+in still installs; the page just shows what it has.
+
+Nothing about how an installed app is kept in its place has changed: it
+still lives on the card, still runs as the untrusted user, still cannot see
+your music or your messages, and still gets one folder of its own to write
+in. What is new is that the phone makes that folder the moment the app is
+installed rather than the next time the card is mounted -- Settings asks the
+core, which asks the card helper, as root, to restate the card's layout.
+
+The first package is the Bible: neodct/packages/Bible-luckfox-armv7.nap.
+docs/NAP-PACKAGES.md says how to make one; neodct/tools/mknap.py makes it.
+
 0.5.1b
 A phone call no longer freezes the phone, the keypad is there whenever the
 home screen is, and a video says what it is doing while you wait for it.

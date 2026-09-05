@@ -2716,3 +2716,149 @@ being the phone's own, does not mention.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_016gPhyhm5QBEn3NLPBBoTHd
+
+================================================================================
+tests: test_bluetooth steps over the sandbox instead of sitting in its timeout,
+and the docs say where the suite may run
+
+Bluetooth sockets exist only in the initial network namespace --
+bt_sock_create() answers EAFNOSUPPORT anywhere else -- and
+test/harness/sandbox.sh gives the suite its own. So inside the sandbox the
+Bluetooth app is right to open on its "no CONFIG_BT" refusal dialog, and
+test_the_menu_draws_and_back_leaves() then waited for ever: MessageDialog
+drains the key channel before it draws, so the queued Back never arrived, and
+the first sandboxed run spent the harness's whole 600 s cap on it. The two
+cases that need a reachable kernel -- that one, and the "this kernel has
+CONFIG_BT" claim in the self-test case -- now ask nd_bt_available() first and
+print why they are stepping over, the same way the suite already treats a
+missing controller. sandbox.sh's header records the namespace fact.
+
+Compiled, not run: the owner has asked for the C suite to run only inside
+QEMU or a disposable VM, sandbox or no sandbox, and AGENTS.md, the neodct-app
+skill and its testing reference now say so at the top of their test sections
+-- build on the workstation, run in the guest, say plainly when tests are
+unrun. The harness stays as the way a run happens where one is allowed.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Jz3HMaBHuh5BptFDTYE94j
+
+================================================================================
+
+fetch: an app that downloads from your own server, and sorts what it gets
+
+There is no way to put a file on this phone that does not involve taking the
+card out. The browser drops everything into untrusted/ and nothing sorts it;
+sftp reaches the phone but wants a key and a PC at the other end. Fetch is the
+third way: a server the owner runs, a password typed on the keypad, a list of
+what is up there, and a download that ends with the file in the folder whose
+app already reads it.
+
+That last part is the whole point of the app. Music goes to sdcard/music and
+MusicPlayer finds it. A PlayStation disc goes to apps/PSX/games/<Title>/ --
+the shape the PSX app's coverflow reads -- with the folder created on the way
+and a single-track MODE2/2352 cue sheet written beside a raw .bin that has
+none, a straight port of neodct-pcsxrearmed's tools/mkcue.sh, refusal
+included: a file that is not a whole number of 2352-byte sectors is not a raw
+image and a cue claiming otherwise fails further away. A .nap goes to
+untrusted/, which is one of the three places nd_nap_find() looks, so it turns
+up in Settings -> Install apps with nothing further to do. Everything else
+lands in untrusted/ beside the browser's downloads.
+
+There is deliberately no sdcard/roms. CARD_LAYOUT in neodct-sdcard is the list
+of directories a card grows at every mount, and nothing on the phone would
+read that one: PSX only looks inside its own app directory, because a confined
+app cannot see anything else. A disc image therefore goes where it will
+actually be played, or -- when PSX is not installed -- waits in untrusted/
+rather than creating a folder with no reader.
+
+It is an engineering app because it must be. music/ is 0750 ndusr:ndusr and
+apps/PSX/ is 0755 ndusr:ndusr, so a .nap-installed app -- ndusr_ut, private
+mount namespace, its own data/ and nothing else -- can write to neither, and
+correctly so. An app under System/engineering/apps runs as root
+(nd_proc_app_needs_root) and can; what it writes lands 0644, which is what
+MusicPlayer and PSX need, since both only ever read it.
+
+The transport is a spawned curl, for the reasons nd_remote.c's header already
+gives: curl is in both defconfigs, Buildroot's libcurl.mk disables ldap and
+ntlm and not ftp, and linking libcurl into libneodct would cost idle RSS in
+every process that maps it. It does NOT reuse nd_remote_download(). That
+function resumes a 53 MB .ndsw over HTTPS with byte ranges and status-line
+parsing, none of which exists in FTP, and generalising the one code path that
+must not break quietly, to serve a development tool, is the more expensive
+mistake. A second driver of 600 lines is the cheaper one.
+
+Two invocations. A listing is a URL with a trailing slash, which makes curl
+send LIST, and the ls -l text that comes back is parsed line by line and
+trusted for nothing: only '-' and 'd' modes, so no symlink and no device; a
+size that will not parse becomes -1 rather than 0, because 0 is a real file
+length and the bar has to tell them apart; and every name goes through
+fetch_name_is_safe() before it can become a path -- no '/', no '\', no control
+byte, no "..", and nothing starting with '-', which curl would read as an
+option the moment it reached an argv. A download is `curl -o <path>.part`,
+with progress taken from stat()ing the partial file five times a second
+against the size the listing gave. curl writes the file; this process only
+watches it grow. The rename happens after curl exits 0 AND the length matches,
+so nothing that scans music/, untrusted/ or games/ ever sees a half-finished
+file with a real name.
+
+TLS is required and the certificate is not checked. --ssl-reqd means a server
+that will not do AUTH TLS is refused rather than silently spoken to in the
+clear; -k is there because the droplet has an IP address and a self-signed
+certificate and no domain to put a real one on. Passive eavesdropping is
+defeated, an active man-in-the-middle is not, and the account at the far end
+is built to be worth nothing accordingly. --proto =ftp pins the protocol so no
+reply can turn a transfer into a local file read.
+
+The password never reaches argv, which is world-readable through /proc for as
+long as curl runs on a phone that ships a shell app. It goes into a 0600 netrc
+under /tmp, curl gets --netrc-file, and the file is unlinked before either
+call returns. Nothing stores it: it lives on app_run's stack, is wiped on the
+way out, and is asked for again at every launch. The host and the user name
+are remembered in settings, because they are not secrets and typing an IP
+address on a keypad twice is what would stop this being used.
+
+tools/ftp-server-setup.sh stands the other end up on Debian or Ubuntu:
+vsftpd, a chrooted nologin account, a self-signed certificate, a passive port
+range, ufw, and read-only over FTP by default since root already has scp. Its
+header records the three settings that otherwise produce a server that looks
+configured and completes no transfer -- require_ssl_reuse=NO, because curl
+does not resume the control connection's TLS session; seccomp_sandbox=NO,
+whose filter kills vsftpd on syscalls TLS makes; and pasv_address, without
+which the PASV reply can send the phone to a private address.
+
+Tests: test_fetch.c is the pure half -- classification, name safety,
+destinations, cue sheets, listing parsing, sizes and URLs -- and test_fetch_app
+.c drives the real curl invocations against a stand-in on PATH, the same
+device neodct/tests/remote/fake-curl is for nd_remote. Three of its cases
+exist because getting them wrong would be silent: the password must not be in
+argv, the netrc must be 0600 and gone afterwards, and --ssl-reqd and
+--proto =ftp must be on every call.
+
+Adding an engineering app moves the app selector's scrollbar notch, so
+test_appreg's index-12 expectation goes from 80 to 78 (36 + 12 * 99/26 is
+81.69, three rows above, truncated) and the counts become fourteen stock and
+thirteen engineering. The menu-* golden frames are shot with engineering mode
+on and therefore need re-cutting; they have not been.
+
+Compiled, not run: the owner has asked for the C suite to run only inside QEMU
+or a disposable VM, and neither was reachable from this session. `make test`
+and the golden-frame re-cut are both still to happen.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01CKmHKMeAz5ZvfH17b3qMrx
+
+================================================================================
+
+version: 0.5.2b
+
+Two things a phone owner sees: apps install from a .nap package with a page
+that shows the app's icon, name, version, author and description first (the
+install screen and the freeze it used to hit are in earlier commits), and an
+engineering-mode Fetch app downloads files from a server the owner runs,
+sorting each into the folder whose app already reads it.
+
+os-release and the 0.5.2b changelog section agree. Cut on main, which is
+where work lands now.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gPhyhm5QBEn3NLPBBoTHd

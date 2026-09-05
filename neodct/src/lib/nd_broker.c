@@ -370,6 +370,14 @@ bool nd_broker__root_exec_allowed(const char *path, const char *const *argv, uin
     if (strcmp(path, ND_PATH_SDCARD_HELPER) == 0) {
         static const char DEV[] = "/dev/";
 
+        /* The second thing, added with .nap packages: `layout`, which
+         * restates the card's ownership after an install so the new app's
+         * data/ belongs to ndusr_ut. It carries NO argument at all -- the
+         * helper lays out the card at the phone's own mountpoint and decides
+         * for itself whether that card is one of ours -- so the whole of the
+         * check is that nothing was appended to it. */
+        if (n_argv == 2u && argv != NULL && argv[1] != NULL && strcmp(argv[1], "layout") == 0)
+            return true;
         if (n_argv != 3u || argv == NULL || argv[1] == NULL || argv[2] == NULL)
             return false;
         if (strcmp(argv[1], "format") != 0)

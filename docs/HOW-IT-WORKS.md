@@ -279,6 +279,20 @@ and wallpapers work exactly as before — and Settings will offer to reformat it
 so it can hold apps. That erases the card, so it asks first and it will never
 do it on its own.
 
+### How an app gets there
+
+As a `.nap` file — a NeoDCT Application Package: a plain tar archive holding
+one app, copied onto the card
+and installed from **Settings → Install apps**. The phone reads every header
+and every name before it writes anything, refuses a package that is damaged,
+that is for a different phone, or that tries to reach outside its own
+directory, and unpacks the rest into `apps/<Name>/` with the modes above. A
+package for an app that is already installed replaces it and keeps its
+`data/`. The one thing the installer cannot do as `ndusr` is hand `data/` to
+`ndusr_ut`, so it asks the core, which asks the card helper as root to restate
+the layout — the same pass a mount does. `docs/NAP-PACKAGES.md` has the
+format.
+
 ---
 
 ## 8. What is deliberately not protected

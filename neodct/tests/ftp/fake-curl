@@ -1,0 +1,115 @@
+#!/bin/sh
+#
+# A stand-in for curl, so that apps/Fetch/ftp.c can be driven over real pipes,
+# with the real argv it builds, on a machine with no network and no FTP
+# server.
+#
+# test/unit/test_fetch_app.c copies this to <tmpdir>/curl and puts <tmpdir>
+# first on PATH. ftp.c finds it with its own PATH walk, spawns it with
+# nd_proc_spawn() and cannot tell the difference -- which is the point.
+# Nothing in the C is stubbed out or compiled differently for the tests.
+#
+# It is the same device neodct/tests/remote/fake-curl is for nd_remote, and
+# it is a separate file because it speaks a different protocol: no -D header
+# descriptor, no Range, a listing on stdout and a file written with -o.
+#
+# ============ HOW A SCENARIO IS SET UP ============
+#
+# $NDFTP_DIR is a directory of control files. The test writes them; this
+# script reads them. Everything is optional.
+#
+#   listing   path of a file to print on stdout -- what LIST would have said.
+#             Used when the URL ends in "/".
+#   body      path of a file to copy to the -o target, one chunk at a time.
+#   exit      the exit code to leave with (default 0). 67 is curl's
+#             "login denied", which the app turns into "Wrong password."
+#   stderr    text to write on stderr, in curl's own "curl: (N) text" shape.
+#   short     copy only this many bytes of `body`, then exit 0 -- a server
+#             that changed its mind, which the app must NOT rename into
+#             music/.
+#   chunks    write the body in this many pieces with a tenth of a second
+#             between them, so the download's progress loop actually ticks
+#             and on_progress() is exercised against a growing file.
+#
+# and it writes back, for the test to assert on:
+#
+#   argv      every argument of every invocation, one per line. The test
+#             greps it for the password: it must never be there.
+#   netrc     a copy of the file --netrc-file pointed at, proving the
+#             credentials went through it and that it was mode 0600.
+#   urls      one line per invocation, the URL asked for.
+set -eu
+
+D="${NDFTP_DIR:?fake-curl needs NDFTP_DIR}"
+
+out=""
+netrc=""
+url=""
+want_out=0
+want_netrc=0
+
+for a in "$@"; do
+    printf '%s\n' "$a" >> "$D/argv"
+    if [ "$want_out" = 1 ]; then out="$a"; want_out=0; continue; fi
+    if [ "$want_netrc" = 1 ]; then netrc="$a"; want_netrc=0; continue; fi
+    case "$a" in
+        -o) want_out=1 ;;
+        --netrc-file) want_netrc=1 ;;
+        ftp://*) url="$a" ;;
+    esac
+done
+printf '%s\n' "$url" >> "$D/urls"
+
+if [ -n "$netrc" ] && [ -f "$netrc" ]; then
+    # The mode matters as much as the contents: the password is on a phone
+    # with a shell app, and 0600 is the whole of what keeps it private.
+    stat -c '%a' "$netrc" > "$D/netrc.mode"
+    cat "$netrc" > "$D/netrc"
+    printf '%s\n' "$netrc" > "$D/netrc.path"
+fi
+
+if [ -f "$D/stderr" ]; then cat "$D/stderr" >&2; fi
+
+code=0
+if [ -f "$D/exit" ]; then code=$(cat "$D/exit"); fi
+if [ "$code" != 0 ]; then
+    exit "$code"
+fi
+
+case "$url" in
+    */)
+        # A directory: LIST, on stdout.
+        if [ -f "$D/listing" ]; then cat "$(cat "$D/listing")"; fi
+        exit 0
+        ;;
+esac
+
+if [ ! -f "$D/body" ]; then exit 0; fi
+src=$(cat "$D/body")
+if [ -z "$out" ]; then exit 0; fi
+
+total=$(stat -c %s "$src")
+if [ -f "$D/short" ]; then total=$(cat "$D/short"); fi
+
+chunks=1
+if [ -f "$D/chunks" ]; then chunks=$(cat "$D/chunks"); fi
+if [ "$chunks" -lt 1 ]; then chunks=1; fi
+
+# Block-at-a-time rather than byte-at-a-time: a 100 kB body copied with bs=1
+# takes long enough to look like a hang.
+per=$(( (total + chunks - 1) / chunks ))
+if [ "$per" -lt 1 ]; then per=1; fi
+
+: > "$out"
+n=0
+while [ $((n * per)) -lt "$total" ]; do
+    dd if="$src" of="$out" bs="$per" skip="$n" seek="$n" count=1 \
+       conv=notrunc status=none 2>/dev/null || true
+    n=$((n + 1))
+    if [ "$chunks" -gt 1 ]; then sleep 0.1; fi
+done
+# The last block overshoots when `short` is set, or when the body does not
+# divide evenly. The length the app checks is this one.
+truncate -s "$total" "$out"
+
+exit 0
