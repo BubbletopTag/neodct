@@ -68,6 +68,30 @@ An update built without bumping it installs but shows no change on screen.
 
 ## Tests
 
+Run the C suite, freely and often, with `make test` -- and only that way:
+
+```sh
+cd neodct/src && make test              # the whole suite, in the sandbox
+make test-one T=test_modem              # one binary, the same way
+make ASAN=1 test                        # before pushing
+```
+
+`make test` runs the binaries **inside a sandbox** (`test/harness/sandbox.sh`:
+bubblewrap with no D-Bus, no network, a minimal `/dev`, everything but the
+checkout read-only, a private `/tmp` under `build/`), puts fake `poweroff`,
+`reboot`, `systemctl` and friends first on `$PATH`, and fails the run if a
+test ever reaches one. Every test binary also carries
+`test/harness/nd_testguard.c`, which disarms the real halt inside libneodct
+and refuses to start outside the harness. The reason is on the record: on
+2026-08-31 and 2026-09-04 a test reached `poweroff(8)` and switched off the
+workstation running it. Through `make test` that cannot happen any more, and
+`build/*/test/test_x` run by hand stops before `main()` with a message
+pointing at `make test-one T=test_x`. `NEODCT_ALLOW_BARE=1` overrides that
+refusal for someone who has read the guard and accepts the risk;
+`NEODCT_TEST_SANDBOX=none` skips the container on a disposable VM or CI box.
+`bwrap` is required (`pacman -S bubblewrap`); without it `make test` refuses
+rather than falling back to a bare run.
+
 ```sh
 python3 -m pytest neodct/tests/ -q      # from the repo root
 ```
@@ -120,7 +144,8 @@ Engineering mode is deliberately not accepted as the gate: it lives in
 `settings.prop`, on the partition the attacker just wrote to.
 
 The C build has its own suite — `cd neodct/src && make test`, and
-`make ASAN=1 test` before you push anything. It includes the golden frames in
+`make ASAN=1 test` before you push anything; both run in the sandbox
+described at the top of this section. It includes the golden frames in
 `neodct/tests/golden/`, captured from the Python build during the port.
 
 **Neither suite can see the confinement.** Every security test in the tree

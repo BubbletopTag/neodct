@@ -1822,6 +1822,83 @@ static void test_two_launches_in_a_row(core_fixture *fx)
 }
 
 /* ------------------------------------------------------------------ *
+ * The interlock between this suite and the machine running it
+ * ------------------------------------------------------------------ */
+
+/* On 2026-08-31 `make test` powered off a developer's workstation.
+ *
+ * nd_svc_poweroff() resolves "poweroff" along $PATH and spawns it, and a
+ * process with no service channel IS the core as far as nd_svc.h can tell.
+ * test/apps/SvcApp calls it for real, deliberately -- it is safe only while
+ * the parent that serves its request installed a fake first, and its own
+ * comment says it chose poweroff over reboot precisely so a missing fake
+ * would be noticed. It was noticed: the machine went off mid-build.
+ *
+ * g_is_app_process does NOT close this. That guard catches an app that was
+ * REFUSED a socket answering as though it were the core; SvcApp has a socket
+ * and is served normally, and the halt it asks for is resolved and spawned by
+ * the serving process. The dangerous call is the one that works.
+ *
+ * The fix is not to find the one unguarded path, because the next one will be
+ * written by somebody who has not read that file. NEODCT_ROOT is set by make
+ * test for every binary and every app they launch, and never on the phone --
+ * the library already reads "unset" as meaning the real device. So a real halt
+ * is refused whenever that variable exists and no simulation is installed. */
+static void test_a_test_process_cannot_power_off_the_machine(void)
+{
+    nd_svc_halt_simulate(NULL); /* no fake: the dangerous configuration */
+    CHECK(getenv("NEODCT_ROOT") != NULL);
+    CHECK(!nd_svc_halt_allowed());
+
+    /* And the verb refuses rather than resolving a binary. This is the call
+     * that took the machine down; being able to make it safely is the point. */
+    CHECK(!nd_svc_poweroff());
+    CHECK(!nd_svc_reboot());
+
+    /* The broker's entry point is the same chokepoint, and has to be: the
+     * broker is the process that still has CAP_SYS_BOOT. */
+    CHECK(!nd_svc_halt_now(false));
+    CHECK(!nd_svc_halt_now(true));
+}
+
+/* The rule itself, with every input a parameter, so the whole table can be
+ * covered by a process that is none of those things. In order of precedence:
+ * a simulation always wins (that is how the halt path is covered at all); a
+ * disarmed process never halts, whatever else is true; a test root never
+ * halts, even as root; and after that only root may -- on the phone the real
+ * halt is the broker's to spawn, and a non-root process asking for one is a
+ * test or a bug. The 2026-09-04 shutdown came through a binary run by hand
+ * with no NEODCT_ROOT: the last two rows are what would have stopped it. */
+static void test_the_halt_rule_table(void)
+{
+    /* sim, disarmed, test root, root */
+    CHECK(nd_svc_halt_allowed_for(true, true, true, false));
+    CHECK(nd_svc_halt_allowed_for(true, false, false, false));
+    CHECK(!nd_svc_halt_allowed_for(false, true, false, true));
+    CHECK(!nd_svc_halt_allowed_for(false, false, true, true));
+    CHECK(!nd_svc_halt_allowed_for(false, false, false, false));
+    CHECK(nd_svc_halt_allowed_for(false, false, false, true));
+}
+
+/* A test that installs a fake still gets the whole path, because that is how
+ * the halt is actually covered. The interlock must not disarm those. */
+static void test_the_interlock_leaves_simulated_halts_alone(void)
+{
+    nd_svc_halt_sim sim;
+    static const char *const FAKE[] = {"true", NULL};
+    static const char *const *const TAB[] = {FAKE};
+
+    memset(&sim, 0, sizeof sim);
+    sim.poweroff = TAB;
+    sim.reboot = TAB;
+    sim.n = 1u;
+    nd_svc_halt_simulate(&sim);
+    CHECK(nd_svc_halt_allowed());
+    nd_svc_halt_simulate(NULL);
+    CHECK(!nd_svc_halt_allowed());
+}
+
+/* ------------------------------------------------------------------ *
  * main
  * ------------------------------------------------------------------ */
 
@@ -1883,6 +1960,9 @@ int main(void)
     test_garbage_does_not_take_the_core_down(&fx);
     test_hardware_true_survives_the_wire();
     test_the_halt_tables_are_the_pythons();
+    test_a_test_process_cannot_power_off_the_machine();
+    test_the_halt_rule_table();
+    test_the_interlock_leaves_simulated_halts_alone();
     test_the_halt_lookup_is_execvps();
     test_a_halt_over_the_wire(&fx);
     test_a_halt_with_nothing_to_spawn(&fx);

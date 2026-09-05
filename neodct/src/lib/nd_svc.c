@@ -447,6 +447,10 @@ const char *const *const nd_svc_reboot_commands[ND_SVC_HALT_CANDIDATES] = {REBOO
 static nd_svc_halt_sim g_halt_sim;
 static bool g_halt_sim_on;
 
+/* Set by nd_svc_halt_disarm() and never cleared. test/harness/nd_testguard.c
+ * calls it from a constructor in every test binary, before main(). */
+static bool g_halt_disarmed;
+
 void nd_svc_halt_simulate(const nd_svc_halt_sim *sim)
 {
     if (sim == NULL) {
@@ -521,11 +525,58 @@ typedef struct {
 
 /* Step 2. False is the only failure the app is ever told about, and it means
  * one thing: this image has no halt binary anywhere the lookup can see. */
+bool nd_svc_halt_allowed(void)
+{
+    return nd_svc_halt_allowed_for(g_halt_sim_on, g_halt_disarmed, getenv(ND_ENV_ROOT) != NULL,
+                                   geteuid() == 0);
+}
+
+void nd_svc_halt_disarm(void)
+{
+    g_halt_disarmed = true;
+}
+
+/* The rule, in order of precedence -- see nd_svc.h for why each row is there.
+ * A pure function of its inputs so that test_svc.c can cover the table from a
+ * process that is neither root nor on a phone. */
+bool nd_svc_halt_allowed_for(bool sim_installed, bool disarmed, bool in_test_root, bool is_root)
+{
+    if (sim_installed)
+        return true;
+    if (disarmed)
+        return false;
+    if (in_test_root)
+        return false;
+    return is_root;
+}
+
+/* Which row refused, for the log line: the person reading a serial console
+ * or a test log should not have to work out which of four rules fired. */
+static const char *halt_refusal_why(void)
+{
+    if (g_halt_disarmed)
+        return "this process was disarmed as a test binary (nd_svc_halt_disarm)";
+    if (getenv(ND_ENV_ROOT) != NULL)
+        return "NEODCT_ROOT is set, so this is a test and no nd_svc_halt_simulate() fake was installed";
+    return "not root -- a real halt is the broker's to spawn, and a non-root process asking for "
+           "one is a test or a bug";
+}
+
 static bool halt_resolve(bool reboot, svc_halt_plan *plan)
 {
     const char *const *const *tab;
     size_t n;
     size_t i;
+
+    /* BEFORE the lookup, so nothing is resolved and nothing is spawned.
+     * Refusing here surfaces as "this image has no halt binary", which is
+     * already the one failure an app is told about -- a test sees a false
+     * return instead of the machine going down under it. */
+    if (!nd_svc_halt_allowed()) {
+        nd_log_err(ND_LOG_OS, "refusing a real halt: %s", halt_refusal_why());
+        memset(plan, 0, sizeof *plan);
+        return false;
+    }
 
     memset(plan, 0, sizeof *plan);
 

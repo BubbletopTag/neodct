@@ -1,0 +1,3 @@
+#!/bin/sh
+# A silent arecord: a recording runs until it is killed, and produces nothing.
+while :; do sleep 3600; done
