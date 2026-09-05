@@ -1,5 +1,13 @@
 # NeoDCT OS Changelog
 
+0.5.5b
+Two things that broke when the phone gave up running with full permissions in
+0.5.0b are fixed. The phone keeps the time across a reboot again -- it was
+setting the clock but no longer writing it to the chip that survives a power
+cycle. And setting up the keypad on a brand-new phone works: the first-boot
+key mapping used to leave the phone on a screen it would not respond to, and
+now it finishes and comes straight up ready to use.
+
 0.5.4b
 Further fixes to the Fetch engineering app: a file whose name has a space in
 it downloads now, and a refused login says which name it tried instead of
