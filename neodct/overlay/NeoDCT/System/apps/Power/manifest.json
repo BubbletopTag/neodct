@@ -2,5 +2,7 @@
     "name": "Power",
     "id": "971",
     "icon": "icon.png",
-    "exec": "main.py"
+    "exec": "main.py",
+    "author": "Aiden/BubbletopTag",
+    "description": "NeoDCT Core System application"
 }
