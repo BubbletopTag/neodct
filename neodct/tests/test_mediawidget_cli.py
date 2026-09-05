@@ -18,9 +18,14 @@ import pytest
 
 from System.core import MediaWidget
 
+# The Python reference, not the overlay: the overlay ships, and what ships
+# there is the C neodct-play from neodct/src/mediawidget. This script sat
+# in the overlay for a while after the port, and BR2_ROOTFS_OVERLAY copied
+# it over the C binary in every image -- a python3 shebang on a phone with
+# no python3. test_overlay_hygiene.py is what stops that happening again.
 CLI = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "overlay", "NeoDCT", "System", "core", "MediaWidget", "neodct-play",
+    "python-reference", "System", "core", "MediaWidget", "neodct-play",
 )
 
 EV_KEY, EV_SYN = 0x01, 0x00

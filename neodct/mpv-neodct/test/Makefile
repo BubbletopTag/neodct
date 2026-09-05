@@ -5,7 +5,7 @@
 CC ?= cc
 CFLAGS += -std=c99 -Wall -Wextra -Werror -g -I..
 
-TESTS := test_fbdev_format
+TESTS := test_fbdev_format test_fbdev_spinner
 
 .PHONY: run clean
 run: $(TESTS)
@@ -16,6 +16,10 @@ run: $(TESTS)
 test_fbdev_format: test_fbdev_format.c ../fbdev_format.c ../fbdev_format.h \
 		test_util.h
 	$(CC) $(CFLAGS) -o $@ test_fbdev_format.c ../fbdev_format.c
+
+test_fbdev_spinner: test_fbdev_spinner.c ../fbdev_spinner.c ../fbdev_spinner.h \
+		../fbdev_format.h test_util.h
+	$(CC) $(CFLAGS) -o $@ test_fbdev_spinner.c ../fbdev_spinner.c
 
 clean:
 	rm -f $(TESTS)

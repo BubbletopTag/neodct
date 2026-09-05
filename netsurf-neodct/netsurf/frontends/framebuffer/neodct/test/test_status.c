@@ -45,5 +45,29 @@ int main(void)
 	CHECK_INT(s.visible, 1);
 	CHECK_STR(s.text, "Waiting for bar.com...");
 
+	/* a video being handed to the player: shown at once, and not on a
+	 * timer -- the player takes the screen when it is ready and the
+	 * page is redrawn when it gives it back */
+	neodct_status_loading(&s);
+	CHECK_STR(s.text, "Loading video...");
+	CHECK_INT(s.visible, 1);
+	neodct_status_tick(&s, 99999999);
+	CHECK_INT(s.visible, 1);
+
+	/* an error stays until something else happens: a line that fades
+	 * before the user looks down is a line that was never shown */
+	neodct_status_done(&s, 40000);
+	neodct_status_error(&s, "Video not found");
+	CHECK_STR(s.text, "Video not found");
+	CHECK_INT(s.visible, 1);
+	neodct_status_tick(&s, 50000);
+	CHECK_INT(s.visible, 1);
+	neodct_status_error(&s, NULL);
+	CHECK_STR(s.text, "Error");
+
+	/* and the next load replaces it as usual */
+	neodct_status_waiting(&s, "example.com");
+	CHECK_STR(s.text, "Waiting for example.com...");
+
 	TEST_EXIT();
 }

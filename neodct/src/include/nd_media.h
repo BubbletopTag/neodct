@@ -31,6 +31,13 @@
  *     needs no idea which machine it is on. The C key is ALSO bound to
  *     quit in input.conf, so it works even when this bridge never starts --
  *     being unable to leave a video is being unable to use the phone.
+ *
+ * The socket carries traffic the other way too. mpv announces on it why a
+ * file could not be played -- an end-file event with a reason, and the log
+ * lines ffmpeg wrote on the way to it -- and that is turned into the exit
+ * status below, which is the one word the browser gets to put on the
+ * screen. Without it every failure on a phone with a flaky modem looked
+ * like the same black flash back to the page.
  */
 
 #ifndef ND_MEDIA_H_INCLUDED
@@ -48,8 +55,17 @@ extern "C" {
 #define ND_MPV_BIN      "/usr/bin/mpv"
 #define ND_MEDIA_FBDEV  "/dev/fb0"
 
-/* /run is the tmpfs the rest of the system already publishes state into. */
-#define ND_MEDIA_IPC_SOCKET "/run/neodct/mpv.sock"
+/* Where the IPC socket goes. /tmp and not /run/neodct, because of who runs
+ * this: the browser is ndusr_ut, confined, and /run is a root-owned 0755
+ * tmpfs it cannot create anything in. The socket was silently never bound
+ * there, mpv shrugged and played on, and every key pressed at it went
+ * nowhere -- including C. /tmp is 1777 (nosuid,nodev; see etc/fstab) and
+ * is not on the untrusted hide list, so it is the one place every caller
+ * can write. The pid is in the name so that a socket a killed player left
+ * behind under another uid -- unlinkable in a sticky directory -- cannot
+ * block the next one. nd_media_ipc_socket_path() spells it. */
+#define ND_MEDIA_IPC_SOCKET_DIR "/tmp"
+#define ND_MEDIA_IPC_SOCKET_FMT ND_MEDIA_IPC_SOCKET_DIR "/neodct-mpv.%ld.sock"
 
 /* Baked into the read-only rootfs beside the neodct-play binary. */
 #define ND_MEDIA_INPUT_CONF "/NeoDCT/System/core/MediaWidget/input.conf"
@@ -59,10 +75,32 @@ extern "C" {
 #define ND_MEDIA_KEYPAD_UINPUT_NAME "neodct-t9-keypad"
 #define ND_MEDIA_KEYPAD_DEVICE_ENV  "NEODCT_KEYPAD_DEVICE"
 
-/* mpv exits 127 when it is not on this image at all -- the same status a
- * shell reports for "command not found", and what the caller distinguishes
- * playback from a build with no mpv in it by. */
-#define ND_MEDIA_ENOENT 127
+/* ------------------------------------------------------------------ *
+ * Exit statuses
+ * ------------------------------------------------------------------ */
+
+/* What neodct-play exits with, and THE BROWSER DEPENDS ON EVERY VALUE:
+ * netsurf-neodct/.../neodct_media.h carries the same table as
+ * NEODCT_MEDIA_EXIT_* and turns each into the line the status bar shows
+ * when the page comes back. test_mediawidget.c reads that header and fails
+ * if the two ever disagree.
+ *
+ * 0 to 4 are mpv's own (0 played, 1 could not start, 2 could not play the
+ * file, 3 played with errors, 4 quit by request). 80 and up are what this
+ * program makes of mpv's IPC events when it can hear them, and are only
+ * ever refinements of a 2. 127 is what a shell says for "command not
+ * found", and what the child says when there is no mpv on the image. */
+#define ND_MEDIA_EXIT_OK        0
+#define ND_MEDIA_EXIT_FAILED    2   /* mpv could not play it and did not say why */
+#define ND_MEDIA_EXIT_NOLOAD   80   /* the url could not be opened at all */
+#define ND_MEDIA_EXIT_NONET    81   /* nothing answered: dns, connect, timeout */
+#define ND_MEDIA_EXIT_NOTFOUND 82   /* the server answered, with a 4xx */
+#define ND_MEDIA_EXIT_FORMAT   83   /* fetched, and this build cannot decode it */
+#define ND_MEDIA_EXIT_DIED     84   /* mpv was killed -- the OOM killer, usually */
+#define ND_MEDIA_ENOENT       127   /* no mpv on this image */
+
+/* A short name for a status, for the serial log. Never NULL. */
+const char *nd_media_exit_name(int status);
 
 typedef enum {
     ND_MEDIA_VIDEO = 0,
@@ -92,10 +130,13 @@ nd_media_kind nd_media_kind_for(const char *url);
 /* The full mpv command line for `url`. Everything is spelled out rather
  * than left to mpv's defaults: an appliance that behaves differently
  * depending on what happens to be installed is one that cannot be debugged
- * from a serial log. Pass ipc_socket NULL for no IPC bridge. */
+ * from a serial log. Pass ipc_socket NULL for no IPC socket. */
 nd_err nd_media_build_argv(nd_media_argv *out, const char *url, nd_media_kind kind,
                            const char *fbdev, const char *ipc_socket, const char *mpv,
                            const char *input_conf);
+
+/* The socket path for this process: ND_MEDIA_IPC_SOCKET_FMT with our pid. */
+nd_err nd_media_ipc_socket_path(char *out, size_t out_sz);
 
 /* The mpv command a NeoDCT keycode means, as a NULL-terminated argv, or
  * NULL when the key means nothing to mpv. The returned pointers are static
@@ -105,6 +146,46 @@ const char *const *nd_media_ipc_command(int32_t keycode);
 /* One mpv IPC request: compact JSON, newline terminated. Returns the byte
  * count written, or 0 if it would not fit. */
 size_t nd_media_encode_command(const char *const *command, char *out, size_t out_sz);
+
+/* ------------------------------------------------------------------ *
+ * What mpv said
+ * ------------------------------------------------------------------ */
+
+/* Everything worth remembering from mpv's side of the socket. Filled in one
+ * line at a time by nd_media_outcome_feed(); read once, at the end, by
+ * nd_media_exit_status(). */
+typedef struct {
+    bool ended;         /* an end-file event arrived */
+    bool error;         /* ...and its reason was "error" */
+    bool format_error;  /* ...naming the format or the decoders, not the fetch */
+    bool unreachable;   /* a log line said the network never answered */
+    bool not_found;     /* a log line carried an HTTP 4xx */
+} nd_media_outcome;
+
+/* Feed one line of mpv's JSON IPC output -- an event, a log message, or
+ * anything else, which is ignored. Returns true if the line changed
+ * anything. A line that is not JSON, or is JSON of a shape mpv has never
+ * sent, is simply not understood; it cannot crash this. */
+bool nd_media_outcome_feed(nd_media_outcome *o, const char *line);
+
+/* Feed one line of mpv's own terminal output (its stdout, mostly: only the
+ * status line goes to stderr). It says the same things the IPC log
+ * messages do, but from mpv's first line rather than from the moment a
+ * client asked: a 404 from a fast server is logged and the file given up
+ * on before the socket is even connected, and the IPC route sees only the
+ * end. The pipe sees everything. */
+bool nd_media_outcome_feed_text(nd_media_outcome *o, const char *text);
+
+/* The status neodct-play exits with, given what mpv said and how it went:
+ * `exited` false means it died of a signal, else `mpv_rc` is its exit
+ * status. An mpv that played (0) or is not there (127) is reported as such
+ * whatever the log said; a 2 ("could not play") is refined by whatever the
+ * outcome learned, on the socket or on stderr. */
+int nd_media_exit_status(const nd_media_outcome *o, bool exited, int mpv_rc);
+
+/* ------------------------------------------------------------------ *
+ * The keypad
+ * ------------------------------------------------------------------ */
 
 /* Which evdev device the keypad reaches us on. Prefers the NeoDCT keypad
  * bridge by name, then anything calling itself a keypad, then a keyboard,
@@ -116,11 +197,13 @@ nd_err nd_media_discover_keypad(char *out, size_t out_sz);
  * discover() so a caller can be told which device to use. */
 int nd_media_open_keypad(const char *path);
 
-/* Play `url` with mpv, returning its exit status (ND_MEDIA_ENOENT when
- * there is no mpv). `suspend_pid` is stopped for as long as mpv runs;
+/* Play `url` with mpv, returning an ND_MEDIA_EXIT_* status (ND_MEDIA_ENOENT
+ * when there is no mpv). `suspend_pid` is stopped for as long as mpv runs;
  * pass 0 for none. `keypad_fd` is an open evdev descriptor to forward from,
- * or -1 -- without one no IPC socket is created, because there would be
- * nothing on the other end of it. */
+ * or -1. The IPC socket is created whenever `ipc_socket` names one, keypad
+ * or not, and mpv's stdout and stderr come back through a pipe either way:
+ * between them they are how mpv's reasons come back. Every line mpv writes
+ * is passed on to our own stderr, so the serial console loses nothing. */
 int nd_media_play(const char *url, nd_media_kind kind, pid_t suspend_pid, int keypad_fd,
                   const char *mpv, const char *fbdev, const char *ipc_socket,
                   const char *input_conf);

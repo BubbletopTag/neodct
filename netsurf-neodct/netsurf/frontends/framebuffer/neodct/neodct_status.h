@@ -28,6 +28,12 @@ void neodct_status_connected(struct neodct_status *s);
 void neodct_status_transferring(struct neodct_status *s, int pct);
 void neodct_status_done(struct neodct_status *s, long now_ms);
 
+/** a video is being handed to the player; stays up until it has the screen */
+void neodct_status_loading(struct neodct_status *s);
+
+/** something failed; stays up until the next thing happens */
+void neodct_status_error(struct neodct_status *s, const char *text);
+
 /** apply any scheduled hide; call periodically */
 void neodct_status_tick(struct neodct_status *s, long now_ms);
 

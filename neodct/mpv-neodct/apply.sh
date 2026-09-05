@@ -25,6 +25,7 @@ if [ -f "$MPV/video/out/vo_fbdev.c" ]; then
 fi
 
 cp "$HERE/vo_fbdev.c" "$HERE/fbdev_format.c" "$HERE/fbdev_format.h" \
+   "$HERE/fbdev_spinner.c" "$HERE/fbdev_spinner.h" \
    "$MPV/video/out/"
 
 # 1. Declare and register the driver. It goes next to vo_drm in the list,
@@ -37,7 +38,7 @@ sed -i 's|^    \&video_out_lavc,|    \&video_out_fbdev,\n    \&video_out_lavc,|'
 
 # 2. Build it. Unconditional: it needs nothing but linux/fb.h, which is
 #    part of the kernel headers every target here already has.
-sed -i "s|^    'video/out/vo_null.c',|    'video/out/vo_null.c',\n    'video/out/vo_fbdev.c',\n    'video/out/fbdev_format.c',|" \
+sed -i "s|^    'video/out/vo_null.c',|    'video/out/vo_null.c',\n    'video/out/vo_fbdev.c',\n    'video/out/fbdev_format.c',\n    'video/out/fbdev_spinner.c',|" \
     "$MPV/meson.build"
 
 # 3. Bindings that survive --no-config (see the file's own comment).
@@ -49,6 +50,10 @@ grep -q "video_out_fbdev" "$MPV/video/out/vo.c" || {
 }
 grep -q "vo_fbdev.c" "$MPV/meson.build" || {
     echo "apply.sh: meson source list did not take" >&2
+    exit 1
+}
+grep -q "fbdev_spinner.c" "$MPV/meson.build" || {
+    echo "apply.sh: spinner source did not take" >&2
     exit 1
 }
 

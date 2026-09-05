@@ -284,3 +284,30 @@ bool neodct_media_argv(const char *url, const char **argv, int max)
 	argv[3] = NULL;
 	return true;
 }
+
+const char *neodct_media_exit_text(int status)
+{
+	switch (status) {
+	case NEODCT_MEDIA_EXIT_OK:
+		return NULL;
+	case NEODCT_MEDIA_EXIT_NOPLAYER:
+		return "No media player";
+	case NEODCT_MEDIA_EXIT_NOLOAD:
+		return "Could not load video";
+	case NEODCT_MEDIA_EXIT_NONET:
+		return "No connection";
+	case NEODCT_MEDIA_EXIT_NOTFOUND:
+		return "Video not found";
+	case NEODCT_MEDIA_EXIT_FORMAT:
+		return "Video format not supported";
+	case NEODCT_MEDIA_EXIT_DIED:
+		return "Player crashed";
+	case 1:
+		return "Player failed to start";
+	default:
+		/* mpv's 2 and 3, and anything nobody has named yet. Vague is
+		 * still better than nothing: the user pressed play and is
+		 * looking at the page again. */
+		return "Could not play video";
+	}
+}

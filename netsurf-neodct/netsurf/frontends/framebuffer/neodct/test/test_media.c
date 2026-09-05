@@ -8,6 +8,7 @@
  */
 
 #include <stdio.h>
+#include <string.h>
 
 #include "test_util.h"
 #include "../neodct_media.h"
@@ -149,6 +150,55 @@ static void test_argv(void)
 	memset(big, 'a', sizeof(big) - 1);
 	big[sizeof(big) - 1] = '\0';
 	CHECK(neodct_media_argv(big, argv, 8) == false);
+}
+
+static void test_exit_text(void)
+{
+	/* success says nothing: "Done." is the status bar's own word */
+	CHECK(neodct_media_exit_text(NEODCT_MEDIA_EXIT_OK) == NULL);
+
+	/* each named failure has its own line, short enough for the bar */
+	CHECK_STR(neodct_media_exit_text(NEODCT_MEDIA_EXIT_NOPLAYER),
+		  "No media player");
+	CHECK_STR(neodct_media_exit_text(NEODCT_MEDIA_EXIT_NOTFOUND),
+		  "Video not found");
+	CHECK_STR(neodct_media_exit_text(NEODCT_MEDIA_EXIT_NONET),
+		  "No connection");
+	CHECK_STR(neodct_media_exit_text(NEODCT_MEDIA_EXIT_FORMAT),
+		  "Video format not supported");
+	CHECK_STR(neodct_media_exit_text(NEODCT_MEDIA_EXIT_NOLOAD),
+		  "Could not load video");
+	CHECK_STR(neodct_media_exit_text(NEODCT_MEDIA_EXIT_DIED),
+		  "Player crashed");
+
+	/* and nothing non-zero is ever silent: mpv's own codes, a status
+	 * nobody has named, and a helper that never exited at all */
+	CHECK(neodct_media_exit_text(NEODCT_MEDIA_EXIT_FAILED) != NULL);
+	CHECK(neodct_media_exit_text(1) != NULL);
+	CHECK(neodct_media_exit_text(3) != NULL);
+	CHECK(neodct_media_exit_text(200) != NULL);
+	CHECK(neodct_media_exit_text(NEODCT_MEDIA_EXIT_LOST) != NULL);
+
+	/* the named lines are all different: two failures that read the
+	 * same would be one failure the user cannot tell apart */
+	{
+		static const int codes[] = {
+			NEODCT_MEDIA_EXIT_NOPLAYER, NEODCT_MEDIA_EXIT_NOLOAD,
+			NEODCT_MEDIA_EXIT_NONET, NEODCT_MEDIA_EXIT_NOTFOUND,
+			NEODCT_MEDIA_EXIT_FORMAT, NEODCT_MEDIA_EXIT_DIED,
+			NEODCT_MEDIA_EXIT_FAILED
+		};
+		int i, j;
+
+		for (i = 0; i < (int)(sizeof(codes) / sizeof(codes[0])); i++) {
+			const char *a = neodct_media_exit_text(codes[i]);
+			CHECK(strlen(a) <= 30);
+			for (j = i + 1;
+			     j < (int)(sizeof(codes) / sizeof(codes[0])); j++)
+				CHECK(strcmp(a, neodct_media_exit_text(codes[j]))
+				      != 0);
+		}
+	}
 }
 
 static void test_triangle(void)
@@ -307,6 +357,7 @@ int main(void)
 	test_playable();
 	test_registry();
 	test_argv();
+	test_exit_text();
 	test_triangle();
 	test_layout();
 	test_layout_bigger_than_the_panel();

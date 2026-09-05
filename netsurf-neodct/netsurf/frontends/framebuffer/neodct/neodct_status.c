@@ -52,6 +52,20 @@ void neodct_status_done(struct neodct_status *s, long now_ms)
 	s->hide_at_ms = now_ms + NEODCT_STATUS_HIDE_MS;
 }
 
+void neodct_status_loading(struct neodct_status *s)
+{
+	snprintf(s->text, sizeof(s->text), "Loading video...");
+	show(s);
+}
+
+void neodct_status_error(struct neodct_status *s, const char *text)
+{
+	snprintf(s->text, sizeof(s->text), "%s", text != NULL ? text : "Error");
+	/* No timer: "Done." can fade, but an error has to still be there
+	 * when the user looks down to see why nothing happened. */
+	show(s);
+}
+
 void neodct_status_tick(struct neodct_status *s, long now_ms)
 {
 	if (s->hide_at_ms >= 0 && now_ms >= s->hide_at_ms) {
