@@ -29,6 +29,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -92,6 +93,10 @@ fetch_dest_kind fetch_classify(const char *name)
 
     if (name == NULL)
         return FETCH_DEST_OTHER;
+    /* The console's own ROM, checked by whole name before its .bin extension
+     * can send it to games/. It belongs in the emulator's bios/ instead. */
+    if (strcasecmp(name, "bios.bin") == 0)
+        return FETCH_DEST_BIOS;
     extension_of(name, ext, sizeof ext);
     if (ext[0] == '\0')
         return FETCH_DEST_OTHER;
@@ -160,10 +165,10 @@ nd_err fetch_dest_path(const char *mount, const char *name, bool psx_installed, 
         return ND_ERR_INVAL;
 
     k = fetch_classify(name);
-    /* A disc image with nowhere to be played is not a disc image yet. It
+    /* A disc image or a BIOS with nowhere to be played is not one yet. It
      * lands in untrusted/ under its own name, and moving it in later is the
      * PSX app's business rather than this one's. */
-    if (k == FETCH_DEST_GAME && !psx_installed)
+    if ((k == FETCH_DEST_GAME || k == FETCH_DEST_BIOS) && !psx_installed)
         k = FETCH_DEST_OTHER;
 
     if (kind != NULL)
@@ -180,6 +185,11 @@ nd_err fetch_dest_path(const char *mount, const char *name, bool psx_installed, 
             return rc;
         return nd_snprintf(out, out_sz, "%s/apps/PSX/games/%s/%s", mount, stem, name);
     }
+    case FETCH_DEST_BIOS:
+        /* Under the one name the core is sure to find (bios = auto scans the
+         * system directory), so an uploaded bios.bin is usable with nothing
+         * further to do. */
+        return nd_snprintf(out, out_sz, "%s/apps/PSX/bios/scph1001.bin", mount);
     case FETCH_DEST_NAP:
     case FETCH_DEST_OTHER:
     default:

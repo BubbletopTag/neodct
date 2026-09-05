@@ -208,6 +208,8 @@ static const char *kind_name(fetch_dest_kind k)
         return "Music";
     case FETCH_DEST_GAME:
         return "the PSX app";
+    case FETCH_DEST_BIOS:
+        return "the PSX app";
     case FETCH_DEST_NAP:
         return "the card, ready to install";
     case FETCH_DEST_OTHER:

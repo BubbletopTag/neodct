@@ -127,6 +127,7 @@ typedef struct {
 typedef enum {
     FETCH_DEST_MUSIC = 0, /* sdcard/music                           */
     FETCH_DEST_GAME,      /* sdcard/apps/PSX/games/<title>/         */
+    FETCH_DEST_BIOS,      /* sdcard/apps/PSX/bios/scph1001.bin      */
     FETCH_DEST_NAP,       /* sdcard/untrusted -- Settings finds it  */
     FETCH_DEST_OTHER      /* sdcard/untrusted                       */
 } fetch_dest_kind;

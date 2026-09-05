@@ -36,6 +36,7 @@ typedef struct {
 typedef enum {
     FETCH_DEST_MUSIC = 0,
     FETCH_DEST_GAME,
+    FETCH_DEST_BIOS,
     FETCH_DEST_NAP,
     FETCH_DEST_OTHER
 } fetch_dest_kind;
@@ -117,6 +118,10 @@ static void test_classify(void)
     CHECK(api.classify("Crash Bandicoot.bin") == FETCH_DEST_GAME);
     CHECK(api.classify("Crash Bandicoot.cue") == FETCH_DEST_GAME);
     CHECK(api.classify("disc.chd") == FETCH_DEST_GAME);
+    /* bios.bin is the console ROM, not a game, whatever its case. */
+    CHECK(api.classify("bios.bin") == FETCH_DEST_BIOS);
+    CHECK(api.classify("BIOS.BIN") == FETCH_DEST_BIOS);
+    CHECK(api.classify("scph1001.bin") == FETCH_DEST_GAME); /* only bios.bin, by name */
     CHECK(api.classify("Bible-qemu-aarch64.nap") == FETCH_DEST_NAP);
     /* Not refused -- just unsorted. It goes where the browser's downloads go. */
     CHECK(api.classify("notes.txt") == FETCH_DEST_OTHER);
@@ -197,10 +202,17 @@ static void test_destinations(void)
                 "/NeoDCT/User/sdcard/apps/PSX/games/Crash Bandicoot/Crash Bandicoot.cue",
                 FETCH_DEST_GAME);
 
-    /* With no PSX app installed there is no games/ worth making, so it waits
-     * in downloads instead of creating a folder nothing will read. */
+    /* A BIOS goes to the emulator's bios/ under the one name the core is sure
+     * to find, so an uploaded bios.bin is usable with nothing further to do. */
+    expect_dest("bios.bin", true, "/NeoDCT/User/sdcard/apps/PSX/bios/scph1001.bin",
+                FETCH_DEST_BIOS);
+
+    /* With no PSX app installed there is no games/ or bios/ worth making, so
+     * a disc or a BIOS waits in downloads instead of creating a folder
+     * nothing will read. */
     expect_dest("Crash Bandicoot.bin", false, "/NeoDCT/User/sdcard/untrusted/Crash Bandicoot.bin",
                 FETCH_DEST_OTHER);
+    expect_dest("bios.bin", false, "/NeoDCT/User/sdcard/untrusted/bios.bin", FETCH_DEST_OTHER);
 
     /* And the boundary holds here too: an unsafe name has no destination at
      * all rather than a repaired one. */
