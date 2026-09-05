@@ -48,6 +48,11 @@ bool nd_clock_remember(time_t when);
  * glance what moved the clock. */
 bool nd_clock_set(time_t when, const char *reason);
 
+/* Push `when` into the hardware RTC (RTC_SET_TIME on /dev/rtc0). Needs root,
+ * so it is called from inside the broker's clock handler, not by the core.
+ * A no-op that only logs when there is no RTC or no permission. */
+void nd_clock_write_rtc(time_t when);
+
 /* Push the clock forward to max(build epoch, last known) if it is behind.
  * false means it was already sane and was left alone. */
 bool nd_clock_apply_floor(time_t *settled);

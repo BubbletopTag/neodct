@@ -300,8 +300,15 @@ done:
 
 /* Push the new time into the RTC so a warm reboot keeps it. Harmless when
  * there is no RTC or no battery behind it, which is the case on the QEMU
- * target and on a bare Luckfox board. */
-static void write_rtc(time_t when)
+ * target and on a bare Luckfox board.
+ *
+ * RTC_SET_TIME needs write access to /dev/rtc0, which is root's: the core
+ * gave that up with CAP_SYS_TIME. So this is called by the BROKER, from
+ * clock_set_raw(), right where it does clock_settime() -- both as root, both
+ * for the same reason. The one path that still calls it directly is a root
+ * core with no broker. Called by the core as ndusr it would only log the
+ * EPERM the owner reported. */
+void nd_clock_write_rtc(time_t when)
 {
     struct tm tm_buf;
     struct rtc_time rtc;
@@ -369,11 +376,13 @@ bool nd_clock_set(time_t when, const char *reason)
         nd_broker *b = nd_broker_default();
 
         if (b != NULL) {
+            /* The broker writes the RTC too, from clock_set_raw(): it is the
+             * one that can, and the core doing it here as ndusr is exactly
+             * the "RTC refused the write: Permission denied" the owner saw. */
             if (!nd_broker_set_clock(b, (int64_t)when)) {
                 nd_log_err(ND_LOG_CLOCK, "the broker would not set the clock");
                 return false;
             }
-            write_rtc(when);
             return true;
         }
     }
@@ -385,7 +394,7 @@ bool nd_clock_set(time_t when, const char *reason)
         return false;
     }
 
-    write_rtc(when);
+    nd_clock_write_rtc(when);
     return true;
 }
 

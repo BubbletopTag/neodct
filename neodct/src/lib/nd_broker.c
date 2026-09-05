@@ -617,6 +617,11 @@ static bool clock_set_raw(time_t when)
         nd_log_err(ND_LOG_CLOCK, "broker: clock_settime: %s", strerror(errno));
         return false;
     }
+    /* And the hardware RTC, so a warm reboot keeps the time. This needs root
+     * too, which is why it is here and not in the core: writing it there as
+     * ndusr is the "RTC refused the write: Permission denied" it used to log.
+     * A missing or battery-less RTC just logs and is not a failure. */
+    nd_clock_write_rtc(when);
     return true;
 }
 
