@@ -1,5 +1,10 @@
 # NeoDCT OS Changelog
 
+0.5.4b
+Further fixes to the Fetch engineering app: a file whose name has a space in
+it downloads now, and a refused login says which name it tried instead of
+blaming the password.
+
 0.5.3b
 Slight tweaks to the Fetch engineering app.
 

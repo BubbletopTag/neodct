@@ -2928,3 +2928,14 @@ typed arrives as "Apple" and fails with nothing on screen to show why. Rather
 than change a widget every other screen shares, nd_textinput_set_no_autocap()
 is new, defaults to false so no existing field and no golden frame moves, and
 Fetch turns it on for the password.
+
+================================================================================
+
+version: 0.5.4b
+
+Further fixes to the Fetch engineering app (commit 1407d517): a file name with
+a space downloads, a refused login names the account it tried, and the
+password field no longer capitalises the first letter.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gPhyhm5QBEn3NLPBBoTHd
