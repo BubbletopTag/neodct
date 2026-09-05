@@ -88,7 +88,11 @@ extern "C" {
  * two. Overridable without a rebuild through settings, because a fork of
  * this OS has no business talking to that address. */
 #define ND_FETCH_HOST_DEFAULT "67.205.190.49"
-#define ND_FETCH_USER_DEFAULT "neodct"
+/* NOT "neodct": that name is already the ssh relay account on the droplet, so
+ * tools/ftp-server-setup.sh makes the FTP account "ndftp" instead. The two
+ * defaults have to agree or every login is refused for a reason the screen
+ * blames on the password. */
+#define ND_FETCH_USER_DEFAULT "ndftp"
 #define ND_FETCH_KEY_HOST     "fetch.host"
 #define ND_FETCH_KEY_USER     "fetch.user"
 
@@ -96,7 +100,13 @@ extern "C" {
  * an attacker's text on a phone that will use it as a file name. A field that
  * does not fit means the entry is skipped, never truncated into use. */
 #define ND_FETCH_NAME_MAX  96  /* one listing entry's file name          */
-#define ND_FETCH_ENTRIES   64  /* entries shown for one directory        */
+/* Entries shown for one directory. 64 was too few the moment a real music
+ * folder was pointed at it; at 256 the view struct is about 60 kB of heap,
+ * which this phone can find for as long as one folder is open. Past that the
+ * listing is truncated -- files only, never directories, see
+ * fetch_parse_listing() -- and the app says so rather than quietly showing a
+ * prefix. */
+#define ND_FETCH_ENTRIES   256
 #define ND_FETCH_LINE_MAX  512 /* one line of LIST output                */
 #define ND_FETCH_LIST_MAX  (128u * 1024u) /* the whole listing, at most  */
 #define ND_FETCH_WHY_MAX   160 /* the reason a person reads              */

@@ -129,6 +129,12 @@ void nd_textinput_set_mask(nd_textinput *t, const char *mask)
     t->mask = (mask != NULL && mask[0] != '\0') ? mask : NULL;
 }
 
+void nd_textinput_set_no_autocap(nd_textinput *t, bool on)
+{
+    if (t != NULL)
+        t->no_autocap = on;
+}
+
 void nd_textinput_draw(nd_textinput *t, bool blink_state)
 {
     char display[ND_TEXTINPUT_CAP + 2];
@@ -304,7 +310,7 @@ nd_widget_result nd_textinput_handle_key(nd_textinput *t, int32_t key)
     if (ch == '\0' || !nd_t9_char_allowed(ch, t->t9.filter))
         return ND_WIDGET_RESULT_NONE;
     len = strlen(t->text);
-    if (len == 0u && ch >= 'a' && ch <= 'z')
+    if (!t->no_autocap && len == 0u && ch >= 'a' && ch <= 'z')
         ch = (char)(ch - ('a' - 'A')); /* str.upper() on the first character */
     if (len + 2u > t->cap)
         return ND_WIDGET_RESULT_NONE;

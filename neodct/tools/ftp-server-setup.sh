@@ -52,7 +52,11 @@
 #                          to connect to 10.x.
 set -eu
 
-FTP_USER="${FTP_USER:-neodct}"
+# NOT "neodct": that account already exists on this droplet as the ssh relay
+# the phone dials for Remote Shell, its home is /home/neodct, and
+# chroot_local_user chroots to a user's HOME -- so reusing it would serve the
+# wrong directory and would put a password on the account the tunnel uses.
+FTP_USER="${FTP_USER:-ndftp}"
 FTP_ROOT="${FTP_ROOT:-/srv/neodct-ftp}"
 PASV_MIN="${PASV_MIN:-40000}"
 PASV_MAX="${PASV_MAX:-40100}"
@@ -86,6 +90,16 @@ if ! id "$FTP_USER" >/dev/null 2>&1; then
     say "set the password for $FTP_USER -- this is what you type on the phone"
     passwd "$FTP_USER"
 else
+    # An account we did not make is an account whose home, shell and purpose
+    # belong to something else. Adopting one silently is how the first run of
+    # this script nearly gave the ssh relay account an FTP password.
+    home=$(getent passwd "$FTP_USER" | cut -d: -f6)
+    if [ "$home" != "$FTP_ROOT" ]; then
+        echo "[ftp-setup] $FTP_USER already exists and its home is $home, not $FTP_ROOT." >&2
+        echo "[ftp-setup] vsftpd chroots to a user's home, so this account is not usable" >&2
+        echo "[ftp-setup] here. Re-run with FTP_USER=<some other name>." >&2
+        exit 1
+    fi
     say "user $FTP_USER exists; leaving its password alone (passwd $FTP_USER to change it)"
 fi
 
@@ -105,6 +119,24 @@ for d in music roms naps other; do
     chmod 755 "$FTP_ROOT/$d"
 done
 
+# ---- the one PAM fact that makes a nologin account usable -----------
+#
+# Ubuntu's /etc/pam.d/vsftpd runs pam_shells, which refuses any account whose
+# login shell is not listed in /etc/shells. This account's shell is
+# /usr/sbin/nologin ON PURPOSE -- it exists to own files and to be a name in a
+# password prompt, and it must never get a shell -- so without this line every
+# login is "530 Login incorrect" no matter how right the password is, which is
+# an hour of retyping it before anybody suspects PAM.
+#
+# Listing nologin in /etc/shells grants nothing. The file is a list of what
+# counts as a valid login shell for chsh and for pam_shells; nologin is still
+# a program that prints a message and exits.
+if ! grep -qx "$(getent passwd "$FTP_USER" | cut -d: -f7)" /etc/shells 2>/dev/null; then
+    shell=$(getent passwd "$FTP_USER" | cut -d: -f7)
+    say "adding $shell to /etc/shells so pam_shells will accept this account"
+    echo "$shell" >> /etc/shells
+fi
+
 # ---- the certificate ------------------------------------------------
 if [ ! -f "$CERT" ]; then
     say "generating a self-signed certificate (10 years)"
@@ -115,8 +147,15 @@ if [ ! -f "$CERT" ]; then
 fi
 
 # ---- the address to advertise in PASV -------------------------------
-PUB_IP="${PUB_IP:-$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')}"
-[ -n "$PUB_IP" ] || { echo "could not work out this host's public IPv4; set PUB_IP=" >&2; exit 1; }
+# Read the address that FOLLOWS "src" rather than a fixed field number: the
+# output is "1.1.1.1 via <gw> dev eth0 src <ip> uid 0" through a gateway and
+# "1.1.1.1 dev eth0 src <ip> uid 0" on a direct route, so field 7 is the
+# address in one shape and the literal "uid" in the other -- and "uid" in
+# pasv_address is exactly the config vsftpd exits 2 over.
+PUB_IP="${PUB_IP:-$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.*[[:space:]]src[[:space:]]\+\([0-9.]\+\).*/\1/p')}"
+case "$PUB_IP" in
+    *[!0-9.]* | "" ) echo "could not work out this host's public IPv4 (got '$PUB_IP'); set PUB_IP=" >&2; exit 1 ;;
+esac
 
 if [ "$WRITABLE" = 1 ]; then WRITE_ENABLE=YES; ALLOW_WR_CHROOT=YES
 else WRITE_ENABLE=NO;  ALLOW_WR_CHROOT=NO; fi
@@ -157,7 +196,14 @@ pasv_address=$PUB_IP
 ssl_enable=YES
 force_local_logins_ssl=YES
 force_local_data_ssl=YES
-ssl_tlsv1_2=YES
+# vsftpd knows exactly three of these -- ssl_tlsv1, ssl_sslv2, ssl_sslv3 --
+# and there is no ssl_tlsv1_2 (500 OOPS: unrecognised variable, and it exits
+# 2). ssl_tlsv1=YES selects OpenSSL's TLSv1 method, which negotiates UP to
+# whatever both ends support, and Ubuntu's system-wide OpenSSL policy is what
+# actually refuses anything below TLS 1.2. The floor is therefore the
+# distribution's, not this file's. The phone pins its own with curl
+# --tlsv1.2, which is a client-side minimum and independent of all this.
+ssl_tlsv1=YES
 ssl_sslv2=NO
 ssl_sslv3=NO
 ssl_ciphers=HIGH
@@ -187,7 +233,15 @@ fi
 systemctl enable vsftpd >/dev/null 2>&1 || true
 systemctl restart vsftpd
 sleep 1
-systemctl is-active --quiet vsftpd || { journalctl -u vsftpd -n 30 --no-pager; exit 1; }
+if ! systemctl is-active --quiet vsftpd; then
+    # systemd only reports "status=2/INVALIDARGUMENT"; the sentence naming the
+    # offending directive is on vsftpd's own stderr, which only appears if it
+    # is run in the foreground.
+    echo "[ftp-setup] vsftpd refused to start. Its own complaint:" >&2
+    /usr/sbin/vsftpd "$CONF" 2>&1 | head -5 >&2
+    journalctl -u vsftpd -n 20 --no-pager >&2
+    exit 1
+fi
 
 FP=$(openssl x509 -in "$CERT" -noout -fingerprint -sha256 | cut -d= -f2)
 

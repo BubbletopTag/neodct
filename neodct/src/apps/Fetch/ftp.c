@@ -157,24 +157,104 @@ static nd_err write_netrc(const fetch_conn *c, char *out, size_t out_sz)
  * URLs
  * ------------------------------------------------------------------ */
 
-/* Whether a remote directory path -- the app's own breadcrumb, built by
- * joining names that fetch_parse_list_line() accepted -- is still fit to go
- * into a URL. Belt and braces: if this ever fails, something upstream let a
- * name through. */
+/* ============ ESCAPING, AND WHY REFUSING WAS THE WRONG CALL ============
+ *
+ * This used to refuse any path that would need escaping, on the reasoning
+ * that everything here was built by the app from names it had already vetted.
+ * That reasoning was wrong about one character: a SPACE. File names have
+ * spaces in them -- "A Forest.mp3", "Crash Bandicoot.bin" -- and there is
+ * nothing unsafe about one; it is simply not legal in a URL. The result was
+ * an app that listed a music folder perfectly and then answered "URL
+ * rejected: Error" for every track in it.
+ *
+ * So the rule is now the correct one: anything outside the unreserved set of
+ * RFC 3986 is percent-encoded, which is what a URL is for. Refusal is kept
+ * for the one thing escaping cannot make safe -- a ".." component, which is a
+ * traversal whether it is encoded or not, and which no listing this app
+ * accepts can produce anyway.
+ */
+static bool is_unreserved(unsigned char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+           c == '-' || c == '.' || c == '_' || c == '~';
+}
+
+/* Percent-encode `in` into `out`. '/' is kept when `keep_slash`, which is how
+ * a multi-segment directory ("music/live") escapes each segment without
+ * losing the separators between them. */
+static nd_err url_escape(const char *in, char *out, size_t out_sz, bool keep_slash)
+{
+    static const char HEX[] = "0123456789ABCDEF";
+    size_t n = 0u;
+    size_t i;
+
+    for (i = 0u; in[i] != '\0'; i++) {
+        unsigned char c = (unsigned char)in[i];
+
+        if (is_unreserved(c) || (keep_slash && c == '/')) {
+            if (n + 1u >= out_sz)
+                return ND_ERR_TOOLONG;
+            out[n++] = (char)c;
+        } else {
+            /* Three bytes, and the NUL still has to fit after them. */
+            if (n + 4u > out_sz)
+                return ND_ERR_TOOLONG;
+            out[n++] = '%';
+            out[n++] = HEX[(c >> 4) & 0x0fu];
+            out[n++] = HEX[c & 0x0fu];
+        }
+    }
+    if (n >= out_sz)
+        return ND_ERR_TOOLONG;
+    out[n] = '\0';
+    return ND_OK;
+}
+
+/* The remote directory the app is showing, as "music" or "roms/psx". Only
+ * two things are refused, because escaping handles everything else: an
+ * absolute path, and a ".." component. Control bytes cannot get here -- every
+ * segment came from fetch_parse_list_line() -- but they are refused anyway,
+ * since a byte that cannot appear is a byte worth refusing cheaply. */
 static bool dir_is_safe(const char *dir)
 {
     size_t i;
 
     if (dir == NULL)
         return false;
-    if (dir[0] == '/' )
+    if (dir[0] == '/')
         return false;
     for (i = 0u; dir[i] != '\0'; i++) {
         unsigned char c = (unsigned char)dir[i];
 
-        if (c <= 0x20u || c == 0x7fu || c == '\\' || c == '?' || c == '#' || c == '%')
+        if (c < 0x20u || c == 0x7fu)
             return false;
-        if (c == '.' && dir[i + 1u] == '.')
+    }
+    /* ".." at the start, as a whole component, or at the end. */
+    if (strcmp(dir, "..") == 0 || strncmp(dir, "../", 3u) == 0 || strstr(dir, "/../") != NULL)
+        return false;
+    {
+        size_t len = strlen(dir);
+
+        if (len >= 3u && strcmp(dir + len - 3u, "/..") == 0)
+            return false;
+    }
+    return true;
+}
+
+/* A host is not escaped -- it is compared against the netrc's `machine` line
+ * and has to match byte for byte -- so it is checked instead. An IPv4 or IPv6
+ * literal or a host name, and nothing that could end a URL authority early. */
+static bool host_is_safe(const char *host)
+{
+    size_t i;
+
+    if (host == NULL || host[0] == '\0')
+        return false;
+    for (i = 0u; host[i] != '\0'; i++) {
+        unsigned char c = (unsigned char)host[i];
+
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+              c == '.' || c == '-' || c == ':' || c == '[' || c == ']'))
             return false;
     }
     return true;
@@ -183,22 +263,29 @@ static bool dir_is_safe(const char *dir)
 nd_err fetch_build_url(const char *host, const char *dir, const char *name, char *out,
                        size_t out_sz)
 {
-    if (host == NULL || host[0] == '\0' || dir == NULL || out == NULL)
+    char dir_esc[ND_FETCH_URL_MAX];
+    char name_esc[ND_FETCH_NAME_MAX * 3u + 1u];
+
+    if (host == NULL || dir == NULL || out == NULL)
         return ND_ERR_INVAL;
-    if (!dir_is_safe(host) || !dir_is_safe(dir))
+    if (!host_is_safe(host) || !dir_is_safe(dir))
         return ND_ERR_INVAL;
     if (name != NULL && !fetch_name_is_safe(name))
         return ND_ERR_INVAL;
+    if (url_escape(dir, dir_esc, sizeof dir_esc, true) != ND_OK)
+        return ND_ERR_TOOLONG;
+    if (name != NULL && url_escape(name, name_esc, sizeof name_esc, false) != ND_OK)
+        return ND_ERR_TOOLONG;
 
     if (name == NULL) {
         /* The trailing slash is what makes curl LIST rather than RETR. */
-        if (dir[0] == '\0')
+        if (dir_esc[0] == '\0')
             return nd_snprintf(out, out_sz, "ftp://%s/", host);
-        return nd_snprintf(out, out_sz, "ftp://%s/%s/", host, dir);
+        return nd_snprintf(out, out_sz, "ftp://%s/%s/", host, dir_esc);
     }
-    if (dir[0] == '\0')
-        return nd_snprintf(out, out_sz, "ftp://%s/%s", host, name);
-    return nd_snprintf(out, out_sz, "ftp://%s/%s/%s", host, dir, name);
+    if (dir_esc[0] == '\0')
+        return nd_snprintf(out, out_sz, "ftp://%s/%s", host, name_esc);
+    return nd_snprintf(out, out_sz, "ftp://%s/%s/%s", host, dir_esc, name_esc);
 }
 
 /* ------------------------------------------------------------------ *
@@ -306,15 +393,16 @@ static int entry_cmp(const void *a, const void *b)
     return strcasecmp(x->name, y->name);
 }
 
-size_t fetch_parse_listing(const char *text, fetch_entry *out, size_t max)
+/* One pass over the text, taking only directories or only files, appending
+ * from `n`. Returns the new count. */
+static size_t scan_listing(const char *text, fetch_entry *out, size_t max, bool want_dirs,
+                           size_t n)
 {
-    size_t n = 0u;
     const char *p = text;
 
-    if (text == NULL || out == NULL || max == 0u)
-        return 0u;
     while (*p != '\0' && n < max) {
         char line[ND_FETCH_LINE_MAX];
+        fetch_entry e;
         const char *nl = strchr(p, '\n');
         size_t len = (nl != NULL) ? (size_t)(nl - p) : strlen(p);
 
@@ -323,13 +411,38 @@ size_t fetch_parse_listing(const char *text, fetch_entry *out, size_t max)
         if (len > 0u && len < sizeof line) {
             memcpy(line, p, len);
             line[len] = '\0';
-            if (fetch_parse_list_line(line, &out[n]))
-                n++;
+            if (fetch_parse_list_line(line, &e) && e.is_dir == want_dirs)
+                out[n++] = e;
         }
         if (nl == NULL)
             break;
         p = nl + 1;
     }
+    return n;
+}
+
+/* ============ WHY THIS IS TWO PASSES AND NOT ONE ============
+ *
+ * The array is bounded and a folder is not, so a big enough folder is
+ * truncated -- and truncation must never cost a DIRECTORY. LIST comes back in
+ * whatever order the server's readdir gave, so a one-pass fill would drop
+ * whichever entries happened to come last, and a subfolder sitting at the end
+ * of a directory of nine hundred tracks would become unreachable: not merely
+ * missing from a screen, but with no way to navigate into it at all.
+ *
+ * Taking directories first means the only thing a full array can cost is
+ * files, which the owner can still get at by making another folder on the
+ * server. Sorting afterwards is unaffected -- entry_cmp puts directories
+ * first anyway, so the two passes and the sort agree.
+ */
+size_t fetch_parse_listing(const char *text, fetch_entry *out, size_t max)
+{
+    size_t n;
+
+    if (text == NULL || out == NULL || max == 0u)
+        return 0u;
+    n = scan_listing(text, out, max, true, 0u);
+    n = scan_listing(text, out, max, false, n);
     if (n > 1u)
         qsort(out, n, sizeof out[0], entry_cmp);
     return n;
@@ -394,13 +507,21 @@ static const char *curl_reason(const char *stderr_text)
 /* Turn an exit code and whatever curl said into the one line a person reads.
  * The three codes named here are the ones with a specific fix; everything
  * else gets curl's own words, which are better than a table would be. */
-static void explain(int exit_status, const char *err_text, char *why, size_t why_sz)
+static void explain(int exit_status, const char *err_text, const char *user, char *why,
+                    size_t why_sz)
 {
     const char *reason = curl_reason(err_text);
 
     switch (exit_status) {
     case CURL_E_LOGIN_DENIED:
-        say_why(why, why_sz, "Wrong password.");
+        /* Curl 67 is "the server said no to this login", and it does not say
+         * which half was wrong. Naming the USER is what makes that useful:
+         * the password is the half the owner just typed and is thinking
+         * about, and the user name is the half that comes from a default
+         * nobody looks at -- which is exactly how a server account renamed
+         * from neodct to ndftp cost an evening of retyping a correct
+         * password. */
+        say_why(why, why_sz, "Login refused as \"%s\".\nCheck the name and password.", user);
         return;
     case CURL_E_COULDNT_RESOLVE:
         say_why(why, why_sz, "No network: cannot look up the server.");
@@ -411,10 +532,23 @@ static void explain(int exit_status, const char *err_text, char *why, size_t why
     default:
         break;
     }
-    if (reason[0] != '\0')
-        say_why(why, why_sz, "%s", reason);
-    else
+    if (reason[0] != '\0') {
+        /* curl's stderr ends in a newline. Left on, it becomes a blank line
+         * inside the dialog and, worse, pushes a two-line message over the
+         * threshold where MessageDialog switches to its paragraph layout --
+         * so the trailing whitespace silently changes how the screen looks. */
+        char trimmed[ND_FETCH_WHY_MAX];
+        size_t len;
+
+        (void)nd_strlcpy(trimmed, reason, sizeof trimmed);
+        len = strlen(trimmed);
+        while (len > 0u && (trimmed[len - 1u] == '\n' || trimmed[len - 1u] == '\r' ||
+                            trimmed[len - 1u] == ' ' || trimmed[len - 1u] == '\t'))
+            trimmed[--len] = '\0';
+        say_why(why, why_sz, "%s", trimmed);
+    } else {
         say_why(why, why_sz, "Transfer failed (curl %d).", exit_status);
+    }
 }
 
 /* Read a whole descriptor into a bounded, NUL-terminated heap buffer. Keeps
@@ -544,7 +678,7 @@ nd_err fetch_list(const fetch_conn *c, const char *dir, fetch_entry *out, size_t
     }
     pid = -1;
     if (!status.exited || status.exit_status != 0) {
-        explain(status.exited ? status.exit_status : -1, err_text, why, why_sz);
+        explain(status.exited ? status.exit_status : -1, err_text, c->user, why, why_sz);
         rc = (status.exited && status.exit_status == CURL_E_LOGIN_DENIED) ? ND_ERR_PERM
                                                                          : ND_ERR_IO;
         goto done;
@@ -694,8 +828,8 @@ nd_err fetch_download(const fetch_conn *c, const char *dir, const char *name,
         goto done;
     }
     if (!status.exited || status.exit_status != 0) {
-        explain(status.exited ? status.exit_status : -1, (err_text != NULL) ? err_text : "", why,
-                why_sz);
+        explain(status.exited ? status.exit_status : -1, (err_text != NULL) ? err_text : "",
+                c->user, why, why_sz);
         rc = (status.exited && status.exit_status == CURL_E_LOGIN_DENIED) ? ND_ERR_PERM
                                                                          : ND_ERR_IO;
         goto done;

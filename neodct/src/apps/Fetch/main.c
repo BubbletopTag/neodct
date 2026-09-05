@@ -123,6 +123,10 @@ static bool ask_password(nd_ui *ui, fetch_conn *c)
     if (nd_textinput_init(&in, ui, "Fetch", "Password", c->pass, sizeof c->pass, "",
                           ND_T9_FILTER_ANY) != ND_OK)
         return false;
+    /* A password is compared byte for byte by a server, so the field must not
+     * improve it. Without this the first letter arrives capitalised and a
+     * correct password fails with nothing on screen to explain why. */
+    nd_textinput_set_no_autocap(&in, true);
     typed = nd_textinput_show(&in);
     return typed != NULL && typed[0] != '\0';
 }
@@ -341,6 +345,20 @@ static void browse(nd_ui *ui, const fetch_conn *c, fetch_view *v)
                 continue;
             }
             build_labels(v);
+            /* A full array means the folder is at least this big and the tail
+             * of it is not on screen. Saying so is the difference between a
+             * limit and a bug: the owner can split the folder on the server,
+             * but not if the phone quietly shows a prefix. Directories are
+             * never the part that is lost -- fetch_parse_listing() takes them
+             * first -- so navigation still works. */
+            if (v->n >= ND_FETCH_ENTRIES) {
+                char note[128];
+
+                (void)nd_snprintf(note, sizeof note,
+                                  "This folder has more than\n%u files. Showing the\nfirst %u.",
+                                  (unsigned)ND_FETCH_ENTRIES, (unsigned)ND_FETCH_ENTRIES);
+                say_notice(ui, note);
+            }
             reload = false;
         }
 

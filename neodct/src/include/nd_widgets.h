@@ -272,6 +272,10 @@ typedef struct {
     nd_predictive predict;
     /* NULL for an ordinary field. See nd_textinput_set_mask(). */
     const char *mask;
+
+    /* Suppress the capital on the first character. See
+     * nd_textinput_set_no_autocap(). */
+    bool no_autocap;
 } nd_textinput;
 
 /* filter is passed straight to the T9 engine and also gates the QWERTY path. */
@@ -291,6 +295,20 @@ nd_err nd_textinput_init(nd_textinput *t, nd_ui *ui, const char *title, const ch
  * The buffer must be at least strlen(mask) + 1. Pass NULL to go back to an
  * ordinary field. */
 void nd_textinput_set_mask(nd_textinput *t, const char *mask);
+
+/* Stop the field capitalising the first character it is given.
+ *
+ * The dev-keyboard path upper-cases the first letter unconditionally, which
+ * is a port of the Python's str.upper() and is right for everything it was
+ * written for -- a contact, a name, a message all begin with a capital. It is
+ * wrong for exactly one kind of field: one whose contents are compared byte
+ * for byte by something that is not a person. A password typed as "apple"
+ * that arrives as "Apple" fails against a server that is working perfectly,
+ * and the screen has no way to show the difference.
+ *
+ * Default false, so every existing field keeps the behaviour and the golden
+ * frames are untouched. */
+void nd_textinput_set_no_autocap(nd_textinput *t, bool on);
 
 /* blink_state draws the trailing "_" cursor. Because the cursor changes the
  * measured INK HEIGHT of the line, the text visibly jumps as you type:

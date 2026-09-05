@@ -2882,3 +2882,49 @@ generalised in the same pass, since it is not public yet.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_016gPhyhm5QBEn3NLPBBoTHd
+
+Second addendum, after the first real server: a folder of music is bigger than
+the array that lists it, so ND_FETCH_ENTRIES goes from 64 to 256 and
+fetch_parse_listing() became two passes.
+
+The two passes are the part that matters. LIST comes back in the server's
+readdir order, so filling the array in one pass drops whatever came last --
+and a subfolder at the end of a directory of nine hundred tracks is then
+unreachable, not merely absent from a screen: there is no key to press that
+would ever reveal it. Taking directories first means a full array can only
+cost files, which the owner can still reach by splitting the folder at the
+other end. The app also says when it truncated, because a silent prefix is
+indistinguishable from a folder that really is that size.
+
+test_truncation_never_costs_a_folder() pins it with the folder placed last in
+the listing, which is exactly where a one-pass fill loses it.
+
+Third addendum, from the first run against the real droplet -- three defects,
+of which the interesting one is the error message.
+
+The app logged in as "neodct" because ND_FETCH_USER_DEFAULT still said so.
+That name was already taken on the droplet by the ssh relay account the phone
+dials for Remote Shell, whose home is /home/neodct and which vsftpd would
+therefore have chrooted to the wrong directory, so the setup script was
+changed to make an account called "ndftp" instead -- and the app's default was
+not changed with it. vsftpd's userlist has only ndftp on it, so every login
+was refused.
+
+It cost an evening because of the second defect. curl's exit 67 is "the server
+said no to this login" and does not say which half was wrong; explain() turned
+it into the flat sentence "Wrong password." So the owner changed the password,
+twice, on a server that was working correctly, while the wrong half was a
+default nobody has reason to look at. It now says
+  Login refused as "ndftp".
+  Check the name and password.
+Naming the value that came from a default is the whole of the fix: the
+password is the half the person just typed and is already thinking about.
+
+Third, nd_textinput upper-cases the first letter on the dev-keyboard path --
+a faithful port of the Python's str.upper(), and right for every field it was
+written for, since a contact and a message both begin with a capital. It is
+wrong for a field whose contents a SERVER compares byte for byte: "apple"
+typed arrives as "Apple" and fails with nothing on screen to show why. Rather
+than change a widget every other screen shares, nd_textinput_set_no_autocap()
+is new, defaults to false so no existing field and no golden frame moves, and
+Fetch turns it on for the password.

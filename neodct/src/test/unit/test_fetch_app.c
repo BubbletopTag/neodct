@@ -345,7 +345,10 @@ static void test_a_refused_login_says_so(void)
     /* ND_ERR_PERM rather than a generic failure, and a sentence the owner can
      * act on -- this is the one failure they can fix by typing again. */
     CHECK(api.list(&c, "", got, ND_ARRAY_LEN(got), &n, why, sizeof why) == ND_ERR_PERM);
-    CHECK_STR(why, "Wrong password.");
+    /* Naming the USER is the point: the password is the half the owner just
+     * typed, and the user name is the half that comes from a default nobody
+     * looks at -- which is the way round this actually failed. */
+    CHECK_STR(why, "Login refused as \"neodct\".\nCheck the name and password.");
     CHECK_INT(n, 0);
 }
 
@@ -451,7 +454,9 @@ static void test_download_lands_where_it_was_asked_to(void)
      * scans music/ should ever see one. */
     CHECK(!nd_path_is_file("/card/music/A Forest.mp3.part"));
 
-    CHECK_STR(readback("urls"), "ftp://10.0.0.1/music/A Forest.mp3\n");
+    /* Escaped, because a space is not legal in a URL and curl rejects the
+     * whole transfer over one. */
+    CHECK_STR(readback("urls"), "ftp://10.0.0.1/music/A%20Forest.mp3\n");
 }
 
 static void test_progress_is_driven_from_the_growing_file(void)

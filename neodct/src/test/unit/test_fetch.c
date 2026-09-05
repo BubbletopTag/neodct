@@ -404,14 +404,77 @@ static void test_build_url(void)
     CHECK(api.build_url("10.0.0.1", "", "Disc.bin", url, sizeof url) == ND_OK);
     CHECK_STR(url, "ftp://10.0.0.1/Disc.bin");
 
-    /* Nothing is escaped, so anything that would need escaping is refused --
-     * including the one that matters, a directory climbing out of itself. */
+    /* ============ THE ONE THAT COST AN EVENING ============
+     *
+     * Real music has spaces in it. This URL used to be REFUSED, on the
+     * reasoning that every path here was built from vetted names and so
+     * nothing should need escaping -- which was true of every character
+     * except the one that appears in almost every file name a person owns.
+     * The app listed the folder perfectly and then said "URL rejected" for
+     * every track in it. */
+    CHECK(api.build_url("10.0.0.1", "music", "Drake - Make Them Pay.mp3", url, sizeof url) ==
+          ND_OK);
+    CHECK_STR(url, "ftp://10.0.0.1/music/Drake%20-%20Make%20Them%20Pay.mp3");
+    /* Only the unreserved set survives; '-', '.', '_' and '~' are unreserved
+     * and must NOT be escaped, or the server is asked for a different file. */
+    CHECK(api.build_url("10.0.0.1", "", "a-b_c.d~e.mp3", url, sizeof url) == ND_OK);
+    CHECK_STR(url, "ftp://10.0.0.1/a-b_c.d~e.mp3");
+    /* A '%' in a name is itself escaped, so a name cannot smuggle an escape
+     * sequence of its own into the URL. */
+    CHECK(api.build_url("10.0.0.1", "", "50%25.mp3", url, sizeof url) == ND_OK);
+    CHECK_STR(url, "ftp://10.0.0.1/50%2525.mp3");
+    /* Directory segments are escaped too, and the separators between them
+     * survive -- otherwise a folder with a space in it is unreachable. */
+    CHECK(api.build_url("10.0.0.1", "my music/live sets", NULL, url, sizeof url) == ND_OK);
+    CHECK_STR(url, "ftp://10.0.0.1/my%20music/live%20sets/");
+
+    /* Refusal is kept for the thing escaping cannot make safe. */
     CHECK(api.build_url("10.0.0.1", "../..", NULL, url, sizeof url) == ND_ERR_INVAL);
+    CHECK(api.build_url("10.0.0.1", "a/../b", NULL, url, sizeof url) == ND_ERR_INVAL);
+    CHECK(api.build_url("10.0.0.1", "a/..", NULL, url, sizeof url) == ND_ERR_INVAL);
     CHECK(api.build_url("10.0.0.1", "/absolute", NULL, url, sizeof url) == ND_ERR_INVAL);
-    CHECK(api.build_url("10.0.0.1", "a b", NULL, url, sizeof url) == ND_ERR_INVAL);
     CHECK(api.build_url("10.0.0.1", "music", "../../etc/passwd", url, sizeof url) ==
           ND_ERR_INVAL);
     CHECK(api.build_url("", "music", NULL, url, sizeof url) == ND_ERR_INVAL);
+    /* A host is compared byte for byte against the netrc, so it is checked
+     * rather than escaped. */
+    CHECK(api.build_url("evil host/x", "music", NULL, url, sizeof url) == ND_ERR_INVAL);
+}
+
+/* The truncation rule: an array that fills up loses FILES, never folders.
+ *
+ * LIST comes back in the server's readdir order, so a one-pass fill would
+ * drop whatever came last -- and a subfolder at the end of a directory of
+ * nine hundred tracks would then be unreachable, with no key to press that
+ * would ever reveal it. This is the case that says the two passes are load
+ * bearing rather than tidy. */
+static void test_truncation_never_costs_a_folder(void)
+{
+    static const char TEXT[] =
+        "-rw-r--r-- 1 1 1 10 Sep 05 12:00 a.mp3\n"
+        "-rw-r--r-- 1 1 1 10 Sep 05 12:00 b.mp3\n"
+        "-rw-r--r-- 1 1 1 10 Sep 05 12:00 c.mp3\n"
+        /* The folder is LAST, which is exactly where a server is free to put
+         * it and where a one-pass fill would lose it. */
+        "drwxr-xr-x 2 1 1 4096 Sep 05 12:00 live\n";
+    fetch_entry got[2];
+    size_t n = api.parse_listing(TEXT, got, ND_ARRAY_LEN(got));
+
+    CHECK_INT(n, 2);
+    CHECK_STR(got[0].name, "live");
+    CHECK(got[0].is_dir);
+    /* The second slot is a file, so files are not starved either -- the rule
+     * is "directories first", not "directories only". */
+    CHECK(!got[1].is_dir);
+
+    /* With room for everything the result is unchanged by the two passes. */
+    {
+        fetch_entry all[8];
+
+        CHECK_INT(api.parse_listing(TEXT, all, ND_ARRAY_LEN(all)), 4);
+        CHECK_STR(all[0].name, "live");
+        CHECK_STR(all[1].name, "a.mp3");
+    }
 }
 
 int main(void)
@@ -429,6 +492,7 @@ int main(void)
     RUN(test_parse_one_line);
     RUN(test_parse_skips_what_it_should);
     RUN(test_parse_whole_listing);
+    RUN(test_truncation_never_costs_a_folder);
     RUN(test_format_size);
     RUN(test_build_url);
 
