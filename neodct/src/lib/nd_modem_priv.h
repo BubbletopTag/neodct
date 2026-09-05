@@ -73,6 +73,19 @@
 #define ND_MODEM_PCM_FORMAT       "S16_LE"
 #define ND_MODEM_PCM_RATE_DEFAULT 16000
 
+/* The mic pipe gets this many consecutive failures to start before the call
+ * carries on listen-only; a pipe that has run for ND_MIC_STABLE_S before
+ * dying was working and starts the count over. Three is the Python's
+ * number; the reset is not, and nd_modem__watch_audio_proc() says why. */
+#define ND_MIC_GIVE_UP_AFTER 3
+#define ND_MIC_STABLE_S      10.0
+
+/* How many AT+CLCC replies in a row may list no call before a call that the
+ * state machine still believes in is declared over. One is what a SIM7600
+ * answers in the beat between ATD returning OK and the call entering its
+ * table, so one is not enough. */
+#define ND_CLCC_EMPTY_TO_END 2
+
 /* R-7. The Python's _rxbuf is a bytes object that only ever loses COMPLETE
  * lines, so a port that emits binary with no '\n' -- the Qualcomm DIAG port is
  * exactly that -- grows it without bound. 8 KB is far more than any real AT
@@ -267,6 +280,11 @@ struct nd_modem {
     double next_net;
     double next_cops;
     double next_probe;
+    /* When the boot grace runs out (nd_modem.h). Written once at creation,
+     * read by the modem thread and, under st_mu, by the readouts. A test
+     * moves it to bring the window forward or push it back. */
+    double boot_deadline;
+    bool sim_announced; /* "Running in Simulation Mode" has been logged */
     /* The last reason the probe gave, so a failure that repeats every
      * PROBE_RETRY_S is printed ONCE and not forever. Cleared on success, so a
      * modem that is lost and fails again says so again. */
@@ -283,15 +301,38 @@ struct nd_modem {
     bool audio_live;
     pid_t mic_pid; /* arecord: mic -> PCM port     */
     bool mic_live;
+    double mic_started_at; /* for ND_MIC_STABLE_S */
     char active_pcm_port[ND_MODEM_PORT_MAX];
     bool pcm_active;
     int32_t mic_fails;
     bool pcm_cleanup;
-    bool pcm_retry;
+
+    /* ---- the call-audio sequence, all owned by the modem thread ----
+     *
+     * dial() and answer() are the UI thread blocked on this one, so they do
+     * ATD or ATA and nothing else; everything slower is owed to the next
+     * tick through these three flags. nd_modem_audio.c's header has the
+     * whole sequence.
+     *
+     *   pcm_setup_pending      ATD returned OK: send CPCMFRM and CPCMREG=1
+     *                          and start the ringback pipe.
+     *   audio_connect_pending  the call came up: assert PCM again, then
+     *                          (re)start the speaker from a flushed port and
+     *                          start the mic. Set ONCE per call, on the
+     *                          first of VOICE CALL: BEGIN, CLCC <stat> 0 or
+     *                          ATA to report it.
+     *   pcm_reg_ok             CPCMREG=1 has answered OK since this call
+     *                          began, so the ringback pipe is worth starting. */
+    bool pcm_setup_pending;
+    bool audio_connect_pending;
+    bool pcm_reg_ok;
+    double next_pcm_try; /* audio_connect_pending is retried no faster than this */
 
     int32_t call_stat; /* -1 is Python's None */
     bool call_connected;
     double call_connected_at;
+    /* Consecutive AT+CLCC replies listing no call; see nd_modem__poll_clcc. */
+    int32_t clcc_empty;
 
     int32_t pcm_rate;
     char configured_port[ND_MODEM_PORT_MAX];
@@ -390,7 +431,13 @@ bool nd_modem__sim_read_text(const char *path, char *out, size_t out_sz);
 /* --- call audio, nd_modem_audio.c --- */
 void nd_modem__pcm_port(char *out, size_t out_sz);
 bool nd_modem__find_capture_device(char *out, size_t out_sz);
-void nd_modem__start_call_audio(nd_modem *m);
+/* The three starts are separate because they happen at different moments of
+ * a call -- the speaker alone for ringback once CPCMREG=1 has been accepted,
+ * then a speaker restarted from a flushed port plus the mic once the call is
+ * up. Each is a no-op for a pipe that is already running; restart never is. */
+void nd_modem__start_speaker(nd_modem *m);
+void nd_modem__restart_speaker(nd_modem *m);
+void nd_modem__start_mic(nd_modem *m);
 void nd_modem__stop_call_audio(nd_modem *m);
 void nd_modem__watch_audio_proc(nd_modem *m, double now);
 

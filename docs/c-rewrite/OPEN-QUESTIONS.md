@@ -1627,6 +1627,13 @@ busy for a millisecond. The C waits `TRANSACT_SLEEP_S` and retries; every
 other errno still drops the port. This is a deliberate divergence and the only
 one in the AT engine.
 
+The retry is bounded now, by `ND_MODEM_WRITE_STALL_S` (2 s of no progress).
+Unbounded, it was a way to freeze the phone solid: a modem whose USB stack
+had wedged returned `EAGAIN` for ever, the modem thread spun in the retry,
+and the UI thread sat blocked in `dial()` or `hangup()` behind it. Running
+into the bound is `_drop_hardware("port write stalled for Ns")`, which is
+what the Python would have done a millisecond in.
+
 ### M-7. The double `close()` in `_probe_ports` is guarded, visibly identically
 
 Line 224 closes the local `fd` even when `_drop_hardware` already closed it

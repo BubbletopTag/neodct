@@ -232,6 +232,14 @@ static void poll_sim_sms(nd_modem *m)
 
 void nd_modem__poll_sim(nd_modem *m, double now)
 {
+    /* The boot grace ran out with nothing answering: NOW it is Simulation
+     * Mode, and the console is told once, where nd_modem_open() used to say
+     * it before the modem had a chance. */
+    if (!m->sim_announced && now >= m->boot_deadline) {
+        nd_log(ND_LOG_MODEM, "HARDWARE NOT FOUND: Running in Simulation Mode.");
+        m->sim_announced = true;
+    }
+
     poll_sim_ring(m);
     poll_sim_sms(m);
 

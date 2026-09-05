@@ -745,6 +745,9 @@ static void write_settings(const char *wallpaper_name)
         return;
     }
     (void)fputs("system.ui.engineering_mode=ON\n", f);
+    /* No boot grace: the reference frames were cut in Simulation Mode and a
+     * modem is never coming under this tool. */
+    (void)fputs("system.modem.boot_grace_s=0\n", f);
     if (wallpaper_name != NULL) {
         /* Stock wallpapers ship inside the read-only image; only user-added
          * ones live under /NeoDCT/User. */

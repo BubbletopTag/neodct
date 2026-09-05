@@ -298,25 +298,21 @@ static void render_status_chrome(nd_ui *ui, bool with_clock)
  * draw_call_screen
  * ------------------------------------------------------------------ */
 
-void nd_dialer_draw_call(nd_ui *ui, const char *number, const char *name)
+/* The canvas, given what to say. draw_call reads the modem for the label and
+ * the timer; place_call and answer_call say "Calling..." and "Connecting..."
+ * themselves, because they paint BEFORE the modem has been asked and there
+ * is no state yet to read it from. */
+static void draw_call_frame(nd_ui *ui, const char *number, const char *label, int32_t secs)
 {
     char fitted[ND_TEXT_LINE_MAX];
     nd_draw *d;
     const nd_font *label_font;
     const nd_font *num_font;
-    const char *status = "CONNECTED";
-    const char *label;
-    int32_t secs = -1;
     int32_t screen_w;
     int32_t content_bottom;
     int32_t label_x;
     int32_t label_y;
     int32_t num_y;
-
-    /* draw_call_screen never reads `name`; the Python's own comment says the
-     * contact name is "keeping it off by default to match your request". The
-     * parameter is kept because show_calling passes it through. */
-    ND_UNUSED(name);
 
     if (ui == NULL || ui->draw == NULL)
         return;
@@ -333,18 +329,6 @@ void nd_dialer_draw_call(nd_ui *ui, const char *number, const char *name)
     /* The top-right clock is COMMENTED OUT at call_screen.py:125-127 and the
      * home layout's own clock element is rendered at the bottom of the
      * function instead. Both are ported: nothing here, one there. */
-
-    /* Live progress from AT+CLCC: Calling... -> Ringing... -> Call 1.
-     * ("CONNECTED", None) is the default when there is no modem at all. */
-    if (ui->modem != NULL)
-        nd_modem_call_status(ui->modem, &status, &secs);
-
-    if (strcmp(status, "CALLING") == 0)
-        label = "Calling...";
-    else if (strcmp(status, "RINGING") == 0)
-        label = "Ringing...";
-    else
-        label = "Call 1";
 
     label_font = (ui->font_n != NULL) ? ui->font_n : ui->font_s;
 
@@ -370,6 +354,35 @@ void nd_dialer_draw_call(nd_ui *ui, const char *number, const char *name)
     }
 
     render_status_chrome(ui, /*with_clock=*/true);
+}
+
+void nd_dialer_draw_call(nd_ui *ui, const char *number, const char *name)
+{
+    const char *status = "CONNECTED";
+    const char *label;
+    int32_t secs = -1;
+
+    /* draw_call_screen never reads `name`; the Python's own comment says the
+     * contact name is "keeping it off by default to match your request". The
+     * parameter is kept because show_calling passes it through. */
+    ND_UNUSED(name);
+
+    if (ui == NULL)
+        return;
+
+    /* Live progress from AT+CLCC: Calling... -> Ringing... -> Call 1.
+     * ("CONNECTED", None) is the default when there is no modem at all. */
+    if (ui->modem != NULL)
+        nd_modem_call_status(ui->modem, &status, &secs);
+
+    if (strcmp(status, "CALLING") == 0)
+        label = "Calling...";
+    else if (strcmp(status, "RINGING") == 0)
+        label = "Ringing...";
+    else
+        label = "Call 1";
+
+    draw_call_frame(ui, number, label, secs);
 }
 
 /* ------------------------------------------------------------------ *
@@ -470,6 +483,81 @@ void nd_dialer_show_calling(nd_ui *ui, const char *number, const char *name)
             return;
         }
     }
+}
+
+/* ------------------------------------------------------------------ *
+ * place_call / answer_call
+ * ------------------------------------------------------------------ */
+
+/* The in-call screen with a label of the caller's choosing, pushed to the
+ * panel now. This is what the owner looks at while dial() or answer() has
+ * the UI thread: ATD on a SIM7600 is usually back inside a second and can
+ * take several, and a screen that does not change for several seconds after
+ * a key is a phone that has frozen -- which is what the old flow, home
+ * screen up until the modem answered, looked like. */
+static void present_call_frame(nd_ui *ui, const char *number, const char *label)
+{
+    nd_softkey bar;
+
+    nd_softkey_init(&bar, ui, false);
+    draw_call_frame(ui, number, label, -1);
+    (void)nd_ui_present(ui);
+    nd_softkey_update(&bar, "End", true);
+}
+
+/* "Call failed", and wait for it to be read. Returning to the home screen
+ * with nothing said is indistinguishable from the Call key being ignored. */
+static void call_failed_notice(nd_ui *ui)
+{
+    nd_msgdialog dlg;
+
+    nd_msgdialog_init(&dlg, ui, "Call failed");
+    nd_msgdialog_set_button(&dlg, "OK");
+    (void)nd_msgdialog_show(&dlg);
+}
+
+bool nd_dialer_place_call(nd_ui *ui, const char *number, const char *name)
+{
+    if (ui == NULL)
+        return false;
+    if (number == NULL)
+        number = "";
+
+    /* Never over a call that is up. An ATD on top of a live call leaves the
+     * modem holding two calls the phone knows nothing about. */
+    if (ui->modem != NULL && nd_modem_state(ui->modem) != ND_CALL_IDLE) {
+        nd_log(ND_LOG_UI, "Call to %s refused: a call is already up.", number);
+        return false;
+    }
+
+    present_call_frame(ui, number, "Calling...");
+
+    if (ui->modem != NULL && !nd_modem_dial(ui->modem, number)) {
+        nd_log(ND_LOG_UI, "Call to %s failed.", number);
+        call_failed_notice(ui);
+        return false;
+    }
+
+    nd_dialer_show_calling(ui, number, name);
+    return true;
+}
+
+bool nd_dialer_answer_call(nd_ui *ui, const char *number, const char *name)
+{
+    if (ui == NULL)
+        return false;
+    if (number == NULL)
+        number = "";
+
+    present_call_frame(ui, number, "Connecting...");
+
+    if (ui->modem != NULL && !nd_modem_answer(ui->modem)) {
+        nd_log(ND_LOG_UI, "Answer failed.");
+        return false;
+    }
+
+    nd_dialer_show_calling(ui, number, name);
+    return true;
 }
 
 /* ------------------------------------------------------------------ *

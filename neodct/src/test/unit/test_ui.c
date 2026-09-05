@@ -210,6 +210,9 @@ static void write_settings_full(const char *wallpaper_name, const char *wpeveryw
     if (f == NULL)
         return;
     (void)fputs("system.ui.engineering_mode=ON\n", f);
+    /* No boot grace: the frames want "Simulation" on the first render, not
+     * thirty seconds of "No Service" waiting for a modem that is not coming. */
+    (void)fputs("system.modem.boot_grace_s=0\n", f);
     if (wallpaper_name != NULL) {
         /* Stock wallpapers ship inside the read-only image. */
         (void)fprintf(f, "system.ui.wallpaper=/NeoDCT/System/wallpapers/%s\n", wallpaper_name);

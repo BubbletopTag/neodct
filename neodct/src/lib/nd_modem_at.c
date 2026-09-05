@@ -434,10 +434,13 @@ size_t nd_modem__read_pending(nd_modem *m, nd_lines *out)
  * Writing
  * ------------------------------------------------------------------ */
 
-static bool port_write(nd_modem *m, const void *data, size_t len)
+/* On failure `why` says what went wrong, in the words drop_hardware() will
+ * print. */
+static bool port_write(nd_modem *m, const void *data, size_t len, char *why, size_t why_sz)
 {
     const uint8_t *p = data;
     size_t left = len;
+    double stalled_since = 0.0;
 
     while (left > 0u) {
         ssize_t n = write(m->fd, p, left);
@@ -448,15 +451,31 @@ static bool port_write(nd_modem *m, const void *data, size_t len)
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 /* The Python's single os.write() would have raised
                  * BlockingIOError here and been caught as an OSError, taking
-                 * the port down. A modem that has asserted flow control for a
-                 * moment is not a modem that has gone away, so this waits the
-                 * same 20 ms the transact loop uses and tries again. Noted in
-                 * OPEN-QUESTIONS.md M-6. */
+                 * the port down. A modem that has asserted flow control for
+                 * a moment is not a modem that has gone away, so this waits
+                 * the same 20 ms the transact loop uses and tries again --
+                 * but not for ever. A modem whose USB stack has wedged
+                 * answers EAGAIN indefinitely, and the UI thread is blocked
+                 * in dial() or hangup() behind this loop; retrying without a
+                 * bound was the phone freezing solid. ND_MODEM_WRITE_STALL_S
+                 * is the bound, and running into it is the port failing.
+                 * Noted in OPEN-QUESTIONS.md M-6. */
+                double now = nd_modem__now();
+
+                if (stalled_since == 0.0) {
+                    stalled_since = now;
+                } else if (now - stalled_since >= ND_MODEM_WRITE_STALL_S) {
+                    (void)snprintf(why, why_sz, "port write stalled for %.0fs",
+                                   now - stalled_since);
+                    return false;
+                }
                 nd_modem__nap(ND_TRANSACT_SLEEP_S);
                 continue;
             }
+            (void)snprintf(why, why_sz, "port write failed: %s", strerror(errno));
             return false;
         }
+        stalled_since = 0.0; /* progress: the clock starts over */
         p += (size_t)n;
         left -= (size_t)n;
     }
@@ -496,13 +515,14 @@ bool nd_modem__transact(nd_modem *m, const char *cmd, double timeout, char *fina
                    (unsigned)ND_MODEM_LINE_MAX);
         return false;
     }
-    if (!port_write(m, wire, (size_t)n)) {
+    {
         char why[ND_MODEM_WHY_MAX];
 
-        (void)snprintf(why, sizeof why, "port write failed: %s", strerror(errno));
-        nd_modem__drop_hardware(m, why);
-        nd_modem__lines_reset(coll);
-        return false;
+        if (!port_write(m, wire, (size_t)n, why, sizeof why)) {
+            nd_modem__drop_hardware(m, why);
+            nd_modem__lines_reset(coll);
+            return false;
+        }
     }
 
     deadline = nd_modem__now() + timeout;
