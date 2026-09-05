@@ -1,5 +1,106 @@
 # NeoDCT OS Changelog
 
+0.5.1b
+A phone call no longer freezes the phone, the keypad is there whenever the
+home screen is, and a video says what it is doing while you wait for it.
+
+--- Calls that do not freeze the phone, and audio that stays clear ---
+
+Placing a call used to leave the home screen sitting there, unchanged, until
+the modem had answered -- usually a second, sometimes several -- and a phone
+that does nothing for several seconds after a key looks frozen. Now the call
+screen comes up saying "Calling..." the instant you press the key, and if
+the modem will not place the call the screen says "Call failed" and waits
+for you to press OK, instead of quietly dropping you back on the home
+screen. Answering works the same way: "Connecting..." goes up first.
+
+Several things that could really freeze the phone during a call are gone:
+
+- A second call arriving while you were already on one used to hijack the
+  in-call screen -- the End key stopped working until the other caller gave
+  up. The phone does not do call waiting, and now it says so and ignores
+  the second call. A missed-call notice for that second call no longer ends
+  the call you are on either, which used to leave the line up on the modem
+  with the phone back on the home screen and nothing to press.
+- A modem that stopped taking commands could hang the phone for good; the
+  phone now gives it two seconds and then treats it as gone.
+- The phone no longer ends a call because the modem had not yet written it
+  down: it asks twice before believing the call is over, and waits a moment
+  after dialling before asking at all.
+
+The call audio is brought up more carefully, which is what the static and
+the silent microphone were about. The stream from the modem is raw sound
+with no framing, so a listener that starts half a sample in, or loses a
+byte, hears a wall of noise for the rest of the call. The phone now asks
+the modem for audio, waits for it to agree, and only then starts listening
+-- from a freshly emptied port -- and it does the same again the moment the
+call actually connects. The microphone is not started until the call is up,
+so it is no longer pushing sound at a modem that is not listening. A
+microphone that has worked for a while and then hiccups is restarted rather
+than counted towards giving up, and losing the modem mid-call no longer
+leaves every later call silent.
+
+On boot the phone now gives the modem thirty seconds to answer before it
+says anything. It used to declare "Simulation" in the carrier line the
+moment the home screen appeared, or put up a modem-fault notice, on a phone
+whose modem was simply still starting; both now wait, and the carrier line
+reads "No Service" with an empty meter until the modem is up. The wait is
+system.modem.boot_grace_s in settings.prop, and 0 turns it off.
+
+--- A keypad that was sometimes not there ---
+
+On some boots the phone came up with a keypad that did nothing at all, and
+the only cure was to turn it off and on again. Giving up root in 0.5.0b is
+what exposed it. The keys are handled by a device file that the system
+creates immediately but only makes readable a moment later, and the
+interface -- no longer root, and therefore no longer able to ignore the
+difference -- could look in between and conclude it had no keypad. It now
+waits for the keypad on the way up, and if it somehow still starts without
+one it keeps looking rather than giving up, so a phone that reaches the
+home screen keyless starts responding a second later instead of needing a
+restart. The same change means a USB keyboard plugged into a running phone
+is noticed.
+
+--- Playing a video says what it is doing ---
+
+Pressing play on a web page hands the screen to the video player, and on a
+mobile connection the player can take several seconds to open the video
+before there is anything to show. Those seconds used to be nothing at all:
+the page sat there unchanged, so the obvious thing was to press play again,
+and the second press was queued up for the browser to act on later.
+
+Now the moment you press play the bottom of the page says "Loading
+video...", and a moment after that the screen goes black with a ring of
+dots turning in the middle of it. The ring keeps turning until the video
+starts. If the connection stalls part-way through -- which on a weak signal
+is most of what happens -- the ring comes back over the picture until the
+video is moving again, so a stalled video and a frozen phone no longer look
+the same.
+
+When a video cannot be played, the page comes back with a reason at the
+bottom: "Video not found", "No connection", "Video format not supported",
+or "Could not load video". It stays there until you do something else.
+Before this, every failure looked identical: a flash of black and the page
+again.
+
+Fixed
+- Videos on web pages play again. The image had the wrong player program in
+  it -- an old script that needed a language the phone no longer has -- so
+  every video on the web answered "No media player". The build now checks
+  for exactly this.
+- The keypad works while a video is playing, on the phone as well as in the
+  emulator. The player's control channel was being created somewhere the
+  browser is not allowed to write, so every key pressed at a video --
+  including C to leave it -- was going nowhere.
+- A failure to play was reported as success. The program that runs the
+  player was throwing its exit status away.
+- Long videos no longer grow without limit in memory: the player was
+  allowed to keep up to 50 MB of what it had already played, on a phone
+  with 64.
+- Playback starts smoother on a slow connection: two seconds are buffered
+  before the video begins, and again before it resumes after a stall,
+  instead of one packet.
+
 0.5.0b
 The phone stops running as root, the browser stops being the phone, memory
 cards change format, the phone keeps a diary, and it says so when it falls

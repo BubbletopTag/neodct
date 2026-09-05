@@ -2118,3 +2118,601 @@ newer than 0.4.9a and 0.4.9a is not newer than 0.4.10a -- verified by linking
 against the built library, not by reading it.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+================================================================================
+
+svc: `make test` cannot power off the machine running it
+
+On 2026-08-31 the suite switched a developer's workstation off mid-build.
+
+nd_svc_poweroff() resolves "poweroff" along $PATH and spawns it, and a process
+with no service channel IS the core as far as nd_svc.h can tell. test/apps/SvcApp
+calls it for real, deliberately -- it is safe only while the parent serving its
+request installed a fake first, and its own comment says it chose poweroff over
+reboot precisely so that a missing fake would be noticed. It was noticed.
+
+The fix is not to find the one unguarded call, because the next one will be
+written by somebody who has not read that file. NEODCT_ROOT is the signal:
+`make test` sets it for every test binary and for every app they launch, and
+nothing on the phone ever does -- the whole library already reads "NEODCT_ROOT
+unset" as meaning the real device. So nd_svc_halt_allowed() refuses a real halt
+whenever that variable is set and no nd_svc_halt_simulate() fake is installed.
+
+The guard sits at the top of halt_resolve(), BEFORE the lookup, so nothing is
+resolved and nothing is spawned. That is the one chokepoint: both callers of
+halt_perform() -- the serve() path behind `halt.pending`, and nd_svc_halt_now()
+-- reach it only through a halt_resolve() that returned true. It covers the
+broker too, which is the process that still has CAP_SYS_BOOT.
+
+## it is not the same hole g_is_app_process closes
+
+app_without_a_channel() catches an app that was REFUSED a socket answering as
+though it were the core. SvcApp has a socket and is served normally; the halt it
+asks for is resolved and spawned by the serving process. The dangerous call is
+the one that works, so the two guards are complementary and both are needed.
+
+Refusing surfaces as a false return, which is already the one halt failure an
+app is told about -- so the caller sees "this image has no halt binary" instead
+of the machine going down underneath it. A test that genuinely wants the halt
+path installs a fake first, and those still get the whole path; the second test
+pins that, so the interlock cannot be tightened into uselessness later.
+
+test_svc: 208 checks, 0 failures.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+sdcard.sh: put a whole directory, which is how an app gets installed
+
+`put` took one file and nothing else, and an app the owner installs is a
+directory: /apps/PSX on the card is app.so, a manifest, an icon, a libretro
+core, a BIOS and a gigabyte of disc images, and the phone's confinement
+means all of it has to live inside that one directory. So `put DIR [FOLDER]`
+now walks the tree -- default folder apps -- and debugfs, which has no
+recursive write, gets one mkdir or write plus three sifs per entry in a
+single run. `neodct/tools/sdcard.sh put ../neodct-pcsxrearmed/dist/qemu/PSX`
+installs PlayStation in three seconds, and the phone under QEMU lists it as
+app 13 and finds both discs.
+
+The modes are apply_layout()'s: 0755 directories and 0644 files, ndusr:ndusr,
+so that the ndusr_ut process which dlopen()s app.so can read it and nothing
+in the app can rewrite its own code, and data/ 0770 ndusr:ndusr_ut. That
+matters below the top level: the phone restates an app's directory and its
+top-level files on every mount but deliberately never descends, so a games/
+folder three levels down is only ever as right as the tool wrote it. A tree
+put into a media folder gets that folder's 0750/0640 instead.
+
+A tree already on the card is updated in place -- every file replaced,
+nothing absent from the source removed -- which is what keeps saves in data/
+across a reinstall. Free space is checked against the superblock before the
+first block is written, with a margin for extent trees and directories, and
+a short card says so and names `new`. Names with a quote, a backslash or a
+newline are refused, because they go to debugfs in double quotes and there
+is no escaping to reach for; symlinks and anything else that is not a file
+or a directory are refused too. `ls` and `rm` now quote their argument, so
+`ls "apps/PSX/games/Crash Bandicoot"` works.
+
+## debugfs mkdir of an existing name corrupts the card
+
+Found because e2fsck -fn on the first card this made reported an unconnected
+directory inode and two bitmap differences. debugfs's mkdir of a name that
+already exists prints "Ext2 directory already exists" AFTER writing a fresh
+directory inode and its block, and before marking either allocated: nothing
+links the inode, the bitmaps say the slot is free, and the next allocation
+overwrites it -- so a run that mkdirs and then writes looks clean, and only
+a run that ENDS on such a mkdir leaves the orphan behind. `init` ended on
+exactly one: `mkdir /lost+found`, a directory mke2fs had already made, on
+every card it ever touched, and every card the test scripts make is `new`
+followed by `init`. The phone never fscks a card, which is why nobody saw.
+
+So the card is read before it is written. card_index() runs `ls -p` -- whose
+/inode/mode/uid/gid/name/size/ lines, unlike `ls -l`, survive a name with a
+space in it -- over every directory the walk will touch, in one read-only
+run, and both `put` and `init` make only what is missing and remove only
+what is there. e2fsck is clean after new, init, init again, put, put again
+and put into music.
+
+## and init never wrote the marker it said it did
+
+The comment above `mkdir /lost+found` described writing .neodct, the file
+card_is_ours() looks for. It writes it now, owned by ndusr, 0644, matching
+what post-image-neodct.sh puts on the build's own card. The fallback --
+recognising the folder set -- is why the omission cost nothing.
+
+The QEMU card at buildroot/output/images/sdcard.img was remade at 2048 MB
+with `new` (it was 128 MB and held only the folder skeleton; the app is
+968 MB) and PlayStation installed on it. The build never overwrites an
+existing sdcard.img, so it stays.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01CcN5BTBq4XPiH2FYkE5FCg
+
+input: the keypad is not absent, it is late
+
+On some boots the phone came up with no keys at all:
+
+    [INPUT] Selected keyboard device: /dev/input/event0 (QEMU Virtio Keyboard)
+    [INPUT] Failed opening /dev/input/event0: Permission denied
+    [INPUT] WARNING: no active input backend.
+
+Roughly one boot in five under QEMU, measured over five boots and matching
+the "one boot in three" the PlayStation port's README had already blamed on
+a QEMU quirk. It is not a QEMU quirk. It is ours, and giving up root is what
+made it fatal rather than invisible.
+
+devtmpfs creates /dev/input/event0 the instant the kernel registers the
+device, owned root:root and mode 0600. The group that makes it readable by
+ndusr arrives later, when udevd processes the uevent and eudev's stock
+`SUBSYSTEM=="input", GROUP="input"` runs -- no MODE, which is right, because
+eudev defaults a node with a group that resolves to 0660 (udev-event.c:1040).
+Between those two instants the node exists, has the correct name, and cannot
+be opened by anything that is not root. nd_main.c opens input at step 4b,
+AFTER dropping to ndusr, so it can look exactly there. It is only input that
+is exposed: /dev/fb0 is opened at step 4, before the drop, and the descriptor
+is inherited -- which is ordering luck rather than design, and worth knowing
+before anything moves.
+
+It is not group membership. The image has input:x:103:ndusr,ndusr_ut, and
+nd_priv.c does setgroups, setgid, setuid in that order with every one read
+back. A boot that wins the race opens the same device as the same uid.
+
+## why S10udevd could not close the window on its own
+
+It triggers the input subsystem and settles it, precisely so the UI starts
+with a keypad. But `udevadm trigger` replays events for the devices in /sys
+at that instant, and settle waits for the QUEUE. A device that has not
+registered yet is in neither, so both commands succeed having waited for
+nothing. The tell is the timing: a losing boot logged "S10udevd took 0.31s"
+against 0.43s for a winning one, because settling an empty queue is instant.
+
+And the event is not late, it is GONE. udevd is started just above with
+start-stop-daemon --background; a device registering between that fork and
+udevd having read its rules produces an event with nobody listening, and no
+second one is ever sent. That is why the phone recovered only when S11udevall
+ran four seconds later -- a trigger is what replays it, and that was the next
+one. The first version of this fix waited for the by-path symlink and timed
+out every single time it was needed, 1500 ms of boot spent proving nothing
+was coming. Kept as a comment, because the shape it rules out is the obvious
+one.
+
+So each pass triggers again, and the loop is normally one pass long. It waits
+on /dev/input/by-path/*-kbd rather than on the queue: udev's own persistent
+rules make that link, so its existence proves the device was processed, and
+it is the exact thing nd_evdev_discover() looks for first. A boot that
+already won the race pays one `set --` and no sleep. It is skipped entirely
+where keymap.json says the keypad is an i2c matrix -- every Luckfox -- since
+there the link is never coming and the wait would be boot time spent proving
+it. That is the same file try_open_matrix() gates on, so the two cannot
+disagree about which phone this is.
+
+## and the core stops believing the first answer
+
+A failed open meant no keyboard, forever. It now means no keyboard YET: an
+input opened by nd_input_open() retries discovery once a second for as long
+as it has none, from the read path, which is already awake and already knows
+the difference between waiting for a key and spinning. It costs one
+comparison on a phone whose keyboard opened. A wrapped pipe or fd never does
+it -- an app's channel is not that input's device to find.
+
+This is belt to the init script's braces, and it earns its place twice over:
+it is what makes "both backends can coexist" true, so a USB keyboard plugged
+into a running handset is now picked up, which the comment promised and the
+code could not deliver.
+
+nd_evdev_discover() grew a quiet twin for it. Retrying the logging version
+wrote three copies of "Selected keyboard device" while it was still failing,
+and on a phone with no evdev keyboard at all it would be a line a second
+forever. The first call still logs; the retries speak only on success.
+
+## verified
+
+Before: 1 of 5 boots dead. After: 22 of 22 clean, with no boot paying the
+old 2.3 s timeout and two at 0.60 s where the re-trigger fired once and
+worked. The recovery path is not theory either -- an intermediate image with
+the passive wait logged "Input recovered: listening on /dev/input/event0"
+on two separate boots, which is the core catching what the init script had
+missed.
+
+make test: the only failures are test_bluetooth (no bluetooth stack in a
+container, pre-existing) and test_broker, which fails identically on a clean
+tree -- checked by stashing these changes and rebuilding.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01CcN5BTBq4XPiH2FYkE5FCg
+
+================================================================================
+calls: a call screen that comes up at once, audio brought up in order, and a
+modem given time to boot
+
+The owner reported three things on hardware: the phone freezing around
+calls, a microphone that sometimes did nothing, and a speaker that was
+sometimes pure static. Each turned out to be the same shape -- something done
+too early, or on one signal when it should have waited for two -- so the
+change is mostly stricter sequencing, pinned by tests in test_modem.c
+section 11 and 12 and test_dialer.c section 6.
+
+## The freezes
+
+Four, and only the first was visible as slowness rather than a lock-up:
+
+- Nothing on screen changed until ATD had answered. dial() blocks the UI
+  thread until the modem replies, and a SIM7600 takes anywhere from a
+  moment to several seconds. nd_dialer_place_call() now paints the in-call
+  screen saying "Calling..." BEFORE the modem is asked, and if the modem
+  refuses it says "Call failed" and waits for OK instead of dropping the
+  owner back on the home screen with nothing said -- which looks exactly
+  like the Call key being ignored. nd_dialer_answer_call() is the same
+  shape for the incoming side ("Connecting..." first). Both refuse to dial
+  over a call that is already up.
+
+- A RING while a call was up reset the state machine to RINGING and wiped
+  the caller ID, and the core's ring tick then returned ND_KEY_INCOMING_CALL
+  from every read_keypress() inside the call screen -- the End key stopped
+  working until the far end gave up. MISSED_CALL, which the modem sends when
+  that waiting call rings out, then ended the LIVE call: the line stayed up
+  on the modem with the phone on the home screen and nothing to press. The
+  phone does not do call waiting; RING, +CLIP and MISSED_CALL are now ignored
+  while a call is being placed or is up, and handling_call is held across an
+  outgoing call as it always was across an incoming one.
+
+- One empty AT+CLCC ended the call, and the first CLCC after ATD went out
+  the instant ATD returned -- before the modem had entered the call in its
+  table. It takes ND_CLCC_EMPTY_TO_END (2) empty replies in a row now, and
+  the first CLCC waits a full poll interval.
+
+- port_write() retried EAGAIN for ever (OPEN-QUESTIONS.md M-6). A modem
+  whose USB stack has wedged returns EAGAIN for ever, and the UI thread was
+  blocked in dial() or hangup() behind that loop: the phone frozen solid.
+  ND_MODEM_WRITE_STALL_S (2 s of no progress) bounds it and is a port
+  failure, which is what the Python would have declared a millisecond in.
+
+Also: the incoming path's belt-and-braces second AT+CHUP is skipped when the
+modem already reports IDLE. It was every call's last act, and a round trip
+the UI thread waited out for nothing.
+
+## The audio
+
+The PCM stream from the modem is raw S16_LE with no framing: a reader that
+starts half a sample in, or loses one byte, hears every sample as the wrong
+two bytes for the rest of the call. That is the static. Two things caused it:
+re-asserting CPCMREG=1 at connect while aplay was already reading (the modem
+switches from ringback to the vocoder there and can restart the stream), and
+the tty dropping bytes -- in whatever count fits, odd included -- once nobody
+had read it for two seconds, which the old three-second speaker restart
+guaranteed.
+
+The sequence is now, entirely on the modem thread (nd_modem_audio.c's header
+has the full table):
+
+    ATD -> OK           CALLING; dial() carries nothing else.
+    next tick           CPCMFRM, CPCMREG=1; if accepted, the speaker alone,
+                        for ringback. The mic does not start: nothing is
+                        listening on the uplink, and it was pushing 32 KB/s
+                        at a port that was not in PCM mode.
+    the call comes up   ONE edge, on the first of VOICE CALL: BEGIN, CLCC
+                        <stat> 0 or ATA -- CPCMREG=1 again while nothing
+                        reads the port, then the speaker killed, the port
+                        tcflush()ed and the speaker restarted, then the mic.
+                        Refused PCM keeps the edge owed and asks again after
+                        the holdoff; the pipes wait for an OK.
+    a pipe dies         the speaker restarts from a flushed port; the mic
+                        gets its three strikes, and a mic that ran for
+                        ND_MIC_STABLE_S first starts them over -- a card
+                        that re-enumerated once per call used the three up
+                        over three calls and left every call after that
+                        listen-only.
+    the modem is lost   the pipes are stopped too. The Python left them, and
+                        a pipe recorded as live with no modem behind it made
+                        nd_modem__start_call_audio() refuse every later call.
+
+VMIN=1/VTIME=0 are set explicitly on the PCM port: whoever last had it may
+have left VMIN=0, and aplay takes an empty first read as end of file.
+
+## The boot
+
+The owner's second note: "Simulation" in the carrier line, or a modem-fault
+notice, the moment the home screen came up, on a phone whose modem was fine
+thirty seconds later. A SIM7600 enumerates, drops and enumerates again while
+its firmware boots, and S45modem holds the AT port for its data session at
+exactly the moment the first probe lands. For system.modem.boot_grace_s
+(default 30) after the service starts, no modem yet is ND_MODEM_LINK_PROBING
+-- the layout's own "No Service" and an empty meter, which is what a booting
+phone looks like -- the probe runs every 2 s instead of 10, and a modem seen
+and then lost is probed for again rather than declared a fault. The console
+line "Running in Simulation Mode" moves to the moment the grace runs out.
+0 is the old behaviour; test_ui, test_modem and nd-shoot set it, because the
+golden frames want "Simulation" on the first render.
+
+Not tested on hardware from here: the sequencing is pinned against the pty
+fake and the analysis. The default suite was green (only test_broker and
+test_bluetooth failing, for the host's usual lack of ndusr and a BT adapter)
+before /tmp hit its quota mid-session; ASan then found a pre-existing
+stack-use-after-return in test_a_fault_is_not_simulation (it never called
+fake_stop, so the fake's reader thread outlived the frame), which is fixed
+in this change but was not re-verified -- the later runs coincided with the
+quota and cannot be trusted, and per the new rule in AGENTS.md the suite is
+not to be run on the developer's machine again. Run `make test` and
+`make ASAN=1 test` inside QEMU or a VM before merging. What to look for on
+the phone: "USB audio setup: CPCMFRM=1 -> OK, CPCMREG=1 -> OK" after ATD,
+"CPCMREG=1 (call up) -> OK" at connect, and "Mic uplink: arecord ..." only
+after that. If the mic is still silent with all three, check
+`amixer -c N` capture switch -- S17audio only sets it at boot, and a card
+that re-enumerated under the modem's TX current comes back muted.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Jz3HMaBHuh5BptFDTYE94j
+
+---
+
+media: a video says it is loading, turns a ring while it waits, and says why not
+
+The owner's note: pressing play on a web page did nothing for several
+seconds, then the video appeared -- or did not -- and there was no way to
+tell the two apart until it was over. On a mobile link "several seconds" is
+the normal case. This makes every stage of that wait visible, and on the way
+there it turns out the shipped image could not play a video at all.
+
+## What was actually broken
+
+THE WRONG neodct-play WAS IN THE IMAGE. The C neodct-play (neodct/src/
+mediawidget) installs to /NeoDCT/System/core/MediaWidget/, which is the path
+netsurf has compiled in. The overlay still carried the Python neodct-play at
+the same path, and BR2_ROOTFS_OVERLAY is copied over the target tree AFTER
+every package has installed -- so the Python script, a #!/usr/bin/env python3
+on an image with no python3, replaced the binary in every build. Every video
+on the web answered "No media player". The Python MediaWidget moves to
+neodct/python-reference with the rest of the reference, and
+tests/test_overlay_hygiene.py fails the suite if anything in the overlay ever
+asks for python again, or if anything sits at that path.
+
+THE IPC SOCKET COULD NOT BE CREATED ON A CONFINED PHONE. It was
+/run/neodct/mpv.sock; /run is a root-owned 0755 tmpfs and the browser --
+hence neodct-play, hence mpv -- is ndusr_ut. mpv shrugged at the failed bind
+and played on, the bridge timed out, and every key pressed at a video went
+nowhere, C included. It is /tmp/neodct-mpv.<pid>.sock now: 1777, nosuid,
+nodev, not on the untrusted hide list, and the pid keeps a socket left by a
+dead player under another uid from blocking the next one.
+
+THE BRIDGE THREW MPV'S EXIT STATUS AWAY. Its "has mpv exited" check was
+waitpid(WNOHANG) with a NULL status, which reaps; the real waitpid() at the
+end then found no child, left its int at zero, and zero is "played". Every
+failure mpv ever reported with the keypad bridge running came back to the
+browser as a success. child_exited() uses waitid(WNOWAIT) and reaps nothing.
+Found by the new fake-mpv test, not on a phone.
+
+THE BACKWARD CACHE WAS UNBOUNDED. --demuxer-max-bytes=512KiB is the forward
+cache; --demuxer-max-back-bytes is a separate budget whose default is 50 MiB,
+and with --cache=yes it fills for as long as the file plays. A 20-minute clip
+would have grown mpv by tens of megabytes on a phone with 64. 256 KiB now.
+
+## What the user sees
+
+  press play      the status bar says "Loading video..." before the fork,
+                  painted synchronously (fbtk_redraw) -- shell_sync only
+                  requests a redraw, and shell_play does not return to the
+                  event loop until the player is done, so the request was
+                  never serviced. That is why the page sat there unchanged.
+  ~0.5 s later    black, with a ring of eight dots turning in the middle
+                  (the new fbdev_spinner in the mpv fork). mpv is started
+                  with --force-window=immediate so the VO exists, and the
+                  ring turns, before the url is even opened.
+  first frame     the ring stops. If --cache-pause-initial is buffering the
+                  first two seconds, the ring turns over the first frame
+                  until playback starts.
+  a stall         after a 300 ms grace (so a cached seek does not flash it),
+                  the ring comes back over the last frame until the stream
+                  is moving again. The VO learns this by opening a client
+                  handle on its own core (mp_new_client, weak) and observing
+                  paused-for-cache and seeking -- the VO interface itself
+                  cannot tell a stall from a pause.
+  a failure       the page comes back with one of: "Video not found" (an
+                  HTTP 4xx), "No connection" (resolver, connect, timeout),
+                  "Video format not supported" (demuxer or every decoder
+                  refused), "Could not load video", "Player crashed" (a
+                  signal death -- the OOM killer, most likely), "No media
+                  player". It stays until the next thing the user does.
+                  Before this every one of them was a flash of black and
+                  the page again.
+
+The reasons come from two places. mpv's terminal output -- stdout AND
+stderr, because mpv's log goes to stdout and only its status line to stderr
+(common/msg.c), and the browser starts the player with stdout on /dev/null
+-- is piped back to neodct-play, every line classified
+(nd_media_outcome_feed_text) and then passed on to our own stderr, so the
+serial console now shows what mpv said; and the IPC socket, created keypad
+or not, carries the end-file event and -- once asked -- the error log. The
+pipe is the one that matters: a 404 from a fast server is logged and given
+up on before the socket has connected, and the first emulator runs showed
+exactly that, "Could not load video" where "Video not found" was meant.
+Together they become exit statuses 80..84. The browser
+has the same table as NEODCT_MEDIA_EXIT_* in its own header;
+test_mediawidget.c reads that header and fails if the two ever drift.
+neodct-play also prints one line to stderr per run -- "neodct-play: not
+found (exit 82): <url>" -- which the Browser app tags onto the serial
+console.
+
+## Tests
+
+  neodct/src           test_mediawidget: the outcome reader (socket and
+                       stderr), the exit table, the socket path, the
+                       browser header contract, and the bridge END TO END
+                       against a fake mpv -- the test binary re-executed as
+                       mpv, binding a real unix socket, sending the real
+                       JSON, writing the real stderr, receiving the
+                       forwarded C as {"command":["quit"]}. 225 checks
+                       passed (ASan too) before the stderr pipe was added;
+                       the suite has NOT been run since, because running
+                       it on the development machine is now forbidden
+                       (AGENTS.md) -- it is compiled and waits for a run
+                       inside QEMU.
+  neodct/mpv-neodct    test_fbdev_spinner: 608 checks on the ring's
+                       geometry, brightness trail, timing and pixel packing.
+                       vo_fbdev.c compiled clean with mpv's own flags plus
+                       -Wall -Wextra.
+  netsurf-neodct       test_media (exit text) and test_status (loading and
+                       error lines): 183 + 20 checks.
+  pytest               test_overlay_hygiene.py (3), the moved MediaWidget
+                       suite still passes from python-reference (77 total).
+
+Built into a QEMU image: mpv rebuilt with the spinner, netsurf with the
+status lines, the C neodct-play now actually in the image.
+
+Not changed: the forward demuxer cache stays at 512 KiB -- the measured
+argument in nd_media.c for keeping dirty pages off zram still holds, and
+--cache-pause-wait=2 buys the smoothness on a jittery link without it.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VF4qWgEv5Yodoj2bPGm5Mx
+
+================================================================================
+AGENTS.md: the test suite is never run on the developer's machine
+
+A test reached nd_svc_poweroff() and switched off the workstation again on
+2026-09-04 -- the second time, after 2026-08-31 -- while an agent was running
+`make test` on the host as AGENTS.md told it to. The rule now sits at the top
+of the Tests section, above every "run the tests before and after": build on
+the host, run only inside QEMU, a VM or a container the owner has called
+disposable, and otherwise stop after the build and say the tests are unrun.
+The neodct-app skill's Testing section says the same, because it was the
+other place that told an agent to run the suite here.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Jz3HMaBHuh5BptFDTYE94j
+
+================================================================================
+
+test: the suite runs in a sandbox, and libneodct refuses a halt it cannot trust
+
+On 2026-08-31 the suite switched a developer's workstation off mid-build.
+
+nd_svc_poweroff() resolves "poweroff" along $PATH and spawns it, and a process
+with no service channel IS the core as far as nd_svc.h can tell. test/apps/SvcApp
+calls it for real, deliberately -- it is safe only while the parent serving its
+request installed a fake first, and its own comment says it chose poweroff over
+reboot precisely so that a missing fake would be noticed. It was noticed.
+
+The fix is not to find the one unguarded call, because the next one will be
+written by somebody who has not read that file. NEODCT_ROOT is the signal:
+`make test` sets it for every test binary and for every app they launch, and
+nothing on the phone ever does -- the whole library already reads "NEODCT_ROOT
+unset" as meaning the real device. So nd_svc_halt_allowed() refuses a real halt
+whenever that variable is set and no nd_svc_halt_simulate() fake is installed.
+
+The guard sits at the top of halt_resolve(), BEFORE the lookup, so nothing is
+resolved and nothing is spawned. That is the one chokepoint: both callers of
+halt_perform() -- the serve() path behind `halt.pending`, and nd_svc_halt_now()
+-- reach it only through a halt_resolve() that returned true. It covers the
+broker too, which is the process that still has CAP_SYS_BOOT.
+
+## it is not the same hole g_is_app_process closes
+
+app_without_a_channel() catches an app that was REFUSED a socket answering as
+though it were the core. SvcApp has a socket and is served normally; the halt it
+asks for is resolved and spawned by the serving process. The dangerous call is
+the one that works, so the two guards are complementary and both are needed.
+
+Refusing surfaces as a false return, which is already the one halt failure an
+app is told about -- so the caller sees "this image has no halt binary" instead
+of the machine going down underneath it. A test that genuinely wants the halt
+path installs a fake first, and those still get the whole path; the second test
+pins that, so the interlock cannot be tightened into uselessness later.
+
+test_svc: 208 checks, 0 failures.
+
+## and then it happened again, so one variable is no longer the whole interlock
+
+On 2026-09-04 a test binary was started by hand, without NEODCT_ROOT in its
+environment, and the machine went down a second time. The rule in nd_svc.c
+is a table now (nd_svc_halt_allowed_for, every input a parameter): a
+simulation installed wins, because the spawn cannot reach a real binary; a
+process that called nd_svc_halt_disarm() is refused for good; a NEODCT_ROOT
+process is refused; and otherwise only root may. On the phone the core is
+ndusr and asks the broker, which is root and does the spawning, so a
+non-root process asking for a real halt is a test or a bug -- and on a
+desktop it is the person at the keyboard, whom logind will happily oblige.
+test_svc.c covers the table.
+
+`make test` and `make test-one T=x` no longer run the binaries in the
+developer's session at all. test/harness/sandbox.sh puts them in a
+bubblewrap container: no D-Bus, so systemctl and poweroff have nobody to
+talk to; no network; a fresh minimal /dev with no sound, input, framebuffer
+or modem in it; everything read-only except the checkout; a private /tmp
+under build/. It refuses rather than falling back to a bare run when bwrap
+is missing -- a fallback nobody notices is how the machine went down the
+first time -- and NEODCT_TEST_SANDBOX=none is the opt-out for a disposable
+VM, announced in the run's output. Inside it, test/harness/run-tests.sh puts
+fake poweroff, reboot, halt, shutdown, systemctl, loginctl, busybox and the
+ALSA tools first on $PATH; reaching one writes a line to a log, and a
+non-empty log fails the run. Each binary gets ten minutes before it is
+counted as hung.
+
+Every test binary and test app also links test/harness/nd_testguard.c, a
+constructor that disarms the halt before main() and stops the process with
+a message unless the harness started it (NEODCT_TEST_HARNESS=1) or
+NEODCT_ALLOW_BARE=1 says the person has read the guard. So
+`build/*/test/test_x` run by hand -- the shape of the second shutdown --
+prints how to run it properly and exits 3. test_harness.c checks all four
+layers from the inside, including by starting itself again the wrong way
+and watching it stop; a guard that let it through would exit 42 from a
+probe path rather than run the suite again, so a missing guard is a failed
+check and not a fork bomb.
+
+verify-c-build.sh runs its glyph check through the sandbox for the same
+reason. AGENTS.md's Tests section and the neodct-app skill now say `make
+test`, freely and often, and only that way -- replacing the day-old rule
+that the suite was never to be run on the developer's machine, which is
+the rule this harness was built to make unnecessary.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gPhyhm5QBEn3NLPBBoTHd
+
+================================================================================
+
+tests: the Python suite drives C test binaries through the sandbox too
+
+Two pytest modules run a C test binary as a validator -- `test_manifest
+--parse` and `--compat`, `test_package --dump`, `--extract` and `--compat`
+-- to hold nd_manifest.c and nd_package.c against the Python they were
+ported from, sentence for sentence. They ran the binaries bare, and every
+test binary now refuses to start that way (test/harness/nd_testguard.c
+exits 3 before main()), so the two modules failed the whole suite with a
+CalledProcessError on the first case.
+
+A driver mode reads a file and prints what it saw; it could not halt
+anything. But the guard cannot know that and should not have to -- the
+rule is one rule -- so the fix is to start the binary the one way it may
+be started, not to carve out an exception. neodct/tests/c_driver.py runs it
+through test/harness/sandbox.sh with NEODCT_TEST_HARNESS=1, exactly as
+verify-c-build.sh runs its glyph check, and skips with a reason if bwrap
+is not installed rather than falling back to a bare run.
+
+The sandbox hides the host's /tmp, which is where pytest's tmp_path lives,
+so the file the driver is asked to read -- or the directory --extract is
+asked to fill -- has to be somewhere the container can see. c_driver.py
+provides a tmp_path fixture that relocates the scratch directory under
+neodct/src/build/tmp, inside the checkout the sandbox binds read-write at
+its own path; the two modules import it, and every path they build is
+then the same path on both sides. Nothing else in either module changed.
+
+130 tests in the two modules pass, in 4.3 s, one container per driver call.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gPhyhm5QBEn3NLPBBoTHd
+
+================================================================================
+
+version: 0.5.1b
+
+os-release and the changelog agree on 0.5.1b: calls that no longer freeze
+the phone, a keypad that is waited for on the way up, and a video player
+that says what it is doing. The changelog text for all three had been
+written into the 0.5.0b section after 0.5.0b was tagged, so a phone
+updated to it would have read about fixes it did not have; they are their
+own section now, and 0.5.0b's reads exactly as it did when it shipped.
+
+COMMIT_MSG.txt carries the long form of everything since 0.5.0b, including
+the test harness and the sdcard.sh directory install that the changelog,
+being the phone's own, does not mention.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gPhyhm5QBEn3NLPBBoTHd
