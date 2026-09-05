@@ -86,7 +86,8 @@ typedef enum {
     SVC_OP_REBOOT = 5,
     SVC_OP_POWEROFF = 6,
     SVC_OP_SET_CLOCK = 7,
-    SVC_OP_FORMAT_CARD = 8
+    SVC_OP_FORMAT_CARD = 8,
+    SVC_OP_LAYOUT_CARD = 9
 } svc_op;
 
 /* Outcome of the exchange, as opposed to the outcome of the operation. */
@@ -400,6 +401,7 @@ static bool valid_request(const svc_req *r)
     case SVC_OP_REBOOT:
     case SVC_OP_POWEROFF:
     case SVC_OP_FORMAT_CARD:
+    case SVC_OP_LAYOUT_CARD:
         return true;
     default:
         return false;
@@ -719,14 +721,12 @@ void nd_svc_format_simulate(const nd_svc_format_sim *sim)
  * is_reserved_device() would still have refused the two that matter, but
  * "the helper checks" is a second line, not a first, and this removes the
  * need for it. */
+static bool run_sdcard_helper(const char *const *argv, double wait_s);
+
 static bool format_card(void)
 {
     nd_card card;
     const char *argv[4];
-    nd_proc_spec spec;
-    nd_proc_status st;
-    pid_t pid = -1;
-    int fd;
     int rc;
 
     /* Never fails; an unreadable state file reads as an absent card. */
@@ -762,6 +762,68 @@ static bool format_card(void)
     argv[2] = card.device;
     argv[3] = NULL;
 
+    nd_log(ND_LOG_OS, "App service: formatting %s", card.device);
+    return run_sdcard_helper(argv, ND_SVC_FORMAT_WAIT_S);
+}
+
+/* Set only by nd_svc_layout_simulate(); same barriers as the format's. */
+static nd_svc_layout_sim g_layout_sim;
+static bool g_layout_sim_on;
+
+void nd_svc_layout_simulate(const nd_svc_layout_sim *sim)
+{
+    if (sim == NULL) {
+        memset(&g_layout_sim, 0, sizeof g_layout_sim);
+        g_layout_sim_on = false;
+        return;
+    }
+    g_layout_sim = *sim;
+    g_layout_sim_on = true;
+}
+
+/* neodct-sdcard layout: restate the card's ownership, so that an app the
+ * owner just installed gets a data/ that belongs to ndusr_ut. The helper
+ * decides for itself which card and whether it is one of ours; what is
+ * checked here is only that there is a card to ask about, so a phone with
+ * no card does not spawn a root process to be told so. */
+static bool layout_card(void)
+{
+    nd_card card;
+    const char *argv[3];
+
+    nd_storage_card(&card);
+    if (card.state == ND_CARD_ABSENT || card.device[0] == '\0') {
+        nd_log_err(ND_LOG_OS, "App service: layout asked for, but there is no card");
+        return false;
+    }
+
+    if (g_layout_sim_on && g_layout_sim.run != NULL) {
+        int rc = g_layout_sim.run(g_layout_sim.user);
+
+        nd_log(ND_LOG_OS, "App service: layout of %s (simulated) exited %d", card.device, rc);
+        return rc == 0;
+    }
+
+    argv[0] = ND_PATH_SDCARD_HELPER;
+    argv[1] = "layout";
+    argv[2] = NULL;
+
+    nd_log(ND_LOG_OS, "App service: restating the layout of %s", card.device);
+    return run_sdcard_helper(argv, ND_SVC_LAYOUT_WAIT_S);
+}
+
+/* Spawn the helper with `argv` -- as root, through the broker -- and wait at
+ * most `wait_s` for it. Shared by the two verbs that run it, so the fd plan,
+ * the privilege route and the wedged-helper rule cannot differ between them.
+ * Returns the helper's "exited 0", which is subprocess.call()'s notion of
+ * success and the one Settings always used. */
+static bool run_sdcard_helper(const char *const *argv, double wait_s)
+{
+    nd_proc_spec spec;
+    nd_proc_status st;
+    pid_t pid = -1;
+    int fd;
+
     memset(&spec, 0, sizeof spec);
     spec.argv = argv;
     spec.owner = ND_OWNER_SYSTEM;
@@ -774,7 +836,6 @@ static bool format_card(void)
         spec.n_fds++;
     }
 
-    nd_log(ND_LOG_OS, "App service: formatting %s", card.device);
     {
         /* The helper mounts and partitions, which needs root, and the core is
          * not root any more. It is one of the two executables the broker will
@@ -796,15 +857,14 @@ static bool format_card(void)
     }
 
     memset(&st, 0, sizeof st);
-    if (nd_svc__wait_child(pid, ND_SVC_FORMAT_WAIT_S, &st) != ND_OK) {
+    if (nd_svc__wait_child(pid, wait_s, &st) != ND_OK) {
         /* Four minutes with no exit is not a slow card, it is a wedged
          * helper, and leaving it wedged would leave the serving thread in
          * here for the life of the core. Killing an mkfs is destructive --
          * but so is the state it is already in, and the alternative is a
          * phone that cannot be told anything again until it reboots. */
-        nd_log_err(ND_LOG_OS,
-                   "App service: the format of %s has not finished in %.0fs; stopping it",
-                   card.device, ND_SVC_FORMAT_WAIT_S);
+        nd_log_err(ND_LOG_OS, "App service: %s %s has not finished in %.0fs; stopping it",
+                   ND_PATH_SDCARD_HELPER, argv[1], wait_s);
         (void)nd_proc_terminate(pid, ND_SVC_JOIN_S, NULL);
         return false;
     }
@@ -881,6 +941,11 @@ static void serve(nd_ui *ui, const svc_req *req, svc_resp *out, svc_halt_plan *h
     case SVC_OP_FORMAT_CARD:
         out->present = 1u;
         out->ok = format_card() ? 1u : 0u;
+        return;
+
+    case SVC_OP_LAYOUT_CARD:
+        out->present = 1u;
+        out->ok = layout_card() ? 1u : 0u;
         return;
 
     case SVC_OP_SEND_SMS:
@@ -1631,6 +1696,22 @@ bool nd_svc_set_clock(time_t when)
 
     if (svc_call_at(SVC_OP_SET_CLOCK, NULL, NULL, (int64_t)when, &resp, ND_SVC_TIMEOUT_S) !=
         SVC_ST_OK)
+        return false;
+    return resp.ok != 0u;
+}
+
+bool nd_svc_layout_card(void)
+{
+    svc_resp resp;
+
+    if (app_without_a_channel()) {
+        nd_log_err(ND_LOG_OS, "an app with no service socket asked to lay out the card; refused");
+        return false;
+    }
+    if (g_client_fd < 0)
+        return layout_card();
+
+    if (svc_call(SVC_OP_LAYOUT_CARD, NULL, NULL, &resp, ND_SVC_LAYOUT_TIMEOUT_S) != SVC_ST_OK)
         return false;
     return resp.ok != 0u;
 }

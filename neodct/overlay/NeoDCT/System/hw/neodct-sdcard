@@ -6,6 +6,7 @@
 #   neodct-sdcard add DEVNAME     from the udev rule when one is inserted
 #   neodct-sdcard remove DEVNAME  from the udev rule when one is pulled
 #   neodct-sdcard format DEV      make a fresh NeoDCT card (destructive)
+#   neodct-sdcard layout          restate the layout on the mounted card
 #
 # The state file is what System/core/Storage reads, so the UI never has to
 # poke at block devices itself:
@@ -698,6 +699,47 @@ do_scan() {
     return 0
 }
 
+# ============ THE LAYOUT, ON REQUEST ============
+#
+# apply_layout() runs on every mount, and that covered every app on the card
+# until the phone could INSTALL one. An install happens while the card is
+# mounted, as ndusr, and ndusr can put every file of the app in place except
+# one: data/ has to belong to ndusr_ut, and giving a directory to somebody
+# else needs CAP_CHOWN, which the core gave up. So after an install the core
+# asks for this, through the broker, as root -- the same pass a mount does,
+# a second time.
+#
+# It takes NO ARGUMENT, on purpose. The card it lays out is the one at the
+# phone's own mountpoint, and whether that card is ours is decided here by
+# card_is_ours(), exactly as after_mount() decides it. A verb that took a
+# path would be a root chown at a path the caller chose, which is the shape
+# nd_broker.h exists to refuse.
+#
+# Exit 1 when there is nothing to lay out -- no card, a foreign card, a FAT
+# card -- so the caller can tell "done" from "not applicable", and never
+# touches anything in either case.
+do_layout() {
+    fstype="$(mounted_fstype "$MOUNT_POINT")"
+    if [ -z "$fstype" ]; then
+        log "layout: nothing is mounted at $MOUNT_POINT"
+        return 1
+    fi
+    if ! is_ext_fstype "$fstype"; then
+        log "layout: $fstype cannot hold the layout"
+        return 1
+    fi
+    if ! card_is_ours; then
+        log "layout: the card at $MOUNT_POINT is not a NeoDCT card"
+        return 1
+    fi
+    for folder in $FOLDERS; do
+        mkdir -p "$MOUNT_POINT/$folder" 2>/dev/null
+    done
+    apply_layout
+    log "layout restated on $MOUNT_POINT"
+    return 0
+}
+
 do_remove() {
     # Inner mount first. `umount -l` on the parent would detach the subtree
     # and leave the arrival filesystem attached to nothing, which is a card
@@ -946,7 +988,8 @@ if [ -z "${NEODCT_SDCARD_SOURCE_ONLY:-}" ]; then
         add)    do_scan ;;
         remove) do_remove ;;
         format) shift; do_format "${1:-}" ;;
-        *)      echo "usage: neodct-sdcard {scan|add|remove|format DEV}" >&2
+        layout) do_layout ;;
+        *)      echo "usage: neodct-sdcard {scan|add|remove|format DEV|layout}" >&2
                 exit 2 ;;
     esac
 fi

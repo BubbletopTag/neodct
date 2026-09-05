@@ -246,9 +246,27 @@ static void test_the_sdcard_helper_may_only_be_asked_to_format_a_device(void)
     argv[3] = NULL;
     CHECK(nd_broker__root_exec_allowed(ND_PATH_SDCARD_HELPER, argv, 3u));
 
+    /* `layout` is the other thing the core asks for (nd_svc_layout_card),
+     * and it takes nothing: the helper lays out the card at the phone's own
+     * mountpoint. A layout WITH an argument is therefore not a request the
+     * core makes, whatever the argument is. */
+    argv[1] = "layout";
+    argv[2] = NULL;
+    CHECK(nd_broker__root_exec_allowed(ND_PATH_SDCARD_HELPER, argv, 2u));
+    argv[2] = "/dev/mmcblk0";
+    CHECK(!nd_broker__root_exec_allowed(ND_PATH_SDCARD_HELPER, argv, 3u));
+    argv[2] = "/NeoDCT/User";
+    CHECK(!nd_broker__root_exec_allowed(ND_PATH_SDCARD_HELPER, argv, 3u));
+
     /* Every other verb the helper implements. */
     argv[1] = "add";
+    argv[2] = "/dev/mmcblk0";
     CHECK(!nd_broker__root_exec_allowed(ND_PATH_SDCARD_HELPER, argv, 3u));
+    argv[2] = NULL;
+    CHECK(!nd_broker__root_exec_allowed(ND_PATH_SDCARD_HELPER, argv, 2u));
+    argv[1] = "scan";
+    CHECK(!nd_broker__root_exec_allowed(ND_PATH_SDCARD_HELPER, argv, 2u));
+    argv[2] = "/dev/mmcblk0";
     argv[1] = "remove";
     CHECK(!nd_broker__root_exec_allowed(ND_PATH_SDCARD_HELPER, argv, 3u));
     argv[1] = "scan";

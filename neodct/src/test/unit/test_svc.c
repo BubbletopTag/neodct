@@ -1606,6 +1606,102 @@ static void test_a_format_over_the_wire(core_fixture *fx)
     nd_storage_set_paths(NULL, NULL);
 }
 
+/* ---- 5d'. restating the layout, with the helper injected out ---- */
+
+typedef struct {
+    pthread_mutex_t mu;
+    int32_t calls;
+    int result;
+} layout_fake;
+
+static int layout_fake_run(void *user)
+{
+    layout_fake *f = user;
+    int rc;
+
+    (void)pthread_mutex_lock(&f->mu);
+    f->calls++;
+    rc = f->result;
+    (void)pthread_mutex_unlock(&f->mu);
+    return rc;
+}
+
+static int layout_fake_calls(layout_fake *f)
+{
+    int n;
+
+    (void)pthread_mutex_lock(&f->mu);
+    n = (int)f->calls;
+    (void)pthread_mutex_unlock(&f->mu);
+    return n;
+}
+
+/* The verb Settings asks for after installing a .nap. It carries nothing,
+ * and the one refusal in front of the helper is "there is no card" -- a
+ * phone with no card must not spawn a root process to find that out. */
+static void test_a_layout_over_the_wire(core_fixture *fx)
+{
+    nd_svc_layout_sim sim;
+    layout_fake fake;
+    nd_svc_server *s = NULL;
+    nd_ui app;
+    int child_fd;
+
+    memset(&app, 0, sizeof app);
+    memset(&fake, 0, sizeof fake);
+    (void)pthread_mutex_init(&fake.mu, NULL);
+    memset(&sim, 0, sizeof sim);
+    sim.run = layout_fake_run;
+    sim.user = &fake;
+
+    nd_storage_set_paths(FMT_MOUNT, FMT_STATE);
+
+    CHECK_INT(nd_svc_server_open(&s), ND_OK);
+    if (s == NULL) {
+        (void)pthread_mutex_destroy(&fake.mu);
+        nd_storage_set_paths(NULL, NULL);
+        return;
+    }
+    child_fd = dup(nd_svc_server_child_fd(s));
+    CHECK(child_fd >= 0);
+    if (child_fd < 0) {
+        nd_svc_server_free(s);
+        (void)pthread_mutex_destroy(&fake.mu);
+        nd_storage_set_paths(NULL, NULL);
+        return;
+    }
+    CHECK(client_from_fd(child_fd));
+    nd_svc_layout_simulate(&sim);
+    CHECK_INT(nd_svc_server_start(s, &fx->ui), ND_OK);
+
+    /* A mounted card: the helper runs, and its exit status is the answer. */
+    write_card_state("mounted", "/dev/vdc1", "ext4");
+    fake.result = 0;
+    CHECK(nd_svc_layout_card());
+    CHECK_INT(layout_fake_calls(&fake), 1);
+
+    (void)pthread_mutex_lock(&fake.mu);
+    fake.result = 1;
+    (void)pthread_mutex_unlock(&fake.mu);
+    CHECK(!nd_svc_layout_card());
+    CHECK_INT(layout_fake_calls(&fake), 2);
+
+    /* No card: refused before the helper, so the count does not move. */
+    write_card_state("absent", "", "");
+    CHECK(!nd_svc_layout_card());
+    CHECK_INT(layout_fake_calls(&fake), 2);
+
+    /* The channel is still good after every refusal. */
+    CHECK(nd_svc_modem_present(&app));
+
+    nd_svc_client_close();
+    nd_svc_server_stop(s);
+    nd_svc_layout_simulate(NULL);
+    (void)close(child_fd);
+    (void)pthread_mutex_destroy(&fake.mu);
+    nd_storage_set_paths(NULL, NULL);
+}
+
 /* ---- 5e. what an UNTRUSTED process can do with this socket ---- */
 
 /* THE UID IS NOT THE BOUNDARY. THE SOCKET IS.
@@ -1968,6 +2064,7 @@ int main(void)
     test_a_halt_with_nothing_to_spawn(&fx);
     test_the_clock_over_the_wire(&fx);
     test_a_format_over_the_wire(&fx);
+    test_a_layout_over_the_wire(&fx);
     test_an_untrusted_uid_is_still_served(&fx);
     test_an_app_with_no_socket_is_not_the_core();
 

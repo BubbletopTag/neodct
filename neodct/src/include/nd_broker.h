@@ -94,8 +94,9 @@ extern "C" {
  *                ND_PATH_ENG_APPS_DIR. Without it, "run nd-apprun as root" is
  *                "run any app as root" -- the same hole with one more step.
  *
- *   neodct-sdcard  the only thing the core ever asks of it through here is
- *                `format <device>` (nd_svc_format_card). It was given no argv
+ *   neodct-sdcard  the core asks two things of it through here: `format
+ *                <device>` (nd_svc_format_card) and the argument-less
+ *                `layout` (nd_svc_layout_card). It was given no argv
  *                condition at all, so "format" could just as well have been
  *                `add` with an attacker-named device and an attacker-named
  *                mountpoint -- and the helper's own "never touch the disk the
