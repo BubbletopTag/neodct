@@ -82,6 +82,15 @@ and the phone rings silently in the meantime.
 Pick an app id that is free; `neodct/overlay/NeoDCT/System/apps/*/manifest.json`
 lists what is taken. The id orders the menu and appears in the breadcrumb.
 
+An app does not have to be stock. The same directory -- manifest, icon, files
+-- plus a cross-built `app.so` can be packed into a `.nap` (a NeoDCT
+Application Package) with
+`neodct/tools/mknap.py` and installed from **Settings → Install apps** onto
+the memory card, where it runs confined as `ndusr_ut` and may write only its
+own `data/`. `docs/NAP-PACKAGES.md` is the format; `neodct/contrib/Bible` is
+the worked example, including a cross build that needs no Buildroot. Adding
+an app that way moves no golden frame and changes no menu count.
+
 ## Making a new screen look native
 
 Most screens should be a widget. When you genuinely need to draw one -- a grid,

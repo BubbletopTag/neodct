@@ -75,6 +75,11 @@ static struct {
     const char *const *sdcard_legacy;
     const char *const *sdcard_legacy_help;
     const char *const *format_warning;
+    const char *const *install_help;
+    const char *const *install_none;
+    const char *const *install_confirm;
+    const char *const *install_replace;
+    const char *const *install_legacy;
     const char *const *menu;
     const char *const *eng_options;
     const char *const *msgstyle_options;
@@ -99,6 +104,11 @@ static bool api_open(void *h)
     api.sdcard_legacy = dlsym(h, "nd_setapp_sdcard_legacy");
     api.sdcard_legacy_help = dlsym(h, "nd_setapp_sdcard_legacy_help");
     api.format_warning = dlsym(h, "nd_setapp_format_warning");
+    api.install_help = dlsym(h, "nd_setapp_install_help");
+    api.install_none = dlsym(h, "nd_setapp_install_none");
+    api.install_confirm = dlsym(h, "nd_setapp_install_confirm");
+    api.install_replace = dlsym(h, "nd_setapp_install_replace");
+    api.install_legacy = dlsym(h, "nd_setapp_install_legacy");
     api.menu = dlsym(h, "nd_setapp_menu");
     api.eng_options = dlsym(h, "nd_setapp_eng_options");
     api.msgstyle_options = dlsym(h, "nd_setapp_msgstyle_options");
@@ -174,15 +184,36 @@ static void test_strings(void)
 {
     CHECK_STR(api.menu[0], "Wallpaper", "the root menu's first row");
     CHECK_STR(api.menu[1], "Memory card", "second");
-    /* WAS four rows. "Messages Style" is new and sits third, before the two
+    /* "Install apps" is the card's other job and sits with it. */
+    CHECK_STR(api.menu[2], "Install apps", "third");
+    /* WAS four rows. "Messages Style" is new and sits before the two
      * engineering-ish rows, so the Python's own four keep their order. */
-    CHECK_STR(api.menu[2], "Messages Style", "third");
+    CHECK_STR(api.menu[3], "Messages Style", "fourth");
     /* "BT Audio" sits before the engineering rows for the reason "Messages
      * Style" does: it is something an owner uses, not something a developer
      * toggles, and the two engineering-ish rows stay last. */
-    CHECK_STR(api.menu[3], "BT Audio", "fourth");
-    CHECK_STR(api.menu[4], "Engineering Mode", "fifth");
-    CHECK_STR(api.menu[5], "About", "sixth");
+    CHECK_STR(api.menu[4], "BT Audio", "fifth");
+    CHECK_STR(api.menu[5], "Engineering Mode", "sixth");
+    CHECK_STR(api.menu[6], "About", "seventh");
+
+    /* The install screen's own strings. The help has to say what a .nap is
+     * and where one goes, because there is no manual. */
+    CHECK(api.install_help != NULL && *api.install_help != NULL, "install help exists");
+    if (api.install_help != NULL && *api.install_help != NULL) {
+        CHECK(strstr(*api.install_help, ".nap") != NULL, "the help names the file type");
+        CHECK(strstr(*api.install_help, "apps folder") != NULL, "and where one goes");
+        CHECK(strstr(*api.install_help, "keeps what it saved") != NULL,
+              "and that a replacement keeps the app's data");
+    }
+    CHECK(api.install_none != NULL && *api.install_none != NULL &&
+              strstr(*api.install_none, ".nap") != NULL,
+          "the empty-list notice names the file type");
+    CHECK(api.install_confirm != NULL && *api.install_confirm != NULL &&
+              strstr(*api.install_confirm, "%s") != NULL,
+          "the confirmation takes the app's name");
+    CHECK(api.install_replace != NULL && *api.install_replace != NULL &&
+              strstr(*api.install_replace, "%s") != NULL && strstr(*api.install_replace, "kept"),
+          "the replacement says the data is kept");
     CHECK_STR(api.msgstyle_options[0], "Classic", "Msg. Style[0]");
     CHECK_STR(api.msgstyle_options[1], "Chat", "Msg. Style[1]");
     CHECK_STR(api.eng_options[0], "On", "Eng. Mode[0]");
@@ -238,6 +269,9 @@ static void test_strings(void)
               "  update       UPDATE.ndsw system updates\n"
               "  apps         apps you installed\n"
               "  untrusted    downloads and picture messages\n"
+              "\n"
+              "Apps come as .nap files. Copy one anywhere onto the card and install it "
+              "from Settings, under Install apps.\n"
               "\n"
               "You can make one on a computer, or let the phone do it. Setting up only "
               "adds the folders. Formatting erases everything on the card.\n"
@@ -702,9 +736,10 @@ static void test_wallpaper_writes_the_setting(void)
  * reason ND_SETAPP_ENG_KEY is asserted equal to ND_SET_UI_ENGINEERING. */
 static void test_messages_style_writes_the_setting(void)
 {
-    /* 3 picks "Messages Style"; then 2 picks "Chat" and 1 picks "Classic". */
-    static const int32_t PICK_CHAT[] = {ND_KEY_3, ND_KEY_2};
-    static const int32_t PICK_CLASSIC[] = {ND_KEY_3, ND_KEY_1};
+    /* 4 picks "Messages Style" -- it was 3 until "Install apps" went in
+     * above it; then 2 picks "Chat" and 1 picks "Classic". */
+    static const int32_t PICK_CHAT[] = {ND_KEY_4, ND_KEY_2};
+    static const int32_t PICK_CLASSIC[] = {ND_KEY_4, ND_KEY_1};
     int rc = -1;
     uint64_t frames = 0u;
 
@@ -721,14 +756,15 @@ static void test_messages_style_writes_the_setting(void)
 
 static void test_engineering_mode_writes_the_setting(void)
 {
-    /* 5 picks "Engineering Mode" off the root list. It has moved twice now:
-     * third to fourth when Messages Style was added, fourth to FIFTH when BT
-     * Audio was. Then 2 picks "Off" and 1 picks "On". VerticalList's digit
-     * shortcuts are 1-based, so a row moving is a keystroke changing -- which
-     * is the whole reason this test drives the real widget rather than calling
-     * the handler directly. */
-    static const int32_t TURN_OFF[] = {ND_KEY_5, ND_KEY_2};
-    static const int32_t TURN_ON[] = {ND_KEY_5, ND_KEY_1};
+    /* 6 picks "Engineering Mode" off the root list. It has moved three
+     * times now: third to fourth when Messages Style was added, fourth to
+     * fifth when BT Audio was, fifth to SIXTH when Install apps was. Then 2
+     * picks "Off" and 1 picks "On". VerticalList's digit shortcuts are
+     * 1-based, so a row moving is a keystroke changing -- which is the whole
+     * reason this test drives the real widget rather than calling the
+     * handler directly. */
+    static const int32_t TURN_OFF[] = {ND_KEY_6, ND_KEY_2};
+    static const int32_t TURN_ON[] = {ND_KEY_6, ND_KEY_1};
     int rc = -1;
     uint64_t frames = 0u;
 
@@ -805,6 +841,71 @@ static void test_the_legacy_card_dialog_fits(void)
     CHECK(fits >= 5u, "at least the five a titled dialog would leave");
 
     sa_fx_free(&fx);
+}
+
+/* The install screen's dialogs, measured the same way. The confirmations
+ * carry an app name, so they are measured with the LONGEST name the manifest
+ * reader accepts -- ND_APP_NAME_MAX less the terminator, all wide letters --
+ * because the dialog that clips is the one with the name nobody tested. */
+static void test_the_install_dialogs_fit(void)
+{
+    sa_fixture fx;
+    nd_msgdialog dlg;
+    char wide[ND_APP_NAME_MAX];
+    char message[ND_APP_NAME_MAX + 64];
+    size_t needed = 0u;
+    size_t fits = 0u;
+    size_t i;
+
+    if (api.install_confirm == NULL || *api.install_confirm == NULL ||
+        api.install_replace == NULL || *api.install_replace == NULL ||
+        api.install_legacy == NULL || *api.install_legacy == NULL) {
+        CHECK(false, "the install dialogs exist");
+        return;
+    }
+    if (!sa_fx_init(&fx)) {
+        CHECK(false, "fixture");
+        sa_fx_free(&fx);
+        return;
+    }
+
+    for (i = 0u; i + 1u < sizeof wide; i++)
+        wide[i] = 'W';
+    wide[sizeof wide - 1u] = '\0';
+
+    (void)nd_snprintf(message, sizeof message, *api.install_replace, wide);
+    nd_msgdialog_init(&dlg, &fx.ui, message);
+    nd_msgdialog_set_button(&dlg, "Install");
+    nd_msgdialog_measure(&dlg, &needed, &fits);
+    CHECK(needed <= fits, "the replace confirmation fits with the widest name");
+
+    (void)nd_snprintf(message, sizeof message, *api.install_confirm, wide);
+    nd_msgdialog_init(&dlg, &fx.ui, message);
+    nd_msgdialog_set_button(&dlg, "Install");
+    nd_msgdialog_measure(&dlg, &needed, &fits);
+    CHECK(needed <= fits, "the install confirmation fits with the widest name");
+
+    nd_msgdialog_init(&dlg, &fx.ui, *api.install_legacy);
+    nd_msgdialog_set_button(&dlg, "More");
+    nd_msgdialog_measure(&dlg, &needed, &fits);
+    CHECK(needed <= fits, "the legacy-card notice fits");
+
+    sa_fx_free(&fx);
+}
+
+/* With no card, "Install apps" is the "No memory card." dialog followed by
+ * the install help, and the app comes back -- the same claim the memory-card
+ * screen makes, one row down. */
+static void test_install_apps_absent(void)
+{
+    static const int32_t OPEN_INSTALL[] = {ND_KEY_3};
+    int rc = -1;
+    uint64_t frames = 0u;
+
+    CHECK(!nd_storage_is_ready(), "no card");
+    run_script(OPEN_INSTALL, ND_ARRAY_LEN(OPEN_INSTALL), &rc, &frames);
+    CHECK_INT(rc, 0, "the install screen returns to the root menu");
+    CHECK(frames >= 4u, "the dialog and the help screen were both drawn");
 }
 
 /* ------------------------------------------------------------------ *
@@ -988,6 +1089,8 @@ int main(void)
     RUN(test_engineering_mode_writes_the_setting);
     RUN(test_memory_card_absent);
     RUN(test_the_legacy_card_dialog_fits);
+    RUN(test_install_apps_absent);
+    RUN(test_the_install_dialogs_fit);
     RUN(test_golden_root);
     RUN(test_golden_wallpaper);
     RUN(test_null_safety);

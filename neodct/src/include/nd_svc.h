@@ -125,6 +125,13 @@ extern "C" {
 #define ND_SVC_FORMAT_WAIT_S    240.0
 #define ND_SVC_FORMAT_TIMEOUT_S 250.0
 
+/* An app waiting for the card's layout to be restated after an install. A
+ * chown and a chmod per file in apps/, which is metadata and quick on any
+ * card; thirty seconds is a card that has stopped answering, not a slow one.
+ * Same shape as the format's pair: the core gives up first. */
+#define ND_SVC_LAYOUT_WAIT_S    30.0
+#define ND_SVC_LAYOUT_TIMEOUT_S 40.0
+
 /* How long the core waits for its service thread after the app has gone.
  * Past this the thread is detached to finish its in-flight request and free
  * itself: there is no way to abort a CMGS already on the wire, and freezing
@@ -359,6 +366,20 @@ bool nd_svc_set_clock(time_t when);
  * where the argument is. */
 bool nd_svc_format_card(void);
 
+/* neodct-sdcard layout, performed by the core: restate the ownership and
+ * modes of everything on the card, which is what a mount does and what an
+ * install needs done again. Settings asks for this after unpacking a .nap
+ * (nd_nap.h), because the one thing ndusr cannot do to the app it just
+ * unpacked is make its data/ belong to ndusr_ut.
+ *
+ * No argument, for the reason the format has none: the helper lays out the
+ * card at the phone's own mountpoint and decides for itself whether the card
+ * is one of ours. false covers no card, a card that is not a NeoDCT card,
+ * and a helper that failed -- and the app it was asked for is installed and
+ * in the menu either way; it just cannot save anything until the card is
+ * next mounted, which Settings says. */
+bool nd_svc_layout_card(void);
+
 /* ------------------------------------------------------------------ *
  * The halt simulation -- TESTS ONLY, in the sense nd_ui_sim.h means it
  * ------------------------------------------------------------------ *
@@ -418,6 +439,17 @@ typedef struct {
 
 /* NULL clears it. */
 void nd_svc_format_simulate(const nd_svc_format_sim *sim);
+
+/* The layout's partner to the format simulation: `run` replaces the
+ * spawn-and-wait of `neodct-sdcard layout` and nothing else. The absent-card
+ * refusal in front of it is real. Same barriers. */
+typedef struct {
+    int (*run)(void *user);
+    void *user;
+} nd_svc_layout_sim;
+
+/* NULL clears it. */
+void nd_svc_layout_simulate(const nd_svc_layout_sim *sim);
 
 /* ------------------------------------------------------------------ *
  * The client half -- libneodct plumbing, not for apps

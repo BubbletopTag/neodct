@@ -1,5 +1,32 @@
 # NeoDCT OS Changelog
 
+Unreleased
+--- Install apps from the memory card ---
+
+Apps now come as .nap files, and Settings has an "Install apps" row that
+installs one from the memory card. Copy a .nap anywhere onto the card -- its
+root, its apps folder, or let the browser download one into untrusted -- put
+the card in the phone, and pick it from the list. The app appears in the menu
+the moment you leave Settings.
+
+A .nap -- a NeoDCT Application Package -- is an ordinary uncompressed tar
+file holding one app: its manifest,
+its icon, its program and its files. It can be made for one phone or for
+several at once, and one that is not for this phone is refused before
+anything is written, as is one that is damaged or that tries to put a file
+somewhere it should not go. Installing a .nap for an app you already have
+replaces the app and keeps what it saved.
+
+Nothing about how an installed app is kept in its place has changed: it
+still lives on the card, still runs as the untrusted user, still cannot see
+your music or your messages, and still gets one folder of its own to write
+in. What is new is that the phone makes that folder the moment the app is
+installed rather than the next time the card is mounted -- Settings asks the
+core, which asks the card helper, as root, to restate the card's layout.
+
+The first package is the Bible: neodct/packages/Bible-luckfox-armv7.nap.
+docs/NAP-PACKAGES.md says how to make one; neodct/tools/mknap.py makes it.
+
 0.5.0b
 The phone stops running as root, the browser stops being the phone, memory
 cards change format, the phone keeps a diary, and it says so when it falls

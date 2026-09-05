@@ -45,6 +45,7 @@ Two halves, and they are tested differently:
 import errno
 import os
 import pwd
+import shutil
 import stat
 import subprocess
 
@@ -345,6 +346,94 @@ def test_an_empty_apps_directory_is_not_an_error(tmp_path):
 
     assert mode_of(card / "apps") == 0o755
     assert not (card / "apps" / "*").exists()
+
+
+# --- the verb the core asks for after an install ---------------------------
+#
+# apply_layout() used to run only from after_mount(). Installing a .nap
+# happens on a card that is already mounted, as ndusr, and the one thing
+# ndusr cannot do is give the new app's data/ to ndusr_ut -- so the core asks
+# the helper, through the broker, for `layout`. These pin what that verb
+# does and, more importantly, when it refuses to do anything.
+
+
+def layout_verb(tmp_path, mount, mounts_line, marker=True):
+    """Run do_layout() with the mount table saying `mounts_line`."""
+    chowns = tmp_path / "chowns"
+    # sh() writes an EMPTY mount table on every call, and the verb's first
+    # question is what that table says is mounted -- so it is pointed at a
+    # table of this test's own, after the helper has been sourced.
+    table = tmp_path / "mounts.layout"
+    table.write_text(mounts_line)
+    stubs = ('chown() { echo "$*" >> "%s"; }\n' % chowns +
+             'MOUNTS="%s"\n' % table)
+    if marker:
+        (mount / ".neodct").write_text("")
+    result = sh(tmp_path, mount, "do_layout", stubs=stubs)
+    asked = chowns.read_text().splitlines() if chowns.exists() else []
+    return result, asked
+
+
+def test_layout_restates_a_mounted_neodct_card(tmp_path):
+    """The case the verb exists for: a card that is mounted, ext4 and ours,
+    with an app on it that was just unpacked and has no data/ yet."""
+    card = build_card(tmp_path / "sdcard", mode=0o777, apps=("Fresh",))
+    shutil.rmtree(card / "apps" / "Fresh" / "data")
+    line = "/dev/mmcblk1p1 %s ext4 rw,nosuid,nodev 0 0\n" % card
+
+    result, asked = layout_verb(tmp_path, card, line)
+
+    assert result.returncode == 0, result.stderr
+    assert (card / "apps" / "Fresh" / "data").is_dir()
+    assert mode_of(card / "apps" / "Fresh" / "data") == 0o770
+    assert mode_of(card / "apps" / "Fresh" / "app.so") == 0o644
+    assert mode_of(card / "apps") == 0o755
+    # The glob apply_layout() walks leaves a trailing slash on the app
+    # directory, so the path it names has a doubled one; the kernel does not
+    # care and neither does this.
+    data = str(card / "apps" / "Fresh" / "data")
+    assert any(a.startswith("ndusr:ndusr_ut ") and a.split(" ", 1)[1].replace("//", "/") == data
+               for a in asked), asked
+
+
+def test_layout_refuses_when_nothing_is_mounted(tmp_path):
+    """No card in the slot: exit 1, and not one chown -- the caller is told
+    "not applicable" rather than "done"."""
+    card = build_card(tmp_path / "sdcard", mode=0o777)
+
+    result, asked = layout_verb(tmp_path, card, "")
+
+    assert result.returncode == 1
+    assert asked == []
+    assert mode_of(card / "apps") == 0o777
+
+
+def test_layout_refuses_a_fat_card(tmp_path):
+    """A legacy card mounts and plays music, and FAT cannot hold the layout.
+    Nothing is attempted: chmod on FAT is a no-op that reads as success."""
+    card = build_card(tmp_path / "sdcard", mode=0o777)
+    line = "/dev/mmcblk1p1 %s vfat rw 0 0\n" % card
+
+    result, asked = layout_verb(tmp_path, card, line)
+
+    assert result.returncode == 1
+    assert asked == []
+
+
+def test_layout_leaves_a_strangers_card_alone(tmp_path):
+    """ext4, mounted, and not ours: no marker and not the folder set. The
+    phone does not take ownership of somebody else's files because an app
+    asked it to."""
+    card = tmp_path / "sdcard"
+    card.mkdir()
+    (card / "DCIM").mkdir()
+    (card / "apps").mkdir()
+    line = "/dev/mmcblk1p1 %s ext4 rw 0 0\n" % card
+
+    result, asked = layout_verb(tmp_path, card, line, marker=False)
+
+    assert result.returncode == 1
+    assert asked == []
 
 
 # --- and what all of that is FOR ------------------------------------------

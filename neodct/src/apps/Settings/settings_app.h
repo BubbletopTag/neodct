@@ -55,6 +55,7 @@
 #include <sys/types.h>
 
 #include "nd_font.h"
+#include "nd_nap.h"
 #include "nd_paths.h"
 #include "nd_text.h"
 #include "nd_types.h"
@@ -124,9 +125,36 @@ extern const char *const nd_setapp_format_warning;
  *
  * WAS 4. "Messages Style" is new and is placed BEFORE Engineering Mode so
  * that the two engineering-ish rows stay together at the end; the Python's
- * four are otherwise in their original order. */
-#define ND_SETAPP_MENU_ITEMS 6
+ * four are otherwise in their original order.
+ *
+ * WAS 6. "Install apps" sits right after "Memory card" because it is the
+ * card's other job -- an installed app lives on it -- and an owner who has
+ * just been told the card is ready is looking for the next thing to do with
+ * it. That moves the third row of the first screen, so golden/app-settings
+ * was re-cut. */
+#define ND_SETAPP_MENU_ITEMS 7
 extern const char *const nd_setapp_menu[ND_SETAPP_MENU_ITEMS];
+
+/* ------------------------------------------------------------------ *
+ * Install apps
+ * ------------------------------------------------------------------ */
+
+/* The help behind the "Install apps" row: what a .nap is, where to put one,
+ * and what installing does. An nd_scroller, so it pages. */
+extern const char *const nd_setapp_install_help;
+
+/* Shown when the card is in but the scan found nothing. */
+extern const char *const nd_setapp_install_none;
+
+/* The confirmation before anything is written. Both are printf formats
+ * taking the app's name, and both fit nd_msgdialog's five lines with a
+ * ND_APP_NAME_MAX name -- test_settings_app.c measures them. */
+extern const char *const nd_setapp_install_confirm;
+extern const char *const nd_setapp_install_replace;
+
+/* What an install screen says about a card that cannot hold apps: the
+ * legacy FAT card. Points at the Memory card row, which offers the reformat. */
+extern const char *const nd_setapp_install_legacy;
 
 /* ------------------------------------------------------------------ *
  * The BT Audio screen

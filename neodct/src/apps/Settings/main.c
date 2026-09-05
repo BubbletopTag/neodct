@@ -73,6 +73,7 @@
 #include "nd_input.h"
 #include "nd_keycodes.h"
 #include "nd_log.h"
+#include "nd_nap.h"
 #include "nd_paths.h"
 #include "nd_settings.h"
 #include "nd_storage.h"
@@ -168,6 +169,9 @@ const char *const nd_setapp_sdcard_help =
     "  apps         apps you installed\n"
     "  untrusted    downloads and picture messages\n"
     "\n"
+    "Apps come as .nap files. Copy one anywhere onto the card and install it "
+    "from Settings, under Install apps.\n"
+    "\n"
     "You can make one on a computer, or let the phone do it. Setting up only "
     "adds the folders. Formatting erases everything on the card.\n"
     "\n"
@@ -187,11 +191,10 @@ const char *const nd_setapp_sdcard_help =
     "app and everything it kept.";
 
 /* Five lines is the whole dialog. See settings_app.h. */
-const char *const nd_setapp_sdcard_legacy =
-    "Card uses the old format.\n"
-    "Music and photos work.\n"
-    "Apps need a reformat,\n"
-    "which erases the card.";
+const char *const nd_setapp_sdcard_legacy = "Card uses the old format.\n"
+                                            "Music and photos work.\n"
+                                            "Apps need a reformat,\n"
+                                            "which erases the card.";
 
 const char *const nd_setapp_sdcard_legacy_help =
     "This card was set up by an older version of NeoDCT, when cards were "
@@ -466,7 +469,42 @@ static void show_bt_audio(nd_ui *ui)
 }
 
 const char *const nd_setapp_menu[ND_SETAPP_MENU_ITEMS] = {
-    "Wallpaper", "Memory card", "Messages Style", "BT Audio", "Engineering Mode", "About"};
+    "Wallpaper", "Memory card",      "Install apps", "Messages Style",
+    "BT Audio",  "Engineering Mode", "About"};
+
+/* ------------------------------------------------------------------ *
+ * Install apps -- the strings
+ * ------------------------------------------------------------------ */
+
+const char *const nd_setapp_install_help =
+    "Apps come as .nap files. Copy one onto your memory card -- anywhere on "
+    "it, or into its apps folder -- put the card in the phone, and it appears "
+    "in this list. A .nap the browser downloaded is found too.\n"
+    "\n"
+    "Installing unpacks the app into the apps folder on the card, and it "
+    "shows up in the menu the moment you leave Settings. Installing a .nap "
+    "for an app you already have replaces it and keeps what it saved.\n"
+    "\n"
+    "An app you install is kept in its place: it can read its own program "
+    "but not change it, it cannot see your music, your messages or your "
+    "contacts, and it gets one folder of its own to write in. Removing the "
+    "app's folder from the card removes the app and everything it kept.\n"
+    "\n"
+    "A .nap is made for a particular phone. One that is not for this phone "
+    "is refused before anything is written, and one that is damaged is "
+    "refused the same way.";
+
+const char *const nd_setapp_install_none = "No .nap files on the card.";
+
+/* Four lines of five with a name of ordinary length; the name is on a line
+ * of its own so that a long one wraps within its own row rather than
+ * pushing the question off the bottom. */
+const char *const nd_setapp_install_confirm = "Install this app?\n%s";
+const char *const nd_setapp_install_replace = "Replace this app?\n%s\nIts saved data is kept.";
+
+const char *const nd_setapp_install_legacy = "Card uses the old format.\n"
+                                             "It cannot hold apps.\n"
+                                             "See Memory card.";
 
 /* Must read the same way round as nd_msg_style_options in the Messages app:
  * index 0 is CLASSIC. test_settings_app.c pins the strings this writes. */
@@ -1358,6 +1396,176 @@ static void show_memory_card(nd_ui *ui)
 }
 
 /* ------------------------------------------------------------------ *
+ * Install apps -- NOT a port
+ * ------------------------------------------------------------------ */
+
+/* One acknowledged notice: the failure has to be read, so C does not
+ * dismiss it. */
+static void install_notice(nd_ui *ui, const char *message)
+{
+    nd_msgdialog dialog;
+
+    nd_msgdialog_init(&dialog, ui, message);
+    nd_msgdialog_set_button(&dialog, "OK");
+    nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
+    (void)nd_msgdialog_show(&dialog);
+}
+
+/* Inspect, confirm, install, and say what happened. The app never names the
+ * card's apps directory itself beyond the one constant nd_paths.h owns, and
+ * never chooses which phone it is: nd_nap_phone_arch() reads the kernel.
+ *
+ * Returns true when something was installed, which is the caller's cue to
+ * rescan -- the .nap is still there, and so, now, is the app. */
+static bool install_one(nd_ui *ui, const char *path)
+{
+    nd_nap_info info;
+    nd_msgdialog dialog;
+    char why[ND_NAP_WHY_MAX];
+    char message[ND_APP_NAME_MAX + 64];
+    const char *arch = nd_nap_phone_arch();
+
+    why[0] = '\0';
+    if (nd_nap_inspect(path, &info, why, sizeof why) != ND_OK) {
+        install_notice(ui, why[0] != '\0' ? why : "Cannot read this package.");
+        return false;
+    }
+    if (arch[0] == '\0' || !nd_nap_info_has_arch(&info, arch)) {
+        install_notice(ui, "This package is not for\nthis phone.");
+        return false;
+    }
+
+    (void)nd_snprintf(message, sizeof message,
+                      nd_nap_is_installed(ND_PATH_USER_APPS_DIR, info.dir)
+                          ? nd_setapp_install_replace
+                          : nd_setapp_install_confirm,
+                      info.name);
+    nd_msgdialog_init(&dialog, ui, message);
+    nd_msgdialog_set_button(&dialog, "Install");
+    if (nd_msgdialog_show(&dialog) != ND_KEY_ENTER)
+        return false;
+
+    /* Unpacking a large package off a slow card takes a moment, and a screen
+     * that does not change while a key does nothing reads as a hang. */
+    bt_say_working(ui, "Installing...");
+
+    why[0] = '\0';
+    if (nd_nap_install(path, ND_PATH_USER_APPS_DIR, arch, &info, why, sizeof why) != ND_OK) {
+        install_notice(ui, why[0] != '\0' ? why : "Could not install this app.");
+        return false;
+    }
+
+    /* The files are there; what is missing is the one thing ndusr cannot do
+     * -- hand the app's data/ to ndusr_ut. The core does it as root through
+     * the helper, and a core that cannot (no card device, a helper that
+     * failed, no service socket) is an app that is installed and cannot
+     * save until the card is next mounted. That is said rather than hidden:
+     * "installed" with a silent caveat is how an owner comes to think an
+     * app is broken. */
+    if (nd_svc_layout_card()) {
+        (void)nd_snprintf(message, sizeof message, "Installed %s.\nIt is in the menu.", info.name);
+    } else {
+        nd_log_err(ND_LOG_OS, "Settings: the card's layout was not restated after installing %s",
+                   info.name);
+        (void)nd_snprintf(message, sizeof message,
+                          "Installed %s.\nTake the card out and put\nit back before using it.",
+                          info.name);
+    }
+    install_notice(ui, message);
+    return true;
+}
+
+static void show_install_apps(nd_ui *ui)
+{
+    nd_card card;
+    nd_msgdialog dialog;
+    nd_scroller help;
+
+    nd_storage_card(&card);
+    if (card.state == ND_CARD_LEGACY_FORMAT) {
+        nd_msgdialog_init(&dialog, ui, nd_setapp_install_legacy);
+        nd_msgdialog_set_button(&dialog, "More");
+        (void)nd_msgdialog_show(&dialog);
+        nd_scroller_init(&help, ui, nd_setapp_sdcard_legacy_help, NULL, NULL);
+        nd_scroller_show(&help);
+        return;
+    }
+    if (!nd_storage_is_ready()) {
+        /* Absent, or a card that is not laid out yet: either way there is
+         * nowhere for an app to go, and the Memory card row is where that
+         * gets fixed. The help says what a .nap is so the trip is not
+         * wasted. */
+        nd_msgdialog_init(&dialog, ui,
+                          card.state == ND_CARD_ABSENT
+                              ? "No memory card."
+                              : "Set the card up first.\nSee Memory card.");
+        nd_msgdialog_set_button(&dialog, "More");
+        (void)nd_msgdialog_show(&dialog);
+        nd_scroller_init(&help, ui, nd_setapp_install_help, NULL, NULL);
+        nd_scroller_show(&help);
+        return;
+    }
+
+    for (;;) {
+        char(*paths)[ND_STORAGE_PATH_MAX];
+        char(*names)[ND_SETAPP_NAME_MAX];
+        const char **items;
+        nd_vlist list;
+        nd_softkey softkey;
+        size_t count;
+        size_t i;
+        int32_t selection;
+        bool again = false;
+
+        /* owned here; freed before every exit from this iteration. 64 paths
+         * of 256 plus 64 names of 96 is 22.5 kB, off the stack. */
+        paths = calloc(ND_NAP_MAX_FOUND, sizeof *paths);
+        names = calloc(ND_NAP_MAX_FOUND, sizeof *names);
+        items = calloc(ND_NAP_MAX_FOUND, sizeof *items);
+        if (paths == NULL || names == NULL || items == NULL) {
+            nd_log_err(ND_LOG_OS, "out of memory listing packages");
+            free(paths);
+            free(names);
+            free(items);
+            return;
+        }
+
+        count = nd_nap_find(paths, ND_NAP_MAX_FOUND);
+        if (count == 0u) {
+            nd_msgdialog_init(&dialog, ui, nd_setapp_install_none);
+            nd_msgdialog_set_button(&dialog, "More");
+            (void)nd_msgdialog_show(&dialog);
+            nd_scroller_init(&help, ui, nd_setapp_install_help, NULL, NULL);
+            nd_scroller_show(&help);
+            free(paths);
+            free(names);
+            free(items);
+            return;
+        }
+        for (i = 0u; i < count; i++)
+            items[i] = nd_nap_display_name(paths[i], names[i], sizeof names[i]);
+
+        nd_vlist_init(&list, ui, "Install apps", items, count, ND_SETAPP_ROOT_ID);
+        nd_softkey_init(&softkey, ui, false);
+        nd_softkey_update(&softkey, "Select", false);
+        selection = nd_vlist_show(&list);
+        if (selection != ND_WIDGET_BACK && selection >= 0 && (size_t)selection < count) {
+            /* Whatever happened, the list is shown again: the .nap is still
+             * on the card, and the notice that closed says what came of it.
+             * The rescan is what makes a card pulled out mid-list honest. */
+            (void)install_one(ui, paths[selection]);
+            again = true;
+        }
+
+        free(paths);
+        free(names);
+        free(items);
+        if (!again || nd_app_should_exit())
+            return;
+    }
+}
+
+/* ------------------------------------------------------------------ *
  * run()
  * ------------------------------------------------------------------ */
 
@@ -1384,12 +1592,14 @@ int app_run(nd_ui *ui)
         else if (selection == 1)
             show_memory_card(ui);
         else if (selection == 2)
-            show_messages_style(ui);
+            show_install_apps(ui);
         else if (selection == 3)
-            show_bt_audio(ui);
+            show_messages_style(ui);
         else if (selection == 4)
-            show_engineering_mode(ui);
+            show_bt_audio(ui);
         else if (selection == 5)
+            show_engineering_mode(ui);
+        else if (selection == 6)
             show_about(ui);
 
         if (nd_app_should_exit())
