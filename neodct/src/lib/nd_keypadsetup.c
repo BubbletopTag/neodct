@@ -804,51 +804,27 @@ static void screen_prompt(setup_screen *s, const char *label, size_t index, size
  * Returns only on failure. */
 static void restart_ui(void)
 {
-    char exe[ND_PATH_MAX];
-    char cmdline[4096];
-    char *argv[65];
-    size_t n_argv = 0u;
-    ssize_t link_len;
-    ssize_t got = -1;
-    int fd;
-
-    link_len = readlink("/proc/self/exe", exe, sizeof exe - 1u);
-    if (link_len <= 0) {
-        nd_log_err(ND_LOG_SETUP, "cannot read /proc/self/exe: %s", strerror(errno));
-        return;
-    }
-    exe[link_len] = '\0';
-
-    fd = open("/proc/self/cmdline", O_RDONLY | O_CLOEXEC);
-    if (fd >= 0) {
-        got = read(fd, cmdline, sizeof cmdline - 1u);
-        (void)close(fd);
-    }
-    if (got > 0) {
-        ssize_t i;
-        bool at_start = true;
-
-        cmdline[got] = '\0';
-        for (i = 0; i < got && n_argv < ND_ARRAY_LEN(argv) - 1u; i++) {
-            if (at_start) {
-                argv[n_argv++] = &cmdline[i];
-                at_start = false;
-            }
-            if (cmdline[i] == '\0')
-                at_start = true;
-        }
-    }
-    /* An unreadable or empty cmdline still restarts, with no arguments. A
-     * phone that has just written its keymap must come back up. */
-    if (n_argv == 0u)
-        argv[n_argv++] = exe;
-    argv[n_argv] = NULL;
-
-    /* The Python execs without announcing it; the "Restarting UI..." screen
-     * is the announcement. Only the failure gets a line. */
+    /* The Python execs sys.executable in place. On this OS that cannot work
+     * any more, and getting it wrong is the "no keypad response after the
+     * wizard" the owner hit. By the time the wizard runs, nd-core has dropped
+     * to ndusr (nd_main.c step 4b), so an execv of /proc/self/exe comes back
+     * as ndusr -- with no way to re-fork the ROOT broker the phone needs to
+     * launch apps, set the clock or lay out a card. The re-exec'd UI would
+     * come up crippled, which is exactly what happened.
+     *
+     * So exit instead, and let the supervisor do the restart with the
+     * privilege it still has. nd-core runs in a loop under nd-crashguard.sh
+     * (bin/run_neodct.sh), which is init's child and therefore root; a clean
+     * exit (status 0) makes it respawn nd-core -- as root, no crash screen --
+     * and that fresh boot forks a new broker, drops, finds the keymap this
+     * wizard just wrote, and goes straight to the home screen with the keypad
+     * working. The old broker sees its socketpair close and exits on its own.
+     *
+     * A phone with an i2c keypad is always launched this way; there is no
+     * bare-nd-core path on hardware for the wizard to run down. */
+    nd_log(ND_LOG_SETUP, "keymap written; exiting for the supervisor to restart the UI as root");
     (void)fflush(NULL);
-    (void)execv(exe, argv);
-    nd_log_err(ND_LOG_SETUP, "could not restart %s: %s", exe, strerror(errno));
+    _exit(0);
 }
 
 /* ------------------------------------------------------------------ *
