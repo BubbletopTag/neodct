@@ -39,6 +39,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,6 +51,7 @@
 #include "nd_clock.h"
 #include "nd_log.h"
 #include "nd_modem.h"
+#include "nd_proc.h"
 #include "nd_settings.h"
 
 #include "../../lib/nd_modem_priv.h"
@@ -87,6 +89,11 @@ typedef struct {
     int commands;
     char last_cmd[256];
     char last_body[512];
+    /* Every command line since the last fake_log_clear(), newline-joined, so
+     * a test can ask what went out and in what order rather than only what
+     * went out last. */
+    char log[4096];
+    size_t log_len;
 } fake_modem;
 
 static void fake_say(fake_modem *fm, const char *text)
@@ -110,6 +117,16 @@ static void fake_command(fake_modem *fm, const char *line)
 
     fm->commands++;
     (void)nd_strlcpy(fm->last_cmd, line, sizeof fm->last_cmd);
+    {
+        size_t len = strlen(line);
+
+        if (fm->log_len + len + 2u <= sizeof fm->log) {
+            memcpy(&fm->log[fm->log_len], line, len);
+            fm->log_len += len;
+            fm->log[fm->log_len++] = '\n';
+            fm->log[fm->log_len] = '\0';
+        }
+    }
 
     if (strncmp(line, "AT+CMGS=", 8u) == 0) {
         fm->awaiting_body = true;
@@ -272,6 +289,39 @@ static void fake_inject(fake_modem *fm, const char *text)
     (void)pthread_mutex_unlock(&fm->mu);
 }
 
+static void fake_log_clear(fake_modem *fm)
+{
+    (void)pthread_mutex_lock(&fm->mu);
+    fm->log[0] = '\0';
+    fm->log_len = 0u;
+    (void)pthread_mutex_unlock(&fm->mu);
+}
+
+/* Did this command go out since the last clear? */
+static bool fake_sent(fake_modem *fm, const char *cmd)
+{
+    bool found;
+
+    (void)pthread_mutex_lock(&fm->mu);
+    found = strstr(fm->log, cmd) != NULL;
+    (void)pthread_mutex_unlock(&fm->mu);
+    return found;
+}
+
+/* Stop reading the master, so the slave's writes back up and then fail with
+ * EAGAIN -- what a modem whose USB stack has wedged looks like from here. The
+ * pty caps that buffer at 8 KB, so it takes a handful of commands to fill. */
+static void fake_pause(fake_modem *fm)
+{
+    if (!fm->running)
+        return;
+    (void)pthread_mutex_lock(&fm->mu);
+    fm->stop = true;
+    (void)pthread_mutex_unlock(&fm->mu);
+    (void)pthread_join(fm->th, NULL);
+    fm->running = false;
+}
+
 static int fake_commands(fake_modem *fm)
 {
     int n;
@@ -293,10 +343,20 @@ static void fake_body(fake_modem *fm, char *out, size_t out_sz)
  * Fixture helpers
  * ------------------------------------------------------------------ */
 
+/* Every case starts with the boot grace off, because nearly every case wants
+ * Simulation Mode or a fault the moment it looks, as QEMU does. The two cases
+ * about the grace itself push m->boot_deadline out by hand. */
+#define NO_GRACE "system.modem.boot_grace_s=0\n"
+
 static void use_scratch_settings(const char *body)
 {
+    char text[1024];
+
     nd_settings_set_paths(SETTINGS_PATH, VERSION_PATH);
-    pt_write_text(SETTINGS_PATH, body != NULL ? body : "");
+    (void)nd_strlcpy(text, NO_GRACE, sizeof text);
+    if (body != NULL)
+        (void)nd_strlcat(text, body, sizeof text);
+    pt_write_text(SETTINGS_PATH, text);
 }
 
 static nd_modem *make_modem(void)
@@ -558,7 +618,7 @@ static void test_urc_call_lifecycle(void)
 
     nd_modem__handle_urc(m, "VOICE CALL: BEGIN");
     CHECK_INT(nd_modem_state(m), ND_CALL_CONNECTED);
-    CHECK(m->pcm_retry); /* re-assert CPCMREG=1 on the next free tick */
+    CHECK(!m->audio_connect_pending); /* no hardware: nothing to bring up */
     CHECK(nd_modem__take(m, &e));
     CHECK_INT(e.kind, ND_MEV_CONNECTED);
     CHECK_STR(e.text, "5550000"); /* ("connected", caller_id) */
@@ -982,6 +1042,7 @@ static const fake_rule SIM7600[] = {
     {"AT+COPS?", "\r\n+COPS: 0,0,\"Tello\",7\r\n\r\nOK\r\n"},
     {"AT+CLCC", "\r\n+CLCC: 1,0,0,0,0,\"+15551234\",129\r\n\r\nOK\r\n"},
     {"AT+CHUP", "\r\nOK\r\n"},
+    {"ATA", "\r\nOK\r\n"},
     {"AT+CPCMFRM=1", "\r\nOK\r\n"},
     {"AT+CPCMREG=1", "\r\nOK\r\n"},
     {"AT+CPCMREG=0", "\r\nOK\r\n"},
@@ -1377,8 +1438,11 @@ static void test_dial_and_hangup_on_real_hardware(void)
     CHECK(!m->audio_live);
     CHECK(!m->mic_live);
 
-    /* CPCMREG=1 answered OK, so no in-call retry is armed. */
-    CHECK(!m->pcm_retry);
+    /* The PCM setup is owed to the next tick, not done inside dial(). */
+    CHECK(m->pcm_setup_pending);
+    poll_now(m);
+    CHECK(!m->pcm_setup_pending);
+    CHECK(m->pcm_reg_ok); /* CPCMREG=1 answered OK */
 
     CHECK(nd_modem_hangup(m));
     CHECK_INT(nd_modem_state(m), ND_CALL_IDLE);
@@ -1432,20 +1496,36 @@ static void test_clcc_ends_a_call_the_modem_forgot(void)
     while (nd_modem__take(m, &e))
         ;
 
-    /* An empty call list with a call still up ends it cleanly -- this is the
-     * missed "VOICE CALL: END" recovery. */
     fm.rules = NULL;
     fm.n_rules = 0u; /* every command now answers ERROR */
     nd_modem__poll_clcc(m);
     CHECK_INT(nd_modem_state(m), ND_CALL_CONNECTED); /* not OK: no change */
 
-    fm.rules = SIM7600;
-    fm.n_rules = ND_ARRAY_LEN(SIM7600);
+    /* An empty call list with a call still up is the missed "VOICE CALL:
+     * END" recovery -- but ONE empty list is also what a modem answers in
+     * the beat between ATD returning OK and the call being entered in its
+     * table, and ending the call on that tore down calls that were still
+     * being placed. So it takes two in a row, and a listed call in between
+     * starts the count over. */
     {
         static const fake_rule EMPTY_LIST[] = {{"AT+CLCC", "\r\nOK\r\n"}};
 
         fm.rules = EMPTY_LIST;
         fm.n_rules = ND_ARRAY_LEN(EMPTY_LIST);
+        nd_modem__poll_clcc(m);
+        CHECK_INT(nd_modem_state(m), ND_CALL_CONNECTED);
+        CHECK_INT(m->clcc_empty, 1);
+        CHECK(!nd_modem__take(m, &e));
+
+        fm.rules = SIM7600;
+        fm.n_rules = ND_ARRAY_LEN(SIM7600);
+        nd_modem__poll_clcc(m); /* listed again: the count starts over */
+        CHECK_INT(m->clcc_empty, 0);
+
+        fm.rules = EMPTY_LIST;
+        fm.n_rules = ND_ARRAY_LEN(EMPTY_LIST);
+        nd_modem__poll_clcc(m);
+        CHECK_INT(nd_modem_state(m), ND_CALL_CONNECTED);
         nd_modem__poll_clcc(m);
         CHECK_INT(nd_modem_state(m), ND_CALL_IDLE);
         CHECK(nd_modem__take(m, &e));
@@ -1647,6 +1727,10 @@ static void test_a_fault_is_not_simulation(void)
     CHECK(nd_modem_take_pending_fault(m) == NULL);
 
     nd_modem__destroy(m);
+    /* The fake's reader thread polls `fm`, which is this frame: without the
+     * stop it outlives the function, which ASan reports as a
+     * stack-use-after-return and the default build merely gets away with. */
+    fake_stop(&fm);
 }
 
 /* THE FAULT HOOK MUST WORK WITH NO HARDWARE, which is the only state QEMU is
@@ -2208,6 +2292,492 @@ static void test_unrepresentable_events_are_skipped_not_surfaced(void)
  * main
  * ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ *
+ * 11. Stricter call sequencing
+ * ------------------------------------------------------------------ */
+
+/* A RING while a call is up is call waiting, which this phone does not do.
+ * The URC used to reset the state to RINGING and wipe the caller ID out from
+ * under the live call, and the core's ring tick then owned every
+ * read_keypress() until the far end gave up -- the End key stopped working,
+ * which on a phone is a freeze. */
+static void test_ring_during_a_call_is_ignored(void)
+{
+    nd_modem *m = make_modem();
+    nd_mev e;
+
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+
+    nd_modem__handle_urc(m, "RING");
+    nd_modem__handle_urc(m, "+CLIP: \"5550000\",129");
+    nd_modem__handle_urc(m, "VOICE CALL: BEGIN");
+    while (nd_modem__take(m, &e))
+        ;
+    CHECK_INT(nd_modem_state(m), ND_CALL_CONNECTED);
+
+    nd_modem__handle_urc(m, "RING");
+    CHECK_INT(nd_modem_state(m), ND_CALL_CONNECTED);
+    CHECK_STR(nd_modem_caller_id(m), "5550000");
+    CHECK(!nd_modem__take(m, &e));
+
+    /* The waiting call's +CLIP must not rename the live one either. */
+    nd_modem__handle_urc(m, "+CLIP: \"5559999\",129");
+    CHECK_STR(nd_modem_caller_id(m), "5550000");
+    CHECK(!nd_modem__take(m, &e));
+
+    /* Same while a call is being placed. */
+    nd_modem__handle_urc(m, "VOICE CALL: END");
+    while (nd_modem__take(m, &e))
+        ;
+    CHECK(nd_modem_dial(m, "5551234")); /* simulated: CALLING */
+    nd_modem__handle_urc(m, "RING");
+    CHECK_INT(nd_modem_state(m), ND_CALL_CALLING);
+    CHECK(!nd_modem__take(m, &e));
+
+    nd_modem__destroy(m);
+}
+
+/* MISSED_CALL is the modem saying an INCOMING call rang out. With a call up
+ * it can only be about a waiting call that was never taken, and ending the
+ * live call for it -- the Python's behaviour -- left the line up on the modem
+ * with the phone back on the home screen and no End key to press. */
+static void test_missed_call_during_a_call_is_ignored(void)
+{
+    nd_modem *m = make_modem();
+    nd_mev e;
+
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+
+    nd_modem__handle_urc(m, "VOICE CALL: BEGIN");
+    while (nd_modem__take(m, &e))
+        ;
+    nd_modem__handle_urc(m, "MISSED_CALL: 11:02AM 15551234");
+    CHECK_INT(nd_modem_state(m), ND_CALL_CONNECTED);
+    CHECK(!nd_modem__take(m, &e));
+
+    /* From RINGING it is the caller giving up, exactly as before. */
+    nd_modem__handle_urc(m, "VOICE CALL: END");
+    while (nd_modem__take(m, &e))
+        ;
+    nd_modem__handle_urc(m, "RING");
+    while (nd_modem__take(m, &e))
+        ;
+    nd_modem__handle_urc(m, "MISSED_CALL: 11:03AM 15551234");
+    CHECK_INT(nd_modem_state(m), ND_CALL_IDLE);
+    CHECK(nd_modem__take(m, &e));
+    CHECK_INT(e.kind, ND_MEV_MISSED);
+
+    nd_modem__destroy(m);
+}
+
+/* dial() is the UI thread blocked on the modem, so it carries ATD and nothing
+ * else. The PCM setup -- CPCMFRM, CPCMREG=1 and the ringback pipe -- is owed
+ * to the modem thread's next tick, and the mic is not started at all until
+ * the call is up. And CLCC is not asked the instant ATD returns: the call is
+ * not in the modem's table yet and an empty answer would have ended it. */
+static void test_dial_defers_pcm_setup_to_the_tick(void)
+{
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+
+    fake_log_clear(&fm);
+    CHECK(nd_modem_dial(m, "5551234"));
+    CHECK_INT(nd_modem_state(m), ND_CALL_CALLING);
+    CHECK(fake_sent(&fm, "ATD5551234;"));
+    CHECK(!fake_sent(&fm, "CPCM"));
+    CHECK(m->pcm_setup_pending);
+    CHECK(!m->pcm_reg_ok);
+    CHECK(m->next_clcc > nd_modem__now());
+    CHECK(!m->audio_connect_pending);
+
+    poll_now(m);
+    CHECK(fake_sent(&fm, "AT+CPCMFRM=1"));
+    CHECK(fake_sent(&fm, "AT+CPCMREG=1"));
+    CHECK(!m->pcm_setup_pending);
+    CHECK(m->pcm_reg_ok);
+    /* Once: a second tick does not send it again. */
+    fake_log_clear(&fm);
+    poll_now(m);
+    CHECK(!fake_sent(&fm, "CPCM"));
+
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
+/* The call coming up is ONE edge, whichever of VOICE CALL: BEGIN, CLCC <stat>
+ * 0 or ATA reports it first, and it is where the pipes are (re)started: PCM
+ * is asserted again first, while nothing is reading the port, so that a
+ * stream the modem restarts at connect is picked up from a clean buffer
+ * instead of half a sample in -- which is what a call of pure static is. */
+static void test_the_connect_edge_fires_once_and_reasserts_pcm_first(void)
+{
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+    nd_mev e;
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+    while (nd_modem__take(m, &e))
+        ;
+
+    CHECK(nd_modem_dial(m, "5551234"));
+    poll_now(m); /* the deferred CPCMFRM / CPCMREG=1 */
+    m->next_clcc = nd_modem__now() + 100.0;
+
+    fake_log_clear(&fm);
+    fake_inject(&fm, "\r\nVOICE CALL: BEGIN\r\n");
+    settle(0.05);
+    poll_now(m);
+    CHECK_INT(nd_modem_state(m), ND_CALL_CONNECTED);
+    CHECK(fake_sent(&fm, "AT+CPCMREG=1"));
+    CHECK(!m->audio_connect_pending);
+
+    /* The same news again -- BEGIN repeated, or CLCC agreeing -- is not a
+     * second edge and sends nothing. */
+    fake_log_clear(&fm);
+    fake_inject(&fm, "\r\nVOICE CALL: BEGIN\r\n");
+    settle(0.05);
+    poll_now(m);
+    CHECK(!fake_sent(&fm, "CPCM"));
+    m->next_clcc = 0.0;
+    fake_log_clear(&fm);
+    poll_now(m);
+    CHECK(fake_sent(&fm, "AT+CLCC"));
+    CHECK(!fake_sent(&fm, "CPCM"));
+
+    /* Answering is the same edge on the incoming side. */
+    CHECK(nd_modem_hangup(m));
+    poll_now(m);
+    nd_modem__handle_urc(m, "RING");
+    fake_log_clear(&fm);
+    CHECK(nd_modem_answer(m));
+    CHECK_INT(nd_modem_state(m), ND_CALL_CONNECTED);
+    CHECK(fake_sent(&fm, "ATA"));
+    CHECK(!fake_sent(&fm, "CPCM")); /* not inside the blocking answer() */
+    CHECK(m->audio_connect_pending);
+    m->next_clcc = nd_modem__now() + 100.0;
+    poll_now(m);
+    CHECK(fake_sent(&fm, "AT+CPCMREG=1"));
+    CHECK(!m->audio_connect_pending);
+
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
+/* A modem that has gone -- the mid-call brownout the bench notes describe --
+ * takes its pipes with it. Leaving them recorded as live meant the next call
+ * refused to start audio at all, for the rest of the day. */
+static void test_losing_the_modem_stops_the_pipes(void)
+{
+    static const char *const ARGV[] = {"/bin/sh", "-c", "exec sleep 30", NULL};
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+    nd_proc_spec spec;
+    pid_t pid = -1;
+    nd_mev e;
+    char final[64];
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+    while (nd_modem__take(m, &e))
+        ;
+
+    memset(&spec, 0, sizeof spec);
+    spec.argv = ARGV;
+    spec.owner = ND_OWNER_AUDIO;
+    CHECK_INT(nd_proc_spawn("/bin/sh", &spec, &pid), ND_OK);
+    CHECK(pid > 0);
+    m->audio_pid = pid;
+    m->audio_live = true;
+    m->pcm_active = true;
+
+    (void)close(m->fd);
+    m->fd = open("/dev/null", O_RDONLY);
+    (void)nd_modem__transact(m, "AT", 0.2, final, sizeof final, NULL);
+    CHECK(!nd_modem_has_hardware(m));
+
+    CHECK(!m->audio_live);
+    CHECK_INT(m->audio_pid, -1);
+    CHECK(!m->pcm_active);
+    settle(0.05);
+    CHECK(pid > 0 && kill(pid, 0) != 0); /* really gone, not just forgotten */
+
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
+/* The AT port's write used to retry EAGAIN for ever, and a modem whose USB
+ * stack has wedged returns EAGAIN for ever -- with the UI thread blocked in
+ * dial() or hangup() behind it. That is the phone freezing solid. A write
+ * that makes no progress for a bounded time is the port failing. */
+static void test_a_stalled_port_drops_the_modem_instead_of_hanging(void)
+{
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+    nd_mev e;
+    char cmd[400];
+    double t0;
+    int i;
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+    while (nd_modem__take(m, &e))
+        ;
+    fake_pause(&fm);
+
+    memset(cmd, 'X', sizeof cmd);
+    memcpy(cmd, "AT+", 3u);
+    cmd[sizeof cmd - 1u] = '\0';
+
+    t0 = nd_modem__now();
+    for (i = 0; i < 60 && nd_modem_has_hardware(m); i++)
+        (void)nd_modem__transact(m, cmd, 0.01, NULL, 0u, NULL);
+    CHECK(!nd_modem_has_hardware(m));
+    CHECK(nd_modem__now() - t0 < ND_MODEM_WRITE_STALL_S + 4.0);
+    CHECK(nd_modem__take(m, &e));
+    CHECK_INT(e.kind, ND_MEV_MODEM_LOST);
+    CHECK(strstr(e.text, "stalled") != NULL);
+
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
+/* The mic's three strikes are for a pipe that cannot start, not for one that
+ * ran for a whole conversation and then hiccupped: a mic that has been up
+ * long enough to count as working starts its strikes over. Without this a
+ * phone that flaps once a call stopped sending after the third call. */
+static void test_a_mic_that_ran_for_a_while_starts_its_strikes_over(void)
+{
+    static const char *const ARGV[] = {"/bin/sh", "-c", "exit 1", NULL};
+    nd_modem *m = make_modem();
+    nd_proc_spec spec;
+    pid_t pid = -1;
+    double now;
+
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+
+    memset(&spec, 0, sizeof spec);
+    spec.argv = ARGV;
+    spec.owner = ND_OWNER_AUDIO;
+    CHECK_INT(nd_proc_spawn("/bin/sh", &spec, &pid), ND_OK);
+    settle(0.1); /* let it exit */
+
+    now = nd_modem__now();
+    m->pcm_active = true;
+    m->next_audio_restart = 0.0;
+    m->mic_pid = pid;
+    m->mic_live = true;
+    m->mic_fails = ND_MIC_GIVE_UP_AFTER - 1; /* one more would give up */
+    m->mic_started_at = now - ND_MIC_STABLE_S - 1.0;
+    (void)nd_strlcpy(m->active_pcm_port, "/dev/ttyUSB4", sizeof m->active_pcm_port);
+
+    nd_modem__watch_audio_proc(m, now);
+    CHECK(!m->mic_live);
+    CHECK_INT(m->mic_fails, 1);         /* the run reset the count; this death is #1 */
+    CHECK(m->next_audio_restart > now); /* so a retry was scheduled, not a give-up */
+
+    nd_modem__destroy(m);
+}
+
+/* PCM refused when the call comes up is not "start the pipes anyway": the
+ * speaker would read nothing and the mic would push 32 KB/s at a port that
+ * is not in PCM mode. The edge stays owed and is asked again after the
+ * holdoff, and the pipes wait for an OK. */
+static void test_pcm_refused_at_connect_is_retried_not_piped(void)
+{
+    static const fake_rule REFUSES_PCM[] = {
+        {"AT+CPCMREG=1", "\r\nERROR\r\n"},
+        {"AT+CLCC", "\r\n+CLCC: 1,0,0,0,0,\"+15551234\",129\r\n\r\nOK\r\n"},
+        {"AT+CSQ", "\r\n+CSQ: 23,99\r\n\r\nOK\r\n"},
+    };
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+    nd_mev e;
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+    while (nd_modem__take(m, &e))
+        ;
+
+    CHECK(nd_modem_dial(m, "5551234"));
+    poll_now(m);
+    CHECK(m->pcm_reg_ok);
+
+    fm.rules = REFUSES_PCM;
+    fm.n_rules = ND_ARRAY_LEN(REFUSES_PCM);
+    fake_inject(&fm, "\r\nVOICE CALL: BEGIN\r\n");
+    settle(0.05);
+    fake_log_clear(&fm);
+    poll_now(m);
+    CHECK_INT(nd_modem_state(m), ND_CALL_CONNECTED);
+    CHECK(fake_sent(&fm, "AT+CPCMREG=1"));
+    CHECK(m->audio_connect_pending); /* still owed */
+    CHECK(m->next_pcm_try > nd_modem__now());
+
+    /* Not hammered: the next tick inside the holdoff sends nothing. */
+    fake_log_clear(&fm);
+    poll_now(m);
+    CHECK(!fake_sent(&fm, "CPCM"));
+
+    /* The modem relents; the holdoff is brought forward rather than waited. */
+    fm.rules = SIM7600;
+    fm.n_rules = ND_ARRAY_LEN(SIM7600);
+    m->next_pcm_try = 0.0;
+    fake_log_clear(&fm);
+    poll_now(m);
+    CHECK(fake_sent(&fm, "AT+CPCMREG=1"));
+    CHECK(!m->audio_connect_pending);
+
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
+/* ------------------------------------------------------------------ *
+ * 12. The boot grace
+ * ------------------------------------------------------------------ */
+
+/* Inside the grace, "no modem yet" is neither Simulation nor a fault: the
+ * carrier line is left to the layout, the meter is empty, and the probe runs
+ * at the boot cadence. When it runs out with nothing answering, Simulation
+ * Mode exactly as before. */
+static void test_boot_grace_is_neither_simulation_nor_a_fault(void)
+{
+    nd_modem *m;
+    double now;
+
+    use_scratch_settings("");
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+
+    /* NO_GRACE is what the fixture writes; the setting's default is the
+     * grace, and this case is the one that wants it. */
+    now = nd_modem__now();
+    m->boot_deadline = now + ND_MODEM_BOOT_GRACE_DEFAULT_S;
+
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_PROBING);
+    CHECK(nd_modem_operator_display(m) == NULL);
+    CHECK_INT(nd_modem_signal_level(m), 0);
+    CHECK(nd_modem_take_pending_fault(m) == NULL);
+
+    nd_modem_poll(m); /* probes, finds nothing, and re-arms at the boot cadence */
+    CHECK(m->next_probe - nd_modem__now() <= ND_MODEM_BOOT_PROBE_S + 0.1);
+    CHECK(!m->sim_announced);
+
+    /* Simulated calls work throughout: waiting is about what is SHOWN. */
+    CHECK(nd_modem_dial(m, "5551234"));
+    CHECK_INT(nd_modem_state(m), ND_CALL_CALLING);
+    CHECK(nd_modem_hangup(m));
+
+    m->boot_deadline = 0.0;
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_SIM);
+    CHECK_STR(nd_modem_operator_display(m), ND_MODEM_SIM_CARRIER);
+    nd_modem__sim_route_forget();
+    CHECK_INT(nd_modem_signal_level(m),
+              nd_clock_has_route() ? ND_MODEM_SIM_BARS_ONLINE : ND_MODEM_SIM_BARS_OFFLINE);
+    m->next_probe = 0.0; /* the boot-cadence timer is still armed; ask now */
+    nd_modem_poll(m);
+    CHECK(m->sim_announced);
+    CHECK(m->next_probe - nd_modem__now() > ND_MODEM_BOOT_PROBE_S + 0.1);
+
+    nd_modem__destroy(m);
+}
+
+/* The setting is the override, and 0 is QEMU's answer. */
+static void test_boot_grace_comes_from_the_setting(void)
+{
+    nd_modem *m;
+
+    use_scratch_settings("");
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_SIM);
+    nd_modem__destroy(m);
+
+    nd_settings_set_paths(SETTINGS_PATH, VERSION_PATH);
+    pt_write_text(SETTINGS_PATH, "system.modem.boot_grace_s=5\n");
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_PROBING);
+    CHECK(m->boot_deadline - nd_modem__now() <= 5.0);
+    CHECK(m->boot_deadline - nd_modem__now() > 4.0);
+    nd_modem__destroy(m);
+}
+
+/* A SIM7600 enumerates, drops and enumerates again while its firmware boots.
+ * Seen and then lost inside the grace is that, not a broken phone: no fault,
+ * no notice, and the port is simply probed for again. After the grace the
+ * same loss is the fault it always was. */
+static void test_a_modem_lost_during_the_boot_grace_is_not_a_fault(void)
+{
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+    nd_mev e;
+    char final[64];
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+    while (nd_modem__take(m, &e))
+        ;
+    m->boot_deadline = nd_modem__now() + ND_MODEM_BOOT_GRACE_DEFAULT_S;
+
+    (void)close(m->fd);
+    m->fd = open("/dev/null", O_RDONLY);
+    (void)nd_modem__transact(m, "AT", 0.2, final, sizeof final, NULL);
+    CHECK(!nd_modem_has_hardware(m));
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_PROBING);
+    CHECK(!m->faulted);
+    CHECK(nd_modem_take_pending_fault(m) == NULL);
+
+    /* Found again -- the pty is still there -- and fully re-adopted. */
+    CHECK(nd_modem__probe_hardware(m));
+    CHECK(nd_modem_has_hardware(m));
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_LIVE);
+
+    /* Lost after the grace: the fault, with the notice. */
+    m->boot_deadline = 0.0;
+    (void)close(m->fd);
+    m->fd = open("/dev/null", O_RDONLY);
+    (void)nd_modem__transact(m, "AT", 0.2, final, sizeof final, NULL);
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_FAULT);
+    CHECK(nd_modem_take_pending_fault(m) != NULL);
+
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
 int main(void)
 {
     (void)nd_settings_init();
@@ -2273,6 +2843,19 @@ int main(void)
 
     RUN(test_allow_calls_off_simulates_on_real_hardware);
     RUN(test_allow_calls_parsing);
+
+    RUN(test_ring_during_a_call_is_ignored);
+    RUN(test_missed_call_during_a_call_is_ignored);
+    RUN(test_dial_defers_pcm_setup_to_the_tick);
+    RUN(test_the_connect_edge_fires_once_and_reasserts_pcm_first);
+    RUN(test_pcm_refused_at_connect_is_retried_not_piped);
+    RUN(test_losing_the_modem_stops_the_pipes);
+    RUN(test_a_stalled_port_drops_the_modem_instead_of_hanging);
+    RUN(test_a_mic_that_ran_for_a_while_starts_its_strikes_over);
+
+    RUN(test_boot_grace_is_neither_simulation_nor_a_fault);
+    RUN(test_boot_grace_comes_from_the_setting);
+    RUN(test_a_modem_lost_during_the_boot_grace_is_not_a_fault);
 
     RUN(test_the_thread_runs_and_stops_cleanly);
     RUN(test_requeue_puts_an_event_back_at_the_front);

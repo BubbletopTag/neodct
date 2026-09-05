@@ -139,14 +139,19 @@ recipe for adding a new kind; the shape is:
 
 ## Testing
 
-Run the host suite before and after every change:
+Run the suite before and after every change:
 
 ```sh
-cd neodct/src && make && make test
+cd neodct/src && make && make test       # sandboxed -- AGENTS.md's Tests section
+make test-one T=test_modem               # one binary, the same way
 ```
 
 `make ASAN=1 test` before pushing -- `AGENTS.md` asks for it and it catches
-real leaks. If a test hangs, run the binaries individually with a timeout;
+real leaks. Both targets run inside `test/harness/sandbox.sh` (bubblewrap: no
+D-Bus, no network, a minimal `/dev`) with fake system verbs on `$PATH`,
+because the suite once reached `poweroff(8)` and switched off the developer's
+machine. A test binary started by hand refuses before `main()`; use
+`make test-one`. If a test hangs, `make test-one T=...` it under a timeout;
 `test_bluetooth` blocks in containers with no bluetooth stack and that is
 pre-existing, not something you broke.
 

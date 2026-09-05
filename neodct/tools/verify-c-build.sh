@@ -241,7 +241,11 @@ head2 "7. Glyph rendering matches Pillow"
 GLYPH="$SRC/build/default/test/test_font"
 if [ ! -x "$GLYPH" ]; then
     skip "test_font not built yet"
-elif "$GLYPH" "$GOLDEN/font/fontref.json" > "$OUT/font.log" 2>&1; then
+elif NEODCT_TEST_HARNESS=1 NEODCT_SANDBOX_TMP="$SRC/build/tmp" \
+     "$SRC/test/harness/sandbox.sh" "$GLYPH" "$GOLDEN/font/fontref.json" > "$OUT/font.log" 2>&1; then
+    # Through the sandbox, like make test: a test binary refuses to start any
+    # other way (test/harness/nd_testguard.c), and for the same reason it
+    # must not -- the suite once powered off the machine running it.
     pass "all 380 glyph records match"
 else
     fail "glyph mismatch -- see $OUT/font.log"

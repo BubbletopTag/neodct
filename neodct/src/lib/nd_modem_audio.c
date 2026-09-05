@@ -7,19 +7,61 @@
  * alsa-utils children write to and read from the bidirectional serial device
  * on USB interface 4 once AT+CPCMREG=1 has been sent.
  *
+ * ============ THE SEQUENCE, AND WHY IT IS NOT "START BOTH AT DIAL" ============
+ *
+ * The Python started both pipes the instant ATD returned, re-asserted
+ * CPCMREG=1 when the call came up, and left them running. On the real phone
+ * that produced calls where the far end was a wall of static, and calls
+ * where the mic never worked. Both have the same root: the PCM stream is raw
+ * S16_LE with no framing, so it is only intelligible if the reader starts on
+ * a sample boundary and never loses a byte. Two things broke that:
+ *
+ *   - re-asserting CPCMREG=1 while aplay was already reading. If the modem
+ *     restarts the stream at connect -- it switches from ringback to the
+ *     vocoder -- a partial frame lands mid-read, and every sample after it
+ *     is the wrong two bytes. That is the static, and it lasts the call.
+ *   - a reader stalling. The tty holds 64 KB, two seconds at 16 kHz, then
+ *     drops bytes in whatever amount fits, odd counts included. The old
+ *     speaker restart waited three seconds with nobody reading.
+ *
+ * So the order is now, all on the modem thread (nd_modem_poll()):
+ *
+ *   ATD -> OK           state CALLING. Nothing else inside dial(): the UI
+ *                       thread is blocked on it.
+ *   next tick           CPCMFRM, CPCMREG=1. If accepted, the SPEAKER only,
+ *                       for ringback. Nothing is listening on the uplink
+ *                       yet, so the mic does not push 32 KB/s at a port
+ *                       that is not in PCM mode.
+ *   the call comes up   CPCMREG=1 again FIRST, while nothing reads the port;
+ *                       then the speaker is killed, the port flushed and the
+ *                       speaker restarted from a clean buffer; then the mic.
+ *                       This happens once per call, on the first of VOICE
+ *                       CALL: BEGIN, CLCC <stat> 0 or ATA to report it.
+ *   a pipe dies         the speaker is restarted from a flushed port after
+ *                       the holdoff; the mic gets its three strikes.
+ *   the call ends       both pipes SIGKILLed, CPCMREG=0 on the next tick.
+ *   the modem is lost   the same, because a pipe recorded as live with no
+ *                       modem behind it blocked every later call's audio.
+ *
  * ============ THINGS THAT LOOK WRONG AND ARE NOT ============
  *
- *  - The PCM port is opened, put in raw mode and CLOSED AGAIN before either
- *    child starts. The configuration sticks to the device, not to the fd.
+ *  - The PCM port is opened, put in raw mode, FLUSHED and CLOSED AGAIN before
+ *    a child starts. The configuration sticks to the device, not to the fd,
+ *    and the flush is what guarantees the child's first byte is the first
+ *    byte of a frame the modem sent after it.
  *  - Its baud rate is NOT set, unlike the AT port's. PCM is not framed by the
  *    UART clock here, and the Python does not set it either.
+ *  - VMIN=1, VTIME=0 are set explicitly. Whoever last had the port may have
+ *    left VMIN=0, and then aplay's first read returns nothing, which it takes
+ *    as end of file and exits -- to be restarted every three seconds.
  *  - "default" is a trap for the microphone once the guest has two cards:
  *    QEMU's USB Audio is playback-only card 0, so ALSA's default maps to a
  *    device arecord cannot capture from. /proc/asound is scanned for a pcm*c
  *    node instead, and the scan is byte-sorted, so card10 precedes card2.
  *  - The speaker retries for ever; the mic gets three tries and then the call
  *    carries on listen-only, because "there is no capture device" is a normal
- *    state on this hardware, not something to spin on.
+ *    state on this hardware, not something to spin on. A mic that ran for
+ *    ND_MIC_STABLE_S first was working, and starts its three over.
  *  - _stop_call_audio() sends SIGKILL, not SIGTERM. Popen.kill() is SIGKILL
  *    on Linux and an aplay left in D-state would hold the port.
  *
@@ -44,8 +86,6 @@
 #include "nd_proc.h"
 #include "nd_settings.h"
 #include "nd_types.h"
-
-#define MIC_GIVE_UP_AFTER 3
 
 /* ------------------------------------------------------------------ *
  * Finding the PCM port and the capture device
@@ -400,6 +440,7 @@ static void start_mic_pipe(nd_modem *m, const char *port)
     if (spawn_quiet(argv, &pid)) {
         m->mic_pid = pid;
         m->mic_live = true;
+        m->mic_started_at = nd_modem__now();
         nd_log(ND_LOG_MODEM, "Mic uplink: arecord -D %s -> %s (%d Hz %s).", device, port,
                (int)m->pcm_rate, ND_MODEM_PCM_FORMAT);
     } else {
@@ -411,51 +452,104 @@ static void start_mic_pipe(nd_modem *m, const char *port)
 }
 
 /* ------------------------------------------------------------------ *
- * _start_call_audio, line 677
+ * The port, before every start
  * ------------------------------------------------------------------ */
 
-void nd_modem__start_call_audio(nd_modem *m)
+/* Find the PCM port, put it in raw mode, optionally discard whatever is
+ * waiting in it, and record it as the active port. Called before EVERY pipe
+ * start, not once per call, because the flush is the point: a speaker that
+ * starts reading from an empty buffer starts on a frame boundary. The mic
+ * does not ask for the flush -- discarding unread downlink while the speaker
+ * is reading it would only cost a few milliseconds of the far end. */
+static bool pcm_port_ready(nd_modem *m, bool flush_input)
 {
     char port[ND_MODEM_PORT_MAX];
     char resolved[ND_PATH_MAX];
     struct termios t;
     int fd;
 
-    if (m->audio_live || m->mic_live)
-        return;
-
-    nd_modem__pcm_port(port, sizeof port);
+    if (m->pcm_active)
+        (void)nd_strlcpy(port, m->active_pcm_port, sizeof port);
+    else
+        nd_modem__pcm_port(port, sizeof port);
     if (!nd_path_exists(port)) {
         nd_log(ND_LOG_MODEM, "PCM port %s not found; call audio unavailable.", port);
-        return;
+        return false;
     }
 
     /* Opened only to configure the device, then closed again. */
     if (nd_path_resolve(resolved, sizeof resolved, port) != ND_OK)
-        return;
+        return false;
     fd = open(resolved, O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0 || tcgetattr(fd, &t) != 0) {
         nd_log(ND_LOG_MODEM, "PCM port setup failed: %s", strerror(errno));
         if (fd >= 0)
             (void)close(fd);
-        return;
+        return false;
     }
     t.c_iflag = 0;
     t.c_oflag = 0;
     t.c_lflag = 0;
     t.c_cflag = CS8 | CREAD | CLOCAL; /* no cfsetspeed here -- see the header */
+    t.c_cc[VMIN] = 1;
+    t.c_cc[VTIME] = 0;
     if (tcsetattr(fd, TCSANOW, &t) != 0) {
         nd_log(ND_LOG_MODEM, "PCM port setup failed: %s", strerror(errno));
         (void)close(fd);
-        return;
+        return false;
     }
+    if (flush_input)
+        (void)tcflush(fd, TCIFLUSH);
     (void)close(fd);
 
     (void)nd_strlcpy(m->active_pcm_port, port, sizeof m->active_pcm_port);
     m->pcm_active = true;
+    return true;
+}
+
+/* SIGKILL one child and collect it. A pid of -1 would signal every process
+ * we may signal and 0 our own group, so the guard is not decoration. */
+static void kill_child(pid_t *pid, bool *live)
+{
+    nd_proc_status st;
+
+    if (*live && *pid > 0) {
+        (void)kill(*pid, SIGKILL);
+        (void)nd_proc_wait(*pid, 1.0, &st);
+    }
+    *pid = -1;
+    *live = false;
+}
+
+/* ------------------------------------------------------------------ *
+ * The three starts
+ * ------------------------------------------------------------------ */
+
+void nd_modem__start_speaker(nd_modem *m)
+{
+    if (m->audio_live)
+        return;
+    if (!pcm_port_ready(m, /*flush_input=*/true))
+        return;
+    start_speaker_pipe(m, m->active_pcm_port);
+}
+
+void nd_modem__restart_speaker(nd_modem *m)
+{
+    kill_child(&m->audio_pid, &m->audio_live);
+    if (!pcm_port_ready(m, /*flush_input=*/true))
+        return;
+    start_speaker_pipe(m, m->active_pcm_port);
+}
+
+void nd_modem__start_mic(nd_modem *m)
+{
+    if (m->mic_live)
+        return;
+    if (!pcm_port_ready(m, /*flush_input=*/false))
+        return;
     m->mic_fails = 0;
-    start_speaker_pipe(m, port);
-    start_mic_pipe(m, port);
+    start_mic_pipe(m, m->active_pcm_port);
 }
 
 /* ------------------------------------------------------------------ *
@@ -464,28 +558,21 @@ void nd_modem__start_call_audio(nd_modem *m)
 
 void nd_modem__stop_call_audio(nd_modem *m)
 {
-    nd_proc_status st;
-    bool stopped = false;
+    bool stopped = m->audio_live || m->mic_live;
 
-    if (m->audio_live) {
-        (void)kill(m->audio_pid, SIGKILL);
-        (void)nd_proc_wait(m->audio_pid, 1.0, &st);
-        m->audio_pid = -1;
-        m->audio_live = false;
-        stopped = true;
-    }
-    if (m->mic_live) {
-        (void)kill(m->mic_pid, SIGKILL);
-        (void)nd_proc_wait(m->mic_pid, 1.0, &st);
-        m->mic_pid = -1;
-        m->mic_live = false;
-        stopped = true;
-    }
+    kill_child(&m->audio_pid, &m->audio_live);
+    kill_child(&m->mic_pid, &m->mic_live);
     if (stopped)
         nd_log(ND_LOG_MODEM, "Call audio stopped.");
 
     m->active_pcm_port[0] = '\0';
     m->pcm_active = false;
+    /* Nothing is owed to a call that is over. */
+    m->pcm_setup_pending = false;
+    m->audio_connect_pending = false;
+    m->pcm_reg_ok = false;
+    m->next_pcm_try = 0.0;
+    m->clcc_empty = 0;
     nd_modem__lock(m);
     m->call_stat = -1;
     m->call_connected = false;
@@ -519,7 +606,9 @@ void nd_modem__watch_audio_proc(nd_modem *m, double now)
         nd_log(ND_LOG_MODEM, "Speaker pipe exited rc=%d mid-call; restarting.", child_rc(&st));
         m->audio_pid = -1;
         m->audio_live = false;
-        start_speaker_pipe(m, m->active_pcm_port);
+        /* Through the restart, for the flush: whatever piled up in the port
+         * while nobody was reading is exactly the odd-byte hazard. */
+        nd_modem__restart_speaker(m);
     }
     /* Both branches run in the same call and both may re-arm the holdoff. */
     if (m->mic_live && nd_proc_wait(m->mic_pid, 0.0, &st) == ND_OK) {
@@ -527,8 +616,14 @@ void nd_modem__watch_audio_proc(nd_modem *m, double now)
 
         m->mic_pid = -1;
         m->mic_live = false;
+        /* The strikes are for a pipe that cannot get going, not for one that
+         * carried a whole conversation and then hiccupped -- a card that
+         * re-enumerates once per call would otherwise use up the three over
+         * three calls and leave every call after that listen-only. */
+        if (now - m->mic_started_at >= ND_MIC_STABLE_S)
+            m->mic_fails = 0;
         m->mic_fails++;
-        if (m->mic_fails >= MIC_GIVE_UP_AFTER) {
+        if (m->mic_fails >= ND_MIC_GIVE_UP_AFTER) {
             nd_log(ND_LOG_MODEM,
                    "Mic pipe keeps dying (rc=%d); giving up -- call continues listen-only. "
                    "Check `arecord -l` and the system.hw.modem_mic_device setting.",

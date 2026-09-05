@@ -170,16 +170,35 @@ probe-or-simulate pattern as BatteryService):
   once registered; it falls back to "No Service" whenever registration
   drops.
 * **Calls are LIVE and FULL-DUPLEX**: `system.modem.allow_calls`
-  defaults ON (OFF restores the pretend flow). `dial()` sends `ATD`,
-  then immediately `AT+CPCMREG=1`, then runs two alsa-utils pipes on the
-  bidirectional PCM port: `aplay -t raw -f S16_LE -r 16000 -c 1
-  /dev/ttyUSBn` (downlink → speaker) and `arecord … -D <mic> /dev/ttyUSBn`
-  (USB sound card mic → uplink). Mic device:
-  `system.hw.modem_mic_device` ("default"; `plughw:N,0` to pin;
-  OFF = listen-only; three arecord failures auto-degrade to listen-only
-  — check `arecord -l` and capture levels with `amixer`). Teardown
-  (End key, `NO CARRIER`, `VOICE CALL: END`) kills both pipes and sends
-  `AT+CPCMREG=0`; the call screen exits by itself on remote hangup.
+  defaults ON (OFF restores the pretend flow). `dial()` sends `ATD` and
+  nothing else (the UI thread is blocked on it); the modem thread's next
+  tick sends `AT+CPCMFRM` and `AT+CPCMREG=1` and, if the modem accepts,
+  starts the speaker pipe alone for ringback. When the call comes up
+  (`VOICE CALL: BEGIN`, `+CLCC` stat 0 or `ATA`, whichever is first)
+  `AT+CPCMREG=1` is asserted again while nothing reads the port, the
+  speaker is restarted from a `tcflush`ed port and the mic is started —
+  the PCM stream is unframed S16_LE, so a reader that starts half a
+  sample in hears static for the whole call, and that sequence is what
+  prevents it (`lib/nd_modem_audio.c`'s header has the reasoning). The
+  pipes: `aplay -t raw -f S16_LE -r 16000 -c 1 /dev/ttyUSBn` (downlink →
+  speaker) and `arecord … -D <mic> /dev/ttyUSBn` (USB sound card mic →
+  uplink). Mic device: `system.hw.modem_mic_device` (AUTO = the USB
+  card's capture node; `plughw:N,0` to pin; OFF = listen-only; three
+  arecord failures in a row auto-degrade to listen-only, and a mic that
+  ran ≥ 10 s starts the count over — check `arecord -l` and capture
+  levels with `amixer`). Teardown (End key, `NO CARRIER`, `VOICE CALL:
+  END`, two empty `+CLCC` in a row, or the modem going away) kills both
+  pipes and sends `AT+CPCMREG=0`; the call screen exits by itself on
+  remote hangup. `RING` and `MISSED_CALL` during a call are ignored (no
+  call waiting), and a write to the AT port that makes no progress for
+  2 s drops the modem instead of hanging the UI thread behind it.
+* **Boot grace**: for `system.modem.boot_grace_s` (default 30) after the
+  service starts, a modem that has not answered yet is neither
+  "Simulation" nor a fault: the carrier line stays at the layout's "No
+  Service", the meter is empty, the probe runs every 2 s instead of 10,
+  and a modem seen and then lost (the SIM7600 re-enumerates while its
+  firmware boots) is probed for again rather than reported. Set 0 for the
+  old behaviour, which is what QEMU and the tests use.
   Typing a number plays fake DTMF beeps (`System/tones/dtmf/`). Test
   line: 1-800-444-4444 (MCI readback — it reads your voice channel back,
   so hearing your own mic echo confirms full duplex!). QEMU note: if

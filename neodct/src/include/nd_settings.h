@@ -79,6 +79,7 @@ extern "C" {
 #define ND_SET_HW_MODEM_PCM_PORT "system.hw.modem_pcm_port"   /* "AUTO"    */
 #define ND_SET_HW_MODEM_MIC_DEV  "system.hw.modem_mic_device" /* "AUTO"    */
 #define ND_SET_MODEM_ALLOW_CALLS "system.modem.allow_calls"   /* "ON"      */
+#define ND_SET_MODEM_BOOT_GRACE  "system.modem.boot_grace_s"  /* "30"      */
 
 /* Wallpaper behind the framework's own chrome -- lists, dialogs, text boxes,
  * every screen that used to be flat black. ON by default, because that is the

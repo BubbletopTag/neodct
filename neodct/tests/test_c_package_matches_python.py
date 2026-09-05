@@ -46,10 +46,11 @@ import mkbadupdate  # noqa: E402
 import mkupdate  # noqa: E402
 
 from update_fixtures import BS, make_ndsw, pattern, png  # noqa: E402
+import c_driver  # noqa: E402
+from c_driver import tmp_path  # noqa: E402,F401 -- a scratch dir the sandbox can see
 
 BUILD = os.path.join(REPO, "src", "build", "default")
 DUMPER = os.path.join(BUILD, "test", "test_package")
-LIBDIR = os.path.join(BUILD, "lib")
 
 PLATFORM = "qemu-aarch64"
 
@@ -80,11 +81,7 @@ def unescape(text):
 
 def c_view(path):
     """What nd_package.c sees. Returns a dict, or {"open": "ERR", ...}."""
-    env = dict(os.environ)
-    env["LD_LIBRARY_PATH"] = LIBDIR
-    env.pop("NEODCT_ROOT", None)
-    out = subprocess.run([DUMPER, "--dump", str(path)], capture_output=True,
-                         check=True, env=env)
+    out = c_driver.run(DUMPER, "--dump", path)
     view = {"members": []}
     for line in out.stdout.decode().splitlines():
         parts = line.split("\t")
@@ -118,11 +115,7 @@ def c_view(path):
 
 
 def c_run(*args):
-    env = dict(os.environ)
-    env["LD_LIBRARY_PATH"] = LIBDIR
-    env.pop("NEODCT_ROOT", None)
-    out = subprocess.run([DUMPER] + [str(a) for a in args], capture_output=True,
-                         check=True, env=env)
+    out = c_driver.run(DUMPER, *args)
     fields = {}
     for line in out.stdout.decode().splitlines():
         parts = line.split("\t")

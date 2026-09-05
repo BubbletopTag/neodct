@@ -576,9 +576,7 @@ static void shell_navigate(struct neodct_shell *sh, const char *url_text)
 	nsurl *url;
 
 	if (nsurl_create(url_text, &url) != NSERROR_OK) {
-		neodct_status_transferring(&sh->status, -1);
-		snprintf(sh->status.text, sizeof(sh->status.text),
-			 "Bad URL");
+		neodct_status_error(&sh->status, "Bad URL");
 		return;
 	}
 	browser_window_navigate(sh->gw->bw, url, NULL, BW_NAVIGATE_HISTORY,
@@ -644,14 +642,23 @@ static void shell_play(struct neodct_shell *sh, const char *url)
 	int status;
 
 	if (!neodct_media_argv(url, argv, 8)) {
-		snprintf(sh->status.text, sizeof(sh->status.text),
-			 "Cannot play that");
+		neodct_status_error(&sh->status, "Cannot play that");
 		shell_sync(sh);
 		return;
 	}
 
-	snprintf(sh->status.text, sizeof(sh->status.text), "Playing...");
+	/* Say so NOW, on the screen, before anything else.
+	 *
+	 * shell_sync() only asks for a redraw; the request is serviced from
+	 * the event loop, and this function does not return to the event
+	 * loop until the player has finished with the screen. Over a mobile
+	 * link the player can take several seconds to open the url, and
+	 * without this paint those seconds were the page, unchanged, with
+	 * nothing to say the press had registered -- so the natural thing
+	 * was to press again, into a browser that was already stopped. */
+	neodct_status_loading(&sh->status);
 	shell_sync(sh);
+	fbtk_redraw(sh->gw->window);
 
 	/* Give the memory back before mpv asks for it.
 	 *
@@ -669,8 +676,7 @@ static void shell_play(struct neodct_shell *sh, const char *url)
 
 	pid = fork();
 	if (pid < 0) {
-		snprintf(sh->status.text, sizeof(sh->status.text),
-			 "Out of memory");
+		neodct_status_error(&sh->status, "Out of memory");
 		shell_sync(sh);
 		return;
 	}
@@ -687,11 +693,22 @@ static void shell_play(struct neodct_shell *sh, const char *url)
 		/* SIGCONT on the way back in interrupts the wait */
 	}
 
-	if (WIFEXITED(status) && WEXITSTATUS(status) == 127) {
-		snprintf(sh->status.text, sizeof(sh->status.text),
-			 "No media player");
-	} else {
-		neodct_status_done(&sh->status, now_ms());
+	/* The helper's exit status is the one word it gets to send back
+	 * about what happened -- see NEODCT_MEDIA_EXIT_*. It played, or
+	 * the status bar says why not, and says it until the next thing
+	 * the user does. */
+	{
+		int code = WIFEXITED(status) ? WEXITSTATUS(status)
+					     : NEODCT_MEDIA_EXIT_LOST;
+		const char *why = neodct_media_exit_text(code);
+
+		if (why == NULL) {
+			neodct_status_done(&sh->status, now_ms());
+		} else {
+			NSLOG(netsurf, INFO, "neodct-play exit %d: %s",
+			      code, why);
+			neodct_status_error(&sh->status, why);
+		}
 	}
 
 	/* mpv owned the framebuffer and left a video frame on it; and every

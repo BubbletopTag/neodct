@@ -1,0 +1,3 @@
+#!/bin/sh
+# There is no mixer in the sandbox; every setting "succeeds".
+exit 0

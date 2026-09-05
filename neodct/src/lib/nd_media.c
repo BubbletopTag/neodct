@@ -189,6 +189,36 @@ nd_err nd_media_build_argv(nd_media_argv *out, const char *url, nd_media_kind ki
     if (rc == ND_OK)
         rc = argv_push(out, "--demuxer-readahead-secs=1");
 
+    /* The BACKWARD cache is a separate budget and its default is 50 MiB.
+     * It holds packets already played so that a seek back can be served
+     * without refetching, and with --cache=yes it fills for as long as the
+     * file runs: a 20-minute clip at 300 kbit/s is 45 MB of it, on a phone
+     * with 64. The forward limit above never touched it. 256 KiB keeps a
+     * few seconds behind the play position for the LEFT key and bounds the
+     * whole cache at three quarters of a megabyte, however long the file. */
+    if (rc == ND_OK)
+        rc = argv_push(out, "--demuxer-max-back-bytes=256KiB");
+
+    /* Buffer before starting, and buffer a little before resuming. mpv's
+     * default is to start the moment one packet is in and pause a second
+     * later when the next one is not; over a mobile link that is a stutter
+     * on every start and on every stall. Two seconds of readahead first is
+     * a slightly longer ring and a much smoother first minute, and it costs
+     * no memory the cache above was not already allowed. */
+    if (rc == ND_OK)
+        rc = argv_push(out, "--cache-pause-initial=yes");
+    if (rc == ND_OK)
+        rc = argv_push(out, "--cache-pause-wait=2");
+
+    /* The screen from the first moment, not from the first frame. The
+     * NeoDCT fbdev output draws a loading ring while it has nothing else;
+     * for the ring to be there during the seconds the url takes to open,
+     * the output has to be created before the file is, which is exactly
+     * what this option is for. Not for audio: a song would otherwise play
+     * to a black screen where the caller's page used to be. */
+    if (rc == ND_OK && kind != ND_MEDIA_AUDIO)
+        rc = argv_push(out, "--force-window=immediate");
+
     if (rc == ND_OK && kind == ND_MEDIA_IMAGE) {
         rc = argv_push(out, "--image-display-duration=inf");
         if (rc == ND_OK)
@@ -209,6 +239,213 @@ nd_err nd_media_build_argv(nd_media_argv *out, const char *url, nd_media_kind ki
         return rc;
     out->argv[out->n] = NULL;
     return ND_OK;
+}
+
+nd_err nd_media_ipc_socket_path(char *out, size_t out_sz)
+{
+    if (out == NULL || out_sz == 0u)
+        return ND_ERR_INVAL;
+    return nd_snprintf(out, out_sz, ND_MEDIA_IPC_SOCKET_FMT, (long)getpid());
+}
+
+const char *nd_media_exit_name(int status)
+{
+    switch (status) {
+    case ND_MEDIA_EXIT_OK:       return "played";
+    case ND_MEDIA_EXIT_FAILED:   return "could not play";
+    case ND_MEDIA_EXIT_NOLOAD:   return "could not load";
+    case ND_MEDIA_EXIT_NONET:    return "no connection";
+    case ND_MEDIA_EXIT_NOTFOUND: return "not found";
+    case ND_MEDIA_EXIT_FORMAT:   return "unsupported format";
+    case ND_MEDIA_EXIT_DIED:     return "player killed";
+    case ND_MEDIA_ENOENT:        return "no mpv";
+    default:                     return "mpv error";
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * What mpv said
+ * ------------------------------------------------------------------ */
+
+/* The value of "key":"..." in one line of mpv's JSON, unescaped, or false
+ * if the key is not there. Deliberately not a JSON parser: mpv writes one
+ * flat object per line with string values, and the two escapes it uses in
+ * practice are the quote and the newline ffmpeg leaves on every message.
+ * Anything stranger is copied through, which for pattern matching is
+ * exactly as good as decoding it. */
+static bool json_string(const char *line, const char *key, char *out, size_t out_sz)
+{
+    char pat[64];
+    const char *p;
+    size_t used = 0u;
+
+    if (nd_snprintf(pat, sizeof pat, "\"%s\":\"", key) != ND_OK)
+        return false;
+    p = strstr(line, pat);
+    if (p == NULL)
+        return false;
+    p += strlen(pat);
+
+    while (*p != '\0' && *p != '"' && used + 1u < out_sz) {
+        char c = *p++;
+
+        if (c == '\\' && *p != '\0') {
+            char e = *p++;
+
+            switch (e) {
+            case 'n': c = '\n'; break;
+            case 't': c = '\t'; break;
+            case 'r': c = '\r'; break;
+            default:  c = e;    break; /* \" \\ \/ and the rest */
+            }
+        }
+        out[used++] = c;
+    }
+    out[used] = '\0';
+    return true;
+}
+
+static bool contains_ci_str(const char *hay, const char *needle);
+
+/* What ffmpeg says when the network, not the file, is the problem. Matched
+ * case-insensitively against the log text; the phrases are ffmpeg's own
+ * (libavformat/tcp.c, network.c, http.c) and glibc's resolver's. */
+static const char *const UNREACHABLE_PHRASES[] = {
+    "failed to resolve hostname",
+    "name or service not known",
+    "temporary failure in name resolution",
+    "connection refused",
+    "network is unreachable",
+    "no route to host",
+    "connection timed out",
+    "timed out",
+    "connection reset",
+    "host is down",
+    NULL
+};
+
+/* And when the server answered and said no. "HTTP error 404 Not Found" is
+ * http.c's log line; "Server returned 404 Not Found" is the same condition
+ * as an error string, which mpv also logs. Anything in the 400s is the
+ * same story from the user's side: the thing the page linked is not there
+ * for them. */
+static bool http_client_error(const char *text)
+{
+    static const char *const prefixes[] = {"http error 4", "server returned 4", NULL};
+    size_t i;
+
+    for (i = 0u; prefixes[i] != NULL; i++) {
+        if (contains_ci_str(text, prefixes[i]))
+            return true;
+    }
+    return false;
+}
+
+/* What mpv itself says when the bytes arrived and could not be used:
+ * loadfile.c's "Failed to recognize file format." and "No video or audio
+ * streams selected." -- the same two conditions the end-file event names
+ * as "unrecognized file format" and "no audio or video data played". */
+static const char *const FORMAT_PHRASES[] = {
+    "failed to recognize file format",
+    "unrecognized file format",
+    "no video or audio streams selected",
+    "no audio or video data played",
+    NULL
+};
+
+bool nd_media_outcome_feed_text(nd_media_outcome *o, const char *text)
+{
+    bool changed = false;
+    size_t i;
+
+    if (o == NULL || text == NULL)
+        return false;
+
+    for (i = 0u; UNREACHABLE_PHRASES[i] != NULL; i++) {
+        if (contains_ci_str(text, UNREACHABLE_PHRASES[i])) {
+            changed |= !o->unreachable;
+            o->unreachable = true;
+            break;
+        }
+    }
+    if (http_client_error(text)) {
+        changed |= !o->not_found;
+        o->not_found = true;
+    }
+    for (i = 0u; FORMAT_PHRASES[i] != NULL; i++) {
+        if (contains_ci_str(text, FORMAT_PHRASES[i])) {
+            changed |= !o->format_error;
+            o->format_error = true;
+            break;
+        }
+    }
+    return changed;
+}
+
+bool nd_media_outcome_feed(nd_media_outcome *o, const char *line)
+{
+    char event[32];
+    char text[256];
+    bool changed = false;
+
+    if (o == NULL || line == NULL)
+        return false;
+    if (!json_string(line, "event", event, sizeof event))
+        return false;
+
+    if (strcmp(event, "log-message") == 0) {
+        if (!json_string(line, "text", text, sizeof text))
+            return false;
+        return nd_media_outcome_feed_text(o, text);
+    }
+
+    if (strcmp(event, "end-file") == 0) {
+        changed = !o->ended;
+        o->ended = true;
+        if (json_string(line, "reason", text, sizeof text) && strcmp(text, "error") == 0) {
+            changed |= !o->error;
+            o->error = true;
+        }
+        /* mpv_error_string() words, from libmpv/client.h: "unrecognized
+         * file format" is the demuxer giving up, "no audio or video data
+         * played" is every decoder giving up. Both mean the bytes arrived
+         * and this build cannot do anything with them. */
+        if (json_string(line, "file_error", text, sizeof text) &&
+            (strstr(text, "unrecognized file format") != NULL ||
+             strstr(text, "no audio or video data") != NULL ||
+             strstr(text, "not supported") != NULL)) {
+            changed |= !o->format_error;
+            o->format_error = true;
+        }
+        return changed;
+    }
+
+    return false;
+}
+
+int nd_media_exit_status(const nd_media_outcome *o, bool exited, int mpv_rc)
+{
+    if (!exited)
+        return ND_MEDIA_EXIT_DIED;
+    if (mpv_rc == ND_MEDIA_EXIT_OK || mpv_rc == ND_MEDIA_ENOENT || o == NULL)
+        return mpv_rc;
+
+    /* A failure with a reason attached beats mpv's bare 2. The order is
+     * from most to least specific about the cause. A reason seen on stderr
+     * counts even when the end-file event was missed -- the socket may
+     * never have connected -- but only against a 2: a 1 is mpv failing to
+     * start, and a 404 in its log is not why. */
+    if (mpv_rc == ND_MEDIA_EXIT_FAILED || o->error) {
+        if (o->format_error)
+            return ND_MEDIA_EXIT_FORMAT;
+        if (o->not_found)
+            return ND_MEDIA_EXIT_NOTFOUND;
+        if (o->unreachable)
+            return ND_MEDIA_EXIT_NONET;
+        if (o->error)
+            return ND_MEDIA_EXIT_NOLOAD;
+    }
+    return mpv_rc;
 }
 
 /* ------------------------------------------------------------------ *
@@ -341,6 +578,11 @@ static bool contains_ci(const char *hay, const char *needle)
             return true;
     }
     return false;
+}
+
+static bool contains_ci_str(const char *hay, const char *needle)
+{
+    return contains_ci(hay, needle);
 }
 
 /* The event names in /sys/class/input, sorted by strcmp -- which is what
@@ -488,35 +730,22 @@ static void suspend_end(pid_t pid)
         (void)kill(pid, SIGCONT);
 }
 
-/* Wait for mpv's IPC socket to appear and connect to it. Returns -1 if mpv
- * exited or never got that far; the caller then just waits it out, and
- * mpv's own input.conf bindings are the way back. */
-static int ipc_connect(pid_t child, const char *sock_path)
+/* Has the child exited? Asked WITHOUT reaping it (WNOWAIT), so that the
+ * one waitpid() at the end of nd_media_play() still has a status to read.
+ *
+ * This used to be waitpid(child, NULL, WNOHANG), which reaps -- and throws
+ * the status away. The final waitpid() then found no child at all, left
+ * its status variable at zero, and zero said "played": every failure mpv
+ * ever reported while the bridge was running came back to the browser as
+ * a success. Found by the fake-mpv test, not on a phone. */
+static bool child_exited(pid_t child)
 {
-    double deadline = now_ms() + (double)SOCKET_TIMEOUT_MS;
-    struct sockaddr_un addr;
+    siginfo_t info;
 
-    if (strlen(sock_path) >= sizeof addr.sun_path)
-        return -1;
-
-    while (now_ms() < deadline) {
-        int fd;
-
-        if (waitpid(child, NULL, WNOHANG) == child)
-            return -1;
-
-        fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-        if (fd < 0)
-            return -1;
-        memset(&addr, 0, sizeof addr);
-        addr.sun_family = AF_UNIX;
-        (void)nd_snprintf(addr.sun_path, sizeof addr.sun_path, "%s", sock_path);
-        if (connect(fd, (const struct sockaddr *)&addr, sizeof addr) == 0)
-            return fd;
-        (void)close(fd);
-        nap_ms(50);
-    }
-    return -1;
+    memset(&info, 0, sizeof info);
+    if (waitid(P_PID, (id_t)child, &info, WEXITED | WNOHANG | WNOWAIT) != 0)
+        return true; /* ECHILD: already gone, whatever the reason */
+    return info.si_pid == child;
 }
 
 /* One evdev read, returning the first key-DOWN code in it or -1.
@@ -563,41 +792,241 @@ static int32_t next_keycode(int fd, int timeout_ms, int32_t *pending, size_t *n_
     return next_keycode(fd, 0, pending, n_pending);
 }
 
-/* Forward keypresses to mpv until it exits. */
-static void bridge_keys(pid_t child, const char *sock_path, int keypad_fd)
+/* One chunk off a descriptor, split into lines. A line longer than the
+ * buffer is dropped up to its newline rather than matched in pieces: half a
+ * log message can be the half without the "not" in it. */
+typedef struct {
+    char buf[1024];
+    size_t used;
+    bool overflow;
+} line_buf;
+
+/* The socket carries JSON events; stderr carries mpv's terminal log, which
+ * is classified as text and then passed on to OUR stderr so the serial
+ * console still shows every line mpv wrote. */
+static void feed_lines(line_buf *l, const char *data, size_t n, nd_media_outcome *o,
+                       bool terminal)
+{
+    size_t i;
+
+    for (i = 0u; i < n; i++) {
+        char c = data[i];
+
+        if (c == '\n') {
+            if (!l->overflow) {
+                l->buf[l->used] = '\0';
+                if (terminal) {
+                    (void)nd_media_outcome_feed_text(o, l->buf);
+                    l->buf[l->used] = '\n';
+                    (void)!write(STDERR_FILENO, l->buf, l->used + 1u);
+                } else {
+                    (void)nd_media_outcome_feed(o, l->buf);
+                }
+            }
+            l->used = 0u;
+            l->overflow = false;
+        } else if (l->used + 2u < sizeof l->buf) {
+            l->buf[l->used++] = c;
+        } else {
+            l->overflow = true;
+        }
+    }
+}
+
+/* One attempt at mpv's socket; -1 if it is not there yet. */
+static int ipc_try_connect(const char *sock_path)
+{
+    struct sockaddr_un addr;
+    int fd;
+
+    if (strlen(sock_path) >= sizeof addr.sun_path)
+        return -1;
+    fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return -1;
+    memset(&addr, 0, sizeof addr);
+    addr.sun_family = AF_UNIX;
+    (void)nd_snprintf(addr.sun_path, sizeof addr.sun_path, "%s", sock_path);
+    if (connect(fd, (const struct sockaddr *)&addr, sizeof addr) == 0)
+        return fd;
+    (void)close(fd);
+    return -1;
+}
+
+/* Ask mpv to send its error log over the socket too. Late -- see
+ * nd_media_outcome_feed_text() for why stderr is the one that catches a
+ * fast failure -- but it costs nothing and covers a stderr that could not
+ * be piped. */
+static void ipc_request_log(int conn)
+{
+    static const char *const req[] = {"request_log_messages", "error", NULL};
+    char buf[128];
+    size_t n = nd_media_encode_command(req, buf, sizeof buf);
+
+    if (n > 0u)
+        (void)send(conn, buf, n, MSG_NOSIGNAL);
+}
+
+/* How often to retry the socket while mpv is still starting. */
+#define CONNECT_RETRY_MS 50
+
+/* How many more polls to give the stderr pipe after mpv has exited before
+ * giving up on its EOF. It arrives at once in practice -- nothing else
+ * holds the write end -- so this is a guard against a stuck fd, not a
+ * wait. */
+#define DRAIN_POLLS_AFTER_EXIT 20
+
+/* Talk to mpv until it exits: keys go in over the socket, events come out
+ * of it, and the terminal log comes out of the pipe.
+ *
+ * Everything learned lands in `o`. mpv's own input.conf bindings are the
+ * fallback if the socket never comes up, and the exit status is the
+ * fallback for the reason. `sock_path` may be NULL and `keypad_fd` and
+ * `err_fd` may be -1; the loop runs for whichever of them exist. */
+static void bridge(pid_t child, const char *sock_path, int keypad_fd, int err_fd,
+                   nd_media_outcome *o)
 {
     int32_t pending[64];
     size_t n_pending = 0u;
-    int conn;
+    line_buf sock_lines;
+    line_buf err_lines;
+    int conn = -1;
+    bool exited = false;
+    int drain_polls = 0;
+    double sock_deadline = now_ms() + (double)SOCKET_TIMEOUT_MS;
+    double next_try = 0.0;
 
-    conn = ipc_connect(child, sock_path);
-    if (conn < 0)
-        return;
+    memset(&sock_lines, 0, sizeof sock_lines);
+    memset(&err_lines, 0, sizeof err_lines);
+    if (sock_path != NULL && sock_path[0] == '\0')
+        sock_path = NULL;
 
     for (;;) {
-        const char *const *command;
-        char buf[256];
-        size_t n;
-        int32_t code;
+        struct pollfd pfd[3];
+        nfds_t n_fds = 0u;
+        int conn_slot = -1;
+        int keypad_slot = -1;
+        int err_slot = -1;
+        int ready;
+        double now = now_ms();
 
-        if (waitpid(child, NULL, WNOHANG) == child)
-            break;
+        if (!exited && child_exited(child))
+            exited = true;
 
-        code = next_keycode(keypad_fd, KEY_POLL_MS, pending, &n_pending);
-        if (code < 0)
+        /* The socket appears during mpv's startup, after its config but
+         * before its first frame. Keep trying, without ever blocking the
+         * stderr pipe: a pipe nobody reads fills, and a full pipe blocks
+         * mpv on its next log line. */
+        if (conn < 0 && sock_path != NULL && !exited && now < sock_deadline && now >= next_try) {
+            conn = ipc_try_connect(sock_path);
+            if (conn >= 0)
+                ipc_request_log(conn);
+            else
+                next_try = now + (double)CONNECT_RETRY_MS;
+        }
+
+        if (conn >= 0) {
+            conn_slot = (int)n_fds;
+            pfd[n_fds].fd = conn;
+            pfd[n_fds].events = POLLIN;
+            pfd[n_fds].revents = 0;
+            n_fds++;
+            if (keypad_fd >= 0) {
+                keypad_slot = (int)n_fds;
+                pfd[n_fds].fd = keypad_fd;
+                pfd[n_fds].events = POLLIN;
+                pfd[n_fds].revents = 0;
+                n_fds++;
+            }
+        }
+        if (err_fd >= 0) {
+            err_slot = (int)n_fds;
+            pfd[n_fds].fd = err_fd;
+            pfd[n_fds].events = POLLIN;
+            pfd[n_fds].revents = 0;
+            n_fds++;
+        }
+
+        if (exited) {
+            /* Nothing more can arrive on the socket; only the pipe's tail
+             * is worth waiting for, and not for long. */
+            if (err_fd < 0 || drain_polls++ > DRAIN_POLLS_AFTER_EXIT)
+                break;
+        }
+
+        if (n_fds == 0u) {
+            if (exited)
+                break;
+            nap_ms(CONNECT_RETRY_MS);
             continue;
-        command = nd_media_ipc_command(code);
-        if (command == NULL)
-            continue;
-        n = nd_media_encode_command(command, buf, sizeof buf);
-        if (n == 0u)
-            continue;
-        if (write(conn, buf, n) < 0) {
-            /* mpv closed the socket -- it is on its way out anyway. */
+        }
+
+        ready = poll(pfd, n_fds, CONNECT_RETRY_MS);
+        if (ready < 0 && errno != EINTR)
             break;
+        if (ready <= 0)
+            continue;
+
+        if (err_slot >= 0 && (pfd[err_slot].revents & (POLLIN | POLLHUP | POLLERR))) {
+            char chunk[512];
+            ssize_t got;
+
+            while ((got = read(err_fd, chunk, sizeof chunk)) > 0)
+                feed_lines(&err_lines, chunk, (size_t)got, o, true);
+            if (got == 0 || (got < 0 && errno != EAGAIN && errno != EINTR)) {
+                /* EOF: every writer is gone, mpv included. */
+                (void)close(err_fd);
+                err_fd = -1;
+            }
+        }
+
+        if (conn_slot >= 0 && (pfd[conn_slot].revents & (POLLIN | POLLHUP | POLLERR))) {
+            char chunk[512];
+            ssize_t got = recv(conn, chunk, sizeof chunk, 0);
+
+            if (got > 0) {
+                feed_lines(&sock_lines, chunk, (size_t)got, o, false);
+            } else if (got == 0 || (errno != EINTR && errno != EAGAIN)) {
+                /* mpv closed its end: it is on its way out. */
+                (void)close(conn);
+                conn = -1;
+                sock_path = NULL;
+            }
+        }
+
+        if (keypad_slot >= 0 && conn >= 0 && (pfd[keypad_slot].revents & POLLIN)) {
+            /* Everything queued on the device, then everything queued in
+             * pending: a burst is forwarded whole rather than one key per
+             * poll interval. */
+            int32_t code;
+
+            while ((code = next_keycode(keypad_fd, 0, pending, &n_pending)) >= 0) {
+                const char *const *command = nd_media_ipc_command(code);
+                char buf[256];
+                size_t n;
+
+                if (command == NULL)
+                    continue;
+                n = nd_media_encode_command(command, buf, sizeof buf);
+                if (n == 0u)
+                    continue;
+                /* MSG_NOSIGNAL: a write to a socket mpv has just closed
+                 * would otherwise be a SIGPIPE, which would end THIS
+                 * process before it could resume the application it
+                 * stopped -- a browser frozen with mpv already gone. */
+                if (send(conn, buf, n, MSG_NOSIGNAL) < 0) {
+                    (void)close(conn);
+                    conn = -1;
+                    sock_path = NULL;
+                    break;
+                }
+            }
         }
     }
-    (void)close(conn);
+    if (conn >= 0)
+        (void)close(conn);
+    if (err_fd >= 0)
+        (void)close(err_fd);
 }
 
 int nd_media_play(const char *url, nd_media_kind kind, pid_t suspend_pid, int keypad_fd,
@@ -605,21 +1034,22 @@ int nd_media_play(const char *url, nd_media_kind kind, pid_t suspend_pid, int ke
                   const char *input_conf)
 {
     nd_media_argv a;
+    nd_media_outcome outcome;
     pid_t stopped = 0;
     pid_t child = -1;
     int status = 0;
     int rc = ND_MEDIA_ENOENT;
+    int errp[2] = {-1, -1};
 
     if (url == NULL)
         return ND_MEDIA_ENOENT;
     if (mpv == NULL)
         mpv = ND_MPV_BIN;
+    memset(&outcome, 0, sizeof outcome);
 
-    /* Without a key source there is no point in a socket: nothing would be
-     * on the other end of it, and mpv's built-in bindings still work. */
-    if (keypad_fd < 0)
-        ipc_socket = NULL;
-
+    /* The socket is wanted even with no keypad to forward from: it is how
+     * mpv says why a file would not play, and "Video not found" on the
+     * status bar is worth a socket on its own. */
     if (ipc_socket != NULL && ipc_socket[0] != '\0') {
         char dir[ND_PATH_MAX];
         const char *slash = strrchr(ipc_socket, '/');
@@ -640,29 +1070,68 @@ int nd_media_play(const char *url, nd_media_kind kind, pid_t suspend_pid, int ke
         return ND_MEDIA_ENOENT;
     }
 
+    /* mpv's terminal output comes back through a pipe: it is where a fast
+     * failure says why (see nd_media_outcome_feed_text). No pipe is not
+     * fatal -- mpv then keeps our descriptors and the socket is all there
+     * is. */
+    if (pipe(errp) != 0) {
+        errp[0] = -1;
+        errp[1] = -1;
+    } else {
+        (void)fcntl(errp[0], F_SETFD, FD_CLOEXEC);
+        (void)fcntl(errp[1], F_SETFD, FD_CLOEXEC);
+        (void)fcntl(errp[0], F_SETFL, fcntl(errp[0], F_GETFL) | O_NONBLOCK);
+    }
+
     stopped = suspend_begin(suspend_pid);
 
     /* fork + execve, and NOTHING between them but the exec: this process
      * may have threads, and a mutex another thread held at the instant of
      * the fork stays locked forever in the child. nd_proc.h says the same
-     * thing at greater length. */
+     * thing at greater length. dup2 is on the async-signal-safe list. */
     (void)fflush(NULL);
     child = fork();
     if (child == 0) {
+        /* BOTH descriptors. mpv's terminal log goes to STDOUT (common/
+         * msg.c: only the status line is stderr), and the browser starts
+         * us with stdout on /dev/null -- so a pipe on stderr alone heard
+         * nothing, and the first emulator run said "Could not load video"
+         * for a 404 with the reason sitting in a discarded stdout. */
+        if (errp[1] >= 0) {
+            (void)dup2(errp[1], STDOUT_FILENO);
+            (void)dup2(errp[1], STDERR_FILENO);
+        }
         (void)execv(mpv, (char *const *)(uintptr_t)a.argv);
         _exit(ND_MEDIA_ENOENT); /* no mpv on this image */
     }
+    if (errp[1] >= 0)
+        (void)close(errp[1]);
     if (child < 0) {
         nd_log_err(ND_LOG_UI, "media: fork: %s", strerror(errno));
+        if (errp[0] >= 0)
+            (void)close(errp[0]);
         suspend_end(stopped);
         return ND_MEDIA_ENOENT;
     }
 
-    if (ipc_socket != NULL && ipc_socket[0] != '\0')
-        bridge_keys(child, ipc_socket, keypad_fd);
+    /* Closes errp[0] itself. */
+    bridge(child, ipc_socket, keypad_fd, errp[0], &outcome);
 
-    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
-    rc = WIFEXITED(status) ? WEXITSTATUS(status) : ND_MEDIA_ENOENT;
+    {
+        pid_t waited;
+
+        while ((waited = waitpid(child, &status, 0)) < 0 && errno == EINTR) {}
+        if (waited != child) {
+            /* Nothing to read a status from. It cannot happen now that the
+             * bridge no longer reaps, but a guess of "played" is the wrong
+             * guess to make about a player that has vanished. */
+            nd_log_err(ND_LOG_UI, "media: lost mpv's exit status: %s", strerror(errno));
+            rc = ND_MEDIA_EXIT_DIED;
+        } else {
+            rc = nd_media_exit_status(&outcome, WIFEXITED(status) != 0,
+                                      WIFEXITED(status) ? WEXITSTATUS(status) : 0);
+        }
+    }
 
     /* Whatever happened, give the caller its screen and its CPU back. */
     suspend_end(stopped);

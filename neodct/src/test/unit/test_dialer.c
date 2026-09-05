@@ -53,6 +53,9 @@
  *         dial -> CALLING -> show_calling -> End -> hangup -> IDLE
  *         a modem that is already IDLE ends show_calling with no key at all
  *         /tmp/neodct_sim_ring -> RINGING -> Answer/Decline/caller-gave-up
+ *         place_call: refused over a live call, dials and ends on End, and a
+ *                     dial the modem refuses is a notice that waits for OK
+ *         answer_call: RINGING -> answer -> show_calling -> End -> IDLE
  *
  * ============ WHY THE ROOT IS A SYMLINK FARM ============
  *
@@ -67,6 +70,7 @@
 
 #include <errno.h>
 #include <ftw.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -741,6 +745,42 @@ static bool keys_push(keys *k, int32_t code)
            nd_input_channel_send(&k->ch, code, false) == ND_OK;
 }
 
+/* A key that arrives AFTER a delay. MessageDialog drains the channel before
+ * its first draw (smallapp_test.h explains), so a key queued ahead of it is
+ * eaten and the dialog then waits for ever. This delivers one from another
+ * thread once the dialog is up. */
+typedef struct {
+    keys *k;
+    int32_t code;
+    double delay_s;
+    pthread_t th;
+} deferred_key;
+
+static void *deferred_key_run(void *arg)
+{
+    deferred_key *d = arg;
+    struct timespec ts;
+
+    ts.tv_sec = (time_t)d->delay_s;
+    ts.tv_nsec = (long)((d->delay_s - (double)ts.tv_sec) * 1e9);
+    (void)nanosleep(&ts, NULL);
+    (void)keys_push(d->k, d->code);
+    return NULL;
+}
+
+static bool keys_push_later(deferred_key *d, keys *k, int32_t code, double delay_s)
+{
+    d->k = k;
+    d->code = code;
+    d->delay_s = delay_s;
+    return pthread_create(&d->th, NULL, deferred_key_run, d) == 0;
+}
+
+static void keys_push_later_join(deferred_key *d)
+{
+    (void)pthread_join(d->th, NULL);
+}
+
 static void keys_close(keys *k, nd_ui *ui)
 {
     ui->input = NULL;
@@ -1179,6 +1219,185 @@ static void shoot_dialer_frames(nd_capture *cap, const nd_json_doc *golden)
  * main
  * ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ *
+ * 6. Placing and answering, as one call each
+ * ------------------------------------------------------------------ */
+
+/* place_call() will not dial over a call that is up. The home screen used
+ * to hand any number to the modem whatever state it was in, and an ATD on
+ * top of a live call is how the modem ended up with two calls the phone
+ * knew nothing about. */
+static void test_place_call_refuses_over_a_live_call(void)
+{
+    fixture fx;
+    nd_modem *m = NULL;
+
+    if (!fx_init(&fx)) {
+        g_skips++;
+        fprintf(stderr, "SKIP place_call refusal: no fonts\n");
+        return;
+    }
+    if (nd_modem_open(&m) != ND_OK || m == NULL) {
+        g_skips++;
+        fprintf(stderr, "SKIP place_call refusal: no modem\n");
+        fx_free(&fx);
+        return;
+    }
+    fx.ui.modem = m;
+
+    CHECK(nd_modem_dial(m, "0741234567"), "a first call is up");
+    CHECK(!nd_dialer_place_call(&fx.ui, "0745555555", NULL), "no dialling over a live call");
+    CHECK_INT(nd_modem_state(m), ND_CALL_CALLING, "and the live call is untouched");
+    CHECK(nd_modem_hangup(m), "released");
+
+    fx.ui.modem = NULL;
+    nd_modem_close(m);
+    fx_free(&fx);
+}
+
+/* The whole outgoing flow behind one entry point: the screen comes up, the
+ * modem dials, the loop runs, End hangs up, and the caller is told the call
+ * happened. */
+static void test_place_call_dials_and_ends_on_end(void)
+{
+    fixture fx;
+    nd_modem *m = NULL;
+    keys k;
+
+    if (!fx_init(&fx)) {
+        g_skips++;
+        fprintf(stderr, "SKIP place_call: no fonts\n");
+        return;
+    }
+    if (nd_modem_open(&m) != ND_OK || m == NULL) {
+        g_skips++;
+        fprintf(stderr, "SKIP place_call: no modem\n");
+        fx_free(&fx);
+        return;
+    }
+    fx.ui.modem = m;
+    if (!keys_open(&k, &fx.ui)) {
+        g_skips++;
+        fprintf(stderr, "SKIP place_call: no key channel\n");
+        nd_modem_close(m);
+        fx_free(&fx);
+        return;
+    }
+
+    CHECK(keys_push(&k, ND_KEY_CLEAR), "queued End");
+    CHECK(nd_dialer_place_call(&fx.ui, "0741234567", "Mum"), "the call was placed");
+    CHECK_INT(nd_modem_state(m), ND_CALL_IDLE, "End hung it up");
+    CHECK(white(fx.canvas, 8, 12), "the in-call screen was drawn");
+
+    keys_close(&k, &fx.ui);
+    fx.ui.modem = NULL;
+    nd_modem_close(m);
+    fx_free(&fx);
+}
+
+/* A dial the modem refuses is said so on screen and waited on, not returned
+ * from silently: pressing Call and landing back on the home screen with
+ * nothing said looks exactly like the phone ignoring the key. The queued
+ * key is what dismisses the notice, and its absence afterwards is the proof
+ * that something modal consumed it. */
+static void test_place_call_reports_a_failed_dial(void)
+{
+    fixture fx;
+    nd_modem *m = NULL;
+    keys k;
+    deferred_key later;
+
+    if (!fx_init(&fx)) {
+        g_skips++;
+        fprintf(stderr, "SKIP failed dial: no fonts\n");
+        return;
+    }
+    if (nd_modem_open(&m) != ND_OK || m == NULL) {
+        g_skips++;
+        fprintf(stderr, "SKIP failed dial: no modem\n");
+        fx_free(&fx);
+        return;
+    }
+    fx.ui.modem = m;
+    if (!keys_open(&k, &fx.ui)) {
+        g_skips++;
+        fprintf(stderr, "SKIP failed dial: no key channel\n");
+        nd_modem_close(m);
+        fx_free(&fx);
+        return;
+    }
+
+    CHECK(keys_push_later(&later, &k, ND_KEY_ENTER, 0.3), "OK for the notice, on its way");
+    /* No digits at all: the modem's own filter refuses it, in every mode. */
+    CHECK(!nd_dialer_place_call(&fx.ui, "hello", NULL), "a number with no digits does not dial");
+    keys_push_later_join(&later);
+    CHECK_INT(nd_modem_state(m), ND_CALL_IDLE, "nothing was left up");
+    CHECK_INT(nd_ui_read_keypress(&fx.ui, 0.05), ND_KEY_NONE,
+              "the notice consumed the key, so it was shown and waited on");
+
+    keys_close(&k, &fx.ui);
+    fx.ui.modem = NULL;
+    nd_modem_close(m);
+    fx_free(&fx);
+}
+
+/* answer_call() is the incoming side of the same shape: answer, then the
+ * in-call loop, then the truth about whether it happened. Run against the
+ * sim ring, so it goes with the other ring-file test in main()'s order. */
+static void test_answer_call_connects_and_ends_on_end(void)
+{
+    fixture fx;
+    nd_modem *m = NULL;
+    keys k;
+    char path[ND_PATH_MAX];
+
+    if (!fx_init(&fx)) {
+        g_skips++;
+        fprintf(stderr, "SKIP answer_call: no fonts\n");
+        return;
+    }
+    if (nd_modem_open(&m) != ND_OK || m == NULL) {
+        g_skips++;
+        fprintf(stderr, "SKIP answer_call: no modem\n");
+        fx_free(&fx);
+        return;
+    }
+    fx.ui.modem = m;
+    fx.ui.handling_call = true;
+    if (!keys_open(&k, &fx.ui)) {
+        g_skips++;
+        fprintf(stderr, "SKIP answer_call: no key channel\n");
+        nd_modem_close(m);
+        fx_free(&fx);
+        return;
+    }
+
+    if (nd_path_resolve(path, sizeof path, DIALER_SIM_RING) == ND_OK) {
+        FILE *f = fopen(path, "wb");
+
+        if (f != NULL) {
+            (void)fputs("5559876\n", f);
+            (void)fclose(f);
+        }
+    }
+    wait_for_state(m, ND_CALL_RINGING);
+    CHECK_INT(nd_modem_state(m), ND_CALL_RINGING, "the sim ring reached the modem");
+
+    CHECK(keys_push(&k, ND_KEY_CLEAR), "queued End");
+    CHECK(nd_dialer_answer_call(&fx.ui, "5559876", NULL), "answered");
+    CHECK_INT(nd_modem_state(m), ND_CALL_IDLE, "End hung it up");
+    CHECK(white(fx.canvas, 8, 12), "the in-call screen was drawn");
+
+    if (nd_path_resolve(path, sizeof path, DIALER_SIM_RING) == ND_OK)
+        (void)remove(path);
+    wait_for_state(m, ND_CALL_IDLE);
+
+    keys_close(&k, &fx.ui);
+    fx.ui.modem = NULL;
+    nd_modem_close(m);
+    fx_free(&fx);
+}
+
 int main(void)
 {
     nd_capture *cap = NULL;
@@ -1206,7 +1425,11 @@ int main(void)
      * file by mtime, so a leftover from a later case would make the next
      * modem it opens believe a call is already coming in. */
     test_show_incoming_results();
+    test_answer_call_connects_and_ends_on_end();
     test_show_calling_ends_the_call();
+    test_place_call_refuses_over_a_live_call();
+    test_place_call_dials_and_ends_on_end();
+    test_place_call_reports_a_failed_dial();
     test_show_calling_returns_when_the_far_end_goes();
     test_first_ring_frame_has_the_label_off();
     test_caller_label_fallbacks();

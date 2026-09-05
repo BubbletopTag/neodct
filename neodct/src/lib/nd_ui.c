@@ -138,6 +138,8 @@
  * framework work package. */
 #pragma weak nd_dialer_show_calling
 #pragma weak nd_dialer_show_incoming
+#pragma weak nd_dialer_place_call
+#pragma weak nd_dialer_answer_call
 
 /* The shared contact picker has no declaration anywhere in the frozen header
  * set -- main.py imports System.apps.PhoneBook.shared.list_ui directly, and
@@ -2257,6 +2259,8 @@ static void open_notification(nd_ui *ui)
         open_event_notification(ui, count, target);
 }
 
+static void place_call(nd_ui *ui, const char *number, const char *name);
+
 void nd_ui_handle_input(nd_ui *ui, int32_t code)
 {
     char ch;
@@ -2285,10 +2289,7 @@ void nd_ui_handle_input(nd_ui *ui, int32_t code)
         if (ui->state == ND_UI_STATE_HOME) {
             ui->state = ND_UI_STATE_MENU;
         } else if (ui->state == ND_UI_STATE_HOME_DIALING) {
-            if (ui->modem != NULL && nd_modem_dial != NULL)
-                (void)nd_modem_dial(ui->modem, ui->dial_buffer);
-            if (nd_dialer_show_calling != NULL)
-                nd_dialer_show_calling(ui, ui->dial_buffer, NULL);
+            place_call(ui, ui->dial_buffer, NULL);
             ui->dial_buffer[0] = '\0';
             ui->state = ND_UI_STATE_HOME;
         }
@@ -2311,12 +2312,8 @@ void nd_ui_handle_input(nd_ui *ui, int32_t code)
         nd_contact target;
 
         if (nd_contacts_show_selector != NULL &&
-            nd_contacts_show_selector(ui, "Select", "Call", &target)) {
-            if (ui->modem != NULL && nd_modem_dial != NULL)
-                (void)nd_modem_dial(ui->modem, target.number);
-            if (nd_dialer_show_calling != NULL)
-                nd_dialer_show_calling(ui, target.number, target.name);
-        }
+            nd_contacts_show_selector(ui, "Select", "Call", &target))
+            place_call(ui, target.number, target.name);
         return;
     }
 
@@ -2336,6 +2333,27 @@ void nd_ui_handle_input(nd_ui *ui, int32_t code)
 /* ------------------------------------------------------------------ *
  * Calls and the low-battery modal
  * ------------------------------------------------------------------ */
+
+/* An outgoing call, start to finish. handling_call is held for the whole of
+ * it for the same reason the incoming path holds it: with it clear, a modem
+ * that reports RINGING makes every read_keypress() inside the call screen
+ * return ND_KEY_INCOMING_CALL instead of a key -- and the End key stops
+ * working until the far end gives up. The modem now refuses a RING during a
+ * call anyway; this is the second lock on the same door. */
+static void place_call(nd_ui *ui, const char *number, const char *name)
+{
+    ui->handling_call = true;
+    if (nd_dialer_place_call != NULL) {
+        (void)nd_dialer_place_call(ui, number, name);
+    } else {
+        /* The Dialer is not linked: the pre-place_call sequence. */
+        if (ui->modem != NULL && nd_modem_dial != NULL)
+            (void)nd_modem_dial(ui->modem, number);
+        if (nd_dialer_show_calling != NULL)
+            nd_dialer_show_calling(ui, number, name);
+    }
+    ui->handling_call = false;
+}
 
 void nd_ui_handle_incoming_call(nd_ui *ui, const char *number)
 {
@@ -2360,17 +2378,24 @@ void nd_ui_handle_incoming_call(nd_ui *ui, const char *number)
         nd_notify_stop_ring(ui->notify);
 
     if (result == ND_CALL_ANSWERED) {
-        bool ok = ui->modem != NULL && nd_modem_answer != NULL && nd_modem_answer(ui->modem);
+        bool ok;
 
-        if (ok) {
-            if (nd_dialer_show_calling != NULL)
-                nd_dialer_show_calling(ui, number != NULL ? number : "", NULL);
+        if (nd_dialer_answer_call != NULL) {
+            ok = nd_dialer_answer_call(ui, number != NULL ? number : "", NULL);
         } else {
-            nd_log(ND_LOG_CORE, "Answer failed; releasing the call.");
+            ok = ui->modem != NULL && nd_modem_answer != NULL && nd_modem_answer(ui->modem);
+            if (ok && nd_dialer_show_calling != NULL)
+                nd_dialer_show_calling(ui, number != NULL ? number : "", NULL);
         }
+        if (!ok)
+            nd_log(ND_LOG_CORE, "Answer failed; releasing the call.");
         /* show_calling returns on End or on a remote hangup; make sure the
-         * line is really down either way. */
-        if (ui->modem != NULL && nd_modem_hangup != NULL)
+         * line is really down either way -- unless the modem already says
+         * it is. A second AT+CHUP on a line that is down is a second round
+         * trip the UI thread waits out for nothing, and it was every call's
+         * last act. */
+        if (ui->modem != NULL && nd_modem_hangup != NULL &&
+            (nd_modem_state == NULL || nd_modem_state(ui->modem) != ND_CALL_IDLE))
             (void)nd_modem_hangup(ui->modem);
     } else if (result == ND_CALL_DECLINED) {
         nd_log(ND_LOG_CORE, "Call declined.");

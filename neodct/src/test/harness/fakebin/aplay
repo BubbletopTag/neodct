@@ -1,0 +1,25 @@
+#!/bin/sh
+# A silent aplay. The sandbox has no /dev/snd, so the real one would exit at
+# once with "audio open error" and every pipeline built on it would look
+# broken; this one behaves like a working card that nobody can hear.
+#
+# Two shapes exist in this tree: a stream on stdin (the ringer, the music
+# player: "-t raw ... -c 2", no file) and a file argument (a one-shot tone,
+# the call's downlink). A stream is consumed to EOF, which is what keeps the
+# feeder's socket flowing; a file "plays" for a few seconds, long enough for
+# a test to see the process alive and short enough not to matter.
+last=""
+prev=""
+for a in "$@"; do
+    prev=$last
+    last=$a
+done
+case "$last" in
+-*|"") exec cat >/dev/null ;;
+esac
+case "$prev" in
+-t|-f|-r|-c|-D|--buffer-time|--period-time|-d|--duration)
+    exec cat >/dev/null ;;
+esac
+sleep 5
+exit 0

@@ -1,0 +1,16 @@
+#!/bin/sh
+# nd-refused -- what poweroff, reboot, halt, shutdown, systemctl, loginctl
+# and busybox resolve to while the test suite runs (run-tests.sh puts this
+# directory first on $PATH; the others are symlinks to this file).
+#
+# Reaching this script means a test process asked for a system verb that
+# three other layers should have made unreachable. It does nothing, exits
+# non-zero, and writes a line to $NEODCT_FAKEBIN_LOG so run-tests.sh can
+# fail the whole run and show exactly what was asked for.
+name=$(basename "$0")
+line="nd-refused: $name $*"
+echo "$line" >&2
+if [ -n "${NEODCT_FAKEBIN_LOG:-}" ]; then
+    echo "$line" >> "$NEODCT_FAKEBIN_LOG"
+fi
+exit 1

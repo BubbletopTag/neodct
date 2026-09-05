@@ -52,6 +52,7 @@ int main(int argc, char **argv)
     const char *fbdev = ND_MEDIA_FBDEV;
     const char *mpv;
     char discovered[ND_PATH_MAX];
+    char sock[ND_PATH_MAX];
     bool no_suspend = false;
     bool dry_run = false;
     bool end_of_options = false;
@@ -146,6 +147,11 @@ int main(int argc, char **argv)
             device = NULL;
     }
 
+    /* Our own socket, keypad or not: the events on it are how a failure
+     * gets a name. See nd_media.h for why it is under /tmp. */
+    if (nd_media_ipc_socket_path(sock, sizeof sock) != ND_OK)
+        sock[0] = '\0';
+
     if (dry_run) {
         nd_media_argv a;
         size_t n;
@@ -157,8 +163,7 @@ int main(int argc, char **argv)
             (void)printf("none\n");
         (void)printf("keypad: %s\n", device != NULL ? device : "none");
 
-        if (nd_media_build_argv(&a, url, nd_media_kind_for(url), fbdev,
-                                keypad_fd >= 0 ? ND_MEDIA_IPC_SOCKET : NULL, mpv,
+        if (nd_media_build_argv(&a, url, nd_media_kind_for(url), fbdev, sock, mpv,
                                 ND_MEDIA_INPUT_CONF) != ND_OK) {
             (void)fprintf(stderr, "neodct-play: command line too long\n");
             return 2;
@@ -173,8 +178,13 @@ int main(int argc, char **argv)
 
     {
         int rc = nd_media_play(url, nd_media_kind_for(url), suspend_pid, keypad_fd, mpv, fbdev,
-                               ND_MEDIA_IPC_SOCKET, ND_MEDIA_INPUT_CONF);
+                               sock, ND_MEDIA_INPUT_CONF);
 
+        /* One line on stderr, which the Browser app pumps to the serial
+         * console with a tag: the same word the status bar is about to
+         * show, next to the url it was about. */
+        (void)fprintf(stderr, "neodct-play: %s (exit %d): %s\n", nd_media_exit_name(rc), rc,
+                      url);
         if (keypad_fd >= 0)
             (void)close(keypad_fd);
         return rc;

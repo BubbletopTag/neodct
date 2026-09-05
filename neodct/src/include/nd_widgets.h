@@ -599,6 +599,21 @@ void nd_draw_pencil(struct nd_draw *d, int32_t x, int32_t y, int32_t size, nd_co
 void nd_dialer_draw_call(nd_ui *ui, const char *number, const char *name);
 void nd_dialer_show_calling(nd_ui *ui, const char *number, const char *name);
 
+/* The two whole flows, and what the core should call.
+ *
+ * place_call: the in-call screen goes up saying "Calling..." BEFORE the modem
+ * is asked, because dial() blocks the UI thread until ATD has answered and a
+ * screen that does not change for that long is a phone that has frozen. Then
+ * the modem dials, then show_calling runs. Refuses -- false, nothing sent --
+ * while a call is already up; says "Call failed" on screen and waits for OK
+ * when the modem will not dial. true means the call happened and is over.
+ *
+ * answer_call: the same shape for an incoming call the user has accepted:
+ * "Connecting..." up first, then answer(), then show_calling. false means the
+ * modem refused ATA and the caller should release the line. */
+bool nd_dialer_place_call(nd_ui *ui, const char *number, const char *name);
+bool nd_dialer_answer_call(nd_ui *ui, const char *number, const char *name);
+
 typedef enum { ND_CALL_ANSWERED = 0, ND_CALL_DECLINED, ND_CALL_GONE } nd_incoming_result;
 
 void nd_dialer_draw_incoming(nd_ui *ui, const char *caller_text, bool blink_on);

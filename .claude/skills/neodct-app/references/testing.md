@@ -4,18 +4,24 @@
 
     cd neodct/src
     make                 # -Werror -Wconversion; it will not let much through
-    make test            # ~70 binaries, one per test file
+    make test            # ~70 binaries, one per test file, in the sandbox
     make ASAN=1 test     # before pushing; AGENTS.md asks for it
 
-If `make test` seems to hang, run the binaries individually with a timeout
-rather than assuming you broke something:
+Both test targets run inside `test/harness/sandbox.sh` -- bubblewrap with no
+D-Bus, no network and a minimal `/dev` -- with fake `poweroff`, `reboot` and
+`systemctl` first on `$PATH`, because the suite once reached `poweroff(8)`
+and switched off the machine running it. A test binary started by hand
+refuses before `main()`, so there is no loop over `build/default/test/test_*`
+to write any more; the one-binary form is:
+
+    make test-one T=test_modem
+
+If `make test` seems to hang, run the binaries one at a time that way, under
+a timeout, rather than assuming you broke something:
 
     for t in build/default/test/test_*; do
-        root=$(mktemp -d)
-        timeout 120 env NEODCT_ROOT=$root NEODCT_GOLDEN=$PWD/../tests/golden \
-            LD_LIBRARY_PATH=build/default/lib "$t" >/dev/null 2>&1 \
+        timeout 120 make test-one T=$(basename $t) >/dev/null 2>&1 \
             && echo "ok   $(basename $t)" || echo "FAIL $(basename $t)"
-        rm -rf "$root"
     done
 
 `test_bluetooth` blocks indefinitely in a container with no bluetooth stack.

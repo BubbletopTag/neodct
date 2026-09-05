@@ -176,6 +176,13 @@ DISPLAYD_SRCS := $(wildcard displayd/*.c)
 RECUI_SRCS  := $(wildcard recovery/*.c)
 TEST_SRCS   := $(wildcard test/unit/*.c)
 
+# Linked into every test binary and test app, never into anything that ships:
+# a constructor that disarms the real halt and refuses to run outside the
+# harness. test/harness/nd_testguard.c says why, at length.
+HARNESS_OBJ := $(OBJDIR)/test/harness/nd_testguard.o
+SANDBOX     := test/harness/sandbox.sh
+RUN_TESTS   := test/harness/run-tests.sh
+
 # An app is any directory under apps/ that contains at least one .c file.
 APP_DIRS := $(sort $(dir $(wildcard apps/*/*.c)))
 
@@ -245,7 +252,7 @@ endif
 # Rules
 # ------------------------------------------------------------------ #
 
-.PHONY: all test clean distclean install format skipped help
+.PHONY: all test test-one clean distclean install format skipped help
 .DEFAULT_GOAL := all
 
 all: $(TARGETS) skipped
@@ -438,7 +445,7 @@ $(OBJDIR)/test/unit/test_bootbar.o: CPPFLAGS_ALL += -Itools
 # test_bootbar links BOTH libneodct and the boot bar: its whole job is to
 # hold the two against each other, asserting that nd_bootbar's hard-coded
 # boxes are the ones nd_progress_init() derives on a real 240x175 nd_ui.
-$(TESTDIR)/test_bootbar: $(OBJDIR)/test/unit/test_bootbar.o $(BOOTBAR_LIB_OBJS) $(LIB)
+$(TESTDIR)/test_bootbar: $(OBJDIR)/test/unit/test_bootbar.o $(BOOTBAR_LIB_OBJS) $(HARNESS_OBJ) $(LIB)
 	$(Q)mkdir -p $(dir $@)
 	$(say) LINK $@
 	$(Q)$(CC) $^ -o $@ $(LDFLAGS_ALL) $(PKG_LIBS)
@@ -446,17 +453,17 @@ $(TESTDIR)/test_bootbar: $(OBJDIR)/test/unit/test_bootbar.o $(BOOTBAR_LIB_OBJS) 
 # One binary per test file, each with its own main(). No test framework: a
 # test that needs a framework to express itself is usually testing the
 # framework.
-$(TESTDIR)/%: $(OBJDIR)/test/unit/%.o $(LIB)
+$(TESTDIR)/%: $(OBJDIR)/test/unit/%.o $(HARNESS_OBJ) $(LIB)
 	$(Q)mkdir -p $(dir $@)
 	$(say) LINK $@
-	$(Q)$(CC) -o $@ $< -L$(LIBDIR) -lneodct $(LDFLAGS_ALL) $(PKG_LIBS) -lm
+	$(Q)$(CC) -o $@ $< $(HARNESS_OBJ) -L$(LIBDIR) -lneodct $(LDFLAGS_ALL) $(PKG_LIBS) -lm
 
 # test_recui is the exception to the rule above, because nd-recui is the
 # exception to the build: it cannot be linked against libneodct, so its
 # objects have to come in directly. nd_recui.o is left out -- it has main().
 # libneodct still comes along, for platform_test.h and for the PNG writer the
 # test dumps its frames through; the two halves never call each other.
-$(TESTDIR)/test_recui: $(OBJDIR)/test/unit/test_recui.o $(RECUI_LIB_OBJS) $(LIB)
+$(TESTDIR)/test_recui: $(OBJDIR)/test/unit/test_recui.o $(RECUI_LIB_OBJS) $(HARNESS_OBJ) $(LIB)
 	$(Q)mkdir -p $(dir $@)
 	$(say) LINK $@
 	$(Q)$(CC) -o $@ $(filter %.o,$^) -L$(LIBDIR) -lneodct $(LDFLAGS_ALL) $(PKG_LIBS) -lm
@@ -472,7 +479,7 @@ endef
 $(foreach d,$(APP_DIRS),$(eval $(call APP_RULE,$(patsubst apps/%/,%,$(d)))))
 
 define TEST_APP_RULE
-$(TESTDIR)/apps/$(1)/app.so: $$(patsubst %.c,$$(OBJDIR)/%.o,$$(wildcard test/apps/$(1)/*.c)) $$(LIB)
+$(TESTDIR)/apps/$(1)/app.so: $$(patsubst %.c,$$(OBJDIR)/%.o,$$(wildcard test/apps/$(1)/*.c)) $$(HARNESS_OBJ) $$(LIB)
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(say) LINK $$@
 	$$(Q)$$(CC) -shared -o $$@ $$(filter %.o,$$^) -L$$(LIBDIR) -lneodct $$(LDFLAGS_ALL) $$(PKG_LIBS) -lm
@@ -483,10 +490,22 @@ $(foreach d,$(TEST_APP_DIRS),$(eval $(call TEST_APP_RULE,$(patsubst test/apps/%/
 # Tests
 # ------------------------------------------------------------------ #
 #
+# THE SUITE RUNS IN A SANDBOX, AND ONLY THERE. On 2026-08-31 and again on
+# 2026-09-04 a test reached poweroff(8) and switched off the workstation
+# running it -- a test process on a desktop has the rights of the person at
+# the keyboard. So `make test` hands the loop to test/harness/sandbox.sh
+# (bubblewrap: no D-Bus, no network, a minimal /dev, everything but the
+# checkout read-only, a private /tmp under build/) and test/harness/
+# run-tests.sh puts fake poweroff/reboot/systemctl on $PATH and fails the run
+# if one is ever reached. Every test binary also carries
+# test/harness/nd_testguard.c, which disarms the halt in the library and
+# refuses to start outside the harness -- so `build/*/test/test_x` run by
+# hand stops with a message pointing at `make test-one T=test_x`.
+#
 # NEODCT_ROOT points the whole path layer at a scratch directory, so a test
 # that writes settings.prop cannot touch a developer's real /NeoDCT -- and on
 # a machine that has no /NeoDCT at all, which is every machine this runs on,
-# the tests still exercise the real code paths.
+# the tests still exercise the real code paths. run-tests.sh sets it.
 #
 # NEODCT_GOLDEN is the absolute path to the reference set, so a test can find
 # the oracle without knowing where it was invoked from. Prefer it over a
@@ -497,28 +516,21 @@ $(foreach d,$(TEST_APP_DIRS),$(eval $(call TEST_APP_RULE,$(patsubst test/apps/%/
 # (neodct/tools/verify-c-build.sh) additionally runs some of them with an
 # explicit reference path; treat that as an override, not as the only way in.
 #
-# The scratch root is chmod'ed 0711 below rather than left at the 0700
-# mktemp -d gives it, because it is the parent of every per-case root and
-# apps/Browser spawns netsurf as ndusr_ut. On a machine that HAS an ndusr_ut
-# -- a phone, a QEMU image, a developer who created one -- a 0700 root means
-# the dropped child cannot resolve the path to the fake netsurf it was told
-# to run, and the test sees a browser that produced nothing at all. 0711 is
-# the phone's own shape: traversable by everyone, listable by nobody.
+# NEODCT_TEST_SANDBOX=none opts out of the container for a disposable VM or
+# CI box that has nothing to lose; the fakes and the guard still apply.
+
+TEST_ENV := NEODCT_GOLDEN=$(GOLDEN) LD_LIBRARY_PATH=$(LIBDIR) NEODCT_SANDBOX_TMP=$(abspath $(BUILD)/tmp)
 
 test: all $(TEST_BINS) $(TEST_APP_SOS)
 	$(Q)if [ -z "$(strip $(TEST_BINS))" ]; then \
 	    printf '  %-7s %s\n' 'SKIP' 'make test: no test/unit/*.c yet'; exit 0; \
 	fi; \
-	fail=0; \
-	root=$$(mktemp -d); chmod 0711 $$root; \
-	for t in $(TEST_BINS); do \
-	    printf '  %-7s %s\n' 'TEST' "$$t"; \
-	    if ! NEODCT_ROOT=$$root NEODCT_GOLDEN=$(GOLDEN) NEODCT_COLOR=1 \
-	         LD_LIBRARY_PATH=$(LIBDIR) $$t; then fail=1; fi; \
-	done; \
-	rm -rf "$$root"; \
-	if [ $$fail -ne 0 ]; then echo "FAILED"; exit 1; fi; \
-	echo "all tests passed"
+	$(TEST_ENV) $(SANDBOX) $(RUN_TESTS) $(TEST_BINS)
+
+# One binary, the same way: make test-one T=test_modem
+test-one: all $(TESTDIR)/$(T) $(TEST_APP_SOS)
+	$(Q)if [ -z "$(T)" ]; then echo "usage: make test-one T=test_name"; exit 2; fi; \
+	$(TEST_ENV) $(SANDBOX) $(RUN_TESTS) $(TESTDIR)/$(T)
 
 # ------------------------------------------------------------------ #
 # Install -- the target layout, whose absolute paths are load-bearing

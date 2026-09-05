@@ -35,6 +35,27 @@
 /** the helper that knows how to run mpv; see System/core/MediaWidget */
 #define NEODCT_MEDIA_PLAYER "/NeoDCT/System/core/MediaWidget/neodct-play"
 
+/**
+ * What the helper exits with. THIS IS A CONTRACT with the phone tree:
+ * neodct/src/include/nd_media.h defines the same values as ND_MEDIA_EXIT_*,
+ * and its test_mediawidget.c reads this header and fails if the two
+ * drift. 0 to 4 are mpv's own; 80 and up are what neodct-play makes of
+ * mpv's IPC events, and are how "Video not found" and "No connection"
+ * get to be different lines on the status bar; 127 is a shell's word for
+ * "command not found", and the helper's for "no mpv on this image".
+ */
+#define NEODCT_MEDIA_EXIT_OK 0
+#define NEODCT_MEDIA_EXIT_FAILED 2
+#define NEODCT_MEDIA_EXIT_NOLOAD 80
+#define NEODCT_MEDIA_EXIT_NONET 81
+#define NEODCT_MEDIA_EXIT_NOTFOUND 82
+#define NEODCT_MEDIA_EXIT_FORMAT 83
+#define NEODCT_MEDIA_EXIT_DIED 84
+#define NEODCT_MEDIA_EXIT_NOPLAYER 127
+
+/** the helper did not exit at all: killed, or never waited for */
+#define NEODCT_MEDIA_EXIT_LOST (-1)
+
 /** what a <video> with no width/height gets, in CSS pixels */
 #define NEODCT_MEDIA_DEFAULT_W 240
 #define NEODCT_MEDIA_DEFAULT_H 175
@@ -88,6 +109,15 @@ bool neodct_media_is_media(const char *url);
  * \return false if the url is unusable or will not fit
  */
 bool neodct_media_argv(const char *url, const char **argv, int max);
+
+/**
+ * The status-bar line for a helper exit status, or NULL when it played.
+ *
+ * Every non-zero status gets a line, known or not: a player that came
+ * back without playing has to say so, or the flash of black and the return
+ * to the page reads as the browser having crashed.
+ */
+const char *neodct_media_exit_text(int status);
 
 /** filled width of one row of a right-pointing play triangle */
 int neodct_media_triangle_row(int row, int rows, int width);

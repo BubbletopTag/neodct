@@ -390,6 +390,46 @@ typedef struct {
 /* NULL clears it. */
 void nd_svc_halt_simulate(const nd_svc_halt_sim *sim);
 
+/* Whether THIS process may spawn a real poweroff or reboot.
+ *
+ * nd_svc_poweroff() resolves "poweroff" along $PATH and spawns it, and a
+ * process with no service channel IS the core as far as this header can tell
+ * -- so any test that reaches the halt without a simulation installed
+ * switches off the machine running the suite. That is not hypothetical:
+ * test/apps/SvcApp calls nd_svc_poweroff() for real and is safe only while
+ * its parent installed a fake first. On 2026-08-31 it took a developer's
+ * workstation down mid-build, and on 2026-09-04 it did so again through a
+ * test binary run by hand, with no NEODCT_ROOT in its environment -- which is
+ * why one environment variable is no longer the whole interlock.
+ *
+ * Four rules, in order (nd_svc_halt_allowed_for() is the table):
+ *
+ *   1. A simulation is installed -> allowed. nd_svc_halt_simulate() means the
+ *      spawn cannot reach a real binary, and it is how the halt path is
+ *      covered at all.
+ *   2. This process was disarmed -> refused. nd_svc_halt_disarm() is sticky,
+ *      and test/harness/nd_testguard.c calls it from a constructor linked
+ *      into every test binary, so a test cannot forget to.
+ *   3. NEODCT_ROOT is set -> refused. `make test` sets it for every binary
+ *      and every app they launch, and nothing on the phone ever does.
+ *   4. Otherwise only ROOT may. On the phone the core runs as ndusr and asks
+ *      the broker, which is root and does the spawning; the direct path in
+ *      svc_halt() is for a root core with no broker. A non-root process
+ *      asking for a real halt is a test or a bug, and on a desktop it is the
+ *      person at the keyboard, whom logind will happily oblige.
+ *
+ * Refusing surfaces as "this image has no halt binary", which is already the
+ * one failure an app is told about; the log line names the rule. */
+bool nd_svc_halt_allowed(void);
+
+/* The rule itself, every input a parameter, so a test can cover the whole
+ * table without being root or on a phone. */
+bool nd_svc_halt_allowed_for(bool sim_installed, bool disarmed, bool in_test_root, bool is_root);
+
+/* Rule 2. Sticky: once called, this process never resolves a real halt.
+ * Production never calls it; the test harness does, before main(). */
+void nd_svc_halt_disarm(void);
+
 /* ------------------------------------------------------------------ *
  * The format simulation -- TESTS ONLY, for the same reason
  * ------------------------------------------------------------------ *

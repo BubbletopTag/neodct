@@ -42,8 +42,25 @@
  *  - MISSED_CALL has no `state != IDLE` guard where VOICE CALL: END does.
  *  - A quote-less +COPS: 0 reply sets the operator to None, it does not leave
  *    the previous carrier on screen.
- *  - _drop_hardware clears the signal and the carrier but NOT caller_id, the
- *    IMEI, the call stat or the audio pipes.
+ *  - _drop_hardware clears the signal and the carrier but NOT caller_id or
+ *    the IMEI.
+ *
+ * ============ AND FOUR PLACES IT DELIBERATELY IS NOT 1:1 ============
+ *
+ * Each of these was a freeze or a dead call on the real phone, and each is
+ * pinned by a test in test_modem.c section 11:
+ *
+ *  - RING, +CLIP and MISSED_CALL are IGNORED while a call is being placed or
+ *    is up. The Python let a waiting call's RING reset the state to RINGING
+ *    -- after which the core's ring tick owned every read_keypress() and the
+ *    End key stopped working -- and let its MISSED_CALL end the live call.
+ *  - One empty AT+CLCC does not end a call; ND_CLCC_EMPTY_TO_END in a row do.
+ *    The first CLCC after ATD is a full poll interval out, not immediate.
+ *  - dial() and answer() carry ATD or ATA and nothing else, because the UI
+ *    thread is blocked on them. CPCMFRM, CPCMREG=1 and the audio pipes are
+ *    owed to the modem thread's next tick; see nd_modem_audio.c's header.
+ *  - _drop_hardware DOES stop the audio pipes. A pipe recorded as live with
+ *    no modem behind it made every later call start silent.
  */
 
 #include <dirent.h>
@@ -334,6 +351,32 @@ static void set_state(nd_modem *m, nd_call_state s)
     unlock_state(m);
 }
 
+/* The call coming up, from whichever of VOICE CALL: BEGIN, CLCC <stat> 0,
+ * ATA or the simulated dial reports it first. The timer starts on the first
+ * report and the audio work is armed on the first report, and a second report
+ * of the same call is neither -- re-asserting PCM under a running pipe was
+ * the static. Returns true on that first report. */
+static bool mark_connected(nd_modem *m)
+{
+    bool edge = false;
+
+    lock_state(m);
+    m->state = ND_CALL_CONNECTED;
+    if (!m->call_connected) {
+        m->call_connected = true;
+        m->call_connected_at = nd_modem__now();
+        edge = true;
+    }
+    unlock_state(m);
+    /* hardware and allow_calls are written by this thread only. A pretend
+     * call, with or without a modem present, has no pipes to bring up. */
+    if (edge && m->hardware && m->allow_calls) {
+        m->audio_connect_pending = true;
+        m->next_pcm_try = 0.0;
+    }
+    return edge;
+}
+
 /* ------------------------------------------------------------------ *
  * The event ring -- collections.deque(maxlen=8)
  * ------------------------------------------------------------------ */
@@ -447,7 +490,15 @@ void nd_modem__handle_urc(nd_modem *m, const char *line)
         nd_log(ND_LOG_MODEM, "%s", line);
 
     if (strcmp(line, "RING") == 0) {
-        if (get_state(m) != ND_CALL_RINGING) {
+        nd_call_state st = get_state(m);
+
+        if (st == ND_CALL_CALLING || st == ND_CALL_CONNECTED) {
+            /* Call waiting, which this phone does not do. Taking it would
+             * put the live call's screen into the ring loop. */
+            nd_log(ND_LOG_MODEM, "RING with a call up: ignored.");
+            return;
+        }
+        if (st != ND_CALL_RINGING) {
             lock_state(m);
             m->state = ND_CALL_RINGING;
             m->caller_id[0] = '\0';
@@ -460,7 +511,10 @@ void nd_modem__handle_urc(nd_modem *m, const char *line)
     if (starts_with(line, "+CLIP:")) {
         char number[ND_MODEM_NUMBER_MAX];
         bool changed = false;
+        nd_call_state st = get_state(m);
 
+        if (st == ND_CALL_CALLING || st == ND_CALL_CONNECTED)
+            return; /* the waiting call's number is not the live call's */
         if (!split_quote(line, 1u, number, sizeof number))
             return; /* IndexError -> number = None */
         if (number[0] == '\0')
@@ -485,21 +539,14 @@ void nd_modem__handle_urc(nd_modem *m, const char *line)
     if (starts_with(line, "VOICE CALL: BEGIN")) {
         nd_mev e;
 
+        (void)mark_connected(m);
         lock_state(m);
-        m->state = ND_CALL_CONNECTED;
-        if (!m->call_connected) {
-            m->call_connected = true;
-            m->call_connected_at = nd_modem__now();
-        }
         mev_init(&e, ND_MEV_CONNECTED);
         if (m->caller_id_known) {
             e.has_detail = true;
             (void)nd_strlcpy(e.text, m->caller_id, sizeof e.text);
         }
         unlock_state(m);
-        /* Some firmwares only accept CPCMREG=1 with a call up; re-assert on
-         * the next free tick now that we are connected. */
-        m->pcm_retry = true;
         nd_modem__queue(m, &e);
         return;
     }
@@ -514,7 +561,15 @@ void nd_modem__handle_urc(nd_modem *m, const char *line)
     if (starts_with(line, "MISSED_CALL:")) {
         char text[ND_MODEM_TEXT_MAX];
         const char *rest = after_colon(line);
+        nd_call_state st = get_state(m);
 
+        if (st == ND_CALL_CALLING || st == ND_CALL_CONNECTED) {
+            /* A waiting call that rang out. The Python ended the LIVE call
+             * here, leaving the line up on the modem with the phone back on
+             * the home screen and nothing to press. */
+            nd_log(ND_LOG_MODEM, "MISSED_CALL with a call up: ignored.");
+            return;
+        }
         /* No `state != IDLE` guard here, unlike VOICE CALL: END. */
         set_state(m, ND_CALL_IDLE);
         nd_modem__stop_call_audio(m);
@@ -654,6 +709,16 @@ void nd_modem__poll_clcc(nd_modem *m)
 
     if (!have_stat) {
         if (get_state(m) != ND_CALL_IDLE) {
+            /* One empty list is also what the modem answers in the beat
+             * between ATD returning OK and the call entering its table, and
+             * between RING and the same. Ending the call on one tore down
+             * calls that were still being placed. */
+            m->clcc_empty++;
+            if (m->clcc_empty < ND_CLCC_EMPTY_TO_END) {
+                nd_log(ND_LOG_MODEM, "CLCC: no call in the list (%d of %d); asking again.",
+                       (int)m->clcc_empty, (int)ND_CLCC_EMPTY_TO_END);
+                return;
+            }
             nd_log(ND_LOG_MODEM, "CLCC: no call in the list; ending call state.");
             set_state(m, ND_CALL_IDLE);
             nd_modem__stop_call_audio(m);
@@ -661,6 +726,7 @@ void nd_modem__poll_clcc(nd_modem *m)
         }
         return;
     }
+    m->clcc_empty = 0;
 
     if (stat != m->call_stat) {
         const char *name = clcc_name(stat);
@@ -673,15 +739,8 @@ void nd_modem__poll_clcc(nd_modem *m)
         else
             nd_log(ND_LOG_MODEM, "Call progress: %d", (int)stat);
     }
-    if (stat == ND_CLCC_CONNECTED) {
-        lock_state(m);
-        if (!m->call_connected) {
-            m->call_connected = true;
-            m->call_connected_at = nd_modem__now();
-        }
-        m->state = ND_CALL_CONNECTED;
-        unlock_state(m);
-    }
+    if (stat == ND_CLCC_CONNECTED)
+        (void)mark_connected(m);
 }
 
 /* ------------------------------------------------------------------ *
@@ -1015,8 +1074,11 @@ bool nd_modem__probe_hardware(nd_modem *m)
     bool ok;
 
     /* Armed BEFORE the attempt, so a port held by S45modem still costs a full
-     * PROBE_RETRY_S before the next try. */
-    m->next_probe = nd_modem__now() + ND_PROBE_RETRY_S;
+     * PROBE_RETRY_S before the next try -- or a BOOT_PROBE_S during the boot
+     * grace, when the modem is expected any moment and ten seconds of
+     * "No Service" past the moment it answers is ten seconds too many. */
+    m->next_probe = nd_modem__now() +
+                    (nd_modem__now() < m->boot_deadline ? ND_MODEM_BOOT_PROBE_S : ND_PROBE_RETRY_S);
     if (!nd_modem__acquire(m)) {
         /* Silent until now, and it is a real cause on a phone that has one:
          * S45modem's background redial takes the lock per transaction, and a
@@ -1043,12 +1105,20 @@ bool nd_modem__probe_hardware(nd_modem *m)
 
 void nd_modem__drop_hardware(nd_modem *m, const char *why)
 {
+    /* Inside the boot grace a modem that answered once and then went away is
+     * a SIM7600 re-enumerating while its firmware boots, which it does. That
+     * is not a fault; it is probed for again. */
+    bool booting = nd_modem__now() < m->boot_deadline;
+
     /* NOT "back to Simulation Mode" any more, because it never was: getting
      * here means a modem we had ALREADY ADOPTED stopped working. Every call
      * site is a hard errno on that port, or the watchdog in nd_modem_poll().
      * A phone that has never seen a modem does not come through here at all
      * -- it simply never leaves ND_MODEM_LINK_SIM. See nd_modem.h. */
-    nd_log_err(ND_LOG_MODEM, "MODEM FAULT: lost the modem (%s).", why);
+    if (booting)
+        nd_log(ND_LOG_MODEM, "Lost the modem during boot (%s); probing again.", why);
+    else
+        nd_log_err(ND_LOG_MODEM, "MODEM FAULT: lost the modem (%s).", why);
     if (m->fd >= 0)
         (void)close(m->fd);
     m->fd = -1;
@@ -1070,15 +1140,77 @@ void nd_modem__drop_hardware(nd_modem *m, const char *why)
      * repeat; nd_modem__init_modem() clears both on a successful adoption, so
      * a modem that really does come back can fault again later and be
      * reported again. */
-    if (!m->faulted)
-        m->fault_pending = true;
-    m->faulted = true;
-    (void)nd_strlcpy(m->fault_why, why != NULL ? why : "", sizeof m->fault_why);
+    if (!booting) {
+        if (!m->faulted)
+            m->fault_pending = true;
+        m->faulted = true;
+        (void)nd_strlcpy(m->fault_why, why != NULL ? why : "", sizeof m->fault_why);
+    }
     unlock_state(m);
 
-    /* caller_id, imei, _call_stat and the audio pipes are deliberately NOT
-     * cleared here -- the Python does not clear them either. */
+    /* caller_id and imei are deliberately NOT cleared here -- the Python does
+     * not clear them either. The audio pipes ARE, and the Python did not:
+     * with the modem gone they are two processes holding the sound card and
+     * a dead tty, and while they were recorded as live the next call
+     * refused to start audio at all. hardware is already false above, so
+     * this queues no CPCMREG=0 for a port that is not there. */
+    nd_modem__stop_call_audio(m);
     queue_simple(m, ND_MEV_MODEM_LOST, why);
+}
+
+/* ------------------------------------------------------------------ *
+ * The PCM path, on the modem thread with the port lock already held
+ * ------------------------------------------------------------------ */
+
+/* After ATD: pick the stream rate and ask for PCM over USB. CPCMFRM picks
+ * the rate (1 = 16 kHz). If the modem accepts CPCMREG=1 now, the speaker
+ * alone is started so ringback is audible; the mic waits for the call to
+ * come up, because nothing is listening on the uplink until then. The
+ * Python did all of this INSIDE dial(), with the UI thread waiting. */
+static void pcm_setup(nd_modem *m)
+{
+    char cmd[32];
+    char final_frm[64];
+    char final_reg[64];
+    const char *frm = (m->pcm_rate == 16000) ? "1" : "0";
+
+    if (nd_snprintf(cmd, sizeof cmd, "AT+CPCMFRM=%s", frm) != ND_OK)
+        return;
+    if (!nd_modem__transact(m, cmd, 2.0, final_frm, sizeof final_frm, NULL))
+        (void)nd_strlcpy(final_frm, "None", sizeof final_frm);
+    if (!nd_modem__transact(m, "AT+CPCMREG=1", 3.0, final_reg, sizeof final_reg, NULL))
+        (void)nd_strlcpy(final_reg, "None", sizeof final_reg);
+    nd_log(ND_LOG_MODEM, "USB audio setup: CPCMFRM=%s -> %s, CPCMREG=1 -> %s", frm, final_frm,
+           final_reg);
+    if (strcmp(final_reg, "OK") != 0)
+        return; /* the call coming up asks again */
+    m->pcm_reg_ok = true;
+    /* Either transact can carry a NO CARRIER through the URC handler and end
+     * the call under us; a pipe for a call that is over is a leak. */
+    if (get_state(m) != ND_CALL_IDLE)
+        nd_modem__start_speaker(m);
+}
+
+/* The call is up: assert PCM again while nothing is reading the port, then
+ * bring the pipes up from a clean buffer. false means the modem would not
+ * enable PCM and the caller should try again after the holdoff -- without
+ * PCM the pipes would read nothing and push 32 KB/s at a port that is not
+ * in PCM mode, so they are not started. */
+static bool call_audio_up(nd_modem *m)
+{
+    char final[64];
+    bool got;
+
+    got = nd_modem__transact(m, "AT+CPCMREG=1", 3.0, final, sizeof final, NULL);
+    nd_log(ND_LOG_MODEM, "CPCMREG=1 (call up) -> %s", got ? final : "None");
+    if (!got || strcmp(final, "OK") != 0)
+        return false;
+    m->pcm_reg_ok = true;
+    if (get_state(m) == ND_CALL_IDLE)
+        return true; /* collapsed during the command; nothing to bring up */
+    nd_modem__restart_speaker(m);
+    nd_modem__start_mic(m);
+    return true;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1098,13 +1230,7 @@ void nd_modem_poll(nd_modem *m)
      * system.modem.allow_calls OFF. */
     if (m->sim_connect_armed && get_state(m) == ND_CALL_CALLING && now >= m->sim_connect_at) {
         m->sim_connect_armed = false;
-        lock_state(m);
-        m->state = ND_CALL_CONNECTED;
-        if (!m->call_connected) {
-            m->call_connected = true;
-            m->call_connected_at = nd_modem__now();
-        }
-        unlock_state(m);
+        (void)mark_connected(m);
         queue_simple(m, ND_MEV_CONNECTED, NULL);
     }
 
@@ -1198,13 +1324,17 @@ void nd_modem_poll(nd_modem *m)
     }
 
     if (get_state(m) != ND_CALL_IDLE) {
-        if (m->pcm_retry) {
-            char final[64];
-            bool got;
-
-            m->pcm_retry = false;
-            got = nd_modem__transact(m, "AT+CPCMREG=1", 3.0, final, sizeof final, NULL);
-            nd_log(ND_LOG_MODEM, "CPCMREG=1 (in-call retry) -> %s", got ? final : "None");
+        /* The work dial() and answer() left for this thread. Both flags are
+         * cleared by nd_modem__stop_call_audio() if the call collapses
+         * first, so neither runs for a call that is already over. */
+        if (m->pcm_setup_pending) {
+            m->pcm_setup_pending = false;
+            pcm_setup(m);
+        }
+        if (m->audio_connect_pending && now >= m->next_pcm_try) {
+            m->next_pcm_try = now + ND_AUDIO_RESTART_HOLDOFF_S;
+            if (call_audio_up(m))
+                m->audio_connect_pending = false;
         }
         if (now >= m->next_clcc) {
             m->next_clcc = now + ND_CLCC_POLL_S;
@@ -1249,10 +1379,7 @@ static bool do_dial(nd_modem *m, const char *raw)
     char number[ND_MODEM_NUMBER_MAX];
     char cmd[ND_MODEM_NUMBER_MAX + 8];
     char final[64];
-    char final_frm[64];
-    char final_reg[64];
     bool got;
-    const char *frm;
 
     (void)nd_modem__filter_number(raw, number, sizeof number);
     /* After the filter, before the empty check: an all-junk number logs an
@@ -1272,33 +1399,37 @@ static bool do_dial(nd_modem *m, const char *raw)
 
     if (nd_snprintf(cmd, sizeof cmd, "ATD%s;", number) != ND_OK)
         return false;
-    got = nd_modem__command(m, cmd, 8.0, final, sizeof final, NULL);
-    if (!got || strcmp(final, "OK") != 0) {
-        nd_log(ND_LOG_MODEM, "Dial failed (final=%s)", got ? final : "None");
-        return false;
-    }
 
+    /* CALLING from before the ATD goes out, so a RING that lands during it
+     * is a collision to ignore rather than a call to take. A NO CARRIER
+     * final is routed through the URC handler and puts this back to IDLE;
+     * a plain ERROR is put back below. */
     set_state(m, ND_CALL_CALLING);
     lock_state(m);
     m->call_stat = -1;
     m->call_connected = false;
     m->call_connected_at = 0.0;
     unlock_state(m);
-    m->next_clcc = 0.0;
+    m->clcc_empty = 0;
+    m->pcm_reg_ok = false;
+    m->audio_connect_pending = false;
 
-    /* Route audio over USB immediately so ringback is audible while the far
-     * end is still ringing. CPCMFRM picks the stream rate (1 = 16 kHz). */
-    frm = (m->pcm_rate == 16000) ? "1" : "0";
-    (void)nd_snprintf(cmd, sizeof cmd, "AT+CPCMFRM=%s", frm);
-    if (!nd_modem__command(m, cmd, 2.0, final_frm, sizeof final_frm, NULL))
-        (void)nd_strlcpy(final_frm, "None", sizeof final_frm);
-    if (!nd_modem__command(m, "AT+CPCMREG=1", 3.0, final_reg, sizeof final_reg, NULL))
-        (void)nd_strlcpy(final_reg, "None", sizeof final_reg);
-    nd_log(ND_LOG_MODEM, "USB audio setup: CPCMFRM=%s -> %s, CPCMREG=1 -> %s", frm, final_frm,
-           final_reg);
-    if (strcmp(final_reg, "OK") != 0)
-        m->pcm_retry = true; /* try again once connected */
-    nd_modem__start_call_audio(m);
+    got = nd_modem__command(m, cmd, 8.0, final, sizeof final, NULL);
+    if (!got || strcmp(final, "OK") != 0) {
+        nd_log(ND_LOG_MODEM, "Dial failed (final=%s)", got ? final : "None");
+        if (get_state(m) == ND_CALL_CALLING)
+            set_state(m, ND_CALL_IDLE);
+        return false;
+    }
+
+    /* That is all dial() does with the UI waiting on it. The PCM setup and
+     * the ringback pipe are the next tick's, and the tick is told to run at
+     * once rather than at its half-second cadence. CLCC waits a full poll
+     * interval: the modem has not entered the call in its table yet, and an
+     * empty list would count against it. */
+    m->pcm_setup_pending = true;
+    m->next_clcc = nd_modem__now() + ND_CLCC_POLL_S;
+    m->next_urc = 0.0;
     return true;
 }
 
@@ -1307,13 +1438,13 @@ static bool do_answer(nd_modem *m)
     char final[64];
 
     if (!m->hardware || !m->allow_calls) {
-        set_state(m, ND_CALL_CONNECTED);
+        (void)mark_connected(m);
         return true;
     }
     if (nd_modem__command(m, "ATA", 8.0, final, sizeof final, NULL) && strcmp(final, "OK") == 0) {
-        set_state(m, ND_CALL_CONNECTED);
-        (void)nd_modem__command(m, "AT+CPCMREG=1", 3.0, NULL, 0u, NULL);
-        nd_modem__start_call_audio(m);
+        /* ATA is all of it; the PCM and the pipes are the tick's, at once. */
+        (void)mark_connected(m);
+        m->next_urc = 0.0;
         return true;
     }
     return false; /* state is deliberately left alone */
@@ -1774,6 +1905,16 @@ static void port_from_settings(char *out, size_t out_sz)
     (void)nd_strlcpy(out, v != NULL ? v : ND_MODEM_DEFAULT_PORT, out_sz);
 }
 
+static double boot_grace_setting(void)
+{
+    const char *v = nd_settings_get(ND_SET_MODEM_BOOT_GRACE, "30");
+    int32_t secs;
+
+    if (v == NULL || !nd_modem__parse_int(v, &secs) || secs < 0)
+        return ND_MODEM_BOOT_GRACE_DEFAULT_S;
+    return (double)secs;
+}
+
 static bool calls_enabled_setting(void)
 {
     /* Default flipped to ON for the 0.3.0a call bring-up. In the Python an
@@ -1845,6 +1986,7 @@ nd_err nd_modem__create(nd_modem **out)
     m->pcm_rate = pcm_rate_setting();
     port_from_settings(m->configured_port, sizeof m->configured_port);
     m->allow_calls = calls_enabled_setting();
+    m->boot_deadline = nd_modem__now() + boot_grace_setting();
     m->lock_fd = open_lock_file();
 
     *out = m;
@@ -1882,7 +2024,17 @@ nd_err nd_modem_open(nd_modem **out)
         return rc;
 
     if (!nd_modem__probe_hardware(m)) {
-        nd_log(ND_LOG_MODEM, "HARDWARE NOT FOUND: Running in Simulation Mode.");
+        double grace = m->boot_deadline - nd_modem__now();
+
+        if (grace > 0.0) {
+            /* Not "Simulation" yet: the modem may simply not be up. The
+             * announcement, if it comes to that, is nd_modem__poll_sim()'s. */
+            nd_log(ND_LOG_MODEM, "No modem has answered yet; probing every %ds for up to %.0fs.",
+                   (int)ND_MODEM_BOOT_PROBE_S, grace);
+        } else {
+            nd_log(ND_LOG_MODEM, "HARDWARE NOT FOUND: Running in Simulation Mode.");
+            m->sim_announced = true;
+        }
         nd_log(ND_LOG_MODEM, "Will re-probe every %ds; sim hooks: %s / %s.", (int)ND_PROBE_RETRY_S,
                ND_MODEM_SIM_CSQ, ND_MODEM_SIM_RING);
     }
@@ -2189,14 +2341,19 @@ nd_modem_link nd_modem_link_state(nd_modem *m)
     if (m == NULL)
         return ND_MODEM_LINK_SIM;
 
+    bool booting;
+
     lock_state(m);
     hw = m->hardware;
     bad = m->faulted;
+    booting = nd_modem__now() < m->boot_deadline;
     unlock_state(m);
 
     if (hw)
         return ND_MODEM_LINK_LIVE;
-    return bad ? ND_MODEM_LINK_FAULT : ND_MODEM_LINK_SIM;
+    if (bad)
+        return ND_MODEM_LINK_FAULT;
+    return booting ? ND_MODEM_LINK_PROBING : ND_MODEM_LINK_SIM;
 }
 
 const char *nd_modem_take_pending_fault(nd_modem *m)
@@ -2247,6 +2404,12 @@ int32_t nd_modem_signal_level(nd_modem *m)
          * modem thread can be blocked behind. */
         if (nd_modem__sim_read_int(ND_MODEM_SIM_CSQ, &sim))
             return nd_modem__bars(sim);
+
+        /* Still waiting for the modem to come up: an empty meter, which is
+         * what a phone whose radio is booting shows. After the hook, so a
+         * developer's csq file works from the first second on QEMU. */
+        if (nd_modem_link_state(m) == ND_MODEM_LINK_PROBING)
+            return 0;
 
         /* NO HOOK, NO HARDWARE: SIMULATION. This used to return -1, which the
          * home layout renders as sim_val -- a FULL meter, four bars, next to
@@ -2310,6 +2473,11 @@ const char *nd_modem_operator_display(nd_modem *m)
                 return m->op_display;
             }
         }
+
+        /* Still waiting for the modem: nothing, and the layout keeps its own
+         * "No Service" -- which for once is the truth. */
+        if (nd_modem_link_state(m) == ND_MODEM_LINK_PROBING)
+            return NULL;
 
         /* The hook is unset or blank, so this is plain Simulation Mode and it
          * says so. It used to return NULL, which the layout leaves as its

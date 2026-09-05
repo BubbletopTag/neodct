@@ -58,6 +58,25 @@ extern "C" {
 #define ND_POLL_OPERATOR_S         60.0
 #define ND_PROBE_RETRY_S           10.0
 
+/* THE BOOT GRACE. How long after the service starts "no modem has answered"
+ * is nothing to report, and how often to ask during it.
+ *
+ * A SIM7600 is not ready when the UI is. It enumerates, drops and enumerates
+ * again while its own firmware boots, and S45modem holds the AT port for its
+ * data session at exactly the moment the first probe lands. The service used
+ * to take any of that as its answer: "Simulation" in the carrier line the
+ * instant the home screen came up, or a fault notice for a modem that had
+ * been seen and then re-enumerated -- both on a phone whose modem was fine
+ * thirty seconds later. Inside the window the link reports
+ * ND_MODEM_LINK_PROBING (an empty meter and the layout's own "No Service"),
+ * a lost modem is probed for again rather than declared broken, and the
+ * probe runs every ND_MODEM_BOOT_PROBE_S instead of every ND_PROBE_RETRY_S.
+ *
+ * system.modem.boot_grace_s overrides the default; 0 is the old behaviour,
+ * and what QEMU and the tests want. */
+#define ND_MODEM_BOOT_GRACE_DEFAULT_S 30.0
+#define ND_MODEM_BOOT_PROBE_S         2.0
+
 /* How long a LIVE modem may go without a single successful AT transaction
  * before the service stops believing in it.
  *
@@ -68,6 +87,14 @@ extern "C" {
  * ND_POLL_SIGNAL_S spacing. A modem that has said nothing for a minute and a
  * half is not busy, it is gone. */
 #define ND_MODEM_FAULT_AFTER_S     90.0
+
+/* How long a write to the AT port may make no progress before the port is
+ * declared dead. A modem asserting flow control for a moment is not a modem
+ * that has gone, and the write retries; a modem whose USB stack has wedged
+ * returns EAGAIN for ever, and the UI thread blocked in dial() or hangup()
+ * behind that write is the phone frozen solid. Two seconds is a hundred
+ * times what any AT line needs. */
+#define ND_MODEM_WRITE_STALL_S     2.0
 
 /* What Simulation Mode puts on the home screen in place of an operator name,
  * and how many bars it draws. See nd_modem_signal_level() for why the two
@@ -288,12 +315,20 @@ bool nd_modem_has_hardware(nd_modem *m);
  *                         must look obviously wrong: zero bars, no carrier
  *                         name at all, and a modal notice once.
  *
+ *   ND_MODEM_LINK_PROBING No modem has answered YET, and the boot grace has
+ *                         not run out -- see ND_MODEM_BOOT_GRACE_DEFAULT_S.
+ *                         The carrier line is left to the layout ("No
+ *                         Service") and the meter is empty, which is what a
+ *                         phone whose radio is still coming up looks like.
+ *                         Appended after FAULT so no existing value moves.
+ *
  * A NULL modem is ND_MODEM_LINK_SIM: a core with no ModemService is not a
  * core with a broken one. */
 typedef enum {
     ND_MODEM_LINK_SIM = 0,
     ND_MODEM_LINK_LIVE,
-    ND_MODEM_LINK_FAULT
+    ND_MODEM_LINK_FAULT,
+    ND_MODEM_LINK_PROBING
 } nd_modem_link;
 
 nd_modem_link nd_modem_link_state(nd_modem *m);
