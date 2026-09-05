@@ -1,6 +1,10 @@
 # NeoDCT OS Changelog
 
-Unreleased
+0.5.2b
+Apps now install from a package, and the phone shows you what an app is
+before it goes on. In engineering mode there is a new way to get files onto
+the phone: download them from a server you run.
+
 --- Fetch: download from your own server ---
 
 There is a new app in engineering mode called Fetch. Give it the password to
