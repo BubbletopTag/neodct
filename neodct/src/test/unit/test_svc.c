@@ -1606,6 +1606,114 @@ static void test_a_format_over_the_wire(core_fixture *fx)
     nd_storage_set_paths(NULL, NULL);
 }
 
+/* ---- 5c''. THE BAR AND THE KILL ARE NOT THE SAME CLOCK ---- */
+
+/* ============ THE BUG THIS PINS ============
+ *
+ * In the owner's words, on 0.5.9a, on real hardware:
+ *
+ *   "I got this beautiful formatting progress bar. Waited for it to hit 100%,
+ *    then it told me that the format failed."
+ *
+ * It was not a coincidence and it was not tuning. apps/Settings drew the bar
+ * as `secs * BAR_TOTAL / ND_SVC_FORMAT_WAIT_S` and nd_svc.c's format_poll()
+ * did `if (elapsed >= ND_SVC_FORMAT_WAIT_S) stop it`, with
+ * ND_SVC_FORMAT_WAIT_S a flat 240.0 in both places. The denominator of the
+ * progress bar WAS the kill deadline, so the bar filling and the helper being
+ * SIGTERMed-then-SIGKILLed mid-mke2fs were one event. A full bar could not
+ * mean anything but failure, on any card, at any speed.
+ *
+ * Nothing about that needed a card to reproduce -- it is two constants and a
+ * division -- and nothing about it was caught, because the timing was never
+ * asserted anywhere. It is asserted here.
+ *
+ * The second half of the report is the flat 240 itself. The format really was
+ * taking longer than four minutes on the owner's card and finishing in seconds
+ * on the 2 GB card everything is tested against, because mke2fs was writing
+ * every inode table by hand -- one byte for every sixty-four bytes of card.
+ * That fix is in neodct-sdcard's mkfs_ext4. What belongs here is the rule that
+ * survives it: a bigger card gets more patience, and there is a ceiling on
+ * how much, because the deadline's real job is stopping a WEDGED helper.
+ */
+static void test_a_full_bar_is_not_a_failure(void)
+{
+    /* 0 is "the size could not be read", then 512 MB up to 2 TB. The step is
+     * deliberately not a power of two: the point is that the property holds
+     * everywhere, not at the sizes somebody thought of. */
+    static const uint64_t sizes[] = {
+        0ull,
+        512ull * 1000ull * 1000ull,
+        2ull * 1024ull * 1024ull * 1024ull,
+        7ull * 1024ull * 1024ull * 1024ull + 12345ull,
+        32ull * 1024ull * 1024ull * 1024ull,
+        64ull * 1024ull * 1024ull * 1024ull,
+        128ull * 1024ull * 1024ull * 1024ull,
+        512ull * 1024ull * 1024ull * 1024ull,
+        2048ull * 1024ull * 1024ull * 1024ull,
+    };
+    size_t i;
+    double small;
+    double big;
+
+    for (i = 0u; i < sizeof sizes / sizeof sizes[0]; i++) {
+        double est = nd_svc_format_estimate_s(sizes[i]);
+        double kill = nd_svc_format_deadline_s(sizes[i]);
+
+        /* A bar needs a denominator that is not zero and not negative, or the
+         * screen divides by it and draws whatever comes out. */
+        CHECK(est > 0.0);
+
+        /* THE ASSERTION THE WHOLE CASE EXISTS FOR. A bar that has just filled
+         * is at `est`; the helper is stopped at `kill`. Four times is a floor
+         * on the gap, not the design value -- ND_SVC_FORMAT_SLACK is six --
+         * so that a later change to the model has to stay recognisably a
+         * margin rather than drifting back to equality one release at a time. */
+        CHECK(kill >= est * 4.0);
+
+        /* And the app's own belt sits above the core's deadline, so the side
+         * that knows WHY the format stopped is the side that stops it. */
+        CHECK(nd_svc_format_app_timeout_s(kill) > kill);
+
+        /* The ceiling is what makes this a protection rather than a promise
+         * to wait for ever: a genuinely wedged root helper is still stopped. */
+        CHECK(kill <= ND_SVC_FORMAT_DEADLINE_MAX_S);
+        CHECK(kill >= ND_SVC_FORMAT_DEADLINE_MIN_S);
+    }
+
+    /* ============ AND THE DEADLINE SCALES ============
+     *
+     * The flat 240 s passed every test on the 2 GB card and failed on the
+     * owner's, which is the definition of a number that should never have been
+     * one number. A 128 GiB card must get strictly more patience than a 2 GiB
+     * one. */
+    small = nd_svc_format_deadline_s(2ull * 1024ull * 1024ull * 1024ull);
+    big = nd_svc_format_deadline_s(128ull * 1024ull * 1024ull * 1024ull);
+    CHECK(big > small);
+    CHECK(nd_svc_format_estimate_s(128ull * 1024ull * 1024ull * 1024ull) >
+          nd_svc_format_estimate_s(2ull * 1024ull * 1024ull * 1024ull));
+
+    /* And it keeps scaling PAST the point where the bar's denominator stops.
+     * The estimate is capped because a bar needs to move; the deadline is not,
+     * because it is the moment a running mke2fs is killed. If the deadline
+     * inherited the display cap, every card above about 110 GiB would share
+     * one number again -- which is the flat 240 s with a bigger constant. */
+    CHECK(nd_svc_format_estimate_s(512ull * 1024ull * 1024ull * 1024ull) ==
+          nd_svc_format_estimate_s(128ull * 1024ull * 1024ull * 1024ull));
+    CHECK(nd_svc_format_deadline_s(512ull * 1024ull * 1024ull * 1024ull) >
+          nd_svc_format_deadline_s(128ull * 1024ull * 1024ull * 1024ull));
+
+    /* A size that could not be read is treated as a BIG card and not a small
+     * one. Getting this backwards would give the least-known card the
+     * shortest deadline, which is the failure this is all about. */
+    CHECK(nd_svc_format_estimate_s(0u) >=
+          nd_svc_format_estimate_s(128ull * 1024ull * 1024ull * 1024ull));
+
+    /* The old constants, as numbers rather than as names, so that a revert
+     * would have to argue with this line: 240 s of patience for a card of any
+     * size is not enough for a large one. */
+    CHECK(nd_svc_format_deadline_s(128ull * 1024ull * 1024ull * 1024ull) > 240.0);
+}
+
 /* ---- 5d''. the format is a JOB, not a call ---- */
 
 /* ============ THE FREEZE THIS SHAPE EXISTS TO PREVENT ============
@@ -1631,9 +1739,10 @@ static void test_the_format_is_a_job(core_fixture *fx)
     nd_svc_format_sim sim;
     format_fake fake;
     nd_svc_server *s = NULL;
-    double secs = -1.0;
+    nd_svc_format_progress prog;
     int child_fd;
 
+    memset(&prog, 0, sizeof prog);
     memset(&fake, 0, sizeof fake);
     (void)pthread_mutex_init(&fake.mu, NULL);
     memset(&sim, 0, sizeof sim);
@@ -1662,7 +1771,7 @@ static void test_the_format_is_a_job(core_fixture *fx)
 
     /* Nothing is running, so there is nothing to report and nothing to stop.
      * A screen that polls before it starts must not be told a job is going. */
-    CHECK_INT((int)nd_svc_format_poll(&secs), (int)ND_SVC_FORMAT_IDLE);
+    CHECK_INT((int)nd_svc_format_poll(&prog), (int)ND_SVC_FORMAT_IDLE);
     CHECK(nd_svc_format_cancel());
 
     /* A card that is not there is refused by START -- before anything is
@@ -1681,9 +1790,22 @@ static void test_the_format_is_a_job(core_fixture *fx)
     fake.result = 0;
     CHECK(nd_svc_format_start());
     CHECK_INT(format_fake_calls(&fake), 1);
-    secs = -1.0;
-    CHECK_INT((int)nd_svc_format_poll(&secs), (int)ND_SVC_FORMAT_DONE_OK);
-    CHECK(secs >= 0.0);
+    memset(&prog, 0, sizeof prog);
+    CHECK_INT((int)nd_svc_format_poll(&prog), (int)ND_SVC_FORMAT_DONE_OK);
+    CHECK(prog.elapsed_s >= 0.0);
+    /* ============ A FULL BAR IS NOT A FAILURE ============
+     *
+     * The two numbers a screen draws with come back with every poll, and the
+     * whole of the owner's bug is that they used to be ONE number: Settings
+     * divided by ND_SVC_FORMAT_WAIT_S and nd_svc.c killed the helper at
+     * ND_SVC_FORMAT_WAIT_S, so filling the bar and losing the card were the
+     * same event. "Waited for it to hit 100%, then it told me that the format
+     * failed."
+     *
+     * They must never be the same number again, and this is the check that
+     * says so on a live reply rather than on the arithmetic alone. */
+    CHECK(prog.estimate_s > 0.0);
+    CHECK(prog.deadline_s >= prog.estimate_s * 4.0);
 
     /* ============ AND THE VERDICT IS HANDED OUT ONCE ============
      *
@@ -2366,6 +2488,7 @@ int main(void)
     test_a_halt_over_the_wire(&fx);
     test_a_halt_with_nothing_to_spawn(&fx);
     test_the_clock_over_the_wire(&fx);
+    test_a_full_bar_is_not_a_failure();
     test_a_format_over_the_wire(&fx);
     test_the_format_is_a_job(&fx);
     test_a_layout_over_the_wire(&fx);

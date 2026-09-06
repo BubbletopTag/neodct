@@ -41,6 +41,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -333,6 +334,213 @@ bool nd_storage_card_is_writable(void)
      * written into either, and 0644 on a mount root is a real way for a card
      * to arrive from somebody else's computer. */
     return access(resolved, W_OK | X_OK) == 0;
+}
+
+/* ============ THE SIZE OF THE CARD, FROM sysfs ============
+ *
+ * Every block device the kernel knows has /sys/class/block/<name>/size, in
+ * 512-byte sectors regardless of what the device's own logical block size is.
+ * That is the only size this file can get at: nd-core is not root any more and
+ * cannot open /dev/mmcblk1 to ask it, and the helper that can is a separate
+ * process the caller is about to start rather than one it can interrogate
+ * first. neodct-sdcard reads exactly the same attribute (device_sectors), so
+ * the number here and the number the format works from are the same number.
+ *
+ * The literal path is used rather than an environment override -- the helper
+ * has NEODCT_SYSFS_BLOCK because it is a shell script the pytest drives from
+ * outside; everything in this file redirects through nd_path_resolve() and
+ * ND_ROOT instead, and adding a second mechanism for one function would mean
+ * two ways to lie about the same thing.
+ */
+#define ND_SD_SYSFS_BLOCK "/sys/class/block"
+
+/* A kernel device name and nothing else. This string reaches a path, and it
+ * arrives from a file written by a root process -- which is exactly the kind
+ * of "it is trusted" that stops being true the day something else writes it.
+ * Names the kernel actually issues are alphanumerics, '-' and '_'; a '/' or a
+ * ".." in one is not a device name that came from the kernel. */
+static bool is_kernel_device_name(const char *name)
+{
+    size_t i;
+
+    if (name == NULL || name[0] == '\0')
+        return false;
+    for (i = 0u; name[i] != '\0'; i++) {
+        char c = name[i];
+
+        if (c >= 'a' && c <= 'z')
+            continue;
+        if (c >= 'A' && c <= 'Z')
+            continue;
+        if (c >= '0' && c <= '9')
+            continue;
+        if (c == '-' || c == '_')
+            continue;
+        return false;
+    }
+    return true;
+}
+
+static bool all_digits(const char *s)
+{
+    size_t i;
+
+    if (s[0] == '\0')
+        return false;
+    for (i = 0u; s[i] != '\0'; i++) {
+        if (s[i] < '0' || s[i] > '9')
+            return false;
+    }
+    return true;
+}
+
+/* Trailing digits removed, in place. "mmcblk1" -> "mmcblk", "sda" -> "sda". */
+static void strip_trailing_digits(char *s)
+{
+    size_t n = strlen(s);
+
+    while (n > 0u && s[n - 1u] >= '0' && s[n - 1u] <= '9')
+        n--;
+    s[n] = '\0';
+}
+
+/* ============ THE FAMILIES WHOSE WHOLE-DISK NAMES END IN A DIGIT =========
+ *
+ * sda1 belongs to sda and vdc2 belongs to vdc, so "strip the trailing digits"
+ * is the whole rule for those. It is not the rule for mmcblk1, nvme0n1 or
+ * loop0, whose OWN names end in a digit and whose partitions are spelled with
+ * a 'p' -- mmcblk1p1. Applied blindly, the simple rule turns the card the
+ * phone actually has, mmcblk1, into "mmcblk", which is not a device, and the
+ * size lookup then quietly answers zero for every real SD card.
+ *
+ * neodct-sdcard's parent_disk() carries the same three families for the same
+ * reason, and the two must agree: the helper decides what it partitions and
+ * this decides how long that is allowed to take. */
+static bool ends_in_digit_family(const char *stem)
+{
+    size_t n = strlen(stem);
+    char nvme[ND_PATH_MAX];
+
+    if (n >= 6u && strcmp(stem + (n - 6u), "mmcblk") == 0)
+        return true;
+    if (n >= 4u && strcmp(stem + (n - 4u), "loop") == 0)
+        return true;
+    /* nvme0n1 loses its "1" above and arrives here as "nvme0n"; losing the
+     * "0" as well is what leaves a name to recognise. */
+    if (n == 0u || stem[n - 1u] != 'n')
+        return false;
+    if (nd_strlcpy(nvme, stem, sizeof nvme) >= sizeof nvme)
+        return false;
+    nvme[strlen(nvme) - 1u] = '\0';
+    strip_trailing_digits(nvme);
+    n = strlen(nvme);
+    return n >= 4u && strcmp(nvme + (n - 4u), "nvme") == 0;
+}
+
+bool nd_storage_parent_disk(const char *device, char *out, size_t out_sz)
+{
+    const char *name;
+    char stem[ND_PATH_MAX];
+    char *p;
+
+    if (out == NULL || out_sz == 0u)
+        return false;
+    out[0] = '\0';
+    if (device == NULL)
+        return false;
+
+    name = strrchr(device, '/');
+    name = (name != NULL) ? name + 1 : device;
+    if (!is_kernel_device_name(name))
+        return false;
+    if (nd_strlcpy(out, name, out_sz) >= out_sz) {
+        out[0] = '\0';
+        return false;
+    }
+
+    /* "<disk>p<N>" first, because it is the spelling the digit-ending
+     * families use and the digit strip below would eat the disk's number. */
+    p = strrchr(out, 'p');
+    if (p != NULL && p != out && all_digits(p + 1)) {
+        char before = p[-1];
+
+        if (before >= '0' && before <= '9') {
+            *p = '\0';
+            return true;
+        }
+    }
+
+    if (nd_strlcpy(stem, out, sizeof stem) >= sizeof stem)
+        return true;
+    strip_trailing_digits(stem);
+    if (ends_in_digit_family(stem))
+        return true; /* mmcblk1, nvme0n1, loop0 -- already a whole disk */
+    if (stem[0] != '\0')
+        (void)nd_strlcpy(out, stem, out_sz);
+    return true;
+}
+
+/* One sysfs `size` attribute, in bytes, or 0. */
+static uint64_t sysfs_block_bytes(const char *name)
+{
+    char path[ND_PATH_MAX];
+    char resolved[ND_PATH_MAX];
+    char line[64];
+    FILE *f;
+    unsigned long long sectors;
+    char *end = NULL;
+
+    if (nd_snprintf(path, sizeof path, "%s/%s/size", ND_SD_SYSFS_BLOCK, name) != ND_OK)
+        return 0u;
+    if (nd_path_resolve(resolved, sizeof resolved, path) != ND_OK)
+        return 0u;
+    f = fopen(resolved, "rb");
+    if (f == NULL)
+        return 0u;
+    if (fgets(line, (int)sizeof line, f) == NULL) {
+        (void)fclose(f);
+        return 0u;
+    }
+    (void)fclose(f);
+
+    errno = 0;
+    sectors = strtoull(line, &end, 10);
+    if (errno != 0 || end == line)
+        return 0u;
+    /* Sectors are 512 bytes here whatever the device's logical block size is;
+     * that is what the attribute means, not an assumption about the card.
+     * Capped so the multiply cannot wrap on a garbage attribute -- 2^53
+     * sectors is four exabytes, which is not an SD card. */
+    if (sectors > (1ull << 53))
+        return 0u;
+    return sectors * 512ull;
+}
+
+uint64_t nd_storage_device_bytes(const char *device)
+{
+    char disk[ND_PATH_MAX];
+    const char *name;
+    uint64_t bytes;
+
+    if (device == NULL || device[0] == '\0')
+        return 0u;
+
+    if (nd_storage_parent_disk(device, disk, sizeof disk)) {
+        bytes = sysfs_block_bytes(disk);
+        if (bytes > 0u)
+            return bytes;
+    }
+
+    /* The parent name did not resolve to anything sysfs knows -- a partition
+     * on a device whose spelling this does not cover, or a name that is not a
+     * device at all. The partition's own size is an UNDERSTATEMENT of what a
+     * format will rewrite, which is the wrong direction to be wrong in, but
+     * it is a real number about the real card and the alternative is none. */
+    name = strrchr(device, '/');
+    name = (name != NULL) ? name + 1 : device;
+    if (!is_kernel_device_name(name))
+        return 0u;
+    return sysfs_block_bytes(name);
 }
 
 bool nd_storage_untrusted_dir(char *out, size_t out_sz)

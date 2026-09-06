@@ -1381,6 +1381,26 @@ static bool call_audio_up(nd_modem *m)
  * poll() -- line 429
  * ------------------------------------------------------------------ */
 
+/* Is another process on the AT port at this instant?
+ *
+ * flock(2) will not say who holds a lock, so this asks the only way there
+ * is: take it, and hand it straight back. Two syscalls, and they are spent
+ * only where the answer changes a verdict -- the watchdog below -- not on
+ * every tick.
+ *
+ * A lock that cannot be opened at all is NOT another process and answers
+ * false: lock_unusable means we have no evidence about the modem in either
+ * direction, and inventing some to spare it the watchdog would be the same
+ * mistake in the other direction. See nd_modem__acquire(). */
+static bool port_busy_elsewhere(nd_modem *m)
+{
+    if (nd_modem__acquire(m)) {
+        nd_modem__release(m);
+        return false;
+    }
+    return !m->lock_unusable;
+}
+
 void nd_modem_poll(nd_modem *m)
 {
     double now;
@@ -1453,7 +1473,28 @@ void nd_modem_poll(nd_modem *m)
      * per-command state, and nothing to reset in five places.
      *
      * The simulated fault hook is handled above, before the no-hardware
-     * return, for the reason given there. */
+     * return, for the reason given there.
+     *
+     * ONE TIMESTAMP IS NOT ENOUGH TO CONDEMN A RADIO. The contended return
+     * further down stamps last_ok_at forward on every tick that finds the
+     * port held by somebody else, so in an evenly spaced tick loop the clock
+     * never ages while S45modem has the port. But that is a property of the
+     * tick loop rather than of the modem, and the ticks are not evenly
+     * spaced: this check is reached first on EVERY tick, including the first
+     * one after a gap, and the stamp is reached only by ticks that get past
+     * the next_urc gate -- which the fair-share block at the end of poll()
+     * pushes out by the whole length of a long tick, and which modem_thread
+     * skips entirely for as long as it has requests to serve. Any gap that
+     * leaves the age over the threshold makes the very next tick condemn a
+     * modem that another process may be talking to at that instant.
+     *
+     * So the lock is asked before the fault is declared, and its answer
+     * outranks the timestamp: another process holding it is direct evidence
+     * that the radio is there and answering, where last_ok_at is only
+     * evidence about who WE last talked to. Over-reporting a fault is the
+     * same lie as the four-bar "Simulation" this watchdog replaced with the
+     * sign flipped -- a fault modal, a blank carrier line, and a phone the
+     * owner believes is broken while it is registered and working. */
     {
         double quiet_since;
 
@@ -1461,11 +1502,17 @@ void nd_modem_poll(nd_modem *m)
         quiet_since = m->last_ok_at;
         unlock_state(m);
         if (quiet_since > 0.0 && now - quiet_since > ND_MODEM_FAULT_AFTER_S) {
-            char why[64];
+            if (port_busy_elsewhere(m)) {
+                lock_state(m);
+                m->last_ok_at = now;
+                unlock_state(m);
+            } else {
+                char why[64];
 
-            (void)nd_snprintf(why, sizeof why, "no reply for %.0fs", now - quiet_since);
-            nd_modem__drop_hardware(m, why);
-            return;
+                (void)nd_snprintf(why, sizeof why, "no reply for %.0fs", now - quiet_since);
+                nd_modem__drop_hardware(m, why);
+                return;
+            }
         }
     }
 
@@ -1474,10 +1521,9 @@ void nd_modem_poll(nd_modem *m)
     m->next_urc = now + ND_POLL_URC_S;
 
     if (!nd_modem__acquire(m)) {
-        /* CONTENTION IS NOT SILENCE, AND THE WATCHDOG ABOVE CANNOT TELL.
+        /* CONTENTION IS NOT SILENCE, AND last_ok_at ALONE CANNOT TELL.
          *
-         * This early return sits BELOW the ND_MODEM_FAULT_AFTER_S check, and
-         * last_ok_at is fed only by a transaction that completed -- so every
+         * last_ok_at is fed only by a transaction that completed, so every
          * tick spent locked out was being counted as a tick the modem failed
          * to answer. S45modem holds the port in long stretches during its
          * data bring-up (`at 'AT+CGATT=1' 40` is one atcmd invocation
@@ -1489,8 +1535,12 @@ void nd_modem_poll(nd_modem *m)
          *
          * Another process holding this lock is POSITIVE evidence that the
          * modem is there and being talked to, so the clock is stamped
-         * forward. A genuinely dead modem is still caught: nothing holds the
-         * lock for it, so the ticks that time out do count.
+         * forward here, on every contended tick, and a busy stretch never
+         * ages into a fault. That is the cheap half of the rule and it holds
+         * only while the ticks keep coming, which is why the watchdog above
+         * asks the lock itself before it condemns anything. A genuinely dead
+         * modem is still caught by both halves: nothing holds the lock for
+         * it, so the ticks that time out do count.
          *
          * The lock being unusable is the other failure and is deliberately
          * NOT stamped -- see nd_modem__acquire(). We are not talking to the

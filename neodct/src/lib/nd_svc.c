@@ -178,6 +178,10 @@ typedef struct {
      * nobody wrote. */
     uint32_t format_state;
     double format_secs;
+    /* The two the screen draws with. They travel because the app is not
+     * allowed to know which card this is -- nd_svc.h, "Formatting a card". */
+    double format_estimate;
+    double format_deadline;
 } svc_resp;
 
 /* The receive buffers are one byte longer than the record, so an oversized
@@ -905,15 +909,82 @@ static pid_t g_fmt_pid = -1;       /* the helper, while it runs           */
 static double g_fmt_started = 0.0; /* svc_now() when it was spawned       */
 static bool g_fmt_have_result = false;
 static bool g_fmt_result_ok = false;
-static double g_fmt_secs = 0.0; /* how long the finished run took      */
+static bool g_fmt_timed_out = false; /* the verdict was a kill, not a failure */
+static double g_fmt_secs = 0.0;      /* how long the finished run took        */
+/* Both fixed when the job STARTS, from the card the core could see then.
+ * Re-deriving them per poll would read sysfs for a device the format has
+ * since deleted and re-added -- the deadline would move under the screen
+ * drawing against it. */
+static double g_fmt_estimate = 0.0;
+static double g_fmt_deadline = 0.0;
 
-static void format_finish(bool ok)
+/* ------------------------------------------------------------------ *
+ * How long a format may take, and how long it is allowed to take
+ * ------------------------------------------------------------------ *
+ *
+ * The whole argument is in nd_svc.h. What is here is the arithmetic, split
+ * out of format_poll() so that a test can ask it the one question that
+ * matters -- is a full bar anywhere near the kill -- without running a
+ * format at all. */
+
+/* The straight line, before either of its two ceilings. The bar and the
+ * deadline want DIFFERENT ceilings on it, which is the whole reason this is
+ * separate: a bar needs a denominator small enough to move, and a deadline
+ * needs a number large enough not to stop a card that is still working. */
+static double format_estimate_raw(uint64_t card_bytes)
+{
+    double gib;
+
+    /* Unknown size is treated as a big card, not a small one: killing a
+     * format that was working is the failure this exists to prevent. */
+    if (card_bytes == 0u)
+        return ND_SVC_FORMAT_EST_MAX_S;
+
+    gib = (double)card_bytes / (1024.0 * 1024.0 * 1024.0);
+    return ND_SVC_FORMAT_EST_BASE_S + gib * ND_SVC_FORMAT_EST_PER_GIB_S;
+}
+
+double nd_svc_format_estimate_s(uint64_t card_bytes)
+{
+    double est = format_estimate_raw(card_bytes);
+
+    /* Capped, because this one is a BAR. Past a couple of minutes the fixed
+     * part of a format stops being the small half and a denominator that
+     * large leaves a bar that never visibly moves -- which reads as a phone
+     * that has stopped, and is the display this file already had once. */
+    return (est > ND_SVC_FORMAT_EST_MAX_S) ? ND_SVC_FORMAT_EST_MAX_S : est;
+}
+
+double nd_svc_format_deadline_s(uint64_t card_bytes)
+{
+    /* The UNCAPPED estimate, deliberately. This one is not a display, it is
+     * the moment a running mke2fs is killed, and a 512 GB card asked to share
+     * a 128 GB card's patience is the flat 240 s all over again with a bigger
+     * number. The absolute ceiling below is what keeps it a protection. */
+    double deadline = format_estimate_raw(card_bytes) * ND_SVC_FORMAT_SLACK;
+
+    if (deadline < ND_SVC_FORMAT_DEADLINE_MIN_S)
+        deadline = ND_SVC_FORMAT_DEADLINE_MIN_S;
+    if (deadline > ND_SVC_FORMAT_DEADLINE_MAX_S)
+        deadline = ND_SVC_FORMAT_DEADLINE_MAX_S;
+    return deadline;
+}
+
+double nd_svc_format_app_timeout_s(double core_deadline_s)
+{
+    if (core_deadline_s <= 0.0)
+        core_deadline_s = ND_SVC_FORMAT_DEADLINE_MAX_S;
+    return core_deadline_s + ND_SVC_FORMAT_APP_MARGIN_S;
+}
+
+static void format_finish(bool ok, bool timed_out)
 {
     g_fmt_secs = (g_fmt_started > 0.0) ? svc_now() - g_fmt_started : 0.0;
     g_fmt_pid = -1;
     g_fmt_started = 0.0;
     g_fmt_have_result = true;
     g_fmt_result_ok = ok;
+    g_fmt_timed_out = timed_out;
 }
 
 /* Start one. True means there IS a format running when this returns -- which
@@ -925,6 +996,7 @@ static bool format_start(void)
     const char *argv[4];
     pid_t pid = -1;
     nd_err rc;
+    uint64_t bytes;
 
     if (g_fmt_pid > 0) {
         nd_log(ND_LOG_OS, "App service: a format of the card is already running (pid %ld)",
@@ -936,6 +1008,7 @@ static bool format_start(void)
      * must not be handed back as this one's. */
     g_fmt_have_result = false;
     g_fmt_result_ok = false;
+    g_fmt_timed_out = false;
 
     /* Never fails; an unreadable state file reads as an absent card. */
     nd_storage_card(&card);
@@ -959,6 +1032,19 @@ static bool format_start(void)
         return false;
     }
 
+    /* Fixed here, once, for the life of this job. nd_storage_device_bytes()
+     * reads sysfs for the disk the card's partition belongs to, and it is
+     * asked BEFORE the helper starts because the format deletes and re-adds
+     * that partition -- a size read halfway through is a race with the
+     * kernel's own partition scan. A card whose size cannot be read comes back
+     * 0, which the estimate deliberately treats as a big card. */
+    bytes = nd_storage_device_bytes(card.device);
+    g_fmt_estimate = nd_svc_format_estimate_s(bytes);
+    g_fmt_deadline = nd_svc_format_deadline_s(bytes);
+    nd_log(ND_LOG_OS, "App service: %s is %llu MiB; a format is allowed %.0fs (expected %.0fs)",
+           card.device, (unsigned long long)(bytes / (1024ull * 1024ull)), g_fmt_deadline,
+           g_fmt_estimate);
+
     if (g_format_sim_on && g_format_sim.run != NULL) {
         /* The simulation replaces the spawn-and-wait and nothing else, so
          * there is no child to poll: it runs here and the job is finished
@@ -968,7 +1054,7 @@ static bool format_start(void)
 
         nd_log(ND_LOG_OS, "App service: format of %s (simulated) exited %d", card.device, rc2);
         g_fmt_started = svc_now();
-        format_finish(rc2 == 0);
+        format_finish(rc2 == 0, false);
         return true;
     }
 
@@ -988,32 +1074,42 @@ static bool format_start(void)
     return true;
 }
 
-/* One non-blocking look. `secs` receives how long the job has been running, or
- * how long the finished one took, so a screen can draw something that moves
- * even though mkfs reports no progress of its own.
+/* One non-blocking look. `out` receives how long the job has been running (or
+ * how long the finished one took) beside the two numbers the screen draws
+ * with, so a bar can move even though mke2fs reports no progress of its own.
  *
  * A DONE verdict is handed out ONCE and then forgotten. A verdict that latched
  * would outlive the screen that asked for it and be shown to the next one. */
-static nd_svc_format_state format_poll(double *secs)
+static void format_progress(nd_svc_format_progress *out, double elapsed)
+{
+    if (out == NULL)
+        return;
+    out->elapsed_s = elapsed;
+    /* Carried even on a finished or idle job. A screen that draws the last
+     * frame of a format needs a denominator, and zero is not one. */
+    out->estimate_s = (g_fmt_estimate > 0.0) ? g_fmt_estimate : ND_SVC_FORMAT_EST_MAX_S;
+    out->deadline_s = (g_fmt_deadline > 0.0) ? g_fmt_deadline : ND_SVC_FORMAT_DEADLINE_MAX_S;
+}
+
+static nd_svc_format_state format_poll(nd_svc_format_progress *out)
 {
     nd_proc_status st;
     double elapsed;
 
-    if (secs != NULL)
-        *secs = 0.0;
+    format_progress(out, 0.0);
 
     if (g_fmt_have_result) {
-        if (secs != NULL)
-            *secs = g_fmt_secs;
+        format_progress(out, g_fmt_secs);
         g_fmt_have_result = false;
-        return g_fmt_result_ok ? ND_SVC_FORMAT_DONE_OK : ND_SVC_FORMAT_DONE_FAIL;
+        if (g_fmt_result_ok)
+            return ND_SVC_FORMAT_DONE_OK;
+        return g_fmt_timed_out ? ND_SVC_FORMAT_DONE_TIMEOUT : ND_SVC_FORMAT_DONE_FAIL;
     }
     if (g_fmt_pid <= 0)
         return ND_SVC_FORMAT_IDLE;
 
     elapsed = svc_now() - g_fmt_started;
-    if (secs != NULL)
-        *secs = elapsed;
+    format_progress(out, elapsed);
 
     memset(&st, 0, sizeof st);
     if (nd_svc__wait_child(g_fmt_pid, 0.0, &st) == ND_OK) {
@@ -1024,26 +1120,39 @@ static nd_svc_format_state format_poll(double *secs)
 
         /* Recorded and consumed in the same breath: this poll IS the one that
          * collects it, so it must not be left waiting for the next. */
-        format_finish(ok);
-        if (secs != NULL)
-            *secs = g_fmt_secs;
+        format_finish(ok, false);
+        format_progress(out, g_fmt_secs);
         g_fmt_have_result = false;
         return ok ? ND_SVC_FORMAT_DONE_OK : ND_SVC_FORMAT_DONE_FAIL;
     }
 
-    if (elapsed >= ND_SVC_FORMAT_WAIT_S) {
-        /* Four minutes with no exit is not a slow card, it is a wedged
-         * helper. Killing an mkfs is destructive -- but so is the state it is
-         * already in, and the alternative is a root process writing the card
-         * for ever with nothing able to stop it. */
-        nd_log_err(ND_LOG_OS, "App service: %s format has not finished in %.0fs; stopping it",
-                   ND_PATH_SDCARD_HELPER, elapsed);
+    /* Never a zero deadline. format_start() always sets one, and a zero here
+     * would mean stopping a helper the instant it was spawned -- the failure
+     * this whole mechanism exists to prevent, arriving through the mechanism
+     * itself. The ceiling is the safe reading of "I do not know". */
+    if (g_fmt_deadline <= 0.0)
+        g_fmt_deadline = ND_SVC_FORMAT_DEADLINE_MAX_S;
+
+    if (elapsed >= g_fmt_deadline) {
+        /* PAST THE DEADLINE IS NOT PAST THE BAR. The screen's bar filled at
+         * g_fmt_estimate, a factor of ND_SVC_FORMAT_SLACK ago, and said
+         * "still working" rather than dying -- see nd_svc.h for the release
+         * where those two were the same instant.
+         *
+         * Killing an mke2fs is destructive. So is the state it is already in,
+         * and the alternative is a root process writing the card for ever
+         * with nothing able to stop it. What makes it survivable is that the
+         * helper traps SIGTERM and publishes `unformatted` for the device
+         * before it goes, so the card the owner is left holding is one the
+         * phone describes correctly and offers to format again. */
+        nd_log_err(ND_LOG_OS,
+                   "App service: %s format has not finished in %.0fs (deadline %.0fs); stopping it",
+                   ND_PATH_SDCARD_HELPER, elapsed, g_fmt_deadline);
         (void)sdcard_helper_stop(g_fmt_pid, NULL);
-        format_finish(false); /* and collected here, as above */
-        if (secs != NULL)
-            *secs = g_fmt_secs;
+        format_finish(false, true); /* and collected here, as above */
+        format_progress(out, g_fmt_secs);
         g_fmt_have_result = false;
-        return ND_SVC_FORMAT_DONE_FAIL;
+        return ND_SVC_FORMAT_DONE_TIMEOUT;
     }
     return ND_SVC_FORMAT_RUNNING;
 }
@@ -1058,6 +1167,7 @@ static bool format_cancel(void)
 
     g_fmt_have_result = false;
     g_fmt_result_ok = false;
+    g_fmt_timed_out = false;
     if (pid <= 0) {
         g_fmt_pid = -1;
         g_fmt_started = 0.0;
@@ -1353,12 +1463,17 @@ static void serve(nd_ui *ui, uint32_t allowed_ops, const svc_req *req, svc_resp 
         return;
 
     case SVC_OP_FORMAT_POLL: {
-        double secs = 0.0;
-        nd_svc_format_state fst = format_poll(&secs);
+        nd_svc_format_progress prog;
+        nd_svc_format_state fst;
+
+        memset(&prog, 0, sizeof prog);
+        fst = format_poll(&prog);
 
         out->present = 1u;
         out->format_state = (uint32_t)fst;
-        out->format_secs = secs;
+        out->format_secs = prog.elapsed_s;
+        out->format_estimate = prog.estimate_s;
+        out->format_deadline = prog.deadline_s;
         out->ok = (fst != ND_SVC_FORMAT_IDLE) ? 1u : 0u;
         return;
     }
@@ -2199,16 +2314,22 @@ bool nd_svc_format_start(void)
     return resp.ok != 0u;
 }
 
-nd_svc_format_state nd_svc_format_poll(double *elapsed_s)
+nd_svc_format_state nd_svc_format_poll(nd_svc_format_progress *out)
 {
     svc_resp resp;
 
-    if (elapsed_s != NULL)
-        *elapsed_s = 0.0;
+    /* Filled before every early return. A caller that reads a denominator out
+     * of an untouched struct divides by zero, and the one caller that does
+     * this is the one drawing a progress bar. */
+    if (out != NULL) {
+        out->elapsed_s = 0.0;
+        out->estimate_s = ND_SVC_FORMAT_EST_MAX_S;
+        out->deadline_s = ND_SVC_FORMAT_DEADLINE_MAX_S;
+    }
     if (app_without_a_channel())
         return ND_SVC_FORMAT_IDLE;
     if (g_client_fd < 0)
-        return format_poll(elapsed_s);
+        return format_poll(out);
 
     if (svc_call(SVC_OP_FORMAT_POLL, NULL, NULL, &resp, ND_SVC_TIMEOUT_S) != SVC_ST_OK) {
         /* A core that has stopped answering is not a format that is still
@@ -2218,10 +2339,18 @@ nd_svc_format_state nd_svc_format_poll(double *elapsed_s)
         nd_log_err(ND_LOG_OS, "no answer from the core while a format was running");
         return ND_SVC_FORMAT_DONE_FAIL;
     }
-    if (resp.format_state > (uint32_t)ND_SVC_FORMAT_DONE_FAIL)
+    if (resp.format_state > (uint32_t)ND_SVC_FORMAT_DONE_TIMEOUT)
         return ND_SVC_FORMAT_DONE_FAIL;
-    if (elapsed_s != NULL)
-        *elapsed_s = resp.format_secs;
+    if (out != NULL) {
+        out->elapsed_s = resp.format_secs;
+        /* A core built before these existed, or a reply that lost them, would
+         * send zeros; a zero denominator is not a bar, so the defaults above
+         * stand rather than being overwritten with one. */
+        if (resp.format_estimate > 0.0)
+            out->estimate_s = resp.format_estimate;
+        if (resp.format_deadline > 0.0)
+            out->deadline_s = resp.format_deadline;
+    }
     return (nd_svc_format_state)resp.format_state;
 }
 
@@ -2250,13 +2379,16 @@ bool nd_svc_format_card(void)
         return false;
 
     for (;;) {
-        double secs = 0.0;
-        nd_svc_format_state st = nd_svc_format_poll(&secs);
+        nd_svc_format_progress prog;
+        nd_svc_format_state st;
+
+        memset(&prog, 0, sizeof prog);
+        st = nd_svc_format_poll(&prog);
 
         if (st == ND_SVC_FORMAT_DONE_OK)
             return true;
         if (st != ND_SVC_FORMAT_RUNNING)
-            return false; /* DONE_FAIL, or IDLE: nothing is running */
+            return false; /* DONE_FAIL, DONE_TIMEOUT, or IDLE */
 
         /* nd_app.h's teardown contract: the phone is ringing and this app has
          * to go. The format is stopped rather than orphaned, because a root
@@ -2265,10 +2397,12 @@ bool nd_svc_format_card(void)
             (void)nd_svc_format_cancel();
             return false;
         }
-        /* ND_SVC_FORMAT_TIMEOUT_S sits above the ND_SVC_FORMAT_WAIT_S the core
-         * allows the helper, so the side that KNOWS WHY gives up first and the
-         * owner gets "Formatting failed." rather than a silent timeout. */
-        if (secs > ND_SVC_FORMAT_TIMEOUT_S) {
+        /* The belt to the core's own deadline, and it sits ABOVE it: the side
+         * that KNOWS WHY has to give up first, so the core reports "the helper
+         * never exited" and this only fires when the core itself has lost
+         * track. The deadline comes back with every poll because it is a
+         * property of the card, which this caller is not allowed to name. */
+        if (prog.elapsed_s > nd_svc_format_app_timeout_s(prog.deadline_s)) {
             (void)nd_svc_format_cancel();
             return false;
         }

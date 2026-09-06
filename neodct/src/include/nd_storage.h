@@ -221,6 +221,45 @@ bool nd_storage_setup_folders(void);
  * and a card can be remounted read-only underneath it. */
 bool nd_storage_card_is_writable(void);
 
+/* ============ HOW BIG THE CARD IS, AND WHY ANYTHING ASKS ============
+ *
+ * Because a 2 GB card and a 128 GB card do not deserve the same patience, and
+ * for one release they got it: the core allowed every format a flat four
+ * minutes and Settings drew its progress bar against that same four minutes.
+ * The two numbers being one number is what produced the owner's report --
+ * "waited for it to hit 100%, then it told me the format failed" -- because
+ * the bar filling and the helper being killed were, by construction, the same
+ * instant. The bar is now drawn against an estimate and the kill deadline is
+ * a multiple of it (nd_svc.h), and both of them are derived from this.
+ *
+ * Answers in BYTES, 0 when the size cannot be established -- a plain-file
+ * "card" in a test, a device that has gone since the state file was written,
+ * a sysfs this process cannot read. Zero is a real answer and callers must
+ * treat it as "assume the worst", never as "a card of no size".
+ *
+ * `device` is what the state file named, so it is usually a PARTITION
+ * (/dev/mmcblk1p1). A format rewrites the whole DISK, so what is wanted is
+ * the disk's size, and the partition currently on it may be a small one on a
+ * large card -- exactly the case where guessing from the partition would put
+ * the deadline back where it started. The parent name is derived with the
+ * same rule neodct-sdcard's parent_disk() uses, and if that name has no size
+ * in sysfs the device's own is used rather than nothing.
+ *
+ * Goes through nd_path_resolve() like everything else here, so a test stages
+ * /sys/class/block under its own root. */
+uint64_t nd_storage_device_bytes(const char *device);
+
+/* The disk a partition belongs to: mmcblk1p1 -> mmcblk1, sda1 -> sda,
+ * mmcblk1 -> mmcblk1. Bare kernel names, no "/dev/". Exposed because it is
+ * the half of the lookup above that is worth pinning on its own -- the
+ * families whose whole-disk names END IN A DIGIT are what makes it more than
+ * a call to strip trailing digits, and getting one wrong reads the size of a
+ * device that is not there.
+ *
+ * Returns false, leaving `out` empty, when the name does not fit or is not a
+ * plausible kernel device name. */
+bool nd_storage_parent_disk(const char *device, char *out, size_t out_sz);
+
 /* Where a download or an MMS attachment goes: the card's arrival partition.
  *
  * false when there is not one, and the caller's answer to that must be to

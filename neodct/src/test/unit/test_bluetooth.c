@@ -9,9 +9,11 @@
  *     so the "up, discoverable, 1021-byte ACL" screen can be checked on a
  *     machine with no radio in it.
  *
- *  3. The two refusals are different strings. A kernel with no CONFIG_BT and
- *     a dongle that is not plugged in look identical on the screen unless
- *     somebody makes them different, and they are different afternoons.
+ *  3. The two refusals are different strings, each naming what to go and do,
+ *     and each SHORT ENOUGH TO FIT. A kernel with no CONFIG_BT and a dongle
+ *     that is not plugged in look identical on the screen unless somebody
+ *     makes them different, and they are different afternoons -- but a
+ *     message the dialog silently clips is a third way to say nothing.
  *
  *  4. The self test stops at the first failure and dashes the rest, and the
  *     failure's reason reaches the bottom line.
@@ -44,6 +46,7 @@
 #include <unistd.h>
 
 #include "nd_bt.h"
+#include "nd_widgets.h"
 #include "smallapp_test.h"
 
 #include "../../apps/Bluetooth/bluetooth.h"
@@ -372,12 +375,84 @@ static void test_the_self_test_stops_at_the_first_failure(void)
  * 5 and 6. The app itself
  * ------------------------------------------------------------------ */
 
+/* ============ WHY NEITHER MESSAGE NAMES A KCONFIG SYMBOL ============
+ *
+ * This case used to demand "CONFIG_BT" inside the kernel refusal, and it has
+ * failed every run since apps/Bluetooth/main.c stopped putting it there. The
+ * code is the half that is right, and the reason is the screen. MessageDialog
+ * is 240x175 with an icon and a button, so a message gets a handful of body
+ * lines; "CONFIG_BT and CONFIG_BT_HCIBTUSB" is a line and a half of kernel
+ * trivia that a person holding the phone cannot act on, and it pushed off the
+ * end the one sentence they can -- that turning Bluetooth on means a reflash.
+ * And the clip is
+ * INVISIBLE (nd_widgets.h): the ellipsis the renderer appends is U+2026 and
+ * this font has no glyph for it, so an over-long message does not look
+ * broken, it looks like it ends there. That is how the modem fault notice
+ * came to ship reading "...if this does not fix the issue, there is".
+ *
+ * The symbols went to the nd_log_err() line beside the dialog, where whoever
+ * is doing the reflash reads them off a serial console and where they cost no
+ * pixels.
+ *
+ * So the claim is unchanged -- two faults, two messages, each naming the thing
+ * to go and look at -- but for a kernel built without Bluetooth that thing is
+ * a reflash, not a symbol. Asking whether the string mentions CONFIG_BT was
+ * never the question; asking whether it FITS is, and the case under this one
+ * asks it of the widget.
+ */
 static void test_the_two_refusals_are_different_faults(void)
 {
     CHECK(strcmp(*api.no_kernel, *api.no_adapter) != 0, "two faults, two messages");
-    /* Each one names the thing to go and look at. */
-    CHECK(strstr(*api.no_kernel, "CONFIG_BT") != NULL, "the kernel one names the option");
+    /* Each one names what to go and do about it. */
+    CHECK(strstr(*api.no_kernel, "reflash") != NULL, "the kernel one asks for a reflash");
     CHECK(strstr(*api.no_adapter, "firmware") != NULL, "the dongle one names the firmware");
+}
+
+/* nd_widgets.h, on nd_msgdialog_measure(): "Ask this about any message you
+ * ship." These two are shipped strings that exist only to be put in a
+ * MessageDialog, and this is the assertion that would have caught the
+ * truncation the symbol names caused -- the one nobody could see. */
+static void test_both_refusals_fit_the_dialog(void)
+{
+    sa_fixture fx;
+    const char *const shipped[2] = {*api.no_kernel, *api.no_adapter};
+    size_t i;
+
+    if (!sa_fx_init(&fx)) {
+        CHECK(false, "fixture");
+        sa_fx_free(&fx);
+        return;
+    }
+
+    for (i = 0u; i < ND_ARRAY_LEN(shipped); i++) {
+        nd_msgdialog dlg;
+        size_t needed = 0u;
+        size_t fits = 0u;
+
+        /* Bare, because both call sites in apps/Bluetooth/main.c are bare: no
+         * title, no icon override, no button text. A dialog measured with
+         * furniture the app does not give it is measuring a different dialog. */
+        nd_msgdialog_init(&dlg, &fx.ui, shipped[i]);
+        nd_msgdialog_measure(&dlg, &needed, &fits);
+        CHECK(needed <= fits, "the refusal fits with nothing clipped off the end");
+    }
+
+    /* And the trade itself, asserted rather than remembered: put the symbols
+     * back beside the sentence and the sentence is what goes. Anybody who
+     * decides the technician needs them on screen has to answer this line. */
+    {
+        nd_msgdialog dlg;
+        size_t needed = 0u;
+        size_t fits = 0u;
+
+        nd_msgdialog_init(&dlg, &fx.ui,
+                          "No Bluetooth here.\n\nCONFIG_BT and CONFIG_BT_HCIBTUSB are off."
+                          "\n\nEnabling it needs a reflash.");
+        nd_msgdialog_measure(&dlg, &needed, &fits);
+        CHECK(needed > fits, "the symbol names do not fit beside the sentence that matters");
+    }
+
+    sa_fx_free(&fx);
 }
 
 static void test_the_menu_draws_and_back_leaves(void)
@@ -457,6 +532,7 @@ int main(void)
     RUN(test_the_first_failure_reaches_the_bottom_line);
     RUN(test_the_self_test_stops_at_the_first_failure);
     RUN(test_the_two_refusals_are_different_faults);
+    RUN(test_both_refusals_fit_the_dialog);
     RUN(test_the_menu_draws_and_back_leaves);
     RUN(test_null_safety);
 

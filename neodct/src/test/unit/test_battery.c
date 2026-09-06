@@ -37,6 +37,7 @@
 
 #include "nd_battery.h"
 #include "nd_types.h"
+#include "nd_vclock.h"
 #include "platform_test.h"
 
 /* ------------------------------------------------------------------ *
@@ -61,6 +62,11 @@ static void clear_sim_vcell(void)
  * readable; stderr is left alone so a real failure still shows. */
 static int g_saved_stdout = -1;
 
+/* capture_begin() takes stderr as well, and puts the failure count aside so
+ * that capture_end() can tell whether it swallowed a FAIL line. */
+static int g_saved_stderr = -1;
+static int g_capture_failures;
+
 static void mute_stdout(void)
 {
     int devnull;
@@ -84,30 +90,81 @@ static void unmute_stdout(void)
     }
 }
 
-/* Runs `body` with stdout pointed at a file under the case root, then reads
- * the file back so a test can assert on what was logged. */
+/* Runs a case with BOTH standard streams pointed at a file under the case
+ * root, then reads the file back so a test can assert on what was logged.
+ *
+ * ============ BOTH, BECAUSE THE VERDICT IS AN ERROR LINE ============
+ *
+ * The gauge deliberately splits its diagnostics across the two streams:
+ * nd_log() carries the routine lines and nd_log_err() carries the ones that
+ * report a failure, and FUEL GAUGE UNREADABLE -- the line that names the bus,
+ * the address it selected and the kernel's own refusal -- is a failure. On
+ * the phone the split costs nothing, because nd_log's serial redirect puts
+ * both streams on the same console and the log somebody greps is the pair of
+ * them.
+ *
+ * Capturing stdout alone was correct while every case here ended in
+ * Simulation Mode, and stopped being correct the moment a node that exists
+ * and cannot be used stopped being called Simulation Mode. The three cases
+ * below then searched the half of the console the verdict is not written to,
+ * and failed while the line they wanted went past on the other half.
+ *
+ * Capturing stderr does mean a CHECK failing INSIDE the window would write
+ * its FAIL line into the file instead of onto the console, so capture_end()
+ * replays the file whenever the failure count moved: no case can be made to
+ * fail invisibly by being wrapped in a capture. */
 static void capture_begin(void)
 {
     char resolved[ND_PATH_MAX];
     int fd;
 
     pt_write_text("/capture.log", "");
-    (void)fflush(stdout);
+    (void)fflush(NULL);
+    g_capture_failures = g_failures;
     g_saved_stdout = dup(STDOUT_FILENO);
+    g_saved_stderr = dup(STDERR_FILENO);
     if (nd_path_resolve(resolved, sizeof resolved, "/capture.log") != ND_OK)
         return;
     fd = open(resolved, O_WRONLY | O_TRUNC);
     if (fd >= 0) {
         (void)dup2(fd, STDOUT_FILENO);
+        (void)dup2(fd, STDERR_FILENO);
         (void)close(fd);
     }
 }
 
 static void capture_end(char *out, size_t out_sz)
 {
+    /* stdout is fully buffered while it points at a file, so nothing is in
+     * the file until this flush. stderr is restored before the replay below,
+     * or the replay would go straight back into the capture. */
+    (void)fflush(NULL);
+    if (g_saved_stderr >= 0) {
+        (void)dup2(g_saved_stderr, STDERR_FILENO);
+        (void)close(g_saved_stderr);
+        g_saved_stderr = -1;
+    }
     unmute_stdout();
     if (pt_read_text("/capture.log", out, out_sz) == (size_t)-1)
         out[0] = '\0';
+    if (g_failures != g_capture_failures)
+        (void)fputs(out, stderr);
+}
+
+/* How many times `needle` occurs in `hay`. What makes the reprobe affordable
+ * is a once-per-reason rule, and "the line is present" cannot tell a rule
+ * that still holds from one that has stopped holding. */
+static int count_occurrences(const char *hay, const char *needle)
+{
+    const char *p = hay;
+    size_t step = strlen(needle);
+    int n = 0;
+
+    while ((p = strstr(p, needle)) != NULL) {
+        n++;
+        p += step;
+    }
+    return n;
 }
 
 /* ------------------------------------------------------------------ *
@@ -587,6 +644,82 @@ static void test_a_nonsense_bus_setting_falls_back_to_three(void)
     nd_battery_close(b);
 }
 
+/* --- and asking again costs the boot nothing --- */
+
+/* ============ THE RETRY MUST NOT BE PAID FOR ON EVERY BOOT ============
+ *
+ * Re-probing is what lets a gauge that lost the udev race start working, and
+ * it would be a bad trade if a board with no battery daughterboard on it paid
+ * for that trade every time it came up. It does not: the constructor makes
+ * exactly ONE attempt, which on an absent node is one failing open(2), and
+ * every attempt after it is due at a time the poll the status bar already
+ * turns will walk past on its own.
+ */
+static void test_an_absent_gauge_is_settled_in_a_single_probe(void)
+{
+    char log[4096];
+    nd_battery *b = NULL;
+    double started;
+    double spent;
+
+    (void)unsetenv(ND_SIM_ENV_VAR);
+    clear_sim_vcell();
+
+    capture_begin();
+    started = nd_time_monotonic();
+    /* Bus 5 has no node under the case root at all. */
+    CHECK(nd_battery_open(&b, 5, 0x36) == ND_OK);
+    spent = nd_time_monotonic() - started;
+    capture_end(log, sizeof log);
+
+    /* The bound is a whole second because it is not a benchmark of this host:
+     * it is here to fail a constructor that has learned to sleep between
+     * attempts, which is the shape a retry usually arrives in and the one
+     * thing a phone cannot afford between power-on and the first frame. */
+    CHECK(spent < 1.0);
+    /* Said once, so the verdict was reached once. A constructor that spun
+     * over the schedule itself would have repeated it. */
+    CHECK_INT(count_occurrences(log, "HARDWARE NOT FOUND"), 1);
+    nd_battery_close(b);
+}
+
+/* And the same for the minute afterwards, which is the busiest the schedule
+ * ever gets: fifteen attempts two seconds apart, then one every thirty.
+ *
+ * The console is the thing at risk here rather than the CPU -- an open(2) per
+ * poll is nothing, but a verdict reprinted every two seconds would bury the
+ * keypad's bring-up, which happens on the same i2c bus in the same second on
+ * exactly the boots where this is retrying. */
+static void test_a_minute_of_reprobing_says_it_once(void)
+{
+    char log[8192];
+    nd_battery *b = NULL;
+    int tick;
+
+    (void)unsetenv(ND_SIM_ENV_VAR);
+    clear_sim_vcell();
+
+    /* Virtual time: the schedule under test is a minute long and no test may
+     * sit through a minute of it. One advance is one UI tick, and the UI asks
+     * the gauge on every tick. */
+    nd_vclock_enable();
+    capture_begin();
+    CHECK(nd_battery_open(&b, 5, 0x36) == ND_OK);
+    for (tick = 0; tick < 600; tick++) {
+        (void)nd_battery_poll(b, false);
+        nd_vclock_advance();
+    }
+    capture_end(log, sizeof log);
+    nd_vclock_disable();
+
+    CHECK_INT(count_occurrences(log, "HARDWARE NOT FOUND"), 1);
+    /* Non-zero, so this also proves the retry actually ran: the line is
+     * printed by the attempt that hands the fast phase over to the slow one,
+     * and it cannot appear unless fourteen attempts happened before it. */
+    CHECK_INT(count_occurrences(log, "still trying"), 1);
+    nd_battery_close(b);
+}
+
 /* --- the seed poll --- */
 
 static void test_the_constructor_polls_once_so_the_first_frame_is_real(void)
@@ -623,6 +756,8 @@ int main(void)
     RUN(test_an_absent_node_is_still_plain_simulation);
     RUN(test_an_explicit_bus_and_address_win_over_settings);
     RUN(test_a_nonsense_bus_setting_falls_back_to_three);
+    RUN(test_an_absent_gauge_is_settled_in_a_single_probe);
+    RUN(test_a_minute_of_reprobing_says_it_once);
     RUN(test_the_constructor_polls_once_so_the_first_frame_is_real);
     return pt_report("test_battery");
 }

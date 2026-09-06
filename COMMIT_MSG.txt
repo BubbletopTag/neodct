@@ -3129,3 +3129,250 @@ Tests are written but UNRUN: this workstation does not run the C suite.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df
+
+--- (group MODEM, test_modem) ---
+
+modem: the fault watchdog condemned a radio it never asked about
+
+0.5.9a made a busy AT port stop ageing the ND_MODEM_FAULT_AFTER_S clock by
+stamping last_ok_at forward on every tick that loses the flock. That works
+only while the ticks are evenly spaced, and they are not: the watchdog is
+evaluated FIRST on every tick, while the stamp is reached only by ticks that
+get past the next_urc gate -- which the fair-share block pushes out by the
+whole length of a long tick, and which modem_thread skips entirely while it
+has requests to serve. The first tick after any such gap declared MODEM FAULT
+without ever asking who had the port.
+
+So the watchdog now asks the lock before it condemns anything, and takes the
+answer over the timestamp: another process holding the flock is direct
+evidence the radio is answering, where last_ok_at is only evidence about who
+we last talked to. A lock that cannot be opened at all still faults -- that
+is no evidence in either direction. Over-reporting a fault is the four-bar
+"Simulation" lie with the sign flipped, and it is what
+test_a_held_lock_is_not_ninety_seconds_of_silence was written to catch.
+
+test_modem: 692 checks passed (was 3 failures).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df
+
+
+================================================================================
+
+test: the battery log a test greps is both streams, not stdout
+
+test_battery captured stdout alone and asserted on it. That was right for as
+long as every probe failure ended in Simulation Mode, which is printed by
+nd_log(); it stopped being right in 0.5.9a, when a node that exists and cannot
+be used stopped being called Simulation Mode and started being an error --
+FUEL GAUGE UNREADABLE, with the bus, the address it selected and the kernel's
+refusal on it, printed by nd_log_err(), i.e. on stderr.
+
+So the five failures were the fixture searching the half of the console the
+verdict is not written to. The verdict itself was never lost: it goes past on
+every run of the three affected cases, in full, with the strings the
+assertions want. The phone puts both streams on the same serial console, so
+capturing both is what "the log" has always meant here; nothing in
+nd_battery.c needed to change and nothing did.
+
+Capturing stderr means a CHECK failing inside a capture window would write its
+FAIL line into the capture file rather than onto the console, so capture_end()
+replays the file whenever the failure count moved. Verified by making a check
+inside a window fail on purpose: the line still names itself.
+
+Two cases added for the thing the retry could plausibly have cost. A board
+with no battery daughterboard settles in one failing open(2) -- no sleep, no
+loop, the next attempt is due at a time the status bar's own poll walks past
+-- and the busiest minute of the schedule, fifteen attempts two seconds apart
+and then one every thirty, driven on the virtual clock, says HARDWARE NOT
+FOUND exactly once. That once-per-reason rule is what keeps the console
+readable on precisely the boots where it is retrying, which are the boots
+where the keypad is coming up on the same bus in the same second.
+
+test_battery: 410 checks passed.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df
+
+sdcard: the formatting bar was a countdown to a kill, and the format was slow
+enough to reach it
+
+The owner's report, on 0.5.9a, on hardware: "I got this beautiful formatting
+progress bar. Waited for it to hit 100%, then it told me that the format
+failed." Three faults sit under that sentence.
+
+THE BAR'S DENOMINATOR WAS THE KILL DEADLINE. apps/Settings drew the bar as
+`secs * BAR_TOTAL / ND_SVC_FORMAT_WAIT_S` and nd_svc.c's format_poll() stopped
+the helper at `elapsed >= ND_SVC_FORMAT_WAIT_S`, with ND_SVC_FORMAT_WAIT_S a
+flat 240.0 in both places. The bar filling and a running mke2fs being SIGTERMed
+then SIGKILLed were one event, by construction: there was no card and no timing
+under which a full bar could mean anything but failure. There are two numbers
+now. The ESTIMATE is the bar's denominator and nothing else; the DEADLINE is
+ND_SVC_FORMAT_SLACK (six) times further away and exists to stop a WEDGED helper
+rather than to hold an opinion about how long a format takes. Both come back
+from the core with every poll, because the whole design of this verb is that
+the app never names the device and so cannot look up its size either. Passing
+the estimate means the end of the bar is now a thing the screen has words for:
+the step line changes from "Formatting" to "Still working", the elapsed clock
+keeps running and Clear keeps working.
+
+AND THE FORMAT REALLY WAS TAKING MINUTES, on a card bigger than the 2 GB one
+everything is tested against. neodct-sdcard's mkfs_ext4 ran
+
+    mke2fs -t ext4 -F -m0 -L NEODCT -O ^64bit,^metadata_csum DEV
+
+which writes every inode table by hand and discards the whole device first.
+At this image's defaults -- inode_ratio 16384, inode_size 256 -- the tables are
+one byte for every sixty-four bytes of card: 32 MiB on the test card, 2 GiB on
+a 128 GB one, in exactly the small metadata writes an SD card is slowest at.
+`-E lazy_itable_init=1,lazy_journal_init=1,nodiscard` fixes both, and
+`uninit_bg` is in the feature list with them because WITHOUT A GROUP-DESCRIPTOR
+CHECKSUM lazy_itable_init is accepted, ignored, and every table written anyway
+-- and this command line turns metadata_csum off on purpose, so an older
+e2fsprogs on the owner's PC can still read the card. uninit_bg is six years
+older than the feature being declined and costs nothing there. Measured on a
+32 GiB image: 775 MiB written before, 5 MiB after, and it fscks clean. The
+fallback ladder keeps an mke2fs that dislikes the extended options on ext4
+(slowly, and saying so) rather than dropping it to busybox's ext2.
+
+THE DEADLINE IS THE CARD'S, NOT A CONSTANT. nd_storage_device_bytes() reads
+/sys/class/block/<disk>/size for the disk the card's partition belongs to --
+the same attribute the helper's device_sectors() reads, with the same
+parent_disk() rule, because one decides what gets partitioned and the other
+decides how long that is allowed to take. The estimate is 10 s + 1 s/GiB capped
+at two minutes (a bar needs a denominator it can move against); the deadline is
+that line UNCAPPED times six, floored at 90 s and ceilinged at twenty minutes,
+so a 512 GB card is not asked to share a 128 GB card's patience. A size that
+cannot be read is treated as a big card, because killing a format that was
+working is the failure the whole mechanism exists to prevent.
+
+AND A KILLED FORMAT NOW LEAVES AN HONEST CARD. Nothing caught the signal: the
+helper died mid-mke2fs and the state file still said `state=mounted device=...`
+for a card whose partition table had just been rewritten, so the UI went on
+naming a device and offering folders that were not there -- a plausible source
+of the "the phone stopped recognising my card" reports. neodct-sdcard now traps
+TERM/INT/HUP around the format verb, publishes `unformatted` for the device,
+removes the in-flight marker (a marker left behind kept udev's add and remove
+handlers standing down until the next reboot) and kills its mke2fs. The mke2fs
+runs in the BACKGROUND for that reason and not for any other: a POSIX shell
+does not run a trap while a foreground child is alive, so the handler would
+have fired only after the mke2fs it was meant to stop had finished -- by which
+time the core's SIGKILL has taken the script and left the mke2fs an orphan
+still writing the card. The core reports that case as its own state,
+ND_SVC_FORMAT_DONE_TIMEOUT, and Settings says "Formatting took too long and was
+stopped" rather than "Formatting failed", because those are different things.
+
+test_storage's one regression was the test, not the code. Its writability case
+created all five folders and then asserted setup_folders() == false on a
+traversable-but-unwritable mount; mkdir -p over a directory that already exists
+succeeds whatever the mode of its parent, correctly, and a card with all five
+folders is READY -- a false there would be the phone refusing a card it had
+itself laid out. The folders are removed first, which is the foreign-card shape
+the case's own comment describes.
+
+neodct/tools/test_format_flow.sh is new and proves it in three parts. The mkfs
+measurement and the SIGTERM case run on the host against the shipped helper's
+own functions; the third boots the phone under QEMU with a blank card, walks
+Settings with the monitor's sendkey, and checks the card afterwards from the
+host with debugfs. The walk verifies itself -- nd_ui.c logs the selector index
+on every launch and nd_appsel_init() resets the selection, so a dropped arrow
+is measurable and pressed again -- and keys are sent with a 120 ms hold because
+without one the guest drops roughly one in three.
+
+    format: 0.5.9a command wrote 775 MiB; the helper now writes 5 MiB
+    [OS] App service: /dev/vda is 2048 MiB; a format is allowed 90s (expected 12s)
+    [sdcard] partitioning /dev/vda: one ext4 partition of 2047 MiB
+    [sdcard] mounted /dev/vda1 (ext4) at /NeoDCT/User/sdcard
+    [sdcard] formatted /dev/vda as a NeoDCT card
+    format: ALL PASS
+
+test_svc: 344 checks, 0 failures. test_storage: 290 checks passed.
+
+Two comments elsewhere still name the constants this removes and belong to
+their owners: include/nd_broker.h line 209 and
+docs/c-rewrite/spec-app-services.md lines 1225-1226.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df
+
+================================================================================
+
+format: a full bar meant failure, and the suite runs again
+
+Two things, and the second is why the first shipped.
+
+THE SUITE HAD NEVER BEEN RUN ON 0.5.9a. Running it was forbidden on this
+workstation at the time -- a test had reached poweroff(8) and switched the
+machine off twice, and the block was a stop-gap while the harness was
+built. So 119 files went out with the compiler as their only reader. The
+owner lifted the block today; AGENTS.md now says the suite runs here and
+that "tests unrun" is not a finished release.
+
+The first run found 35 failures. A baseline built from cd323bcf -- the
+commit before 0.5.9a -- gives 18, so 25 of them were ours and 18 were
+pre-existing and mostly environmental. The re-cut golden frames fixed 8 of
+the old ones. All 35 are now gone: MAKE_TEST_EXIT=0, zero FAIL lines.
+
+Of the 25, exactly two were the code being wrong and the rest were tests
+that had been written against the behaviour 0.5.9a deliberately changed:
+
+  * test_modem's held-lock case. A modem whose AT port was busy was being
+    marked faulted, which is the "Simulation" lie 0.5.9a exists to remove
+    pointing the other way -- reporting a fault on a working radio. Code.
+
+  * test_storage's writability probe. A card that already had all five
+    folders was being asked to answer false, which would be the phone
+    refusing a card it had laid out itself. Fixture.
+
+  * test_t9_app's nine. These looked like the worst possible regression --
+    env_matrix empty, multitap typing "2223" where it should type "cd",
+    i.e. a phone whose keypad had stopped producing letters. It is not.
+    0.5.9a separated NEODCT_KEYPAD_MATRIX (a hardware fact) from the
+    NEODCT_T9 override, which is what nd_app.h has always required, and
+    the fixture had been asserting has_matrix_keypad over an nd_input that
+    is a pipe -- under the new contract that describes a phone with no
+    keypad and T9 forced on. The fixture now opens a real matrix backend
+    over a fake PCF8575 on a socketpair and drives the whole chain through
+    the real nd_proc_launch_app(); the child reports env_matrix=1,
+    multitap "cd", # walking abc->ABC->123 and predictive "home".
+
+  * test_broker's ten, of which eight predate us: this host has no ndusr,
+    so the broker correctly refuses a spawn whose user cannot be resolved.
+    That refusal is what stops netsurf running as root on an image built
+    without the users table and it stays. The four affected cases now SKIP
+    with a reason, and the runner prints, at the end of a green run, that
+    no test exercised a privilege drop and that a green suite is therefore
+    not evidence that a spawn reaches execve on the phone. Run nd-selftest
+    there. A suite that always fails is a suite nobody reads, which is
+    precisely how 0.5.9a shipped with 25 regressions nobody saw.
+
+THE OWNER'S FORMAT BUG, reported as: "I got this beautiful formatting
+progress bar. Waited for it to hit 100%, then it told me that the format
+failed." It was literally true. Settings drew the bar as
+secs/ND_SVC_FORMAT_WAIT_S and format_poll() killed the helper at
+elapsed >= ND_SVC_FORMAT_WAIT_S, both 240 s, so the bar filling and the
+mke2fs being SIGKILLed were one event. The bar was a countdown to a
+guaranteed failure.
+
+And it really did need four minutes, because mke2fs was writing every
+inode table by hand. The obvious fix does not work and fails silently:
+-E lazy_itable_init=1 is ignored unless the group descriptors carry a
+checksum, and this command line turns metadata_csum off on purpose so an
+older e2fsprogs can still read the card. Measured on a 32 GiB image with
+the target's own e2fsprogs: 775 MiB written as shipped, 519 MiB with the
+-E options added (no effect), 5 MiB once uninit_bg is in the feature list.
+uninit_bg is six years older than the metadata_csum being declined, so
+nothing about the compatibility promise changes.
+
+The estimate and the deadline are now two numbers rather than one, both
+derived from the card's real size out of sysfs, and reaching the end of
+the bar says "Still working" instead of dying. The full detail, including
+the trap that stops a killed format leaving the card described as mounted,
+is in the entry above this one.
+
+neodct/tools/test_format_flow.sh is new: it boots the real image under
+QEMU, walks Settings with sendkey, formats the card and checks the result.
+It passes.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df

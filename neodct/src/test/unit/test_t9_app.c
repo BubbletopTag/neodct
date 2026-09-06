@@ -21,6 +21,23 @@
  *      developer override set         -> T9 on, which is how it is exercised
  *                                        on a keyboard
  *
+ * ============ WHAT "A CORE WITH THE MATRIX" MEANS HERE ============
+ *
+ * It used to mean `fx.ui.has_matrix_keypad = true`, because that field was
+ * what nd_proc.c put into NEODCT_KEYPAD_MATRIX. It is not any more, and it
+ * must not be: that field has the NEODCT_T9 override folded into it, the app
+ * folds the override in AGAIN on the far side, and the two questions nd_app.h
+ * keeps apart -- "should keys mean T9?" and "is the console's keyboard
+ * missing?" -- were one value. So the core now hands down the HARDWARE FACT,
+ * nd_input_has_matrix(ui->input), and a fixture that sets a boolean is no
+ * longer describing a phone.
+ *
+ * This one therefore opens a REAL matrix backend, through the real
+ * nd_input_open(), over a real keymap.json and a fake PCF8575 that is one end
+ * of a socketpair -- the shape test_matrix.c and test_keypad.c already use.
+ * It fakes THE CHIP and nothing above it, so every layer between the i2c
+ * transaction and the child's environment is the shipped one.
+ *
  * ============ WHY THE CHILD TYPES ============
  *
  * The flag is a means, not the end. What broke was that a keypad press typed
@@ -32,12 +49,14 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <ftw.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pwd.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -47,6 +66,7 @@
 #include "nd_font.h"
 #include "nd_image.h"
 #include "nd_input.h"
+#include "nd_keypad.h"
 #include "nd_paths.h"
 #include "nd_priv.h"
 #include "nd_proc.h"
@@ -298,9 +318,136 @@ typedef struct {
     nd_font *font_md;
     nd_font *font_n;
     nd_font *font_xl;
-    nd_input *input;
+    /* The two inputs a case chooses between; see fixture_use(). */
+    nd_input *input;  /* a pipe: the dev-board core, no matrix        */
+    nd_input *matrix; /* the i2c keypad, over the fake chip below     */
     int write_fd;
+    int driver_fd; /* the descriptor nd_pcf8575 talks to  */
+    int chip_fd;   /* the end this file answers on        */
 } core_fixture;
+
+/* The fake chip's bus and address. Any pair will do -- nd_input_open() takes
+ * the descriptor this file provides and never looks at /dev/i2c-N -- but they
+ * have to be the pair keymap.json names, or the provided descriptor is not
+ * recognised as the one the keymap is about and the open falls through to a
+ * node that is not there. */
+#define FAKE_I2C_BUS  9
+#define FAKE_I2C_ADDR 32 /* 0x20, the PCF8575's default */
+
+/* Enough 0xFFFF answers -- every pin high, nothing held -- that no scan runs
+ * out of them: one scan reads two bytes per row, the launch loop scans at
+ * 20 Hz, and a launch takes about a second. Both ends are non-blocking, so a
+ * scan that outlived the seed fails immediately instead of hanging the suite
+ * on a chip that is a socketpair with nobody behind it. */
+#define QUIET_BYTES 32768u
+
+/* A keymap the real loader accepts, naming the driver and the bus above.
+ * Written by hand rather than through nd_keymap_save() for the reason
+ * test_input.c gives: a fixture built with the code under test cannot catch
+ * that code being wrong.
+ *
+ * WHICH key sits at which position does not matter to anything here. The
+ * core's matrix answers "nothing held" to every scan for the whole test -- it
+ * is the keys the CHILD types that this file is about -- so the map exists to
+ * be loadable and to look like the phone's, and nothing reads it back. */
+static void write_keymap(void)
+{
+    char json[1024];
+
+    CHECK(nd_snprintf(json, sizeof json,
+                      "{\n"
+                      "  \"format\": \"neodct.keymap.v3.matrix.i2c\",\n"
+                      "  \"driver\": \"pcf8575-i2c\",\n"
+                      "  \"i2c_bus\": %d,\n"
+                      "  \"i2c_addr\": %d,\n"
+                      "  \"row_pins\": [0, 1, 2, 3],\n"
+                      "  \"col_pins\": [4, 5, 6, 7],\n"
+                      "  \"keys\": {\n"
+                      "    \"num_1\": {\"row\": 0, \"col\": 0},\n"
+                      "    \"num_2\": {\"row\": 0, \"col\": 1},\n"
+                      "    \"num_3\": {\"row\": 0, \"col\": 2},\n"
+                      "    \"up\": {\"row\": 0, \"col\": 3},\n"
+                      "    \"num_4\": {\"row\": 1, \"col\": 0},\n"
+                      "    \"num_5\": {\"row\": 1, \"col\": 1},\n"
+                      "    \"num_6\": {\"row\": 1, \"col\": 2},\n"
+                      "    \"down\": {\"row\": 1, \"col\": 3},\n"
+                      "    \"num_7\": {\"row\": 2, \"col\": 0},\n"
+                      "    \"num_8\": {\"row\": 2, \"col\": 1},\n"
+                      "    \"num_9\": {\"row\": 2, \"col\": 2},\n"
+                      "    \"navikey\": {\"row\": 2, \"col\": 3},\n"
+                      "    \"star\": {\"row\": 3, \"col\": 0},\n"
+                      "    \"num_0\": {\"row\": 3, \"col\": 1},\n"
+                      "    \"hash\": {\"row\": 3, \"col\": 2},\n"
+                      "    \"clear\": {\"row\": 3, \"col\": 3}\n"
+                      "  }\n"
+                      "}\n",
+                      FAKE_I2C_BUS, FAKE_I2C_ADDR) == ND_OK);
+    pt_write_text(ND_PATH_KEYMAP, json);
+}
+
+/* The core's second input: a real nd_input whose backend is the real i2c
+ * matrix, running over a socketpair instead of a bus. Everything above
+ * nd_pcf8575's read() and write() is the shipped code, which is the point --
+ * nd_input_has_matrix() is true here for the same reason it is true on a
+ * phone, and not because a test said so. */
+static bool fixture_open_matrix(core_fixture *fx)
+{
+    int fds[2];
+    uint8_t quiet[1024];
+    size_t written = 0u;
+    nd_err rc;
+
+    fx->driver_fd = -1;
+    fx->chip_fd = -1;
+
+    write_keymap();
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0)
+        return false;
+    fx->driver_fd = fds[0];
+    fx->chip_fd = fds[1];
+    if (fcntl(fx->driver_fd, F_SETFL, fcntl(fx->driver_fd, F_GETFL, 0) | O_NONBLOCK) != 0)
+        return false;
+    if (fcntl(fx->chip_fd, F_SETFL, fcntl(fx->chip_fd, F_GETFL, 0) | O_NONBLOCK) != 0)
+        return false;
+
+    memset(quiet, 0xFF, sizeof quiet);
+    while (written < QUIET_BYTES) {
+        ssize_t n = write(fx->chip_fd, quiet, sizeof quiet);
+
+        if (n <= 0)
+            break; /* the socket's buffer is full, which is enough answers */
+        written += (size_t)n;
+    }
+
+    /* The descriptor nd-core's root phase leaves behind for exactly this
+     * reason: permission is checked at open(2), so the matrix is opened over
+     * a descriptor somebody else opened. Cleared again straight away, so no
+     * later nd_input_open() in this process picks up a socketpair. */
+    nd_input_provide_keypad_fd(fx->driver_fd, FAKE_I2C_BUS, FAKE_I2C_ADDR);
+    rc = nd_input_open(&fx->matrix);
+    nd_input_provide_keypad_fd(-1, -1, -1);
+    if (rc != ND_OK)
+        return false;
+    return nd_input_has_matrix(fx->matrix);
+}
+
+/* Point the core at one of its two inputs. keypad_fd travels with it because
+ * nd_ui.h says the two are one answer: the descriptor a widget polls belongs
+ * to whichever backend this core is listening to. */
+static void fixture_use(core_fixture *fx, bool matrix)
+{
+    fx->ui.input = matrix ? fx->matrix : fx->input;
+    fx->ui.keypad_fd = nd_input_fd(fx->ui.input);
+    /* keypad_tick()'s line, because this fixture stands in for a core and a
+     * core's has_matrix_keypad is derived, not assigned: the backend's answer
+     * with NEODCT_T9 folded in. Nothing in the launch reads it any more -- the
+     * environment carries the hardware fact instead -- and that is exactly why
+     * it is derived here rather than set by hand: a fixture whose flag and
+     * whose backend disagreed is what let the old shortcut look like a phone.
+     * Set AFTER the override in each case below, since it reads it. */
+    fx->ui.has_matrix_keypad = nd_ui_t9_active_for(nd_input_has_matrix(fx->ui.input));
+}
 
 static bool core_init(core_fixture *fx)
 {
@@ -309,6 +456,8 @@ static bool core_init(core_fixture *fx)
 
     memset(fx, 0, sizeof *fx);
     fx->write_fd = -1;
+    fx->driver_fd = -1;
+    fx->chip_fd = -1;
 
     if (!resolve_font(path, sizeof path))
         return false;
@@ -349,6 +498,9 @@ static bool core_init(core_fixture *fx)
     fx->ui.input = fx->input;
     fx->ui.keypad_fd = nd_input_fd(fx->input);
     fx->ui.softkey_exists = true;
+    /* Not nd_ui_init()'s doing, so it is stated here: this fixture owns the
+     * backends it opened above and may ask them what they are. */
+    fx->ui.owns_input_backend = true;
     fx->ui.image_cache = nd_imgcache_new(ND_IMGCACHE_MAX);
     return fx->ui.image_cache != NULL;
 }
@@ -358,6 +510,15 @@ static void core_free(core_fixture *fx)
     nd_imgcache_free(fx->ui.image_cache);
     if (fx->input != NULL)
         nd_input_close(fx->input);
+    /* Closing the input does not close driver_fd: nd_pcf8575_adopt() never
+     * owned it, which is the property that lets the descriptor outlive a
+     * matrix that was torn down and reopened. So both ends are closed here. */
+    if (fx->matrix != NULL)
+        nd_input_close(fx->matrix);
+    if (fx->driver_fd >= 0)
+        (void)close(fx->driver_fd);
+    if (fx->chip_fd >= 0)
+        (void)close(fx->chip_fd);
     if (fx->write_fd >= 0)
         (void)close(fx->write_fd);
     nd_image_free(fx->canvas);
@@ -471,8 +632,8 @@ static void test_no_matrix_means_no_t9(core_fixture *fx)
 {
     char report[REPORT_BYTES];
 
-    fx->ui.has_matrix_keypad = false;
     (void)unsetenv(ND_ENV_T9);
+    fixture_use(fx, false);
     if (!launch(fx, report, sizeof report))
         return;
 
@@ -504,8 +665,12 @@ static void test_matrix_reaches_the_app(core_fixture *fx)
 {
     char report[REPORT_BYTES];
 
-    fx->ui.has_matrix_keypad = true;
     (void)unsetenv(ND_ENV_T9);
+    fixture_use(fx, true);
+    /* First, because everything under it is worthless if the core does not
+     * really have a matrix -- a fixture that lost its fake chip would go on
+     * to report "no T9" as a bug in the OS. */
+    CHECK(nd_input_has_matrix(fx->ui.input));
     if (!launch(fx, report, sizeof report))
         return;
 
@@ -544,18 +709,22 @@ static void test_the_override_reaches_the_app(core_fixture *fx)
 {
     char report[REPORT_BYTES];
 
-    fx->ui.has_matrix_keypad = false;
     (void)setenv(ND_ENV_T9, "1", 1);
+    fixture_use(fx, false);
 
-    /* The core folds the override into its own flag on init. This fixture
-     * builds its nd_ui by hand and never calls nd_ui_init(), so it stands in
-     * for that here -- the propagation under test is core flag -> child. */
-    fx->ui.has_matrix_keypad = true;
+    /* The core's own flag goes true here, off the override alone, and the
+     * child's goes true WITHOUT NEODCT_KEYPAD_MATRIX -- because the override
+     * reaches the child as itself. That is the whole shape of the separation:
+     * the environment carries the phone's hardware and the developer's
+     * variable travels beside it, so neither has to be reconstructed from the
+     * other. build_envp() leaves NEODCT_T9 alone for this. */
+    CHECK(fx->ui.has_matrix_keypad);
 
     if (!launch(fx, report, sizeof report))
         goto out;
 
     check_boundary_intact(report);
+    check_kv(report, "env_matrix", ""); /* no matrix in this core, and it says so */
     check_kv(report, "env_t9", "1");
     check_kv(report, "has_matrix_keypad", "1");
     check_kv(report, "multitap_text", "cd");
@@ -570,8 +739,9 @@ static void test_the_override_can_force_it_off(core_fixture *fx)
 {
     char report[REPORT_BYTES];
 
-    fx->ui.has_matrix_keypad = true;
     (void)setenv(ND_ENV_T9, "0", 1);
+    fixture_use(fx, true);
+    CHECK(!fx->ui.has_matrix_keypad); /* the override reached the core's flag */
 
     if (!launch(fx, report, sizeof report))
         goto out;
@@ -609,10 +779,21 @@ int main(void)
         return 0;
     }
 
-    test_no_matrix_means_no_t9(&fx);
-    test_matrix_reaches_the_app(&fx);
-    test_the_override_reaches_the_app(&fx);
-    test_the_override_can_force_it_off(&fx);
+    /* A FAILURE AND NOT A SKIP. Two of the four cases are the ones this file
+     * exists for, and both need a core that really has a matrix; a fixture
+     * that quietly ran the other two would report success for the exact bug
+     * it was written to catch. Everything it needs -- a socketpair, a file in
+     * the scratch root -- is available on any host that got this far. */
+    if (!fixture_open_matrix(&fx)) {
+        g_checks++;
+        g_failures++;
+        fprintf(stderr, "FAIL %s: no fake matrix backend, so nothing below is tested\n", __FILE__);
+    } else {
+        test_no_matrix_means_no_t9(&fx);
+        test_matrix_reaches_the_app(&fx);
+        test_the_override_reaches_the_app(&fx);
+        test_the_override_can_force_it_off(&fx);
+    }
 
     core_free(&fx);
     drop_stage();

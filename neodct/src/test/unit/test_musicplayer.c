@@ -1475,22 +1475,58 @@ static void test_duration(void)
  * `aplay` is what the in-process path feeds; `mpv` is MPV_CMD's argv[0] and
  * therefore the only program the mpv path has to find. Both block, so a
  * started child stays started until it is stopped. */
+/* The blocking command both stubs below run, found by absolute path.
+ *
+ * ============ A STUB CANNOT USE THE $PATH IT IS TESTING ============
+ *
+ * Every test here cuts $PATH down to the single directory holding the stubs,
+ * and that narrowing is the assertion: it is what says the program the spawn
+ * reached was the player itself and not a wrapper standing in front of it.
+ * But a stub is a child and inherits that $PATH, so a script whose body is
+ * `exec sleep 30` hands /bin/sh a name it has nowhere left to look up. The
+ * shell exits 127 and the "player" is a corpse before it ever blocks.
+ *
+ * That is not hypothetical; it is what these stubs did for as long as they
+ * existed. It went unseen because the code under test ALSO treated a
+ * successful fork() as playback, so a dead child and a playing one were
+ * indistinguishable -- the very blind spot that let `nice -n -10` turn every
+ * fallback track into one that "finished" instantly. 0.5.9a gave start_mpv()
+ * an execve probe, and the first corpse the probe found was this one's.
+ *
+ * Resolving it HERE, while the real $PATH is still in place, is what makes a
+ * stub independent of the environment the test then constructs. */
+static const char *find_sleep(void)
+{
+    static const char *const dirs[] = {"/bin", "/usr/bin", "/usr/local/bin"};
+    static char buf[ND_PATH_MAX];
+    size_t i;
+
+    for (i = 0u; i < sizeof dirs / sizeof dirs[0]; i++) {
+        if (nd_snprintf(buf, sizeof buf, "%s/sleep", dirs[i]) == ND_OK && access(buf, X_OK) == 0)
+            return buf;
+    }
+    return NULL;
+}
+
 /* A stub that RECORDS its argv before sleeping, so a test can assert on what
  * was actually passed to the player. Written with printf rather than "$@" so
  * that one argument per line survives arguments containing spaces. */
 static bool make_recording_stub(const char *name, const char *logfile)
 {
+    const char *sleeper = find_sleep();
     char path[ND_PATH_MAX];
     FILE *f;
 
+    if (sleeper == NULL)
+        return false;
     if (nd_snprintf(path, sizeof path, "%s/%s", g_bindir, name) != ND_OK)
         return false;
     f = fopen(path, "w");
     if (f == NULL)
         return false;
     (void)fprintf(f, "#!/bin/sh\nfor a in \"$@\"; do printf '%%s\\n' \"$a\"; done > '%s'\n"
-                     "exec sleep 30\n",
-                  logfile);
+                     "exec '%s' 30\n",
+                  logfile, sleeper);
     (void)fclose(f);
     return chmod(path, 0755) == 0;
 }
@@ -1520,15 +1556,18 @@ static bool stub_argv_has(const char *logfile, const char *needle)
 
 static bool make_stub(const char *name)
 {
+    const char *sleeper = find_sleep();
     char path[ND_PATH_MAX];
     FILE *f;
 
+    if (sleeper == NULL)
+        return false;
     if (nd_snprintf(path, sizeof path, "%s/%s", g_bindir, name) != ND_OK)
         return false;
     f = fopen(path, "w");
     if (f == NULL)
         return false;
-    (void)fputs("#!/bin/sh\nexec sleep 30\n", f);
+    (void)fprintf(f, "#!/bin/sh\nexec '%s' 30\n", sleeper);
     (void)fclose(f);
     return chmod(path, 0755) == 0;
 }

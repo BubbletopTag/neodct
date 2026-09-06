@@ -315,6 +315,39 @@ static void test_scan(void)
 
 static char g_bindir[ND_PATH_MAX];
 
+/* The blocking command the stub below runs, found by absolute path.
+ *
+ * ============ THE STUB CANNOT USE THE $PATH IT IS TESTING ============
+ *
+ * test_preview cuts $PATH down to the single directory holding the stub, and
+ * that narrowing is the assertion -- but the stub is a child and inherits it,
+ * so a script whose body is `exec sleep 30` hands /bin/sh a name it has
+ * nowhere left to look up. The shell exits 127 and the "preview" is a corpse
+ * before it ever blocks.
+ *
+ * That is not hypothetical; it is what this stub did for as long as it
+ * existed, under both its names. It went unseen because the app under test
+ * ALSO treated a successful fork() as playback, so a dead child and a playing
+ * one were indistinguishable -- the very blind spot that let `nice -n -10`
+ * silence every preview on the handset for eight releases. 0.5.9a gave
+ * nd_tones_preview_play() an execve probe, and the first corpse the probe
+ * found was this one's.
+ *
+ * Resolving it HERE, while the real $PATH is still in place, is what makes
+ * the stub independent of the environment the test then constructs. */
+static const char *find_sleep(void)
+{
+    static const char *const dirs[] = {"/bin", "/usr/bin", "/usr/local/bin"};
+    static char buf[ND_PATH_MAX];
+    size_t i;
+
+    for (i = 0u; i < sizeof dirs / sizeof dirs[0]; i++) {
+        if (nd_snprintf(buf, sizeof buf, "%s/sleep", dirs[i]) == ND_OK && access(buf, X_OK) == 0)
+            return buf;
+    }
+    return NULL;
+}
+
 /* A stub `mpv` that blocks, so a preview can be started and stopped without
  * a real mpv, without a sound card and without playing anything. MPV_CMD's
  * argv[0] is `mpv`, so this is the only program the spawn needs to find --
@@ -323,15 +356,18 @@ static char g_bindir[ND_PATH_MAX];
  * ever goes back to being a wrapper. */
 static bool make_stub_mpv(void)
 {
+    const char *sleeper = find_sleep();
     char path[ND_PATH_MAX];
     FILE *f;
 
+    if (sleeper == NULL)
+        return false;
     if (nd_snprintf(path, sizeof path, "%s/mpv", g_bindir) != ND_OK)
         return false;
     f = fopen(path, "w");
     if (f == NULL)
         return false;
-    (void)fputs("#!/bin/sh\nexec sleep 30\n", f);
+    (void)fprintf(f, "#!/bin/sh\nexec '%s' 30\n", sleeper);
     (void)fclose(f);
     return chmod(path, 0755) == 0;
 }

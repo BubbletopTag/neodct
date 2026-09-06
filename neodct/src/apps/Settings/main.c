@@ -1334,18 +1334,41 @@ static void show_about(nd_ui *ui)
  *
  * mke2fs reports no progress of its own -- there is no percentage to be had
  * from it, and inventing one out of `sync` calls would be a fiction. What
- * moves is time, so the bar is elapsed time against ND_SVC_FORMAT_WAIT_S, the
- * ceiling the core allows the helper. That is an honest "about how long this
- * usually takes" and the reading beside it is the elapsed time in minutes and
- * seconds, which is the part an owner can actually check against a watch.
+ * moves is time, so the bar is elapsed time against an ESTIMATE of how long a
+ * format of this particular card ought to take, and the reading beside it is
+ * the elapsed time in minutes and seconds, which is the part an owner can
+ * actually check against a watch.
  *
- * It stops at 99%. A bar that sits full while the work continues is the one
- * thing that makes a progress display read as broken, and this one CAN reach
- * its denominator without being finished -- the cap is a timeout, not an
- * estimate.
+ * ============ A FULL BAR IS NOT A FAILURE ============
+ *
+ * It was, and this is the bug the owner reported: "I got this beautiful
+ * formatting progress bar. Waited for it to hit 100%, then it told me that
+ * the format failed."
+ *
+ * The denominator used to be ND_SVC_FORMAT_WAIT_S, a flat 240 s, and that
+ * same constant was the instant nd_svc.c's format_poll() SIGKILLed the
+ * helper. The bar and the execution were the same clock. Filling it was not
+ * "nearly done", it was "out of time", and no card and no timing could have
+ * made it mean anything else.
+ *
+ * So the denominator is now the estimate the core sends back with every poll,
+ * and the core's deadline sits a factor of ND_SVC_FORMAT_SLACK above it. The
+ * bar can therefore reach its end while the format is healthy and continuing
+ * -- which is a state the screen has to have words for, and now does: past
+ * the estimate the step line changes from "Formatting" to "Still working",
+ * the clock keeps running, and Clear keeps working. Reaching the end of this
+ * bar is the phone saying "longer than I expected", never "I have given up".
+ *
+ * It still stops short of the end while running. A bar that sits full while
+ * the work continues is the one thing that makes a progress display read as
+ * broken, and this one CAN outrun its denominator; only DONE_OK draws it
+ * full.
  */
 
 #define SETAPP_FORMAT_BAR_TOTAL 1000
+
+/* Where the bar stops while the job is still going, in thousandths. */
+#define SETAPP_FORMAT_BAR_CAP ((SETAPP_FORMAT_BAR_TOTAL * 99) / 100)
 
 /* The elapsed clock, right-aligned beside the percentage. */
 static void format_elapsed_detail(void *ctx, int64_t done, int64_t total, char *out, size_t out_sz)
@@ -1364,10 +1387,11 @@ static void format_elapsed_detail(void *ctx, int64_t done, int64_t total, char *
 }
 
 typedef enum {
-    FORMAT_DONE_OK = 0, /* the card was formatted                   */
-    FORMAT_NOT_STARTED, /* the core would not start one at all      */
-    FORMAT_FAILED,      /* it ran and did not finish                */
-    FORMAT_STOPPED      /* the owner pressed Clear and confirmed it */
+    FORMAT_DONE_OK = 0, /* the card was formatted                       */
+    FORMAT_NOT_STARTED, /* the core would not start one at all          */
+    FORMAT_FAILED,      /* it ran and reported a failure                */
+    FORMAT_TIMED_OUT,   /* it was still running at the deadline         */
+    FORMAT_STOPPED      /* the owner pressed Clear and confirmed it     */
 } format_outcome;
 
 /* Ask before stopping. Cancelling a format is not a way out of a screen, it is
@@ -1394,8 +1418,12 @@ static bool confirm_stop(nd_ui *ui)
 static format_outcome run_format_job(nd_ui *ui)
 {
     nd_progress bar;
+    nd_svc_format_progress prog;
     double secs = 0.0;
     int last_whole = -1;
+    bool overrun = false;
+
+    memset(&prog, 0, sizeof prog);
 
     /* BEFORE the start, not after it. nd_svc_format_start() is a round trip to
      * the core and the core spawns a root helper on it; short, but the frame
@@ -1413,33 +1441,49 @@ static format_outcome run_format_job(nd_ui *ui)
         int64_t done;
         int32_t key;
         int whole;
+        double span;
 
-        st = nd_svc_format_poll(&secs);
+        st = nd_svc_format_poll(&prog);
+        secs = prog.elapsed_s;
         if (st == ND_SVC_FORMAT_DONE_OK) {
             (void)nd_progress_draw(&bar, SETAPP_FORMAT_BAR_TOTAL, SETAPP_FORMAT_BAR_TOTAL);
             return FORMAT_DONE_OK;
         }
+        if (st == ND_SVC_FORMAT_DONE_TIMEOUT)
+            return FORMAT_TIMED_OUT;
         /* IDLE as well as DONE_FAIL: a verdict is handed out once and the job
          * then reads IDLE, so anything that is not RUNNING means there is
          * nothing left to wait for. */
         if (st != ND_SVC_FORMAT_RUNNING)
             return FORMAT_FAILED;
 
-        done = (int64_t)(secs * (double)SETAPP_FORMAT_BAR_TOTAL / ND_SVC_FORMAT_WAIT_S);
-        if (done > (SETAPP_FORMAT_BAR_TOTAL * 99) / 100)
-            done = (SETAPP_FORMAT_BAR_TOTAL * 99) / 100;
+        /* The ESTIMATE, never the deadline. The two used to be one number,
+         * and the block comment above this function is what that produced. */
+        span = (prog.estimate_s > 0.0) ? prog.estimate_s : ND_SVC_FORMAT_EST_MAX_S;
+        done = (int64_t)(secs * (double)SETAPP_FORMAT_BAR_TOTAL / span);
+        if (done > SETAPP_FORMAT_BAR_CAP)
+            done = SETAPP_FORMAT_BAR_CAP;
         if (done < 0)
             done = 0;
 
         /* nd_progress_draw() paints nothing when the whole percentage has not
-         * moved, which on a four-minute denominator is once every 2.4 seconds
-         * -- long enough for a panel to look stopped. The clock beside the bar
-         * is what says the phone is alive, so force a repaint when the SECOND
-         * changes and let the gate do its job the rest of the time. */
+         * moved, and once the bar is pinned at its cap the percentage never
+         * moves again -- so on a card that outruns its estimate the panel
+         * would freeze at 99% with no clock, which is precisely the reading
+         * that made the old screen look like a dead phone. The clock beside
+         * the bar is what says the phone is alive, so force a repaint when the
+         * SECOND changes and let the gate do its job the rest of the time. */
         whole = nd_trunc32(secs);
         if (whole != last_whole) {
             last_whole = whole;
-            nd_progress_set_step(&bar, "Formatting");
+            /* THIS IS WHAT THE END OF THE BAR MEANS NOW. The format is fine,
+             * it is simply taking longer than this card's size suggested, and
+             * the core's deadline is ND_SVC_FORMAT_SLACK times further away.
+             * One-way: a job that has once outrun its estimate has, and a
+             * caption that flickered back would be worse than either word. */
+            if (secs > span)
+                overrun = true;
+            nd_progress_set_step(&bar, overrun ? "Still working" : "Formatting");
         }
         (void)nd_progress_draw(&bar, done, SETAPP_FORMAT_BAR_TOTAL);
 
@@ -1454,7 +1498,7 @@ static format_outcome run_format_job(nd_ui *ui)
             /* The dialog painted over the whole screen and the percentage has
              * not moved, so without this the gate would refuse the repaint and
              * the owner would be left looking at the dismissed dialog. */
-            nd_progress_set_step(&bar, "Formatting");
+            nd_progress_set_step(&bar, overrun ? "Still working" : "Formatting");
         }
 
         /* nd_app.h's teardown: the phone is ringing and this app has to go.
@@ -1464,15 +1508,19 @@ static format_outcome run_format_job(nd_ui *ui)
             (void)nd_svc_format_cancel();
             return FORMAT_STOPPED;
         }
-        /* The core caps the helper at ND_SVC_FORMAT_WAIT_S inside poll() and
-         * this is the belt: a poll that keeps saying RUNNING past the caller's
-         * own ceiling is a core that has lost track of its child, and a screen
-         * that trusts it polls for ever. */
-        if (secs > ND_SVC_FORMAT_TIMEOUT_S) {
+        /* The core stops the helper at prog.deadline_s inside poll() and this
+         * is the belt: a poll that keeps saying RUNNING past the core's own
+         * deadline is a core that has lost track of its child, and a screen
+         * that trusts it polls for ever. It fires LATER than the core's, so
+         * the side that knows why gives up first -- and reports TIMED_OUT
+         * rather than FAILED, because that is what happened. */
+        if (secs > nd_svc_format_app_timeout_s(prog.deadline_s)) {
             nd_log_err(ND_LOG_OS,
-                       "Settings: the format was still running after %.0f s; stopping it", secs);
+                       "Settings: the format was still running after %.0f s (the core's deadline "
+                       "was %.0f s); stopping it",
+                       secs, prog.deadline_s);
             (void)nd_svc_format_cancel();
-            return FORMAT_FAILED;
+            return FORMAT_TIMED_OUT;
         }
     }
 }
@@ -1571,6 +1619,27 @@ static void offer_format(nd_ui *ui, const nd_card *card)
                           "Formatting could not\n"
                           "start. Nothing was\n"
                           "changed.");
+        nd_msgdialog_set_button(&dialog, "OK");
+        nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
+        (void)nd_msgdialog_show(&dialog);
+        return;
+    case FORMAT_TIMED_OUT:
+        /* Not "it failed", because it did not: it was interrupted, and what
+         * the owner needs to know is that the phone gave up rather than the
+         * card. The helper traps the signal and republishes the card as
+         * unformatted on its way out (neodct-sdcard), so the sentence below
+         * and the card screen behind it agree.
+         *
+         * "Try a smaller card" is the one piece of advice that is actually
+         * actionable here -- the deadline scales with the card, so a card that
+         * outran a deadline derived from its own size is either very slow or
+         * failing, and both of those are answered the same way. */
+        nd_log_err(ND_LOG_OS, "Settings: the format was stopped at its deadline");
+        nd_msgdialog_init(&dialog, ui,
+                          "Formatting took too\n"
+                          "long and was stopped.\n"
+                          "The card is unusable\n"
+                          "until it is formatted.");
         nd_msgdialog_set_button(&dialog, "OK");
         nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
         (void)nd_msgdialog_show(&dialog);

@@ -1342,16 +1342,92 @@ reread_partitions() {   # reread_partitions DISK
 # and everything the layout rests on works either way. What is lost is the
 # journal, which on a card people pull out of a running phone is worth having
 # -- hence the log line, and hence e2fsprogs being in both defconfigs.
+# ============ WHY THE FORMAT USED TO TAKE MINUTES ============
+#
+# The owner's report was "I got this beautiful formatting progress bar. Waited
+# for it to hit 100%, then it told me that the format failed." Half of that is
+# the UI's fault and nd_svc.h carries it. The other half is this function, and
+# it is the half that made the format genuinely slow.
+#
+# The command was:
+#
+#     mke2fs -t ext4 -F -m0 -L NEODCT -O ^64bit,^metadata_csum DEV
+#
+# and it has two costs that both scale with the SIZE OF THE CARD:
+#
+#   THE INODE TABLES. mke2fs writes every one of them out by hand unless it is
+#   told not to. At this image's defaults -- inode_ratio 16384, inode_size 256
+#   -- that is one byte of inode table for every sixty-four bytes of card:
+#   32 MiB on the 2 GB card the tests use, and 2 GiB on a 128 GB card. Small
+#   metadata writes are the slowest thing an SD card does, so the test card
+#   formatted in seconds and a real one took minutes. That is exactly the shape
+#   of a bug that ships.
+#
+#   THE DISCARD. mke2fs discards the whole device first. On a card whose
+#   controller does that synchronously it is minutes on its own, and it buys
+#   nothing here: the card is about to be written with a filesystem either way.
+#
+# `-E lazy_itable_init=1` fixes the first -- the tables are left uninitialised
+# and the kernel's ext4lazyinit thread zeroes them in the background after the
+# mount, which is what every desktop distribution has done since 2009.
+# `lazy_journal_init=1` does the same for the journal blocks, and `nodiscard`
+# turns the second off.
+#
+# ============ AND WHY uninit_bg IS IN THE FEATURE LIST ============
+#
+# Because lazy_itable_init DOES NOTHING WITHOUT IT, silently. "Do not write the
+# inode tables" is only expressible if the group descriptors can say which
+# groups are uninitialised, and that needs a group-descriptor checksum --
+# either uninit_bg (2006) or metadata_csum (2012). This command line turns
+# metadata_csum OFF, so before uninit_bg was added here the -E option was
+# accepted, ignored, and every inode table written anyway.
+#
+# Measured on the host, 32 GiB image, allocated blocks after mke2fs:
+#
+#     ^64bit,^metadata_csum                      263 MiB
+#     ^64bit,^metadata_csum        + lazy -E     519 MiB   (no effect)
+#     ^64bit,^metadata_csum,uninit_bg + lazy -E    5 MiB
+#
+# metadata_csum stays off for the reason it always was -- an older e2fsprogs on
+# the owner's PC can still read the card -- and uninit_bg costs nothing there:
+# it is six years older than the feature being declined.
+MKE2FS_FAST_OPTS="lazy_itable_init=1,lazy_journal_init=1,nodiscard"
+
+# The mke2fs currently running, so the signal handler can reach it. See
+# format_interrupted(): the reason mke2fs runs in the background at all is that
+# a POSIX shell does not run a trap while a FOREGROUND child is alive, so a
+# SIGTERM aimed at this script during a format would sit unhandled until the
+# format finished -- by which time the core has sent SIGKILL, this script is
+# gone, and mke2fs is an orphan still writing the card.
+MKFS_PID=""
+
+run_mkfs() {   # run_mkfs COMMAND...
+    "$@" >/dev/null 2>&1 &
+    MKFS_PID=$!
+    wait "$MKFS_PID"
+    _rc=$?
+    MKFS_PID=""
+    return $_rc
+}
+
 mkfs_ext4() {   # mkfs_ext4 DEV
     # -F because the device may already hold a filesystem and destroying it is
     # the point. -m0 because reserving 5% for root on a removable card
-    # reserves it for nobody. -O ^64bit,^metadata_csum keeps the card readable
-    # by an older e2fsprogs on the owner's PC, which is most of the reason to
-    # pick a filesystem Linux reads everywhere.
-    if mke2fs -t ext4 -F -m0 -L "$LABEL" -O ^64bit,^metadata_csum "$1" >/dev/null 2>&1; then
+    # reserves it for nobody.
+    if run_mkfs mke2fs -t ext4 -F -m0 -L "$LABEL" \
+            -O ^64bit,^metadata_csum,uninit_bg -E "$MKE2FS_FAST_OPTS" "$1"; then
         return 0
     fi
-    if mke2fs -F -m0 -L "$LABEL" "$1" >/dev/null 2>&1; then
+    # A rung of its own, and not merged with the ext2 one below. An mke2fs that
+    # makes ext4 but dislikes one of the extended options above should still
+    # produce an ext4 card -- slowly, and saying so -- rather than dropping
+    # to ext2 and losing the journal for the sake of a flag.
+    if run_mkfs mke2fs -t ext4 -F -m0 -L "$LABEL" -O ^64bit,^metadata_csum "$1"; then
+        log "mke2fs would not take $MKE2FS_FAST_OPTS: the inode tables are being"
+        log "  written in full, which on a large card is minutes rather than seconds."
+        return 0
+    fi
+    if run_mkfs mke2fs -F -m0 -L "$LABEL" "$1"; then
         log "no ext4 mke2fs in this image: the card is ext2, without a journal."
         log "  Ownership and modes are unaffected. Rebuild with BR2_PACKAGE_E2FSPROGS=y for ext4."
         return 0
@@ -1414,6 +1490,52 @@ format_fail() {   # format_fail DEVICE MESSAGE...
     UNTRUSTED_STATE=""
     write_state unformatted "$_dev" "" ""
     return 1
+}
+
+# ============ AND ONE MORE EXIT: BEING KILLED HALFWAY ============
+#
+# The core allows a format a deadline (nd_svc.h) and stops the helper when it
+# passes it, and the owner can press Clear at any time, which does the same
+# thing. Both arrive here as SIGTERM.
+#
+# Until now nothing caught it. The script died mid-mke2fs and the state file
+# still held whatever the last successful mount had published -- typically
+# `state=mounted device=/dev/mmcblk1p1` -- for a card whose partition table had
+# just been rewritten and whose filesystem was half made. nd_storage_card()
+# accepts `mounted`, so the UI went on naming a device, offering an update
+# folder and a download directory, on a card that had none of them. That is
+# the same class of lie format_fail() exists to prevent, arriving by the one
+# route format_fail() cannot cover, and it is a good candidate for the "the
+# phone stopped recognising my card" reports that outlived every other fix.
+#
+# So: publish the truth and go. `unformatted` is exactly what the card is --
+# there is something in the slot and nothing readable on it -- and it is the
+# state Settings offers to format on, which is the way out the owner needs.
+#
+# The marker is removed here as well as in dispatch(). It is what makes the
+# udev add/remove handlers stand down during a format, and a marker left behind
+# by a killed format would keep them standing down until the next reboot, on a
+# phone whose card work is entirely done by those handlers.
+#
+# The mke2fs is killed first and explicitly. It is a separate process (see
+# run_mkfs) and nothing else would ever reap it: the core signals this script's
+# pid, not its process group, so an unkilled mke2fs would keep writing the card
+# with its parent gone and the phone telling the owner it had stopped.
+format_interrupted() {   # format_interrupted DEVICE
+    trap - TERM INT HUP
+    if [ -n "$MKFS_PID" ]; then
+        kill -TERM "$MKFS_PID" 2>/dev/null
+        # Not a wait: this handler is itself running against the core's own
+        # two-second grace before SIGKILL, and a wait here would spend it.
+        sleep 0.5
+        kill -KILL "$MKFS_PID" 2>/dev/null
+    fi
+    rm -f "$FORMAT_MARKER" 2>/dev/null
+    log "the format of ${1:-the card} was stopped before it finished"
+    UNTRUSTED_STATE=""
+    write_state unformatted "${1:-}" "" ""
+    sync
+    exit 143
 }
 
 do_format() {   # do_format DEV -- destroys everything on it
@@ -1592,9 +1714,16 @@ dispatch() {
         add)    do_scan ;;
         remove) shift; do_remove "${1:-}" ;;
         format) shift
+                _fmt_dev="${1:-}"
                 : > "$FORMAT_MARKER" 2>/dev/null
-                do_format "${1:-}"
+                # Armed around the destructive verb and nothing else. `scan`,
+                # `add` and `remove` are short and idempotent; being killed
+                # inside one of them leaves a card the next uevent describes
+                # correctly, so there is nothing for a handler to say.
+                trap 'format_interrupted "$_fmt_dev"' TERM INT HUP
+                do_format "$_fmt_dev"
                 _rc=$?
+                trap - TERM INT HUP
                 rm -f "$FORMAT_MARKER" 2>/dev/null
                 return $_rc ;;
         layout) do_layout ;;

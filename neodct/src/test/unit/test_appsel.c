@@ -3,10 +3,12 @@
  *
  * ============ WHAT THIS FILE CLAIMS ============
  *
- * 1. The registry produces the same 24 entries, in the same order, with the
- *    same names, ids, paths and icon paths that main.py's _scan_apps_from_dir
- *    plus `sort(key=id)` produce -- including engineering mode adding the
- *    second directory and turning it off removing exactly eleven apps.
+ * 1. The registry produces one entry per manifest the overlay ships, in the
+ *    same order, with the same names, ids, paths and icon paths that main.py's
+ *    _scan_apps_from_dir plus `sort(key=id)` produce -- including engineering
+ *    mode adding the second directory and turning it off removing exactly the
+ *    apps in it. The counts are taken off the overlay rather than written down
+ *    here; see shipped_manifest_count() for what a written-down one cost.
  *
  * 2. Nine frames rendered by the C AppSelector are byte-identical to the ones
  *    the Python build produced. Checked by SHA-256 over raw RGB against the
@@ -41,6 +43,7 @@
  * a directory to keep the staged root and the rendered PNGs for inspection.
  */
 
+#include <dirent.h>
 #include <errno.h>
 #include <ftw.h>
 #include <stdio.h>
@@ -295,10 +298,15 @@ static void check_frame(nd_capture *cap, const nd_json_doc *golden, const char *
  * The registry
  * ------------------------------------------------------------------ */
 
-/* The 26 shipped manifests in the order `sort(key=lambda x: x["id"])` puts
- * them. This is the list the menu walks, so the index of each name is also
- * its page number minus one, and every scrollbar notch in the nine frames is
- * derived from it. */
+/* The shipped manifests in the order `sort(key=lambda x: x["id"])` puts them.
+ * This is the list the menu walks, so the index of each name is also its page
+ * number minus one, and every scrollbar notch in the nine frames is derived
+ * from it.
+ *
+ * A PIN ON THE APPS THAT WERE SHIPPING, NOT A CENSUS. It is not how many apps
+ * there are -- see shipped_manifest_count(), which counts the overlay -- and
+ * an app added after this was written need not appear here. Each entry is
+ * looked up by id, so a new manifest anywhere in the range moves nothing. */
 static const struct {
     int32_t id;
     const char *name;
@@ -327,10 +335,81 @@ static const struct {
     {9006, "Downgrade", "/NeoDCT/System/engineering/apps/Downgrade"},
     {9007, "Bluetooth", "/NeoDCT/System/engineering/apps/Bluetooth"},
     {9008, "Sleepy", "/NeoDCT/System/engineering/apps/Sleepy"},
+    {9009, "Fetch", "/NeoDCT/System/engineering/apps/Fetch"},
     {9990, "Remote Shell", "/NeoDCT/System/engineering/apps/RemoteShell"},
     {9997, "Crash", "/NeoDCT/System/engineering/apps/Crash"},
     {9998, "Cube Bench", "/NeoDCT/System/engineering/apps/CubeBench"},
 };
+
+/* How many app directories the overlay actually ships, COUNTED rather than
+ * written down.
+ *
+ * This assertion used to read `nd_ui_app_count(ui) == ND_ARRAY_LEN(EXPECTED)`,
+ * and when Fetch was added in 0.5.2b the registry became twenty-seven while
+ * the table stayed at twenty-six. It has failed on every run since, saying
+ * "got 27 want 26" -- an arithmetic disagreement between a test and its own
+ * table, with nothing in it about the phone. A failure that is always there is
+ * one people learn to step over, and the ones that mean something are then
+ * standing in the same line: that is how 0.5.9a came to be released with
+ * twenty-five regressions in it and the suite never run.
+ *
+ * The question worth asking is whether the registry loads every manifest that
+ * SHIPS, and only the overlay can answer that. So it is asked of the overlay,
+ * and the next app to be added changes both sides at once. */
+static size_t count_manifests_in(const char *dir)
+{
+    DIR *d = opendir(dir);
+    const struct dirent *e;
+    size_t n = 0u;
+
+    if (d == NULL)
+        return 0u;
+    while ((e = readdir(d)) != NULL) {
+        char manifest[ND_PATH_MAX];
+        struct stat st;
+
+        if (e->d_name[0] == '.')
+            continue;
+        /* By the manifest and not by the directory: nd_ui's scan registers a
+         * directory only when it can read a manifest.json out of it, so a
+         * stray folder under apps/ is not an app to either of us. */
+        if (nd_snprintf(manifest, sizeof manifest, "%s/%s/manifest.json", dir, e->d_name) != ND_OK)
+            continue;
+        if (stat(manifest, &st) == 0 && S_ISREG(st.st_mode))
+            n++;
+    }
+    (void)closedir(d);
+    return n;
+}
+
+/* One of the two app directories, named the way the overlay spells it. */
+static size_t manifests_under(const char *sub)
+{
+    char dir[ND_PATH_MAX];
+
+    if (nd_snprintf(dir, sizeof dir, "%s/NeoDCT/System/%s", g_overlay, sub) != ND_OK)
+        return 0u;
+    return count_manifests_in(dir);
+}
+
+/* Both of them, because engineering mode is on for this fixture and the
+ * registry then walks both. */
+static size_t shipped_manifest_count(void)
+{
+    return manifests_under("apps") + manifests_under("engineering/apps");
+}
+
+static const nd_app_entry *entry_with_id(nd_ui *ui, int32_t id)
+{
+    const nd_app_entry *list = nd_ui_app_list(ui, NULL);
+    size_t i;
+
+    for (i = 0u; i < nd_ui_app_count(ui); i++) {
+        if (list[i].id == id)
+            return &list[i];
+    }
+    return NULL;
+}
 
 static size_t index_of(nd_ui *ui, const char *name)
 {
@@ -345,26 +424,39 @@ static size_t index_of(nd_ui *ui, const char *name)
 
 static void test_registry(nd_ui *ui)
 {
+    const size_t shipped = shipped_manifest_count();
+    const nd_app_entry *list = nd_ui_app_list(ui, NULL);
     size_t i;
 
-    CHECK_INT(nd_ui_app_count(ui), ND_ARRAY_LEN(EXPECTED), "every shipped manifest is registered");
+    CHECK(shipped > 0u, "the overlay has manifests to count");
+    CHECK_INT(nd_ui_app_count(ui), shipped, "every shipped manifest is registered");
     CHECK(nd_ui_engineering_mode(ui), "engineering mode is on");
-    if (nd_ui_app_count(ui) != ND_ARRAY_LEN(EXPECTED))
+    if (list == NULL)
         return;
+
+    /* Ascending, with no duplicates, for the WHOLE list and not just for the
+     * entries named below. That is the property the frames rest on: an index
+     * into this list is a page number, so the order has to hold for an app
+     * that arrived after this file was last edited too. */
+    for (i = 1u; i < nd_ui_app_count(ui); i++)
+        CHECK(list[i - 1u].id < list[i].id, "the registry is sorted by id");
 
     for (i = 0u; i < ND_ARRAY_LEN(EXPECTED); i++) {
         char icon[ND_APP_PATH_MAX];
+        const nd_app_entry *got = entry_with_id(ui, EXPECTED[i].id);
 
-        CHECK_INT(nd_ui_app_list(ui, NULL)[i].id, EXPECTED[i].id, EXPECTED[i].name);
-        CHECK_STR(nd_ui_app_list(ui, NULL)[i].name, EXPECTED[i].name, "name in id order");
-        CHECK_STR(nd_ui_app_list(ui, NULL)[i].path, EXPECTED[i].path, "path in id order");
+        CHECK(got != NULL, EXPECTED[i].name);
+        if (got == NULL)
+            continue;
+        CHECK_STR(got->name, EXPECTED[i].name, "the name the manifest gives");
+        CHECK_STR(got->path, EXPECTED[i].path, "the directory it was found in");
         /* Every shipped manifest omits "icon", so the default joins
          * "icon.png" onto the app's own directory. */
         (void)nd_snprintf(icon, sizeof icon, "%s/icon.png", EXPECTED[i].path);
-        CHECK_STR(nd_ui_app_list(ui, NULL)[i].icon, icon, "icon path defaults to <dir>/icon.png");
+        CHECK_STR(got->icon, icon, "icon path defaults to <dir>/icon.png");
         /* U-6: the field is populated from the manifest and launches nothing.
-         * All 26 still say main.py. */
-        CHECK_STR(nd_ui_app_list(ui, NULL)[i].exec, "main.py", "exec as the manifest spells it");
+         * Every one of them still says main.py. */
+        CHECK_STR(got->exec, "main.py", "exec as the manifest spells it");
     }
 }
 
@@ -392,6 +484,12 @@ static void test_icons_load(nd_ui *ui)
     }
 }
 
+/* The split, which is what engineering mode switches between: the menu with
+ * the mode off is the first directory alone. Both sides are counted off the
+ * overlay for the reason shipped_manifest_count() gives -- a number written
+ * down here is a number that goes stale the next time somebody adds an app,
+ * and it goes stale as a FAILURE, in a suite where a standing failure is
+ * indistinguishable from the ones that mean something. */
 static void test_engineering_off(void)
 {
     nd_app_entry apps[ND_APP_MAX];
@@ -400,8 +498,9 @@ static void test_engineering_off(void)
 
     stock = nd_ui_scan_apps(ND_PATH_APPS_DIR, apps, ND_APP_MAX);
     eng = nd_ui_scan_apps(ND_PATH_ENG_APPS_DIR, apps, ND_APP_MAX);
-    CHECK_INT(stock, 14, "fourteen stock apps");
-    CHECK_INT(eng, 13, "thirteen engineering apps");
+    CHECK_INT(stock, manifests_under("apps"), "the stock menu is apps/");
+    CHECK_INT(eng, manifests_under("engineering/apps"), "and engineering mode adds the rest");
+    CHECK(stock > 0u && eng > 0u, "neither directory scanned as empty");
 }
 
 /* ------------------------------------------------------------------ *

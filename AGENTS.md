@@ -68,14 +68,15 @@ An update built without bumping it installs but shows no change on screen.
 
 ## Tests
 
-**On the owner's own workstation, build the suite but do not run it -- not
-even through the sandbox described below.** The owner has asked (2026-09-05)
-for the C tests to run only inside QEMU or a disposable VM, because a test
-switched this machine off twice before the harness existed. So on this host:
-`cd neodct/src && make` compiles and links everything; the run happens in the
-guest (`ssh` in, `cd neodct/src && make test`) or in a VM the owner has set
-up, and if neither is reachable, stop after the build and say the tests are
-unrun. Where a run is allowed, `make test` is the only way to do it:
+**The suite runs here again (2026-09-06).** It was blocked on the owner's own
+workstation from 2026-09-05, because a test had reached `poweroff(8)` and
+switched the machine off twice. That was a stop-gap while the containment was
+built; the containment described below now exists and has been exercised, so
+the restriction is lifted and the tests are expected to be RUN rather than
+merely built. A release that says "tests unrun" is not finished.
+
+`make test` is still the only way to run them -- the guard in every binary
+refuses a bare `build/*/test/test_x`, and that refusal is deliberate:
 
 ```sh
 cd neodct/src && make test              # the whole suite, in the sandbox

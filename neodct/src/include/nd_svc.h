@@ -113,17 +113,12 @@ extern "C" {
  * It must also be finite, so a wedged core cannot wedge the app. */
 #define ND_SVC_SMS_TIMEOUT_S 45.0
 
-/* An app waiting for a card to be formatted. The old code did not wait a
- * bounded time at all -- Settings called nd_proc_wait(pid, -1.0) and blocked
- * until the helper was done -- so this is the finite version of "forever",
- * picked so it cannot fire while anything is still making progress: two
- * mkfs.vfat runs, a partition-table re-read and a sync(2) on the slowest card
- * the phone will accept. The core gives the helper ND_SVC_FORMAT_WAIT_S and
- * the app gives the core a little more, so that when a format really does
- * wedge, the side that KNOWS WHY is the side that gives up first and the user
- * gets "Formatting failed." rather than a silent timeout. */
-#define ND_SVC_FORMAT_WAIT_S    240.0
-#define ND_SVC_FORMAT_TIMEOUT_S 250.0
+/* Formatting a card had a flat pair of these -- 240 s for the core, 250 s for
+ * the app -- and they are now nd_svc_format_deadline_s() and
+ * nd_svc_format_app_timeout_s(), computed from the size of the card. The
+ * reasoning is long enough to belong beside them; see "Formatting a card"
+ * below.
+ */
 
 /* An app waiting for the card's layout to be restated after an install. A
  * chown and a chmod per file in apps/, which is metadata and quick on any
@@ -379,26 +374,139 @@ bool nd_svc_set_clock(time_t when);
  *
  *     if (!nd_svc_format_start()) { "Formatting failed." ; return; }
  *     for (;;) {
- *         double secs = 0.0;
- *         nd_svc_format_state st = nd_svc_format_poll(&secs);
+ *         nd_svc_format_progress p;
+ *         nd_svc_format_state st = nd_svc_format_poll(&p);
  *
  *         if (st == ND_SVC_FORMAT_DONE_OK)   { ...; break; }
  *         if (st != ND_SVC_FORMAT_RUNNING)   { "Formatting failed."; break; }
- *         draw a bar from secs / ND_SVC_FORMAT_WAIT_S, pump one key;
+ *         draw a bar from p.elapsed_s / p.estimate_s, pump one key;
  *         if (the key was CLEAR) { (void)nd_svc_format_cancel(); break; }
  *     }
  *
- * A poll every ND_SVC_FORMAT_POLL_S is plenty: mkfs reports no progress of its
- * own, so `secs` is the only thing that moves and a bar drawn from it is an
- * honest "how long this usually takes", not a measurement.
+ * A poll every ND_SVC_FORMAT_POLL_S is plenty: mke2fs reports no progress of
+ * its own, so `elapsed_s` is the only thing that moves and a bar drawn from it
+ * is an honest "how long this usually takes", not a measurement.
+ *
+ * ============ THE BAR AND THE DEADLINE ARE NOT THE SAME NUMBER ==========
+ *
+ * They were, and it produced the worst kind of bug -- one where the phone
+ * looked like it was working right up to the moment it told the truth. The
+ * owner's words: "I got this beautiful formatting progress bar. Waited for it
+ * to hit 100%, then it told me that the format failed."
+ *
+ * They were the same number by construction. Settings drew the bar as
+ * `secs * BAR_TOTAL / ND_SVC_FORMAT_WAIT_S` and format_poll() killed the
+ * helper at `elapsed >= ND_SVC_FORMAT_WAIT_S`, with ND_SVC_FORMAT_WAIT_S a
+ * flat 240 s in both. A bar that filled was therefore not a bar that was
+ * nearly done; it was a countdown, and the instant it reached its own
+ * denominator was the instant the core SIGKILLed a running mke2fs. There was
+ * no arrangement of card and timing under which a full bar meant anything but
+ * failure.
+ *
+ * So there are two numbers now and they are a factor of ND_SVC_FORMAT_SLACK
+ * apart:
+ *
+ *   the ESTIMATE   what a format of THIS card ought to take. The bar's
+ *                  denominator, and nothing else. Reaching it means "this is
+ *                  taking longer than expected", which is a thing a screen
+ *                  can say and a person can believe.
+ *
+ *   the DEADLINE   when the core stops a helper that has not exited. A
+ *                  protection against a WEDGED helper -- a root process
+ *                  writing a card with nothing able to stop it -- and not an
+ *                  opinion about how long a format takes.
+ *
+ * Both are derived from the size of the card, because a 2 GB card and a
+ * 128 GB card do not deserve the same patience and the flat 240 s gave them
+ * it. That is the second half of the owner's bug: the format really was
+ * running past four minutes on their card, and it passed every test because
+ * the test card is 2 GB. (The first half was in the helper -- mke2fs was
+ * writing every inode table by hand, which is bytes proportional to the card
+ * and minutes on a real one. neodct-sdcard's mkfs_ext4 carries that story.)
  */
+
+/* How long a format of a card this big ought to take, in seconds.
+ *
+ * A fixed part -- releasing the mounts, the partition table, BLKRRPART and
+ * the udev settle behind it, the mount, the folders, the sync -- plus a part
+ * that scales, because even with lazy inode tables the group descriptors and
+ * the superblock backups grow with the card.
+ *
+ * CAPPED at ND_SVC_FORMAT_EST_MAX_S, because this number is a bar. Past a
+ * couple of minutes the fixed part stops being the small half, and a bar with
+ * a twenty-minute denominator does not visibly move -- which reads as a phone
+ * that has stopped, and a phone that looked stopped during a format is the
+ * report this screen already answered once. The deadline does NOT share that
+ * cap; see below.
+ *
+ * 0 bytes means "the size could not be established", and the answer is the
+ * cap: an unknown card is assumed to be a big one, because the failure this
+ * whole mechanism exists to prevent is a format killed while it was working.
+ */
+double nd_svc_format_estimate_s(uint64_t card_bytes);
+
+/* When the core stops a helper that has not exited: the estimate times
+ * ND_SVC_FORMAT_SLACK, floored and capped -- and computed from the estimate
+ * BEFORE its display cap, so a 512 GB card is not asked to share a 128 GB
+ * card's patience. That would be the flat 240 s again with a bigger number.
+ *
+ * The floor exists because the estimate for a small card is small and a
+ * fifteen-second deadline would kill a healthy format on a slow reader. The
+ * ceiling exists because this is the only thing that can stop a wedged root
+ * process, and "wait for ever" is not a protection. Twenty minutes is set
+ * against the slowest thing the helper can legitimately do: an image with no
+ * ext4 mke2fs falls back to busybox's ext2, which has no lazy inode tables at
+ * all and writes one byte for every sixty-four bytes of card. Past that, the
+ * card is failing rather than slow -- and the owner has had Clear in front of
+ * them for the whole of it. */
+double nd_svc_format_deadline_s(uint64_t card_bytes);
+
+/* The core's deadline plus a margin, for a caller that is POLLING the core
+ * rather than running the helper -- Settings' loop and nd_svc_format_card()'s.
+ *
+ * Takes the deadline and not the card, because a caller on the far side of the
+ * socket is not allowed to know which card this is; the deadline arrives with
+ * every poll (nd_svc_format_progress) and this turns it into the caller's own.
+ *
+ * The side that KNOWS WHY has to be the side that gives up first: the core can
+ * say "the helper never exited" and an app can only say "the core stopped
+ * answering", so the app's ceiling sits above the core's and fires only when
+ * the core itself has lost track of its child. */
+double nd_svc_format_app_timeout_s(double core_deadline_s);
+
+/* The estimate, in one place, for the two callers that need to agree on it. */
+#define ND_SVC_FORMAT_EST_BASE_S    10.0
+#define ND_SVC_FORMAT_EST_PER_GIB_S  1.0
+#define ND_SVC_FORMAT_EST_MAX_S    120.0
+
+/* How much longer than the estimate a format may run before the core stops
+ * it. Six, not two: the estimate is a guess about an SD card, and cards vary
+ * by more than a factor of two. What this number really has to be is big
+ * enough that a FULL BAR IS NOWHERE NEAR THE KILL, and test_svc.c pins
+ * exactly that. */
+#define ND_SVC_FORMAT_SLACK          6.0
+#define ND_SVC_FORMAT_DEADLINE_MIN_S 90.0
+#define ND_SVC_FORMAT_DEADLINE_MAX_S 1200.0
+
+/* What the app's own belt sits above the core's deadline by. Long enough to
+ * cover a poll interval and a scheduling hiccup, short enough that a core
+ * which has genuinely lost its child does not leave a screen polling. */
+#define ND_SVC_FORMAT_APP_MARGIN_S 15.0
 
 /* Where the job is. */
 typedef enum {
     ND_SVC_FORMAT_IDLE = 0,     /* nothing running and no verdict waiting */
     ND_SVC_FORMAT_RUNNING = 1,  /* the helper is still going              */
     ND_SVC_FORMAT_DONE_OK = 2,  /* it finished and the card was formatted */
-    ND_SVC_FORMAT_DONE_FAIL = 3 /* it failed, was stopped, or wedged      */
+    ND_SVC_FORMAT_DONE_FAIL = 3,   /* it ran and reported a failure       */
+    /* It was still running at the deadline and the core stopped it. Split
+     * from DONE_FAIL because the two are different events with different
+     * sentences: a helper that FAILED chose to stop and left the card in a
+     * state it decided on, while one that was KILLED was interrupted in the
+     * middle of writing and the card is whatever mke2fs had got to. The
+     * owner's next move differs too -- "try again" against "this card is
+     * slower than the phone will wait for". */
+    ND_SVC_FORMAT_DONE_TIMEOUT = 4
 } nd_svc_format_state;
 
 /* How often a caller should poll. Below what anybody perceives, far above the
@@ -414,14 +522,27 @@ typedef enum {
  * over the first, so it joins the one in progress instead. */
 bool nd_svc_format_start(void);
 
-/* One non-blocking look. `elapsed_s` (may be NULL) receives how long the job
- * has been running, or how long the finished one took.
+/* What a screen needs to draw, and what a headless caller needs to give up at
+ * the right moment. All three are seconds.
+ *
+ * `estimate_s` and `deadline_s` come from the CORE, computed from the card
+ * the core itself can see. That is not a convenience: the whole design of
+ * this verb is that the app never names the device (see above), so the app
+ * cannot look up its size either, and a bar drawn from the app's own guess
+ * about which card this is would be a second opinion nobody asked for. */
+typedef struct {
+    double elapsed_s;  /* how long it has been running, or how long it took */
+    double estimate_s; /* what a format of this card ought to take          */
+    double deadline_s; /* when the core will stop a helper that has not gone */
+} nd_svc_format_progress;
+
+/* One non-blocking look. `out` may be NULL.
  *
  * A DONE verdict is handed out ONCE and the job then reads IDLE. A verdict
  * that latched would outlive the screen that asked for it and be shown to the
  * next one -- which, on a phone where the format outlives the app that started
  * it, is a thing that would actually happen. */
-nd_svc_format_state nd_svc_format_poll(double *elapsed_s);
+nd_svc_format_state nd_svc_format_poll(nd_svc_format_progress *out);
 
 /* Stop it: SIGTERM, then SIGKILL, both through the broker, which is the only
  * process that can signal a root helper it forked. True when nothing is

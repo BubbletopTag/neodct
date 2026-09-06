@@ -37,6 +37,54 @@ static const char *true_path(void)
     return NULL;
 }
 
+/* ============ WHAT THIS HOST CANNOT BE ASKED ============
+ *
+ * Four of the cases below need a spawn to SUCCEED, and a spawn succeeds only
+ * for a user the broker can RESOLVE: ND_BROKER_USERS is {ndusr, ndusr_ut} and
+ * a build host has neither. nd_broker.c then refuses, deliberately -- a name
+ * that does not resolve leaves the nd_priv_id zeroed, nd_priv_become() on a
+ * zeroed id is a documented no-op, and the child would run as root having
+ * never passed the root-exec list. That refusal is the subject of
+ * test_a_user_that_does_not_resolve_is_not_a_way_to_stay_root() a few
+ * hundred lines down; it is the fix, not a fault.
+ *
+ * So "does the round trip work" is not a question this host can be asked, and
+ * the comment that used to sit on it -- "if the host has no ndusr,
+ * nd_priv_lookup fails on the broker's side and the child simply runs
+ * undropped" -- has described removed behaviour since the hole was closed. It
+ * cost eight permanent FAILs a run, and ten once the kill verb was given a
+ * case of its own, which is worse than not running them at all: a suite that
+ * is always red is a suite nobody reads, and that is precisely how 0.5.9a came
+ * to ship with twenty-five regressions in it.
+ *
+ * They SKIP now, by name and with the reason. run-tests.sh prints the same
+ * configuration once as a CONFIG banner; this is the per-case half of it. A
+ * skip must never be read as a pass, so main() repeats the count beside the
+ * result and says what the run did not touch.
+ */
+static int g_skips;
+
+static bool a_drop_user_exists(void)
+{
+    nd_priv_id id;
+
+    /* The broker's own question, asked the same way, so the two can never
+     * disagree about which hosts these cases can run on. */
+    return nd_priv_lookup(ND_PRIV_USER, &id);
+}
+
+static bool skipped_without_a_drop_user(const char *what)
+{
+    if (a_drop_user_exists())
+        return false;
+    g_skips++;
+    fprintf(stderr,
+            "SKIP %s: no '%s' on this host, so the broker refuses the spawn -- correctly -- "
+            "and there is no round trip left to measure\n",
+            what, ND_PRIV_USER);
+    return true;
+}
+
 static void spec_for(nd_proc_spec *spec, const char *const *argv)
 {
     memset(spec, 0, sizeof *spec);
@@ -132,15 +180,21 @@ static void test_a_nameless_user_is_not_a_way_to_stay_root(void)
     CHECK_INT((int)nd_broker_spawn(b, path, &spec, "", &pid), (int)ND_ERR_PERM);
 
     /* Naming a user that IS allowed still works -- the refusal is about
-     * staying root, not about this path. */
-    pid = -1;
-    CHECK_INT((int)nd_broker_spawn(b, path, &spec, ND_PRIV_USER, &pid), (int)ND_OK);
-    if (pid > 0) {
-        nd_proc_status st;
+     * staying root, not about this path.
+     *
+     * Only this tail needs the name to resolve. Everything above it is pure
+     * policy and is checked on every host, which is the half that matters:
+     * the case exists to prove the hole is shut, not to prove /bin/true runs. */
+    if (!skipped_without_a_drop_user("an allowed user is still spawned")) {
+        pid = -1;
+        CHECK_INT((int)nd_broker_spawn(b, path, &spec, ND_PRIV_USER, &pid), (int)ND_OK);
+        if (pid > 0) {
+            nd_proc_status st;
 
-        memset(&st, 0, sizeof st);
-        while (nd_broker_wait(b, pid, 1.0, &st) == ND_ERR_TIMEOUT)
-            ;
+            memset(&st, 0, sizeof st);
+            while (nd_broker_wait(b, pid, 1.0, &st) == ND_ERR_TIMEOUT)
+                ;
+        }
     }
 
     nd_broker_stop(b);
@@ -356,6 +410,8 @@ static void test_the_broker_spawns_and_reaps(void)
         printf("test_broker: no /bin/true; skipping\n");
         return;
     }
+    if (skipped_without_a_drop_user("the broker spawns and reaps"))
+        return;
     b = nd_broker_start();
     CHECK(b != NULL);
     if (b == NULL)
@@ -368,9 +424,9 @@ static void test_the_broker_spawns_and_reaps(void)
 
     /* A NAMED user, because "do not drop" is no longer a request an arbitrary
      * path may make -- see test_a_nameless_user_is_not_a_way_to_stay_root().
-     * This test is about the round trip, not the drop: if the host has no
-     * ndusr, nd_priv_lookup fails on the broker's side and the child simply
-     * runs undropped, which does not change what is being measured here. */
+     * This case is about the round trip rather than about the drop, but it
+     * still needs the name to RESOLVE: one that does not is refused before a
+     * child exists, which is why the whole case skips at the top. */
     rc = nd_broker_spawn(b, path, &spec, ND_PRIV_USER, &pid);
     CHECK_INT((int)rc, (int)ND_OK);
     CHECK(pid > 0);
@@ -425,22 +481,37 @@ static void test_an_oversized_request_is_refused_not_trimmed(void)
 
     /* And the broker is still usable afterwards: a rejected record must not
      * desynchronise the socket, or one bad launch takes every later one with
-     * it. */
+     * it.
+     *
+     * The follow-up request is ANSWERED whatever the host is -- ND_OK where
+     * ndusr exists, ND_ERR_PERM where it does not -- and it is the answer,
+     * arriving at all and carrying a code the broker chose for it, that shows
+     * the framing recovered. Asserting the code the configuration implies,
+     * rather than ND_OK, keeps the desynchronisation check running everywhere;
+     * only the reap under it needs a child to have been started. */
     CHECK(nd_broker_ok(b));
     {
         const char *ok_argv[2];
         nd_proc_status st;
+        const bool have_user = a_drop_user_exists();
 
         ok_argv[0] = path;
         ok_argv[1] = NULL;
         spec_for(&spec, ok_argv);
         pid = -1;
-        CHECK_INT((int)nd_broker_spawn(b, path, &spec, ND_PRIV_USER, &pid), (int)ND_OK);
-        CHECK(pid > 0);
-        memset(&st, 0, sizeof st);
-        while (nd_broker_wait(b, pid, 1.0, &st) == ND_ERR_TIMEOUT)
-            ;
-        CHECK(st.exited);
+        CHECK_INT((int)nd_broker_spawn(b, path, &spec, ND_PRIV_USER, &pid),
+                  (int)(have_user ? ND_OK : ND_ERR_PERM));
+        if (!have_user) {
+            g_skips++;
+            fprintf(stderr, "SKIP the reap after an oversized request: no '%s' on this host\n",
+                    ND_PRIV_USER);
+        } else {
+            CHECK(pid > 0);
+            memset(&st, 0, sizeof st);
+            while (nd_broker_wait(b, pid, 1.0, &st) == ND_ERR_TIMEOUT)
+                ;
+            CHECK(st.exited);
+        }
     }
 
     nd_broker_stop(b);
@@ -544,6 +615,14 @@ static void test_the_broker_stops_a_child_it_started(void)
         printf("test_broker: no sleep(1); skipping\n");
         return;
     }
+    /* Every line of this case hangs off a child that started, so there is no
+     * half of it to keep. Skipping it leaves the kill verb covered only by its
+     * two pins -- the signal list and the not-my-child refusal, both above and
+     * both pure -- and leaves the signal-then-reap sequence itself unexercised
+     * anywhere a developer runs. nd-selftest on the phone is where that one is
+     * actually answered. */
+    if (skipped_without_a_drop_user("the broker stops a child it started"))
+        return;
     b = nd_broker_start();
     CHECK(b != NULL);
     if (b == NULL)
@@ -676,6 +755,8 @@ static void test_a_halt_crosses_the_socket(void)
 
 int main(void)
 {
+    int rc;
+
     RUN(test_the_broker_refuses_to_spawn_as_root);
     RUN(test_a_nameless_user_is_not_a_way_to_stay_root);
     RUN(test_apprun_as_root_is_only_for_engineering_apps);
@@ -688,5 +769,19 @@ int main(void)
     RUN(test_the_broker_will_not_signal_a_pid_it_did_not_start);
     RUN(test_the_broker_stops_a_child_it_started);
     RUN(test_a_halt_crosses_the_socket);
-    return pt_report("test_broker");
+    rc = pt_report("test_broker");
+    /* Printed after the result, not before it: pt_report()'s "checks passed"
+     * is a statement about the checks that RAN, and a reader who does not see
+     * this line beside it will take it for coverage this run did not have. */
+    if (g_skips > 0) {
+        /* pt_report() wrote to stdout, which is block-buffered down a pipe
+         * while stderr is not; without this the caveat overtakes the result it
+         * is a caveat ON. */
+        (void)fflush(stdout);
+        fprintf(stderr,
+                "test_broker: %d case(s) SKIPPED for want of '%s' -- this run did NOT exercise "
+                "a successful spawn, a reap, or the kill verb end to end\n",
+                g_skips, ND_PRIV_USER);
+    }
+    return rc;
 }

@@ -553,9 +553,20 @@ static void test_hash_walks_nav_abc_upper_123_and_back(void)
      * the bug: the label existed and the owner could not see it. */
     CHECK_INT(drain(&fk, recs, 32u), 16);
 
-    /* In abc the number pad types instead of scrolling. */
+    /* In abc the number pad types instead of scrolling.
+     *
+     * The fifth # is drained on its own, and that is not tidying: the mode
+     * change now ANNOUNCES itself (the check above, and nd_t9.h), so the
+     * announcement and the letter share the wire. Reading them in one drain
+     * asserted on whichever came first and got the announcement -- which is
+     * how this read (1, 79, 1), KEY_KP1, "the pad is in abc", and called it a
+     * failure to type 'a'. Draining the mode first leaves the next drain
+     * carrying nothing but the keystroke, which is what this claim is about. */
     nd_t9_bridge_handle_code(b, ND_KEY_HASH);
-    nd_t9_bridge_handle_code(b, 3);
+    CHECK_INT(drain(&fk, recs, 32u), 4);
+    check_rec(&recs[0], EV_KEY_T, ND_T9_BROWSER_KEY_MODE_ABC, 1, "abc again");
+
+    nd_t9_bridge_handle_code(b, ND_KEY_2);
     CHECK_INT(drain(&fk, recs, 32u), 4);
     check_rec(&recs[0], EV_KEY_T, 30u, 1, "a");
 

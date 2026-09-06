@@ -53,6 +53,23 @@ static void insert_default(const char *const *folders, size_t nfolders)
     insert("mounted", "vfat", "NEODCT", folders, nfolders);
 }
 
+/* The five back off again, so a case can ask what happens to a card that has
+ * not got them. rmdir and not remove(): they are empty here and a recursive
+ * delete in a fixture is a way to lose a case root. */
+static void remove_folders(void)
+{
+    size_t i;
+
+    for (i = 0u; i < 5u; i++) {
+        char path[ND_PATH_MAX];
+        char resolved[ND_PATH_MAX];
+
+        CHECK_INT(nd_snprintf(path, sizeof path, "%s/%s", MOUNT, FOLDERS[i]), ND_OK);
+        CHECK_INT(nd_path_resolve(resolved, sizeof resolved, path), ND_OK);
+        CHECK_INT(rmdir(resolved), 0);
+    }
+}
+
 static void test_no_card_when_nothing_is_mounted(void)
 {
     nd_card card;
@@ -408,9 +425,27 @@ static void test_the_writability_probe_answers_for_this_process(void)
     CHECK_INT(nd_path_resolve(resolved, sizeof resolved, MOUNT), ND_OK);
     CHECK_INT(chmod(resolved, 0555u), 0);
     CHECK(nd_storage_card_is_writable() == false);
-    /* Traversable but not writable is the exact shape a foreign card arrives
-     * in, so the folders cannot be made either -- which is what the screen
-     * above this now says out loud. */
+
+    /* ============ AND THE FOLDERS THIS FIXTURE HAD ALREADY MADE ==========
+     *
+     * This case used to go straight from the chmod above to
+     * `CHECK(nd_storage_setup_folders() == false)`, and it was asserting
+     * something that is not true and should not be: insert_default() created
+     * all five folders three lines earlier, mkdir -p over a directory that
+     * already exists succeeds whatever the mode of its PARENT, and a card
+     * whose five folders are all present is READY. Making setup_folders()
+     * answer false there would mean the phone refusing a card it had itself
+     * laid out, on the grounds that it could not lay it out again.
+     *
+     * The claim the comment above makes is about a card that has NOT got
+     * them, which is what a card from somebody else's computer actually looks
+     * like. So they are removed first -- through a 0755 mount, because a 0555
+     * one cannot have entries removed from it either -- and then the mode
+     * goes back and the question is finally the one being asked. */
+    CHECK_INT(chmod(resolved, 0755u), 0);
+    remove_folders();
+    CHECK_INT(chmod(resolved, 0555u), 0);
+    CHECK(nd_storage_card_is_writable() == false);
     CHECK(nd_storage_setup_folders() == false);
     CHECK_INT(chmod(resolved, 0755u), 0);
 }
@@ -717,6 +752,107 @@ static void test_the_untrusted_directory_is_not_gated_on_the_five_folders(void)
     CHECK(nd_storage_untrusted_dir(path, sizeof path));
 }
 
+/* ============ HOW BIG THE CARD IS, AND WHY IT IS ASKED ============
+ *
+ * The format's deadline is derived from it, and until 0.5.9a there was no
+ * deadline to derive: every card got a flat four minutes and Settings drew its
+ * progress bar against that same four minutes, so the bar filling and the
+ * helper being SIGKILLed were the same instant. The owner watched a bar reach
+ * the end and then be told the format had failed, on a card large enough that
+ * four minutes was not enough. Two of the three fixes are elsewhere; this is
+ * the number the other two are built on. */
+static void test_the_parent_disk_of_a_partition(void)
+{
+    char out[ND_PATH_MAX];
+
+    /* The plain families: strip the trailing digits. */
+    CHECK(nd_storage_parent_disk("/dev/sda1", out, sizeof out));
+    CHECK_STR(out, "sda");
+    CHECK(nd_storage_parent_disk("/dev/vdc2", out, sizeof out));
+    CHECK_STR(out, "vdc");
+    CHECK(nd_storage_parent_disk("vdc", out, sizeof out));
+    CHECK_STR(out, "vdc");
+
+    /* ============ THE ONES WHOSE OWN NAMES END IN A DIGIT ============
+     *
+     * mmcblk1 IS the card on this phone, and stripping its trailing digits
+     * gives "mmcblk", which is not a device -- the size read would answer
+     * zero for every real SD card, and zero means "assume the worst" all the
+     * way up. neodct-sdcard's parent_disk() carries the same three families
+     * and the two have to agree, because one decides what gets partitioned
+     * and the other decides how long that is allowed to take. */
+    CHECK(nd_storage_parent_disk("/dev/mmcblk1", out, sizeof out));
+    CHECK_STR(out, "mmcblk1");
+    CHECK(nd_storage_parent_disk("/dev/mmcblk1p1", out, sizeof out));
+    CHECK_STR(out, "mmcblk1");
+    CHECK(nd_storage_parent_disk("/dev/nvme0n1", out, sizeof out));
+    CHECK_STR(out, "nvme0n1");
+    CHECK(nd_storage_parent_disk("/dev/nvme0n1p3", out, sizeof out));
+    CHECK_STR(out, "nvme0n1");
+    CHECK(nd_storage_parent_disk("/dev/loop0", out, sizeof out));
+    CHECK_STR(out, "loop0");
+    CHECK(nd_storage_parent_disk("/dev/loop0p1", out, sizeof out));
+    CHECK_STR(out, "loop0");
+
+    /* ============ THIS STRING REACHES A PATH ============
+     *
+     * It comes out of the state file, which is written by root -- and "it is
+     * written by root" is the kind of guarantee that stops being true the day
+     * something else writes it. Two things keep it harmless. Only the part
+     * after the last slash is ever used, so no amount of "../" survives; and
+     * what is left has to look like a name the kernel would issue, which is
+     * alphanumerics, '-' and '_' and nothing else.
+     *
+     * So a traversal collapses to its last component and then answers about
+     * that -- "etc", which /sys/class/block does not have, so the size comes
+     * back 0 and the caller assumes the worst. A component that is not a
+     * device name at all is refused outright. */
+    CHECK(nd_storage_parent_disk("/dev/../../etc", out, sizeof out));
+    CHECK_STR(out, "etc");
+    CHECK(nd_storage_device_bytes("/dev/../../etc") == 0u);
+    CHECK(!nd_storage_parent_disk("/dev/..", out, sizeof out));
+    CHECK_STR(out, "");
+    CHECK(!nd_storage_parent_disk("/dev/mmc blk1", out, sizeof out));
+    CHECK(!nd_storage_parent_disk("", out, sizeof out));
+    CHECK(!nd_storage_parent_disk(NULL, out, sizeof out));
+}
+
+/* sysfs `size` is in 512-byte sectors whatever the device's own block size
+ * is, and the fixture is a staged /sys under the case root -- everything in
+ * nd_storage.c goes through nd_path_resolve(), so a test can put one there. */
+static void test_the_size_of_the_card_comes_off_the_disk(void)
+{
+    use_scratch_paths();
+
+    /* Nothing staged at all: the honest answer is 0, and 0 is a real answer
+     * that the format timing deliberately reads as "a big card". */
+    CHECK(nd_storage_device_bytes("/dev/mmcblk1p1") == 0u);
+
+    /* 2 GiB, the size of the card the tests run against. */
+    pt_write_text("/sys/class/block/mmcblk1/size", "4194304\n");
+    CHECK(nd_storage_device_bytes("/dev/mmcblk1") == 2ull * 1024ull * 1024ull * 1024ull);
+
+    /* THE POINT OF THE PARENT LOOKUP. The state file names the PARTITION,
+     * and a format rewrites the whole disk -- so a phone that reads the
+     * partition's size gets its deadline from whatever happened to be on the
+     * card, which on a big card carrying a small partition is exactly the
+     * too-short deadline this was all about. */
+    pt_write_text("/sys/class/block/mmcblk1p1/size", "2048\n");
+    CHECK(nd_storage_device_bytes("/dev/mmcblk1p1") == 2ull * 1024ull * 1024ull * 1024ull);
+
+    /* A partition whose parent sysfs does not know: the partition's own size
+     * is an understatement, and an understatement of a real card beats
+     * nothing at all. */
+    pt_write_text("/sys/class/block/sdz9/size", "1024\n");
+    CHECK(nd_storage_device_bytes("/dev/sdz9") == 512ull * 1024ull);
+
+    /* Garbage in the attribute is not a size. */
+    pt_write_text("/sys/class/block/sdy/size", "not a number\n");
+    CHECK(nd_storage_device_bytes("/dev/sdy") == 0u);
+    CHECK(nd_storage_device_bytes("") == 0u);
+    CHECK(nd_storage_device_bytes(NULL) == 0u);
+}
+
 int main(void)
 {
     RUN(test_no_card_when_nothing_is_mounted);
@@ -755,6 +891,8 @@ int main(void)
     RUN(test_a_state_file_from_before_any_of_this_still_reads);
     RUN(test_a_card_that_was_pulled_leaves_no_stale_path);
     RUN(test_the_untrusted_directory_is_not_gated_on_the_five_folders);
+    RUN(test_the_parent_disk_of_a_partition);
+    RUN(test_the_size_of_the_card_comes_off_the_disk);
 
     nd_storage_set_paths(NULL, NULL);
     return pt_report("test_storage");
