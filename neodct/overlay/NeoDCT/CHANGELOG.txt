@@ -1,5 +1,12 @@
 # NeoDCT OS Changelog
 
+0.5.6b
+Another attempt at the keypad on a brand-new phone: the first-boot key
+setup now runs with the permissions it needs. And if the keypad still does
+not come up, the phone says so -- a screen with the sick phone and "Input
+failed to initialize", then the reason -- instead of sitting on the opening
+notice with no way past it.
+
 0.5.5b
 Two things that broke when the phone gave up running with full permissions in
 0.5.0b are fixed. The phone keeps the time across a reboot again -- it was
