@@ -299,23 +299,14 @@ static void core_run(nd_fb *fb, bool idle_measure)
             why = "No keypad and no keyboard were found.";
         nd_log_err(ND_LOG_INPUT, "no input backend at UI start: %s", why);
 
-        /* The sick Nokia first -- the phone plainly broke -- with "check
-         * serial logs" baked into CRASH.jpg. */
-        nd_crash_draw_engineering(&ui, "Input failed to initialize");
+        /* The panic-styled screen, in two frames sharing one picture: the
+         * headline and the cropped sick Nokia first, then -- once the owner
+         * has had a moment to read it -- the same picture with the reason
+         * wrapped in below. Neither waits; nobody can dismiss a keyless
+         * phone, so the hold below is what keeps it up. */
+        nd_crash_draw_input_failure(&ui, NULL);
         nap(3.0);
-
-        /* Then the reason, WRAPPED so it is read rather than clipped to one
-         * line. nd_msgdialog_render() draws and does not wait, which is what a
-         * screen nobody can dismiss wants; the low-battery shutdown uses it
-         * the same way. */
-        {
-            nd_msgdialog dlg;
-
-            nd_msgdialog_init(&dlg, &ui, why);
-            nd_msgdialog_set_title(&dlg, "Input failed");
-            nd_msgdialog_render(&dlg);
-            (void)nd_ui_present(&ui);
-        }
+        nd_crash_draw_input_failure(&ui, why);
 
         /* Nothing can dismiss it, so hold until a signal (a power-off, or the
          * supervisor on its way to a restart) sets g_quit. */

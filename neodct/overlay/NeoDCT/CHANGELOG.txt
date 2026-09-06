@@ -1,5 +1,17 @@
 # NeoDCT OS Changelog
 
+0.5.7b
+The keypad works after first-boot setup now. On a brand-new phone the setup
+would map the keys and then the phone came up dead to the keypad, stuck on
+the opening notice -- because the keypad's connection was handed to the
+running phone a moment too late, after it had already given up looking for
+it. The phone now waits for that hand-off before it starts, and keeps trying
+to reach the keypad for a few seconds if it still is not there, so a working
+keypad comes up working. And if input genuinely cannot start, the screen that
+says so now looks like the phone's own crash screen: the sick phone to one
+side, "Input failed to initialize" and the reason beside it.
+
+
 0.5.6b
 Another attempt at the keypad on a brand-new phone: the first-boot key
 setup now runs with the permissions it needs. And if the keypad still does

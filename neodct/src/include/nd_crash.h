@@ -111,6 +111,15 @@ void nd_crash_set_entry(const char *entry);
  * "Continue" softkey, and exactly one present. Does not wait. */
 void nd_crash_draw_engineering(struct nd_ui *ui, const char *summary);
 
+/* The screen the core draws when its keypad never opened: nd_panic's LOOK --
+ * the sick Nokia cropped to just the phone and pinned left, a text column on
+ * black in the OS's own faces -- rather than the app crash screen. The words
+ * are the difference: "Input failed to initialize", and no countdown, because
+ * nothing is about to restart and fix it. reason == NULL draws the headline
+ * alone (the first of nd_main.c's two frames); a second call with the reason
+ * wraps it in below. Does not wait; nobody is coming to press a key. */
+void nd_crash_draw_input_failure(struct nd_ui *ui, const char *reason);
+
 /* _exc_summary()'s C equivalent: the child's detail when there is one, else a
  * line built from the signal or the exit status. Capped at 90 characters with
  * "..." at 87, exactly as the Python caps it. Returns the wanted length. */

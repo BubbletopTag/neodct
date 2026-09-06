@@ -61,12 +61,25 @@ start() {
 	# a virtio tablet on the same bus, and a phone that came up reading the
 	# tablet would have no working keys.
 	#
-	# So: trigger the input subsystem and settle THAT, which is a handful of
-	# devices and returns almost at once -- and on a Luckfox, where the
-	# keypad is a GPIO matrix and there may be no input device at all, it
-	# returns having done nothing. The rest of the coldplug is S11udevall,
-	# which rcS runs in the background while the phone is already up.
-	udevadm trigger --type=devices --action=add --subsystem-match=input
+	# So: trigger the input subsystem AND i2c-dev, and settle those -- a handful
+	# of devices that returns almost at once. The rest of the coldplug is
+	# S11udevall, which rcS runs in the background while the phone is already up.
+	#
+	# i2c-dev is here for the Luckfox, where the keypad is a PCF8575 on
+	# /dev/i2c-3 and there is no input device at all. devtmpfs makes that node
+	# root:root 0600; it becomes group i2c 0660 -- readable by the non-root UI --
+	# only when udev applies 61-neodct-devices.rules to it. Leave that grant to
+	# the background S11udevall and it RACES nd-core dropping privilege and
+	# opening the keypad at S90display: root (the first-boot wizard) ignores the
+	# mode and reads the keypad fine, but the steady-state UI running as ndusr
+	# gets EACCES and the phone has no keys. A spurious /dev/input/event0 then
+	# masks it as "a backend is present", so the phone shows its alpha notice
+	# and never answers a press. Settling i2c-dev HERE, before the UI, closes
+	# that race. Unlike the keyboard below, i2c-3 is a fixed platform bus already
+	# in /sys before udevd starts, so there is no 'the uevent fired into the
+	# void' problem -- the replay this trigger issues is enough -- and the fuel
+	# gauge on the same bus (nd_battery.c) gets its group at the same time.
+	udevadm trigger --type=devices --action=add --subsystem-match=input --subsystem-match=i2c-dev
 	udevadm settle --timeout=$SETTLE_TIMEOUT || echo "udevadm settle failed"
 
 	# ============ AND THEN WAIT FOR ONE TO ACTUALLY BE THERE ============
