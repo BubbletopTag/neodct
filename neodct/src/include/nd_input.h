@@ -58,6 +58,10 @@ typedef struct {
  * allows more; 16 is slack with no cost. */
 #define ND_INPUT_HELD_MAX 16
 
+/* Room for the one-line reason there is no active backend, shown on screen to
+ * a keyless phone. Fits the crash screen's summary cap. */
+#define ND_INPUT_REASON_MAX 96
+
 typedef struct nd_input nd_input;
 
 /* ------------------------------------------------------------------ *
@@ -99,6 +103,14 @@ bool nd_input_has_matrix(const nd_input *in);
  * input before showing a screen -- AppSelector and PagedList poll with a
  * 0.01 s timeout, MessageDialog with 0.0. Keep those two numbers apart. */
 int nd_input_fd(const nd_input *in);
+
+/* Whether anything is actually behind this input: a matrix, an evdev
+ * descriptor or a pipe. False means every read will return nothing -- a dead
+ * keypad -- which the core shows on screen rather than a home it cannot drive. */
+bool nd_input_has_backend(const nd_input *in);
+
+/* The one-line reason there is no backend, "" when there is one; never NULL. */
+const char *nd_input_no_backend_reason(const nd_input *in);
 
 /* ------------------------------------------------------------------ *
  * Reading

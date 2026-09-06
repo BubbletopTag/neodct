@@ -1477,8 +1477,15 @@ nd_err nd_ui_init(nd_ui *ui, nd_fb *fb)
      * meaning. That used to be an ordering difference from the Python --
      * ui_common_init had already assigned all four -- recorded as U-3 in
      * OPEN-QUESTIONS.md. Making them lazy closed it: at this point none of
-     * them has been loaded, which is exactly where launcher.py stood. --- */
-    (void)show_alpha_security_notice_once(ui);
+     * them has been loaded, which is exactly where launcher.py stood. ---
+     *
+     * ONLY WITH A KEYPAD. This is a blocking modal that waits for a key to
+     * dismiss it. On a phone whose keypad did not come up there is no key,
+     * so it would sit here for ever -- which is precisely the "stuck on the
+     * alpha screen, no keypad response" a keyless phone showed. Skipping it
+     * lets core_run() reach its own input-failure screen, which says why. */
+    if (nd_input_has_backend(ui->input))
+        (void)show_alpha_security_notice_once(ui);
 
     return ND_OK;
 }

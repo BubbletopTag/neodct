@@ -105,6 +105,12 @@ struct nd_input {
     nd_key_event queue[QUEUE_MAX];
     size_t q_head;
     size_t q_len;
+
+    /* Why there is no active backend, in words for the screen -- empty when
+     * there is one. Set by try_open_matrix() and finalised in nd_input_open();
+     * read by nd_input_no_backend_reason() so the core can show a keyless
+     * phone what went wrong instead of a home screen it cannot drive. */
+    char no_backend[ND_INPUT_REASON_MAX];
 };
 
 /* ------------------------------------------------------------------ *
@@ -361,8 +367,12 @@ static void try_open_matrix(nd_input *in)
     nd_keymap cfg;
     char i2c_dev[32];
 
-    if (nd_keymap_load(ND_PATH_KEYMAP, &cfg) != ND_OK)
+    if (nd_keymap_load(ND_PATH_KEYMAP, &cfg) != ND_OK) {
+        (void)nd_strlcpy(in->no_backend,
+                         "No keypad map yet. First-boot keypad setup has not written one.",
+                         sizeof in->no_backend);
         return;
+    }
 
     if (strcmp(cfg.driver, "pcf8575-i2c") != 0) {
         /* The gpiozero backend is deliberately not ported: it needs a keymap
@@ -371,6 +381,8 @@ static void try_open_matrix(nd_input *in)
          * libgpiod for a path that cannot run. Recorded in
          * OPEN-QUESTIONS.md; the refusal line is kept. */
         nd_log(ND_LOG_INPUT, "Keymap present, but the %s driver is not supported.", cfg.driver);
+        (void)nd_snprintf(in->no_backend, sizeof in->no_backend,
+                          "Keymap names an unsupported keypad driver: %s.", cfg.driver);
         return;
     }
 
@@ -378,13 +390,19 @@ static void try_open_matrix(nd_input *in)
         return;
     if (!nd_path_exists(i2c_dev)) {
         nd_log(ND_LOG_INPUT, "Keymap wants %s, but %s does not exist.", cfg.driver, i2c_dev);
+        (void)nd_snprintf(in->no_backend, sizeof in->no_backend,
+                          "The keypad's i2c bus %s does not exist.", i2c_dev);
         return;
     }
 
     if (nd_matrix_input_open(&in->matrix, &cfg) != ND_OK) {
         nd_log(ND_LOG_INPUT, "I2C matrix init failed; falling back to evdev.");
+        (void)nd_snprintf(in->no_backend, sizeof in->no_backend,
+                          "The keypad on %s did not open (a permission or wiring problem).",
+                          i2c_dev);
         return;
     }
+    in->no_backend[0] = '\0'; /* a backend exists */
     in->have_matrix = true;
     in->backend = ND_INPUT_MATRIX;
     nd_log(ND_LOG_INPUT, "I2C matrix input active from %s (bus=%d addr=0x%02X rows=%u cols=%u).",
@@ -489,9 +507,15 @@ nd_err nd_input_open(nd_input **out)
         (void)nd_strlcpy(in->path, path, sizeof in->path);
         if (!in->have_matrix)
             in->backend = ND_INPUT_EVDEV;
+        in->no_backend[0] = '\0'; /* the keyboard opened; there is a backend */
         nd_log(ND_LOG_INPUT, "Listening on %s", path);
     } else if (!in->have_matrix) {
         nd_log(ND_LOG_INPUT, "WARNING: no active input backend.");
+        /* try_open_matrix() left the reason; a phone that reached here with an
+         * empty one had no keymap and no keyboard at all. */
+        if (in->no_backend[0] == '\0')
+            (void)nd_strlcpy(in->no_backend, "No keypad and no keyboard were found.",
+                             sizeof in->no_backend);
     }
 
     /* Set last, and for both outcomes: a phone that opened its keyboard can
@@ -558,6 +582,26 @@ bool nd_input_has_matrix(const nd_input *in)
 int nd_input_fd(const nd_input *in)
 {
     return (in != NULL) ? in->fd : -1;
+}
+
+/* An opened nd_input can exist with nothing behind it -- no matrix and no
+ * evdev descriptor -- and then every read returns nothing, which on a phone
+ * looks like dead keys. This is how the core tells that apart from a quiet
+ * keypad. A wrapped pipe (an app's channel) always counts as a backend. */
+bool nd_input_has_backend(const nd_input *in)
+{
+    if (in == NULL)
+        return false;
+    return in->have_matrix || in->fd >= 0;
+}
+
+/* The one-line reason there is no backend, or "" when there is one. Never
+ * NULL. For the screen a keyless phone shows instead of an undriveable home. */
+const char *nd_input_no_backend_reason(const nd_input *in)
+{
+    if (in == NULL)
+        return "No input was opened at all.";
+    return in->no_backend;
 }
 
 /* ------------------------------------------------------------------ *

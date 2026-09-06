@@ -54,6 +54,7 @@
 #include "nd_broker.h"
 #include "nd_clock.h"
 #include "nd_crash.h"
+#include "nd_input.h"
 #include "nd_db.h"
 #include "nd_draw.h"
 #include "nd_fb.h"
@@ -68,6 +69,7 @@
 #include "nd_settings.h"
 #include "nd_types.h"
 #include "nd_ui.h"
+#include "nd_widgets.h"
 
 /* ------------------------------------------------------------------ *
  * Subsystems that belong to other work packages
@@ -252,15 +254,10 @@ static void core_run(nd_fb *fb, bool idle_measure)
     if (idle_measure)
         ack_security_notice_for_measurement();
 
-    /* First boot with an i2c keypad but no keymap runs the on-screen setup
-     * wizard here, which exec-restarts the UI and may never return. Same
-     * position as run()'s own call, which is above `ui = NeoDCT_UI(fb)` and
-     * takes fb rather than the UI for that reason.
-     *
-     * The Python wraps it in a try/except that prints one line and carries
-     * on. There is nothing here to wrap: every failure is logged, announced
-     * on the panel where the Python announces it, and comes back as false. */
-    (void)nd_kpsetup_maybe_run(fb, true);
+    /* First-boot keypad setup used to run here. It now runs in main(), BEFORE
+     * the privilege drop, so its i2c probe happens as root -- see "4a-bis".
+     * By the time core_run() is reached the UI is ndusr, which is exactly why
+     * the wizard could not do its job from here. */
 
     if (nd_ui_init(&ui, fb) != ND_OK) {
         nd_log_err(ND_LOG_CORE, "UI initialisation failed; nothing to run");
@@ -285,6 +282,45 @@ static void core_run(nd_fb *fb, bool idle_measure)
         (void)fflush(stdout);
         while (g_quit == 0)
             nap(0.1);
+        nd_ui_teardown(&ui);
+        return;
+    }
+
+    /* A phone whose keypad never came up cannot be driven, and a home screen
+     * that ignores every key looks like a freeze. Say what happened instead:
+     * the sick-Nokia crash screen with "Input failed to initialize", then --
+     * so the owner has time to read it -- the reason, and hold there. This is
+     * a hardware and first-boot case; QEMU and a dev keyboard have a backend,
+     * so it never fires there (NEODCT_FORCE_NO_INPUT=1 forces it for a test). */
+    if (!nd_input_has_backend(ui.input) || getenv("NEODCT_FORCE_NO_INPUT") != NULL) {
+        const char *why = nd_input_no_backend_reason(ui.input);
+
+        if (why == NULL || why[0] == '\0')
+            why = "No keypad and no keyboard were found.";
+        nd_log_err(ND_LOG_INPUT, "no input backend at UI start: %s", why);
+
+        /* The sick Nokia first -- the phone plainly broke -- with "check
+         * serial logs" baked into CRASH.jpg. */
+        nd_crash_draw_engineering(&ui, "Input failed to initialize");
+        nap(3.0);
+
+        /* Then the reason, WRAPPED so it is read rather than clipped to one
+         * line. nd_msgdialog_render() draws and does not wait, which is what a
+         * screen nobody can dismiss wants; the low-battery shutdown uses it
+         * the same way. */
+        {
+            nd_msgdialog dlg;
+
+            nd_msgdialog_init(&dlg, &ui, why);
+            nd_msgdialog_set_title(&dlg, "Input failed");
+            nd_msgdialog_render(&dlg);
+            (void)nd_ui_present(&ui);
+        }
+
+        /* Nothing can dismiss it, so hold until a signal (a power-off, or the
+         * supervisor on its way to a restart) sets g_quit. */
+        while (g_quit == 0)
+            nap(0.2);
         nd_ui_teardown(&ui);
         return;
     }
@@ -399,6 +435,19 @@ int main(int argc, char **argv)
     } else {
         nd_log(ND_LOG_FB, "headless: no panel will be written");
     }
+
+    /* 4a-bis. First-boot keypad setup, BEFORE the drop, so it runs as root.
+     *
+     *     The wizard probes /dev/i2c-3 for the keypad expander and writes the
+     *     keymap. Setting the i2c bus up and opening it wants privileges the
+     *     UI is about to give away, and on a fresh phone the probe as ndusr
+     *     was finding nothing -- no keymap, then no keypad at all. As root the
+     *     probe just works. If a keymap gets written the wizard exits for the
+     *     supervisor to restart nd-core as root, so this returns only when
+     *     there is nothing to set up. It needs the framebuffer above; on a
+     *     phone with no i2c bus (QEMU) it gates itself off and is silent. */
+    if (fb != NULL)
+        (void)nd_kpsetup_maybe_run(fb, true);
 
     /* 4b. AND NOW STOP BEING ROOT.
      *
