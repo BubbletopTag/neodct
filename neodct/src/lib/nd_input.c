@@ -68,6 +68,15 @@
  * times a second forever. */
 #define ND_REOPEN_INTERVAL_US 1000000u
 
+/* The matrix keypad's recovery is BOUNDED where evdev's is not. A soldered
+ * i2c keypad is never hot-plugged, so the only reason to retry it is the boot
+ * race -- its i2c node is root:root 0600 until udev applies the group -- which
+ * resolves within a few seconds of the background coldplug. Spinning past that
+ * is a phone with a genuinely dead keypad, and a line a second forever is the
+ * very thing the comment above ND_REOPEN_INTERVAL_US warns against. Thirty
+ * tries at one second covers the race with slack, then stops. */
+#define ND_MATRIX_REOPEN_MAX_TRIES 30
+
 typedef struct {
     int32_t code;
     bool used;
@@ -87,6 +96,11 @@ struct nd_input {
      * its back. */
     bool may_reopen;
     uint64_t reopen_after_us;
+
+    /* The matrix twin of reopen_after_us, with a bounded try count: the same
+     * boot race on the i2c bus. See try_reopen_matrix(). */
+    uint64_t matrix_reopen_after_us;
+    int32_t matrix_reopen_tries;
 
     bool have_matrix;
     nd_matrix_input matrix;
@@ -470,6 +484,38 @@ static void try_reopen_evdev(nd_input *in, uint64_t now)
     nd_log(ND_LOG_INPUT, "Input recovered: listening on %s", path);
 }
 
+/* The matrix twin of try_reopen_evdev(). Same boot race, other bus: the
+ * keypad's i2c node is root:root 0600 from devtmpfs until udev applies its
+ * group, so a core that opened input in that window -- or before the
+ * background coldplug ran on a Luckfox -- saw try_open_matrix() fail with
+ * EACCES. Retry at the same one-second cadence for as long as there is no
+ * matrix, and -- unlike the evdev retry -- do it EVEN WHEN an evdev descriptor
+ * is open: on a real phone a spurious /dev/input/event0 is not the keypad, and
+ * it must not stop the real one from coming back. Bounded, because a soldered
+ * keypad is not hot-plugged; see ND_MATRIX_REOPEN_MAX_TRIES. */
+static void try_reopen_matrix(nd_input *in, uint64_t now)
+{
+    if (!in->may_reopen || in->have_matrix)
+        return;
+    if (in->matrix_reopen_tries >= ND_MATRIX_REOPEN_MAX_TRIES)
+        return;
+    if (in->matrix_reopen_after_us != 0u && now < in->matrix_reopen_after_us)
+        return;
+    in->matrix_reopen_after_us = now + ND_REOPEN_INTERVAL_US;
+
+    /* No keymap means no matrix keypad on this phone (QEMU, a dev board):
+     * nothing to recover, so do not spend a try on it. try_open_matrix() gates
+     * on the same file; checking here keeps this off the try clock, so a
+     * keyboard-only phone never exhausts its budget on a keypad it lacks. */
+    if (!nd_path_exists(ND_PATH_KEYMAP))
+        return;
+
+    in->matrix_reopen_tries++;
+    try_open_matrix(in);
+    if (in->have_matrix)
+        nd_log(ND_LOG_INPUT, "Input recovered: i2c keypad matrix now readable.");
+}
+
 nd_err nd_input_open(nd_input **out)
 {
     /* owned by the caller; free with nd_input_close() */
@@ -517,6 +563,20 @@ nd_err nd_input_open(nd_input **out)
             (void)nd_strlcpy(in->no_backend, "No keypad and no keyboard were found.",
                              sizeof in->no_backend);
     }
+
+    /* One unambiguous line for the serial log. The evdev open above clears
+     * no_backend the moment ANY /dev/input node opens -- a spurious event0
+     * that is not the keypad included -- so the only record that the matrix
+     * lost the boot race is this: which backend actually won, by name. A
+     * hardware debugger reads "evdev ... (no matrix keypad opened)" and knows
+     * to look at /dev/i2c-3's group rather than at the keypad wiring. */
+    if (in->have_matrix)
+        nd_log(ND_LOG_INPUT, "Input backend selected: i2c keypad matrix.");
+    else if (in->fd >= 0)
+        nd_log(ND_LOG_INPUT, "Input backend selected: evdev %s (no matrix keypad opened).",
+               in->path);
+    else
+        nd_log(ND_LOG_INPUT, "Input backend selected: NONE (%s).", in->no_backend);
 
     /* Set last, and for both outcomes: a phone that opened its keyboard can
      * still lose it, and one that has a matrix can still be handed a USB
@@ -654,6 +714,14 @@ bool nd_input_read_event(nd_input *in, double timeout_s, nd_key_event *out)
         due = next_repeat_due(in);
         if (due != 0u && (wake == 0u || due < wake))
             wake = due;
+
+        /* The keypad's i2c node may have been root:root 0600 when the UI
+         * opened it -- the boot race, on the other bus. Keep trying to bring
+         * the matrix up, independent of any evdev descriptor, because a
+         * spurious /dev/input/event0 is not the keypad. See
+         * try_reopen_matrix(); rate-limited and bounded inside, so this is one
+         * comparison on every phone that already has its keys. */
+        try_reopen_matrix(in, now_us());
 
         if (in->have_matrix) {
             matrix_poll_into_queue(in);

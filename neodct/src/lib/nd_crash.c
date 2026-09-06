@@ -52,7 +52,9 @@
 #include "nd_input.h"
 #include "nd_keycodes.h"
 #include "nd_log.h"
+#include "nd_panic.h"
 #include "nd_paths.h"
+#include "nd_text.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_widgets.h"
@@ -645,4 +647,104 @@ void nd_crash_show_app(struct nd_ui *ui, const char *message, const char *app_na
         }
         (void)nd_msgdialog_show(&dlg);
     }
+}
+
+/* ------------------------------------------------------------------ *
+ * The input-failure screen
+ * ------------------------------------------------------------------ *
+ *
+ * A phone whose keypad never opened cannot be driven, and a home screen that
+ * ignores every key looks like a freeze. This is what the core draws instead,
+ * from nd_main.c, and it is deliberately the LOOK of the real core-crash
+ * screen (nd_panic_draw) rather than the app crash screen: the sick Nokia
+ * CROPPED to just the phone and pinned left, a text column on the right in the
+ * OS's own faces on black. The one difference from nd_panic is the words --
+ * there is no countdown and no "try N of M", because nothing is about to
+ * restart and fix this; a person with a serial cable is.
+ *
+ * Two frames, driven by the caller: reason == NULL draws the headline alone,
+ * and a second call with the reason adds it below once the owner has had a
+ * moment to read the headline. Both frames are the same picture, so the reason
+ * appearing reads as the screen finishing rather than a new screen.
+ */
+void nd_crash_draw_input_failure(nd_ui *ui, const char *reason)
+{
+    int32_t screen_w;
+    int32_t screen_h;
+    int32_t text_x;
+    int32_t text_w;
+    int32_t y;
+    const nd_font *hfont;
+    const nd_font *bfont;
+    nd_image *art;
+    bool saved_use_wallpaper;
+
+    if (ui == NULL || ui->draw == NULL || ui->canvas == NULL)
+        return;
+
+    screen_w = nd_ui_width(ui);
+    screen_h = nd_ui_height(ui);
+
+    /* Not wallpapered, exactly like nd_panic and nd_crash_draw_engineering:
+     * the words that explain a dead keypad have to be legible, and a
+     * photograph behind small type is the one thing that stops them being. */
+    saved_use_wallpaper = ui->app_use_wallpaper;
+    ui->app_use_wallpaper = false;
+
+    (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, screen_w, screen_h), ND_BLACK);
+
+    /* The sick Nokia cropped to just the phone, pinned left -- the panic
+     * screen's exact artwork and position. Missing or undecodable art moves
+     * the text to the left margin instead; the screen degrades, it does not
+     * vanish. */
+    text_x = ND_PANIC_TEXT_X_BARE;
+    art = nd_panic_load_art();
+    if (art != NULL) {
+        if (nd_image_blit(ui->canvas, art, 0, 0) == ND_OK)
+            text_x = ND_PANIC_TEXT_X;
+        nd_image_free(art);
+    }
+    text_w = screen_w - text_x - 6;
+    if (text_w < 40)
+        text_w = 40;
+
+    /* Title in the medium face like nd_panic's headline, the reason in the
+     * small one -- each degrading to the next size the core actually loaded. */
+    hfont = ui->font_md != NULL ? ui->font_md : (ui->font_n != NULL ? ui->font_n : ui->font_s);
+    bfont = ui->font_s != NULL ? ui->font_s : hfont;
+
+    y = 8;
+    if (hfont != NULL) {
+        int32_t tw = 0;
+        int32_t th = 0;
+
+        nd_ui_text_size(ui, "Input failed", hfont, &tw, &th);
+        (void)nd_draw_text(ui->draw, text_x, y, "Input failed", hfont, ND_WHITE);
+        y += th + 3;
+        nd_ui_text_size(ui, "to initialize", hfont, &tw, &th);
+        (void)nd_draw_text(ui->draw, text_x, y, "to initialize", hfont, ND_WHITE);
+        y += th + 9;
+    }
+
+    if (reason != NULL && reason[0] != '\0' && bfont != NULL) {
+        char storage[6][ND_TEXT_LINE_MAX];
+        nd_lines lines;
+        size_t i;
+
+        nd_lines_init(&lines, storage, ND_ARRAY_LEN(storage));
+        nd_text_wrap_break(&lines, reason, bfont, text_w);
+        for (i = 0u; i < lines.n; i++) {
+            const char *ln = nd_lines_at(&lines, i);
+            int32_t tw = 0;
+            int32_t th = 0;
+
+            nd_ui_text_size(ui, ln, bfont, &tw, &th);
+            (void)nd_draw_text(ui->draw, text_x, y, ln, bfont, ND_GRAY);
+            y += th + 2;
+        }
+    }
+
+    (void)nd_ui_present(ui);
+
+    ui->app_use_wallpaper = saved_use_wallpaper;
 }
