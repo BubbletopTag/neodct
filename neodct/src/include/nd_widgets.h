@@ -172,7 +172,7 @@ int32_t nd_vlist_handle_key(nd_vlist *l, int32_t key);
  * 5. LevelSelector -- a VerticalList of "Level 1".."Level N"
  * ================================================================== */
 
-#define ND_LEVELSEL_MAX 9
+#define ND_LEVELSEL_MAX 10
 
 typedef struct {
     nd_vlist list;

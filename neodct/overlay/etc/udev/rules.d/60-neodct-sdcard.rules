@@ -2,8 +2,26 @@
 #
 # The helper decides for itself whether a device is removable (anything that
 # is not the system or user-data partition from the kernel cmdline), so this
-# rule can afford to be broad. RUN is fine here because the helper returns
-# immediately after mounting.
+# rule can afford to be broad.
+#
+# ============ WHAT %k IS FOR, AND WHY IT WENT WRONG ============
+#
+# These rules match EVERY block partition on the phone, and they always did --
+# the breadth is deliberate, because the helper is the thing that knows what a
+# card is. What was not true is that the helper read the name they pass:
+# do_remove() ignored it and unmounted the card for any partition removal
+# anywhere. That became load-bearing the day the helper learned to format,
+# because partprobe's BLKRRPART makes the kernel remove and re-add every
+# partition on the disk -- so a format fires this rule at itself, mid-format,
+# and the `remove` published `state=absent` over the `mounted` the format had
+# just written. The phone said "Card formatted and ready." and then could not
+# see the card until the next reboot.
+#
+# The helper now compares %k against the card it published and does nothing for
+# anything else, and the whole dispatcher runs under an flock so these handlers
+# cannot land inside a format at all. RUN is still fine here -- the helper
+# mounts and returns -- but "returns immediately" is no longer the reason, the
+# lock is.
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", RUN+="/NeoDCT/System/hw/neodct-sdcard add %k"
 ACTION=="add", SUBSYSTEM=="block", KERNEL=="mmcblk[0-9]", RUN+="/NeoDCT/System/hw/neodct-sdcard add %k"
 ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", RUN+="/NeoDCT/System/hw/neodct-sdcard remove %k"

@@ -41,6 +41,9 @@
  */
 
 #include <dirent.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -670,28 +673,54 @@ static bool load_gif_wallpaper(nd_ui *ui, const char *path)
  * ui->home_.wallpaper, and opens the decoder when the file animates. */
 static void load_configured_wallpaper(nd_ui *ui)
 {
+    /* A LANCZOS resize of a full-size photograph to 240x175 and then a dim
+     * pass over 126,000 bytes, or the first frame of a GIF off the card. It is
+     * the most expensive single thing the home screen does and it happens with
+     * nothing yet drawn, which is what makes it worth a name of its own. */
+    const char *saved = nd_ui_watch_begin("loading the wallpaper");
+    const char *from_core = getenv(ND_ENV_UI_WALLPAPER);
     char setting[ND_PATH_MAX];
 
-    if (nd_settings_get_copy(ND_SET_UI_WALLPAPER, ND_SET_UI_WALLPAPER_DFLT, setting,
-                             sizeof setting) != ND_OK)
-        return;
+    /* ============ WHY THE ENVIRONMENT COMES FIRST ============
+     *
+     * An app runs as ndusr_ut, and settings.prop is 0640 ndusr:ndusr -- so an
+     * installed app reading it gets ENOENT and silently draws on the default
+     * background instead of the owner's. Widening the file is not the answer:
+     * it also holds engineering_mode, which gates LinuxShell and raw AT.
+     *
+     * So the core, which CAN read it, projects the presentation subset into
+     * the child's environment (nd_proc.h, app_env). The value is the setting
+     * verbatim and unparsed, "NONE" included, so the branch below is the same
+     * branch for both sources and no parsing policy is duplicated across a
+     * fork. Absent means no core set it -- an app started by hand, or the core
+     * itself -- and the settings read is then still the right answer. */
+    if (from_core != NULL) {
+        if (nd_strlcpy(setting, from_core, sizeof setting) >= sizeof setting)
+            goto done;
+    } else if (nd_settings_get_copy(ND_SET_UI_WALLPAPER, ND_SET_UI_WALLPAPER_DFLT, setting,
+                                    sizeof setting) != ND_OK) {
+        goto done;
+    }
 
     /* `if wallpaper_setting and wallpaper_setting.upper() != "NONE":` -- and
      * when it IS "NONE", load_wallpaper() is never called, so the
      * "[UI] No wallpaper found." line does not appear either. */
     if (setting[0] == '\0' || eq_ci(setting, "NONE"))
-        return;
+        goto done;
 
     if (wallpaper_ext_ok(setting) && nd_path_exists(setting)) {
         nd_log(ND_LOG_UI, "Loading wallpaper: %s", setting);
         if (!load_gif_wallpaper(ui, setting))
             ui->home_.wallpaper = nd_ui_load_wallpaper(setting);
-        return;
+        goto done;
     }
 
     nd_log(ND_LOG_UI, "Invalid wallpaper setting: %s", setting);
     if (nd_path_exists(ND_PATH_WALLPAPER))
         ui->home_.wallpaper = nd_ui_load_wallpaper(ND_PATH_WALLPAPER);
+
+done:
+    nd_ui_watch_end(saved);
 }
 
 /* ------------------------------------------------------------------ *
@@ -870,6 +899,12 @@ static void sort_apps_by_id(nd_app_entry *apps, size_t n)
 
 static void rescan_apps(nd_ui *ui)
 {
+    /* Three directory walks, one of them ON THE SD CARD, each opening and
+     * parsing a manifest.json per app. A healthy card makes it invisible; a
+     * card that is failing makes it the longest thing the core does without
+     * touching the screen, and the reads are uninterruptible. Named, so a
+     * phone that stops here says which card it stopped on. */
+    const char *saved = nd_ui_watch_begin("scanning the app directories");
     size_t n;
 
     ui->home_.n_apps = 0u;
@@ -892,6 +927,7 @@ static void rescan_apps(nd_ui *ui)
         ui->home_.n_apps += n;
     }
     sort_apps_by_id(ui->home_.apps, ui->home_.n_apps);
+    nd_ui_watch_end(saved);
 }
 
 /* ------------------------------------------------------------------ *
@@ -955,8 +991,14 @@ int32_t nd_ui_unread_sms(nd_ui *ui)
     if (ui == NULL)
         return 0;
     if (!ui->home_.unread_sms_ready) {
+        /* Opens SQLite. 60-70 ms of a 130 ms app launch when it was measured
+         * on the phone, and unbounded when the database is on storage that has
+         * stopped answering -- which is the case that ends up here. */
+        const char *saved = nd_ui_watch_begin("counting unread messages");
+
         ui->home_.unread_sms_ready = true;
         ui->home_.unread_sms = nd_db_count_unread_sms();
+        nd_ui_watch_end(saved);
     }
     return ui->home_.unread_sms;
 }
@@ -1088,14 +1130,25 @@ double nd_ui_frame_timeout(nd_ui *ui, double dflt)
 static void chrome_settings_load(nd_ui *ui)
 {
     const char *raw;
+    const char *from_core;
     char *end = NULL;
     double v;
 
     ui->home_.chrome_ready = true;
-    ui->home_.chrome_enabled = nd_setting_is_enabled(
-        nd_settings_get(ND_SET_UI_WP_EVERYWHERE, ND_SET_UI_WP_EVERYWHERE_DFLT), true);
 
-    raw = nd_settings_get(ND_SET_UI_WP_APP_DIM, ND_SET_UI_WP_APP_DIM_DFLT);
+    /* Both of these prefer the core's projection for the reason spelled out in
+     * load_configured_wallpaper(): an ndusr_ut app cannot read settings.prop,
+     * and drawing the framework's chrome the way the owner asked for it is not
+     * worth widening a file that also carries engineering_mode. */
+    from_core = getenv(ND_ENV_UI_WP_EVERYWHERE);
+    ui->home_.chrome_enabled = nd_setting_is_enabled(
+        from_core != NULL ? from_core
+                          : nd_settings_get(ND_SET_UI_WP_EVERYWHERE, ND_SET_UI_WP_EVERYWHERE_DFLT),
+        true);
+
+    raw = getenv(ND_ENV_UI_WP_DIM);
+    if (raw == NULL)
+        raw = nd_settings_get(ND_SET_UI_WP_APP_DIM, ND_SET_UI_WP_APP_DIM_DFLT);
     if (raw == NULL)
         raw = ND_SET_UI_WP_APP_DIM_DFLT;
     v = strtod(raw, &end);
@@ -1232,15 +1285,46 @@ void nd_ui_paint_chrome_content(nd_ui *ui)
     "This is alpha software. Extremely insecure and unstable. Don't " \
     "store important data on it."
 
-/* ErrorScreen.show_alpha_security_notice_once(). Returns true when it showed.
- * The ack file is written ONLY after the dialog was actually displayed -- if
- * the widget layer is not linked in yet, boot continues and the notice is
- * still owed. */
-static bool show_alpha_security_notice_once(nd_ui *ui)
+/* Best-effort persistence, exactly as the Python's bare except. */
+static void write_security_ack(void)
 {
-    nd_msgdialog dlg;
     char resolved[ND_PATH_MAX];
     FILE *f;
+
+    (void)nd_mkdir_p(ND_PATH_USER, 0755u);
+    if (nd_path_resolve(resolved, sizeof resolved, ND_PATH_ACK_SECURITY) != ND_OK)
+        return;
+    f = fopen(resolved, "w");
+    if (f == NULL)
+        return;
+    (void)fprintf(f, "%lld", (long long)nd_time_now());
+    (void)fclose(f);
+}
+
+/* ErrorScreen.show_alpha_security_notice_once(). Returns true when it showed.
+ *
+ * ============ WHY THE ACK IS WRITTEN BEFORE THE DIALOG BLOCKS ============
+ *
+ * nd_msgdialog_show() is `for (;;) { key = nd_ui_wait_for_key(...); }` with
+ * no timeout, and this is the FIRST thing on the screen of a phone that has
+ * just started. So on a phone whose keypad dies -- or never fully arrives --
+ * between nd_ui_init()'s backend check and this call, the notice becomes a
+ * permanent state: it cannot be dismissed, and because the acknowledgement
+ * used to be written only after the dialog RETURNED, it was owed again on the
+ * next boot, and the one after that. That is the original 0.5.x "stuck on the
+ * alpha notice" symptom, and this cause of it was still live.
+ *
+ * Writing the file first turns "for ever" into "once". The cost is a phone
+ * that loses power while the notice is up never seeing it again, which is a
+ * fair trade for a notice, and it is the same trade nd_main.c's
+ * ack_security_notice_for_measurement() already makes deliberately.
+ *
+ * Everything that decides NOT to show it still happens before the write, so
+ * a build with no widget layer linked still owes the notice rather than
+ * silently acknowledging one it never drew. */
+bool nd_ui_show_security_notice_once(nd_ui *ui)
+{
+    nd_msgdialog dlg;
 
     if (nd_path_exists(ND_PATH_ACK_SECURITY))
         return false;
@@ -1256,18 +1340,352 @@ static bool show_alpha_security_notice_once(nd_ui *ui)
         nd_msgdialog_set_icon(&dlg, ND_PATH_WARNING_ICON);
     if (nd_msgdialog_set_button != NULL)
         nd_msgdialog_set_button(&dlg, "OK");
-    (void)nd_msgdialog_show(&dlg);
 
-    /* Best-effort persistence, exactly as the Python's bare except. */
-    (void)nd_mkdir_p(ND_PATH_USER, 0755u);
-    if (nd_path_resolve(resolved, sizeof resolved, ND_PATH_ACK_SECURITY) == ND_OK) {
-        f = fopen(resolved, "w");
-        if (f != NULL) {
-            (void)fprintf(f, "%lld", (long long)nd_time_now());
-            (void)fclose(f);
+    write_security_ack();
+    (void)nd_msgdialog_show(&dlg);
+    return true;
+}
+
+/* ------------------------------------------------------------------ *
+ * The soft watchdog -- the contract, and why it exists, are in nd_ui.h
+ * ------------------------------------------------------------------ */
+
+/* Five seconds. Nothing the UI does ON PURPOSE reaches it: the longest
+ * deliberate block in the system is a key wait, and every one of those beats
+ * at 0.1 s. Short enough that the line is in the log while the owner is still
+ * deciding whether the phone is dead. */
+#define ND_UI_WATCH_STALL_MS 5000u
+
+/* One second between looks. The answer only has to be approximately right, and
+ * this thread waking is the whole of what the watchdog costs while nothing is
+ * wrong. Whole seconds so the deadline arithmetic below is one addition and
+ * cannot be got wrong. */
+#define ND_UI_WATCH_POLL_S 1
+
+/* It formats one log line and does nothing else, so it takes 64 KiB against
+ * the 128 KiB the modem, clock and service threads each ask for. */
+#define ND_UI_WATCH_STACK (64u * 1024u)
+
+/* Labels with static storage, as nd_ui.h requires of every label. */
+#define ND_UI_WATCH_IDLE_LABEL    "the key loop"
+#define ND_UI_WATCH_STARTUP_LABEL "starting up"
+#define ND_UI_WATCH_APP_LABEL     "an app screen"
+
+/* NEODCT_UI_WATCHDOG=0 turns it off. For the same audience NEODCT_BENCH has:
+ * a debugger stops every thread in the process, so single-stepping cannot make
+ * this fire, but a measurement run that wants nothing else awake can say so. */
+#define ND_UI_WATCH_ENV "NEODCT_UI_WATCHDOG"
+
+/* ============ WHY THESE ARE ATOMICS AND NOT A MUTEX ============
+ *
+ * The UI thread writes them and the checker reads them, and the UI thread must
+ * never take a lock to say it is alive -- the one thing a watchdog may not do
+ * is add a way for the watched thread to block. Relaxed ordering throughout:
+ * nothing here publishes memory, the values ARE the message, and the checker is
+ * allowed to see a beat one poll late.
+ *
+ * 32-bit and not 64-bit deliberately. A 64-bit atomic is not lock-free on
+ * 32-bit ARM in every toolchain configuration, and a libatomic call on the key
+ * loop is exactly what this must not cost. A millisecond counter in 32 bits
+ * wraps every 49.7 days, and the subtraction that reads it is unsigned, so the
+ * wrap is invisible: what is computed is a difference of less than a minute,
+ * which is correct across it. */
+static _Atomic uint32_t g_watch_beat_ms;
+static _Atomic(const char *) g_watch_label = ND_UI_WATCH_IDLE_LABEL;
+static _Atomic uint32_t g_watch_hold;
+/* The beat that was current when the outermost hold began -- see the checker
+ * for what it is for. */
+static _Atomic uint32_t g_watch_hold_beat_ms;
+
+/* The stop handshake, and NOTHING else, is what this pair guards. The checker
+ * takes them; the UI thread never does. */
+static pthread_mutex_t g_watch_mu;
+static pthread_cond_t g_watch_cv;
+static pthread_t g_watch_tid;
+static bool g_watch_running;
+static bool g_watch_quit;
+static bool g_watch_cv_monotonic;
+
+/* clock_gettime(CLOCK_MONOTONIC) and not nd_time_monotonic().
+ *
+ * Under the golden-frame capture nd_time_monotonic() reads the VIRTUAL clock,
+ * which advances one tick per committed frame -- so a UI thread that has
+ * stopped committing frames is precisely the one whose clock has also stopped,
+ * and a watchdog reading it could never see a stall. This is the one place in
+ * the system that has to ask the kernel itself. */
+static uint32_t watch_now_ms(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0u;
+    return (uint32_t)((uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u);
+}
+
+void nd_ui_watch_beat(void)
+{
+    atomic_store_explicit(&g_watch_beat_ms, watch_now_ms(), memory_order_relaxed);
+}
+
+const char *nd_ui_watch_begin(const char *what)
+{
+    const char *saved = atomic_load_explicit(&g_watch_label, memory_order_relaxed);
+
+    atomic_store_explicit(&g_watch_label, what != NULL ? what : ND_UI_WATCH_IDLE_LABEL,
+                          memory_order_relaxed);
+    /* The five seconds are the OPERATION'S, not the leftovers of whenever the
+     * last beat happened to land -- otherwise a section entered 4.9 s after a
+     * beat would be reported 0.1 s in, under its own name, for something the
+     * caller before it did. */
+    nd_ui_watch_beat();
+    return saved;
+}
+
+void nd_ui_watch_end(const char *saved)
+{
+    atomic_store_explicit(&g_watch_label, saved != NULL ? saved : ND_UI_WATCH_IDLE_LABEL,
+                          memory_order_relaxed);
+    nd_ui_watch_beat();
+}
+
+void nd_ui_watch_hold(void)
+{
+    /* The stamp is recorded, not cleared: a held section that turns out to
+     * beat after all is watched like any other. The checker explains why. */
+    atomic_store_explicit(&g_watch_hold_beat_ms,
+                          atomic_load_explicit(&g_watch_beat_ms, memory_order_relaxed),
+                          memory_order_relaxed);
+    (void)atomic_fetch_add_explicit(&g_watch_hold, 1u, memory_order_relaxed);
+}
+
+void nd_ui_watch_release(void)
+{
+    /* THE BEAT COMES FIRST, and the order is the whole of what makes this
+     * safe. The other way round leaves an instant in which the hold is gone
+     * and the stamp is still the minutes-old one the held section never
+     * touched -- and a checker that samples there reports a stall that ended
+     * before it started looking. Beating first cannot go wrong the same way:
+     * a sample taken between the two sees a held section with a fresh stamp,
+     * which is exactly what a healthy one looks like. */
+    nd_ui_watch_beat();
+    /* Read-then-decrement rather than a bare fetch_sub, so an unbalanced
+     * release cannot wrap the counter and disarm the watchdog for the life of
+     * the process. Not a race: only the UI thread touches this. */
+    if (atomic_load_explicit(&g_watch_hold, memory_order_relaxed) > 0u)
+        (void)atomic_fetch_sub_explicit(&g_watch_hold, 1u, memory_order_relaxed);
+}
+
+uint32_t nd_ui_watch_age_ms(const char **label_out, bool *held_out)
+{
+    /* The beat FIRST and the clock second. The other order lets a beat land
+     * between the two reads, which makes the stamp newer than "now" and turns
+     * the unsigned subtraction into 49 days of apparent stall. */
+    uint32_t beat = atomic_load_explicit(&g_watch_beat_ms, memory_order_relaxed);
+    uint32_t now = watch_now_ms();
+
+    if (label_out != NULL)
+        *label_out = atomic_load_explicit(&g_watch_label, memory_order_relaxed);
+    if (held_out != NULL)
+        *held_out = atomic_load_explicit(&g_watch_hold, memory_order_relaxed) != 0u;
+    return now - beat;
+}
+
+static void *watch_thread(void *arg)
+{
+    const char *stall_label = ND_UI_WATCH_IDLE_LABEL;
+    uint32_t stall_age_ms = 0u;
+    bool reported = false;
+
+    (void)arg;
+
+    for (;;) {
+        struct timespec deadline;
+        const char *label;
+        bool held;
+        bool quit;
+        uint32_t beat;
+        uint32_t age;
+
+        if (clock_gettime(g_watch_cv_monotonic ? CLOCK_MONOTONIC : CLOCK_REALTIME, &deadline) != 0)
+            break;
+        deadline.tv_sec += ND_UI_WATCH_POLL_S;
+
+        (void)pthread_mutex_lock(&g_watch_mu);
+        /* Checked inside the lock before waiting: a stop that arrived while
+         * this thread was doing the work below must not be slept through. */
+        if (!g_watch_quit)
+            (void)pthread_cond_timedwait(&g_watch_cv, &g_watch_mu, &deadline);
+        quit = g_watch_quit;
+        (void)pthread_mutex_unlock(&g_watch_mu);
+        if (quit)
+            break;
+
+        /* The beat FIRST and the clock second -- nd_ui_watch_age_ms() says why.
+         * Read here rather than through that accessor because the hold test
+         * below needs the raw stamp, not the age. */
+        beat = atomic_load_explicit(&g_watch_beat_ms, memory_order_relaxed);
+        age = watch_now_ms() - beat;
+        label = atomic_load_explicit(&g_watch_label, memory_order_relaxed);
+        held = atomic_load_explicit(&g_watch_hold, memory_order_relaxed) != 0u;
+
+        /* ============ A HOLD THAT NOTICES IT IS NO LONGER NEEDED ============
+         *
+         * A hold is the UI thread saying it has handed the screen to a child
+         * process and will not beat until it has it back. Today that is true:
+         * nd_proc.c's wait loop, where the thread actually is, stamps nothing,
+         * so five seconds into every app launch the watchdog would otherwise
+         * report a stall that is not one.
+         *
+         * But silence for the whole of an app's life is a real cost, and the
+         * fault this watchdog exists for lives exactly there. So the hold is
+         * not "stop looking" -- it is "stop looking UNTIL SOMETHING IN HERE
+         * BEATS". The stamp is remembered at the hold, and the moment it moves,
+         * whatever is inside is demonstrably reporting for itself and gets
+         * watched on the ordinary five-second rule.
+         *
+         * That makes the placeholder self-retiring. One nd_ui_watch_beat() in
+         * nd_proc.c's wait loop and app runs become watched, here, with no
+         * change to this file and nothing to remember to undo. */
+        if (held && beat == atomic_load_explicit(&g_watch_hold_beat_ms, memory_order_relaxed)) {
+            /* Any stall already reported ends unremarked rather than being
+             * announced as fixed by something that only stopped looking. */
+            reported = false;
+            continue;
+        }
+
+        if (age >= ND_UI_WATCH_STALL_MS) {
+            /* Measured every poll even though it is REPORTED once: the age at
+             * the moment of recovery cannot be read after the fact, because
+             * the beat that ended the stall has already replaced the stamp
+             * that would have said how long it was. Keeping the last measured
+             * one puts the recovery line within a second of the truth. */
+            stall_age_ms = age;
+            /* ONCE per stall. A line per check would be twelve lines a minute
+             * for as long as the fault lasts, on a log the owner reads to
+             * debug everything else, and the twelfth says nothing the first
+             * did not. */
+            if (!reported) {
+                reported = true;
+                stall_label = label != NULL ? label : ND_UI_WATCH_IDLE_LABEL;
+                /* nd_log_err for BOTH lines, including the recovery, which is
+                 * not an error: run_neodct.sh redirects only stderr into
+                 * /NeoDCT/User/logs/core.log, and a line about a phone that
+                 * stopped responding is worth nothing on a serial console
+                 * nobody was attached to. */
+                nd_log_err(ND_LOG_UI, "the UI thread has not checked in for %.1f s -- it is in: %s",
+                           (double)age / 1000.0, stall_label);
+            }
+        } else if (reported) {
+            reported = false;
+            nd_log_err(ND_LOG_UI,
+                       "the UI thread is running again; it had been stopped at least "
+                       "%.1f s in: %s",
+                       (double)stall_age_ms / 1000.0, stall_label);
         }
     }
-    return true;
+    return NULL;
+}
+
+/* Started by nd_ui_init() and by nothing else. See nd_ui.h for why an app
+ * process gets the beats but not the thread. */
+static void watch_start(void)
+{
+    pthread_attr_t attr;
+    pthread_condattr_t cattr;
+    sigset_t all;
+    sigset_t saved;
+    const char *off;
+    bool have_attr;
+    bool have_cattr;
+    size_t stack = ND_UI_WATCH_STACK;
+    int rc;
+
+    if (g_watch_running)
+        return;
+    off = getenv(ND_UI_WATCH_ENV);
+    if (off != NULL && strcmp(off, "0") == 0)
+        return;
+
+    atomic_store_explicit(&g_watch_label, ND_UI_WATCH_STARTUP_LABEL, memory_order_relaxed);
+    atomic_store_explicit(&g_watch_hold, 0u, memory_order_relaxed);
+    nd_ui_watch_beat();
+
+    if (pthread_mutex_init(&g_watch_mu, NULL) != 0)
+        return;
+
+    /* A CLOCK_MONOTONIC condition variable, if this libc will give one.
+     *
+     * The default base is CLOCK_REALTIME, and this board has no RTC: the clock
+     * service sets the wall clock from NTP a minute or so into every boot, and
+     * a jump of years is the normal case rather than the exceptional one. A
+     * timed wait on the realtime clock would then sleep out that jump, and the
+     * one thread in the system that must not go to sleep is this one. Falling
+     * back to the default is still better than no watchdog, so a libc without
+     * it gets one that can be fooled once per clock step. */
+    have_cattr = pthread_condattr_init(&cattr) == 0;
+    g_watch_cv_monotonic = have_cattr && pthread_condattr_setclock(&cattr, CLOCK_MONOTONIC) == 0;
+    rc = pthread_cond_init(&g_watch_cv, g_watch_cv_monotonic ? &cattr : NULL);
+    if (have_cattr)
+        (void)pthread_condattr_destroy(&cattr);
+    if (rc != 0) {
+        (void)pthread_mutex_destroy(&g_watch_mu);
+        return;
+    }
+
+    have_attr = pthread_attr_init(&attr) == 0;
+    if (have_attr) {
+#ifdef PTHREAD_STACK_MIN
+        if (stack < (size_t)PTHREAD_STACK_MIN)
+            stack = (size_t)PTHREAD_STACK_MIN;
+#endif
+        (void)pthread_attr_setstacksize(&attr, stack);
+    }
+
+    /* A new thread inherits the creator's signal mask, so blocking everything
+     * across the pthread_create() leaves this one unable to receive a signal
+     * at all. SIGTERM and SIGINT keep going to the main thread, which is the
+     * one that installed handlers for them -- nd_clock.c makes the same
+     * argument at length for the same reason. */
+    (void)sigfillset(&all);
+    (void)pthread_sigmask(SIG_SETMASK, &all, &saved);
+
+    g_watch_quit = false;
+    rc = pthread_create(&g_watch_tid, have_attr ? &attr : NULL, watch_thread, NULL);
+
+    (void)pthread_sigmask(SIG_SETMASK, &saved, NULL);
+    if (have_attr)
+        (void)pthread_attr_destroy(&attr);
+
+    if (rc != 0) {
+        /* Not fatal. A phone without a watchdog is the phone every release
+         * before this one shipped; a phone that will not boot because it could
+         * not start one would be a worse trade than the fault it watches for. */
+        nd_log_err(ND_LOG_UI, "cannot start the UI watchdog: %s", strerror(rc));
+        (void)pthread_cond_destroy(&g_watch_cv);
+        (void)pthread_mutex_destroy(&g_watch_mu);
+        return;
+    }
+    g_watch_running = true;
+}
+
+static void watch_stop(void)
+{
+    if (!g_watch_running)
+        return;
+
+    /* Signalled rather than left to time out: nd-shoot builds and tears down a
+     * context a dozen times in two seconds, and a join that waited out the
+     * poll each time would cost more than the tool does. */
+    (void)pthread_mutex_lock(&g_watch_mu);
+    g_watch_quit = true;
+    (void)pthread_cond_signal(&g_watch_cv);
+    (void)pthread_mutex_unlock(&g_watch_mu);
+
+    (void)pthread_join(g_watch_tid, NULL);
+    (void)pthread_cond_destroy(&g_watch_cv);
+    (void)pthread_mutex_destroy(&g_watch_mu);
+    g_watch_running = false;
+    g_watch_quit = false;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1344,8 +1762,12 @@ static void ui_load_fonts(nd_ui *ui)
  * core, the core's word for it in an app (nd_app.h). NEODCT_T9 overrides
  * both, and is the only way to exercise T9 on a keyboard. Unset in every
  * golden capture, so the reference frames are unchanged -- OPEN-QUESTIONS.md
- * T-5 still holds. */
-static bool t9_active(bool detected)
+ * T-5 still holds.
+ *
+ * Public rather than static since 0.5.9b: nd_main.c had already copied it
+ * word for word, and the core now re-asks it on every key wait. See
+ * keypad_tick() and nd_ui.h. */
+bool nd_ui_t9_active_for(bool detected)
 {
     const char *env = getenv(ND_ENV_T9);
 
@@ -1417,6 +1839,11 @@ static nd_err ui_common_init(nd_ui *ui, nd_fb *fb)
 
 nd_err nd_ui_init(nd_ui *ui, nd_fb *fb)
 {
+    /* The label in force before each step, handed back at its end. Every one
+     * of the eighteen steps can block on hardware or on storage, and a boot
+     * that wedges inside one is the hardest fault on this phone to see from
+     * outside -- there is no screen yet for it to look wrong on. */
+    const char *saved;
     nd_err rc;
 
     if (ui == NULL)
@@ -1429,20 +1856,35 @@ nd_err nd_ui_init(nd_ui *ui, nd_fb *fb)
     ui->drives_wallpaper = true;
     g_ring_seen_at = 0.0;
 
+    /* BEFORE the eighteen steps and not after them. Everything below this line
+     * can block -- opening the modem, opening a database, probing an i2c bus
+     * that is not there -- and a boot that wedges inside one of them is the
+     * hardest fault on this phone to see from the outside, because there is no
+     * screen yet to look wrong. Started here, the log says which step. */
+    watch_start();
+
     (void)nd_settings_init();
 
     /* --- step 1 --- */
+    saved = nd_ui_watch_begin("opening the databases");
     (void)nd_db_init_all();
+    nd_ui_watch_end(saved);
 
     /* --- step 2: the three services. Each is optional at link time and each
      * runs in simulation when its hardware is absent, which is what makes the
      * whole UI drivable on a desktop. --- */
+    saved = nd_ui_watch_begin("opening the modem");
     if (nd_modem_open != NULL)
         (void)nd_modem_open(&ui->modem);
+    nd_ui_watch_end(saved);
+    saved = nd_ui_watch_begin("opening the battery gauge");
     if (nd_battery_open != NULL)
         (void)nd_battery_open(&ui->battery, -1, -1);
+    nd_ui_watch_end(saved);
+    saved = nd_ui_watch_begin("opening the notification service");
     if (nd_notify_open != NULL)
         (void)nd_notify_open(&ui->notify);
+    nd_ui_watch_end(saved);
 
     /* --- step 3 --- */
     /* --- step 3 is the unread-SMS count, and it is lazy now: see
@@ -1457,16 +1899,26 @@ nd_err nd_ui_init(nd_ui *ui, nd_fb *fb)
      * keymap and matrix story (see nd_input.h and nd_keypad.h); the core just
      * asks for a backend and remembers the descriptor widgets poll directly
      * to flush pending keys before their first draw. --- */
+    /* This process opened its own backend, so it may ask it again later --
+     * and it must, because the answer changes. See keypad_tick(). */
+    ui->owns_input_backend = true;
+    /* An i2c probe against a bus that is not there, or is there and does not
+     * answer. It is the step a keyless phone spends longest in, and the one an
+     * owner is most likely to be looking at a blank screen through. */
+    saved = nd_ui_watch_begin("opening the keypad");
     if (nd_input_open(&ui->input) == ND_OK && ui->input != NULL) {
         ui->keypad_fd = nd_input_fd(ui->input);
-        ui->has_matrix_keypad = t9_active(nd_input_has_matrix(ui->input));
+        ui->has_matrix_keypad = nd_ui_t9_active_for(nd_input_has_matrix(ui->input));
     } else {
         ui->input = NULL;
         ui->keypad_fd = -1;
-        ui->has_matrix_keypad = t9_active(false);
+        ui->has_matrix_keypad = nd_ui_t9_active_for(false);
     }
+    nd_ui_watch_end(saved);
 
+    saved = nd_ui_watch_begin("building the canvas and loading the fonts");
     rc = ui_common_init(ui, fb);
+    nd_ui_watch_end(saved);
     if (rc != ND_OK) {
         nd_ui_teardown(ui);
         return rc;
@@ -1485,7 +1937,7 @@ nd_err nd_ui_init(nd_ui *ui, nd_fb *fb)
      * alpha screen, no keypad response" a keyless phone showed. Skipping it
      * lets core_run() reach its own input-failure screen, which says why. */
     if (nd_input_has_backend(ui->input))
-        (void)show_alpha_security_notice_once(ui);
+        (void)nd_ui_show_security_notice_once(ui);
 
     return ND_OK;
 }
@@ -1512,6 +1964,13 @@ nd_err nd_ui_init_app(nd_ui *ui, nd_fb *fb, int keypad_fd)
     ui->drives_wallpaper = true;
     g_ring_seen_at = 0.0;
 
+    /* The beat but not the thread -- nd_ui.h says why an app gets no thread.
+     * Stamped anyway so that nd_ui_watch_age_ms() answers honestly in an app
+     * process, and so that a label an app sets is not sitting on top of a beat
+     * that never happened. */
+    atomic_store_explicit(&g_watch_label, ND_UI_WATCH_APP_LABEL, memory_order_relaxed);
+    nd_ui_watch_beat();
+
     (void)nd_settings_init();
     nd_bench_mark("ui_init_app: settings");
 
@@ -1536,7 +1995,7 @@ nd_err nd_ui_init_app(nd_ui *ui, nd_fb *fb, int keypad_fd)
      * in every app on every device and took multi-tap, predictive, the # mode
      * cycle and the mode indicator down with it. The core knows, and says so.
      * nd_app.h, and OPEN-QUESTIONS.md BR-3. */
-    ui->has_matrix_keypad = t9_active(matrix_from_env());
+    ui->has_matrix_keypad = nd_ui_t9_active_for(matrix_from_env());
 
     nd_bench_mark("ui_init_app: input");
 
@@ -1553,6 +2012,12 @@ void nd_ui_teardown(nd_ui *ui)
 {
     if (ui == NULL)
         return;
+
+    /* First, and unconditionally: everything below frees something the
+     * watchdog does not touch, but leaving a thread running over a teardown is
+     * how a tool that builds a dozen contexts (nd-shoot) ends up with a dozen
+     * of them. A no-op in an app, which never started one. */
+    watch_stop();
 
     /* Idempotent, and a no-op in the core, which never opened one. */
     nd_svc_client_close();
@@ -1611,6 +2076,12 @@ void nd_ui_teardown(nd_ui *ui)
 
 nd_err nd_ui_present(nd_ui *ui)
 {
+    /* One of the three beats. A screen that is still being painted is a UI
+     * thread that is still alive, whatever else it is doing -- and this is the
+     * beat that covers a widget with a loop of its own, which is most of them.
+     * Before the guards, because a context with no framebuffer is a state to
+     * report, not a reason to stop reporting. */
+    nd_ui_watch_beat();
     if (ui == NULL || ui->fb == NULL || ui->canvas == NULL)
         return ND_ERR_INVAL;
     return nd_fb_update(ui->fb, ui->canvas);
@@ -1716,6 +2187,62 @@ static void calendar_tick(nd_ui *ui)
         nd_cal_mark_notified(ev.id, occurrence);
 }
 
+/* ============ THE T9 FLAG IS NOT A FACT ABOUT THE BOOT ============
+ *
+ * ui->has_matrix_keypad was decided once, in nd_ui_init(), from an nd_input
+ * that had had exactly one attempt at the i2c bus -- and then two separate
+ * releases taught the layer underneath it to change its mind. 0.5.7b added
+ * try_reopen_matrix(), which brings the matrix up after a lost udev race;
+ * 0.5.9b added nd_input_retry_backend() and a tear-down at
+ * ND_MATRIX_DEAD_SCANS for a bus that dies mid-session. Neither told the UI.
+ *
+ * So a phone that recovered its keypad -- which is exactly the phone the
+ * retry was written for -- had working keys and no T9: no multi-tap, no
+ * predictive text, no # mode cycle, no mode indicator. On a 16-key matrix
+ * with no letter keys, that means letters cannot be typed AT ALL, in
+ * Messages, in Contacts, anywhere. And because nd_proc.c deliberately hands
+ * this CACHED value to every child in NEODCT_KEYPAD_MATRIX rather than asking
+ * the input layer itself, the stale answer was then handed to every app
+ * launched for the rest of the session.
+ *
+ * It is wrong in the other direction too: a UI still drawing the T9 indicator
+ * for a matrix nd_input has torn down is lying about which keyboard it is
+ * listening to.
+ *
+ * The fix is to stop remembering it. This runs on every key wait -- two
+ * pointer dereferences and one getenv, on a path that is about to sleep for
+ * a tenth of a second -- so the field becomes a cache with an owner instead
+ * of a verdict taken in the first fraction of a second of a boot. The field
+ * itself stays because the app path fills it from the environment and because
+ * nd_proc.c reads it there; ui->owns_input_backend is what says which of the
+ * two this process is.
+ *
+ * ui->keypad_fd is refreshed with it and for the same reason: widgets poll
+ * that descriptor directly to flush pending keys before their first draw, and
+ * nd_input hands out a different one -- or none -- once a backend has been
+ * dropped and reopened. */
+static void keypad_tick(nd_ui *ui)
+{
+    bool live;
+
+    if (!ui->owns_input_backend || ui->input == NULL)
+        return;
+
+    ui->keypad_fd = nd_input_fd(ui->input);
+
+    live = nd_ui_t9_active_for(nd_input_has_matrix(ui->input));
+    if (live == ui->has_matrix_keypad)
+        return;
+
+    ui->has_matrix_keypad = live;
+    /* Logged because it is the counterpart of try_reopen_matrix()'s own
+     * "Input recovered" line: without it a serial log shows the keypad coming
+     * back and says nothing about whether text entry came back with it, which
+     * is the half the owner actually notices. */
+    nd_log(ND_LOG_UI, "T9 %s: the i2c keypad matrix %s.", live ? "ON" : "OFF",
+           live ? "is now open" : "is gone");
+}
+
 /* _ring_tick. Returns true when the Python would have raised IncomingCall. */
 static bool ring_tick(nd_ui *ui)
 {
@@ -1796,6 +2323,11 @@ static void repaint_if_wallpaper_moved(nd_ui *ui)
 
 int32_t nd_ui_read_keypress(nd_ui *ui, double timeout_s)
 {
+    /* The main beat: every loop in the system that waits for a key comes
+     * through here, so this alone covers the home screen, every widget, every
+     * app's own loop and the format progress bar. Before the NULL check for
+     * the reason nd_ui_present()'s is. */
+    nd_ui_watch_beat();
     if (ui == NULL)
         return ND_KEY_NONE;
 
@@ -1807,6 +2339,7 @@ int32_t nd_ui_read_keypress(nd_ui *ui, double timeout_s)
     battery_tick(ui);
     modem_tick(ui);
     calendar_tick(ui);
+    keypad_tick(ui);
     if (ring_tick(ui))
         return ND_KEY_INCOMING_CALL;
 
@@ -1850,6 +2383,47 @@ int32_t nd_ui_wait_for_key(nd_ui *ui)
         if (key != ND_KEY_NONE)
             return key;
     }
+}
+
+/* Every nd_proc_launch_app() in this file goes through here, and the reason is
+ * the watchdog rather than the launch.
+ *
+ * ============ THE CORE IS ALIVE, JUST NOT HERE ============
+ *
+ * nd_proc_launch_app() does not return until the app does, and for the whole
+ * of that the core's UI thread is inside nd_proc.c's wait loop, forwarding key
+ * events to the child every 50 ms. It is running. It simply beats nowhere this
+ * file can reach. Left alone the watchdog would report a stall five seconds
+ * into every app launch and a recovery when the app exited -- two false lines
+ * per launch, which is precisely the noise that teaches somebody to stop
+ * reading a watchdog.
+ *
+ * ============ AND THE HOLD RETIRES ITSELF ============
+ *
+ * This matters more than the false alarms do, because the freeze the watchdog
+ * was written for -- the phone dead for minutes while a card formatted -- is
+ * exactly a core UI thread wedged in THAT loop, on the broker round-trip mutex
+ * the format was holding (nd_svc.c makes the argument at length). A hold that
+ * simply stopped looking would be blind to the one fault it exists for.
+ *
+ * So it does not stop looking; it waits to be shown that somebody in there is
+ * reporting. The checker remembers the beat at the hold and resumes the
+ * ordinary five-second rule the moment that stamp moves. ONE
+ * nd_ui_watch_beat() in nd_proc.c's wait loop, beside pump_keys(), turns app
+ * runs into watched time -- with no change here, and nothing to remember to
+ * undo. Until that line exists, an app run is silent, and that silence is a
+ * measured trade rather than an oversight.
+ *
+ * Nothing else in the system holds the watchdog, and nothing else should. */
+static nd_err launch_app_watched(nd_ui *ui, const nd_app_entry *app, const char *entry,
+                                 const char *arg, nd_crash_info *crash_out)
+{
+    nd_err rc;
+
+    nd_ui_watch_hold();
+    rc = nd_proc_launch_app(ui, app, entry, arg, crash_out);
+    nd_ui_watch_release();
+    return rc;
 }
 
 /* Why an app did not open, when the reason is that the core would have had to
@@ -1932,7 +2506,23 @@ void nd_ui_render_home(nd_ui *ui)
              * standing on a phone whose radio has died would be the most
              * misleading thing on the screen: "No Service" is what a working
              * phone says in a tunnel. Nothing is the honest answer, and the
-             * empty meter beside it plus the notice say the rest. */
+             * empty meter beside it plus the notice say the rest.
+             *
+             * ND_MODEM_LINK_UNREACHABLE is DELIBERATELY NOT dropped here, and
+             * the difference is worth stating because the next reader will
+             * want to add it. FAULT is a radio that was working a moment ago,
+             * so a blank line plus a modal reads as "something just broke".
+             * UNREACHABLE is the steady state of a phone that has never
+             * managed to open its own modem -- a udev grant that arrived
+             * late, S45modem holding the AT-port lock -- and it is reached
+             * through paths where the owner may never see a modal at all. So
+             * it keeps the line and fills it: nd_modem_operator_display()
+             * answers ND_MODEM_UNREACHABLE_CARRIER ("Modem ERROR") and
+             * nd_layout.c substitutes it for the placeholder, beside the
+             * empty meter nd_modem_signal_level() returns for the same state.
+             * That pair is the only thing on the home screen that can tell
+             * this apart from a phone in a tunnel -- and it is what replaced
+             * the word "Simulation" beside four full bars. */
             if (el->type == ND_EL_TEXT && strcmp(el->text, "No Service") == 0 &&
                 nd_ui_status_modem_faulted(ui))
                 continue;
@@ -2083,7 +2673,7 @@ void nd_ui_render_menu(nd_ui *ui)
              * the phone SAFER than it would otherwise be and looks identical
              * from the outside. A screen that flashes and returns home is
              * what hid the browser being broken once already. */
-            if (nd_proc_launch_app(ui, &apps[choice], NULL, NULL, NULL) == ND_ERR_PERM)
+            if (launch_app_watched(ui, &apps[choice], NULL, NULL, NULL) == ND_ERR_PERM)
                 show_cannot_confine(ui, apps[choice].name);
         } else {
             nd_log_err(ND_LOG_OS, "App launcher not linked; ignoring %s", apps[choice].name);
@@ -2095,6 +2685,11 @@ void nd_ui_render_menu(nd_ui *ui)
 
 void nd_ui_update(nd_ui *ui)
 {
+    /* The core's per-frame beat. Redundant with the two below it on a healthy
+     * phone and not redundant at all on a sick one: this is the top of the
+     * core loop, so it is the one beat that still lands if a frame is being
+     * composed and never presented. */
+    nd_ui_watch_beat();
     if (ui == NULL)
         return;
 
@@ -2209,9 +2804,9 @@ static void open_sms_notification(nd_ui *ui, int32_t count, int64_t target)
      * open_message(ui, id) for a single new text, open_inbox(ui) otherwise. */
     if (count == 1 && target >= 0 &&
         nd_snprintf(arg, sizeof arg, "%lld", (long long)target) == ND_OK) {
-        (void)nd_proc_launch_app(ui, messages, ND_APP_ENTRY_OPEN_MESSAGE, arg, NULL);
+        (void)launch_app_watched(ui, messages, ND_APP_ENTRY_OPEN_MESSAGE, arg, NULL);
     } else {
-        (void)nd_proc_launch_app(ui, messages, ND_APP_ENTRY_OPEN_INBOX, NULL, NULL);
+        (void)launch_app_watched(ui, messages, ND_APP_ENTRY_OPEN_INBOX, NULL, NULL);
     }
     ui->home_.unread_sms_ready = false;
 }
@@ -2233,9 +2828,9 @@ static void open_event_notification(nd_ui *ui, int32_t count, int64_t target)
 
     if (count == 1 && target >= 0 &&
         nd_snprintf(arg, sizeof arg, "%lld", (long long)target) == ND_OK)
-        (void)nd_proc_launch_app(ui, calendar, ND_APP_ENTRY_OPEN_EVENT, arg, NULL);
+        (void)launch_app_watched(ui, calendar, ND_APP_ENTRY_OPEN_EVENT, arg, NULL);
     else
-        (void)nd_proc_launch_app(ui, calendar, ND_APP_ENTRY_RUN, NULL, NULL);
+        (void)launch_app_watched(ui, calendar, ND_APP_ENTRY_RUN, NULL, NULL);
 }
 
 static void open_notification(nd_ui *ui)

@@ -171,6 +171,17 @@ const char *const ND_RING_SWEEP_EXT[ND_RING_SWEEP_EXT_COUNT] = {
  * now also for aplay. */
 #define RING_TERM_GRACE 0.3
 
+/* How long a freshly spawned player is given to prove it did not die on the
+ * way to execve.
+ *
+ * 50 ms is two orders of magnitude longer than fork+dup2+exec takes and well
+ * under what a person can perceive, and it is spent ONCE per boot on the tone
+ * path (see player_gone's callers) rather than on every dial-pad keypress --
+ * because a pre-exec death is total: if the first aplay cannot reach execve,
+ * none of them can, and one measurement answers for all of them. The ringer
+ * pays it on every ring, which is a call arriving and can afford it. */
+#define PLAYER_PROBE_S 0.05
+
 /* ------------------------------------------------------------------ *
  * The streaming source
  * ------------------------------------------------------------------ */
@@ -406,6 +417,22 @@ struct nd_notify {
 
     nd_ringer *ring; /* streaming ringer, NULL when not ringing */
     pid_t mpv_pid;   /* mpv fallback, -1 when not ringing       */
+
+    /* ---- watching the players die. See player_gone(). ---------------- *
+     *
+     * The reason the dead-tone bug survived eight releases is that nothing in
+     * this file ever asked what happened to a child. spawn_quiet() reports the
+     * fork, nd_proc's SIGCHLD reaper files the status in a ring nobody reads,
+     * and a tone is fire-and-forget by design. These four fields are the
+     * minimum state needed to turn that into one honest log line. */
+    pid_t tone_pid;          /* the last one-shot chirp; -1 when none      */
+    /* Which file that chirp was. 512 bytes, once per phone, so that the line
+     * reporting a dead player names the tone that did not play rather than
+     * the one about to be tried. */
+    char tone_path[ND_PATH_MAX];
+    bool player_probed;      /* the once-per-boot measurement has been made */
+    bool player_fault_logged; /* the current failure has already been said  */
+    char player_why[96];     /* the last death, rendered for a log line     */
 };
 
 /* ------------------------------------------------------------------ *
@@ -446,6 +473,118 @@ static bool which_exec(const char *name, char *out, size_t out_sz)
     return false;
 }
 
+/* ------------------------------------------------------------------ *
+ * Who may drop, and what a dead player's exit number means
+ * ------------------------------------------------------------------ */
+
+bool nd_tone_drop_to_user(uid_t euid)
+{
+    /* ONLY ROOT CAN DROP. setgroups(2) -- the first syscall nd_priv_become()
+     * makes -- needs CAP_SETGID whatever it is being asked to do, so a caller
+     * that is already ndusr cannot ask a child to become ndusr; it can only
+     * kill it at exit 122 before execve. See spawn_quiet() for the whole
+     * story. Pure, and separated from the spawn so the DECISION can be tested
+     * on a host where there is no second user to become. */
+    return euid == 0u;
+}
+
+const char *nd_tone_pre_exec_reason(int exit_code)
+{
+    /* nd_proc.c reserves 120..127 for what went wrong BETWEEN the fork and
+     * the execve: 120 + the step nd_priv_become() failed at, 126 for a dup2,
+     * 127 for the execve itself. Nothing that actually started can exit with
+     * one of them -- aplay uses 0 and 1, mpv 0..4 -- so seeing one is proof
+     * the player never ran, and saying WHICH is the difference between "the
+     * phone is silent" and "the phone is silent because setgroups() needs a
+     * capability the core gave up". */
+    switch (exit_code) {
+    case 121:
+        return "prctl(NO_NEW_PRIVS) refused";
+    case 122:
+        return "setgroups() refused -- it needs CAP_SETGID, which this "
+               "process does not have";
+    case 123:
+        return "setgid() refused";
+    case 124:
+        return "setuid() refused";
+    case 125:
+        return "the privilege drop did not read back";
+    case 126:
+        return "dup2() of the child's descriptors failed";
+    case 127:
+        return "execve failed -- the player is not installed";
+    default:
+        return NULL;
+    }
+}
+
+/* Render a corpse the way the log should say it. */
+static void describe_death(const nd_proc_status *st, char *out, size_t out_sz)
+{
+    const char *reason;
+
+    if (st->signalled) {
+        (void)nd_snprintf(out, out_sz, "was killed by signal %d", st->signo);
+        return;
+    }
+    reason = nd_tone_pre_exec_reason(st->exit_status);
+    if (reason != NULL) {
+        (void)nd_snprintf(out, out_sz, "never started: exit %d, %s", st->exit_status, reason);
+        return;
+    }
+    (void)nd_snprintf(out, out_sz, "exited %d", st->exit_status);
+}
+
+/* Has `pid` already stopped, and if so, say so once.
+ *
+ * ============ WHY THIS EXISTS ============
+ *
+ * spawn_quiet() returns true when fork() succeeded, which is a statement
+ * about this process and not about the player. nd_proc_spawn()'s own header
+ * says so: "an execve failure is reported by the child exiting 127, which the
+ * caller sees at waitpid" -- and until now nobody here waited. The SIGCHLD
+ * reaper does collect the status, but remember() only files pid+status in a
+ * ring for someone who might ask later, and for a tone nobody ever asked. So
+ * a child that died at exit 122 several times a second while dialling
+ * produced not one character of output.
+ *
+ * `wait_s` of 0.0 makes this free: nd_proc_wait() reads the status the reaper
+ * already collected and returns ND_ERR_TIMEOUT if the player is still going.
+ * A positive `wait_s` is the once-per-boot measurement.
+ *
+ * The log line is latched so that a phone with no sound card says it once per
+ * episode rather than once per keypress; a player seen alive again re-arms
+ * it. Returns true when the player is GONE -- which for a one-shot chirp that
+ * exited 0 simply means it finished. */
+static bool player_gone(nd_notify *n, pid_t pid, double wait_s, const char *what, const char *path)
+{
+    nd_proc_status st;
+
+    if (n == NULL || pid <= 0)
+        return false;
+    if (nd_proc_wait(pid, wait_s, &st) != ND_OK) {
+        /* Still running. That is the only positive evidence there is that a
+         * spawn reached the player at all. */
+        n->player_fault_logged = false;
+        return false;
+    }
+    if (st.exited && st.exit_status == 0) {
+        n->player_why[0] = '\0';
+        n->player_fault_logged = false;
+        return true;
+    }
+
+    describe_death(&st, n->player_why, sizeof n->player_why);
+    if (!n->player_fault_logged) {
+        n->player_fault_logged = true;
+        /* stderr, not stdout: this is the phone telling its owner why it is
+         * making no noise, and SESSION-SCOPE's rule is that a failure the
+         * user can hear must be a failure somebody can read. */
+        nd_log_err(ND_LOG_NOTIFY, "No sound: %s %s (%s)", what, n->player_why, path);
+    }
+    return true;
+}
+
 /* stdout and stderr to /dev/null, exactly as subprocess.DEVNULL does, plus an
  * optional descriptor for the child's stdin. The /dev/null path is NOT
  * ND_ROOT-resolved: it is the child's plumbing, not phone data, and a scratch
@@ -470,26 +609,53 @@ static bool spawn_quiet(const char *const *argv, int stdin_fd, nd_proc_owner own
     spec.owner = owner;
     spec.n_fds = 0u;
 
-    /* The ringer runs as ndusr, not as the core.
+    /* The player runs as ndusr -- but only when there is a privilege to drop.
      *
      * Everything spawned here is a MEDIA PARSER handed a file the owner put on
-     * the phone: mpv or aplay, given a ringtone out of /NeoDCT/User/tones. The
-     * core is root and stays root (SECURITY-PLAN.md section 8), so without
-     * this the phone decodes an arbitrary mp3 as uid 0 every time a call
-     * comes in -- and a decoder is the last thing that should have that.
+     * the phone: mpv or aplay, given a ringtone out of /NeoDCT/User/tones. A
+     * decoder is the last thing that should run as uid 0, so on a core that
+     * still HAS uid 0 -- a rescue boot, nd-core started by hand, an image
+     * built without the users table -- the child is dropped before it opens
+     * the file.
      *
-     * mpv's other three callers already drop for free: neodct-play is exec'd
-     * by netsurf, which is ndusr_ut, and Koki and MusicPlayer run under
-     * nd-apprun, which is ndusr since apps stopped being root. This was the
-     * one path left, precisely because the core launches it directly.
+     * ============ WHY THE geteuid() TEST IS NOT PADDING ============
+     *
+     * This call used to be unconditional, and the comment above it asserted
+     * "the core is root and stays root (SECURITY-PLAN.md section 8)". That was
+     * true for one day. efb0b3c9 added the drop; 721d5b39, the next day, made
+     * nd-core itself become ndusr in nd_main.c step 4b. From that release on,
+     * EVERY SOUND THE PHONE MAKES DIED BETWEEN THE fork AND THE execve, and
+     * nobody noticed for eight of them.
+     *
+     * The mechanism is the one nd_broker.h calls "the single thing that broke"
+     * for app launches. nd_priv_become() does setgroups() first, and
+     * setgroups(2) needs CAP_SETGID UNCONDITIONALLY -- even when the group
+     * list handed to it is the caller's own, even when the target uid is the
+     * uid the caller already has. An ndusr core reached uid 1000 by a plain
+     * setuid() from root and holds no capabilities at all, so the call returns
+     * EPERM, nd_priv_become() returns ND_PRIV_STEP_SETGROUPS, and nd_proc.c's
+     * child does _exit(120 + step) -- exit 122 -- before execve. No aplay: no
+     * DTMF, no SMS chirp, no calendar alert, and an incoming call that rings
+     * in total silence while the log says "Ringing:".
+     *
+     * So ask for a drop only when the caller can actually perform one. When
+     * the core is already ndusr the child is ALREADY the user this wanted;
+     * there is nothing to drop, and refusing to ask costs nothing.
      *
      * ndusr rather than ndusr_ut: /NeoDCT/User/tones is 0750 ndusr:ndusr, so
      * the untrusted user cannot read the file it is being asked to play. The
      * tighter uid would be a ringer that never rings.
      *
      * No route lost. ndusr is in `audio`, so /dev/snd is open to it, and both
-     * /NeoDCT/System/tones and /NeoDCT/User/tones are readable. */
-    (void)nd_priv_lookup(ND_PRIV_USER, &spec.run_as);
+     * /NeoDCT/System/tones and /NeoDCT/User/tones are readable.
+     *
+     * no_new_privs is set either way and is deliberately NOT conditional on
+     * the drop: with run_as invalid nd_proc.c applies PR_SET_NO_NEW_PRIVS on
+     * its own, so efb0b3c9's actual security intent -- a media parser must not
+     * be able to regain privilege through a setuid binary -- holds on a root
+     * core and on a dropped one alike. */
+    if (nd_tone_drop_to_user(geteuid()))
+        (void)nd_priv_lookup(ND_PRIV_USER, &spec.run_as);
     spec.no_new_privs = true;
 
     if (stdin_fd >= 0) {
@@ -663,6 +829,30 @@ static bool ringer_start(nd_notify *n, const char *virt_path, const char **why)
      * player that exits is noticed by the next send() rather than by nothing. */
     (void)shutdown(r->fd, SHUT_RD);
 
+    /* IS THE PLAYER ACTUALLY THERE?
+     *
+     * This function used to return true on a successful fork(), so
+     * nd_notify_start_ring() printed "Ringing: <path>" over an aplay that had
+     * already exited -- and, because it returned true, the mpv fallback below
+     * it was never reached, which is the fallback that exists precisely for a
+     * ringer that cannot play. The feeder thread then filled the socket, took
+     * EPIPE from the dead reader and returned without a word, while
+     * nd_notify_ringing() went on answering true because n->ring is non-NULL.
+     * A phone that says it is ringing and is not is worse than one that says
+     * it cannot: this asks the kernel before making the claim.
+     *
+     * Checked BEFORE the feeder starts, so a failure has no thread to unwind
+     * and the reason is available for the log line that sends us to mpv. */
+    if (player_gone(n, r->pid, PLAYER_PROBE_S, "aplay", resolved)) {
+        *why = (n->player_why[0] != '\0') ? n->player_why : "the player exited at once";
+        /* Already reaped by the probe. Leaving the number behind would have
+         * ringer_free() SIGTERM a pid the kernel may have handed to somebody
+         * else by now. */
+        r->pid = -1;
+        ringer_free(r);
+        return false;
+    }
+
     if (pthread_attr_init(&attr) != 0) {
         ringer_free(r);
         return false;
@@ -718,6 +908,7 @@ nd_err nd_notify_open(nd_notify **out)
     n->count = 0;
     n->latest = -1; /* the header's spelling of Python's None */
     n->mpv_pid = -1;
+    n->tone_pid = -1;
 
     nd_log(ND_LOG_NOTIFY, "Initializing NotifyService...");
     *out = n;
@@ -862,9 +1053,19 @@ bool nd_notify_play_tone(nd_notify *n, const char *path)
     const char *argv[4];
     pid_t pid;
 
-    ND_UNUSED(n);
     if (path == NULL)
         return false;
+
+    /* Collect the PREVIOUS chirp before starting another one.
+     *
+     * A DTMF tone fires on every dial-pad keypress, so this path cannot wait
+     * for its own child -- but it can look at the last one on the way past,
+     * and that costs nothing: nd_proc_wait() with a zero timeout reads the
+     * status the SIGCHLD reaper has already collected and returns
+     * ND_ERR_TIMEOUT when the player is still going. One keypress later, the
+     * owner has a log line saying why the phone is quiet. */
+    if (n != NULL && n->tone_pid > 0 && player_gone(n, n->tone_pid, 0.0, "aplay", n->tone_path))
+        n->tone_pid = -1;
 
     if (!nd_path_exists(path)) {
         nd_log(ND_LOG_NOTIFY, "Tone missing: %s", path);
@@ -886,6 +1087,20 @@ bool nd_notify_play_tone(nd_notify *n, const char *path)
     if (!spawn_quiet(argv, -1, ND_OWNER_TONE, &pid)) {
         nd_log(ND_LOG_NOTIFY, "Tone playback unavailable: aplay: %s", strerror(errno));
         return false;
+    }
+    if (n != NULL) {
+        n->tone_pid = pid;
+        (void)nd_strlcpy(n->tone_path, resolved, sizeof n->tone_path);
+        /* The FIRST tone of a boot is watched properly; every one after it is
+         * not. A child that dies between fork and execve dies in microseconds
+         * and dies every time, so one 50 ms measurement answers for the whole
+         * boot -- and it means the very first keypress reports the fault,
+         * rather than the second. */
+        if (!n->player_probed) {
+            n->player_probed = true;
+            if (player_gone(n, pid, PLAYER_PROBE_S, "aplay", resolved))
+                n->tone_pid = -1;
+        }
     }
     return true;
 }
@@ -1116,8 +1331,17 @@ bool nd_notify_start_ring(nd_notify *n)
     argv[4] = path;
     argv[5] = NULL;
     if (spawn_quiet(argv, -1, ND_OWNER_TONE, &n->mpv_pid)) {
-        nd_log(ND_LOG_NOTIFY, "Ringing (mpv): %s", path);
-        return true;
+        /* Same question as the streaming ringer's, for the same reason: this
+         * used to print "Ringing (mpv)" for a process that had already
+         * exited, and that log line was the only evidence anyone had. */
+        if (!player_gone(n, n->mpv_pid, PLAYER_PROBE_S, "mpv", path)) {
+            nd_log(ND_LOG_NOTIFY, "Ringing (mpv): %s", path);
+            return true;
+        }
+        nd_log(ND_LOG_NOTIFY, "Ringer unavailable: mpv %s",
+               (n->player_why[0] != '\0') ? n->player_why : "exited at once");
+        n->mpv_pid = -1;
+        return false;
     }
     nd_log(ND_LOG_NOTIFY, "Ringer unavailable: mpv: %s", strerror(errno));
     n->mpv_pid = -1;

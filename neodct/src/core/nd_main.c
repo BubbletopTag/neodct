@@ -54,12 +54,12 @@
 #include "nd_broker.h"
 #include "nd_clock.h"
 #include "nd_crash.h"
-#include "nd_input.h"
 #include "nd_db.h"
 #include "nd_draw.h"
 #include "nd_fb.h"
 #include "nd_font.h"
 #include "nd_image.h"
+#include "nd_input.h"
 #include "nd_keycodes.h"
 #include "nd_keypadsetup.h"
 #include "nd_log.h"
@@ -92,6 +92,52 @@ void nd_rs_start_if_enabled(void);
 
 #define BANNER_RULE_WIDTH 72
 #define BANNER_RULE_CHAR  '='
+
+/* ============ HOW LONG A LATE KEYPAD IS GIVEN ============
+ *
+ * A keypad is late far more often than it is absent. The i2c node registers
+ * after userspace has started, udev applies its group in a subshell rcS
+ * deliberately backgrounds, and the expander's rail takes tens of
+ * milliseconds to come up -- so the honest answer to "is there a keypad" a
+ * quarter of a second into the UI is "ask again". Twenty seconds is far past
+ * every one of those (the background coldplug measures ~2.7 s) and still
+ * short enough that a phone which genuinely has no keypad says so while the
+ * owner is still holding it.
+ *
+ * Nothing is drawn during the grace window on purpose. Whatever the boot put
+ * on the panel stays there, so a phone that recovers in two seconds never
+ * showed an error at all -- which is the entire complaint this is answering.
+ */
+#define ND_CORE_INPUT_GRACE_S 20.0
+#define ND_CORE_INPUT_RETRY_S 1.0
+
+/* And how long the failure screen is held before nd-core gives the problem
+ * back to the supervisor. Long enough to read and photograph; short enough
+ * that a phone whose keypad needs the whole privileged boot re-run is not
+ * sitting on a dead screen for a minute. The retry keeps running underneath
+ * it, so a keypad that turns up during the hold is used, not ignored. */
+#define ND_CORE_INPUT_HOLD_S 20.0
+
+/* ============ WHY THE KEYLESS PHONE EXITS ============
+ *
+ * It used to hold: `while (g_quit == 0) nap(0.2);`, for ever. That looks like
+ * patience and is actually a dead end. nd-core never returns, so
+ * nd-crashguard.sh -- which is still ROOT, and which restarting would re-run
+ * the entire privileged boot including the keypad bring-up and the first-boot
+ * wizard -- never gets control back; and inittab's `::once:` will not respawn
+ * run_neodct.sh either. The one screen that most needs the recovery machinery
+ * was the one screen that could not reach it, and the owner's only way out
+ * was the battery.
+ *
+ * So it exits, with a status that is not zero (which the guard reads as a
+ * requested shutdown) and not a signal. The guard restarts nd-core as root,
+ * up to NDGUARD_MAX times, and then draws its own halt screen -- a bounded
+ * sequence that ends somewhere a person can act on, which the hold never did.
+ *
+ * The wizard has always done exactly this: nd_keypadsetup.c's restart_ui()
+ * calls _exit(0) precisely so the root supervisor performs the restart. This
+ * is the same decision for the same reason. */
+#define ND_CORE_EXIT_NO_INPUT 90
 /* the green the CORE tag uses, so the banner and the OS that follows it read
  * as one voice */
 #define BANNER_COLOUR 46
@@ -247,7 +293,65 @@ static void ack_security_notice_for_measurement(void)
     }
 }
 
-static void core_run(nd_fb *fb, bool idle_measure)
+/* nd_ui.c's t9_active(), which is static there and belongs to another work
+ * package. The duplicate is deliberate and small: when a keypad turns up
+ * during the grace window below, ui.has_matrix_keypad has already been
+ * decided -- as false -- and a phone that came alive with an i2c matrix and a
+ * false T9 flag would put every text field on the QWERTY path and type
+ * gibberish. Getting the override wrong in the other direction would be just
+ * as bad, so the rule is copied rather than approximated. */
+static bool t9_active_for_recovery(bool detected)
+{
+    const char *env = getenv("NEODCT_T9");
+
+    if (env == NULL || env[0] == '\0')
+        return detected;
+    return !(env[0] == '0' && env[1] == '\0');
+}
+
+/* Sit on a frame for `seconds`, or until a signal asks for a shutdown. Used
+ * only by the forced-failure developer flag, which has nothing to retry. */
+static void hold_still(double seconds)
+{
+    double held = 0.0;
+
+    while (g_quit == 0 && held < seconds) {
+        nap(0.2);
+        held += 0.2;
+    }
+}
+
+/* Ask the input layer, once a second for `seconds`, whether a backend can be
+ * opened now that could not be a moment ago. True as soon as one is.
+ *
+ * This is the call 0.5.7b's self-heal was missing. The retry it added lived
+ * inside nd_input_read_event(), and a core with no backend at all never
+ * reaches its read loop -- so on a Luckfox, the only phone without a spare
+ * evdev keyboard to fall back on, the recovery written for the udev race
+ * could not execute even once. */
+static bool wait_for_input_backend(nd_ui *ui, double seconds)
+{
+    double waited = 0.0;
+
+    while (g_quit == 0 && waited < seconds) {
+        nap(ND_CORE_INPUT_RETRY_S);
+        waited += ND_CORE_INPUT_RETRY_S;
+        if (!nd_input_retry_backend(ui->input))
+            continue;
+
+        nd_log(ND_LOG_INPUT, "Input recovered after %.0fs: %s", waited,
+               nd_input_has_matrix(ui->input) ? "i2c keypad matrix" : "evdev");
+        /* Both were decided in nd_ui_init() from an input that had nothing
+         * behind it, and both are wrong now. */
+        ui->keypad_fd = nd_input_fd(ui->input);
+        if (nd_input_has_matrix(ui->input))
+            ui->has_matrix_keypad = t9_active_for_recovery(true);
+        return true;
+    }
+    return false;
+}
+
+static int core_run(nd_fb *fb, bool idle_measure)
 {
     nd_ui ui;
 
@@ -261,7 +365,7 @@ static void core_run(nd_fb *fb, bool idle_measure)
 
     if (nd_ui_init(&ui, fb) != ND_OK) {
         nd_log_err(ND_LOG_CORE, "UI initialisation failed; nothing to run");
-        return;
+        return 0;
     }
 
     if (idle_measure) {
@@ -283,37 +387,92 @@ static void core_run(nd_fb *fb, bool idle_measure)
         while (g_quit == 0)
             nap(0.1);
         nd_ui_teardown(&ui);
-        return;
+        return 0;
     }
 
-    /* A phone whose keypad never came up cannot be driven, and a home screen
-     * that ignores every key looks like a freeze. Say what happened instead:
-     * the sick-Nokia crash screen with "Input failed to initialize", then --
-     * so the owner has time to read it -- the reason, and hold there. This is
-     * a hardware and first-boot case; QEMU and a dev keyboard have a backend,
-     * so it never fires there (NEODCT_FORCE_NO_INPUT=1 forces it for a test). */
+    /* ============ A LATE KEYPAD IS NOT AN ABSENT ONE ============
+     *
+     * A phone whose keypad never came up cannot be driven, and a home screen
+     * that ignores every key looks like a freeze -- so there is a screen for
+     * it: the sick-Nokia panic with "Input failed to initialize" and the
+     * reason underneath. The screen is right. WHEN it was drawn was the bug.
+     *
+     * It was drawn from a single verdict taken at the first instant the UI
+     * wanted a key, from an nd_input that had had exactly one attempt at each
+     * backend. On a Luckfox nearly everything that can go wrong in that
+     * instant is a race that resolves by itself a second or two later -- the
+     * i2c node's group, the expander's rail, i2c-dev registering -- and every
+     * one of them put this screen in front of the owner of a working phone.
+     * Three releases of point fixes did not close it because each one made
+     * the single verdict slightly more likely to be right, rather than making
+     * it stop being a single verdict.
+     *
+     * So: ask again, once a second, for twenty seconds, drawing nothing (the
+     * boot screen stays up and the phone looks like it is still starting,
+     * which it is). Only a phone that is still keyless after all of that gets
+     * told it has no keypad -- and even then the retry keeps running behind
+     * the screen, and even then the screen is not the end: see
+     * ND_CORE_EXIT_NO_INPUT.
+     *
+     * NEODCT_FORCE_NO_INPUT=1 forces the screen for a screenshot. It skips
+     * the RETRY deliberately -- it is a static flag and nothing could ever
+     * clear it, so asking would only make the developer wait -- but it still
+     * holds the screen and still exits the same way, because a developer
+     * looking at this screen wants to see what the phone does, not a
+     * simulation of it. */
     if (!nd_input_has_backend(ui.input) || getenv("NEODCT_FORCE_NO_INPUT") != NULL) {
-        const char *why = nd_input_no_backend_reason(ui.input);
+        bool forced = getenv("NEODCT_FORCE_NO_INPUT") != NULL;
+        bool recovered = false;
+        const char *why;
 
-        if (why == NULL || why[0] == '\0')
-            why = "No keypad and no keyboard were found.";
-        nd_log_err(ND_LOG_INPUT, "no input backend at UI start: %s", why);
+        if (!forced) {
+            nd_log_err(ND_LOG_INPUT,
+                       "no input backend at UI start (%s); waiting up to %.0fs "
+                       "for a late keypad before saying so",
+                       nd_input_no_backend_reason(ui.input), ND_CORE_INPUT_GRACE_S);
+            recovered = wait_for_input_backend(&ui, ND_CORE_INPUT_GRACE_S);
+        }
 
-        /* The panic-styled screen, in two frames sharing one picture: the
-         * headline and the cropped sick Nokia first, then -- once the owner
-         * has had a moment to read it -- the same picture with the reason
-         * wrapped in below. Neither waits; nobody can dismiss a keyless
-         * phone, so the hold below is what keeps it up. */
-        nd_crash_draw_input_failure(&ui, NULL);
-        nap(3.0);
-        nd_crash_draw_input_failure(&ui, why);
+        if (!recovered && g_quit == 0) {
+            why = nd_input_no_backend_reason(ui.input);
+            if (why == NULL || why[0] == '\0')
+                why = "No keypad and no keyboard were found.";
+            nd_log_err(ND_LOG_INPUT, "no input backend after %.0fs: %s", ND_CORE_INPUT_GRACE_S,
+                       why);
 
-        /* Nothing can dismiss it, so hold until a signal (a power-off, or the
-         * supervisor on its way to a restart) sets g_quit. */
-        while (g_quit == 0)
-            nap(0.2);
-        nd_ui_teardown(&ui);
-        return;
+            /* The panic-styled screen, in two frames sharing one picture: the
+             * headline and the cropped sick Nokia first, then -- once the
+             * owner has had a moment to read it -- the same picture with the
+             * reason wrapped in below. Neither waits; nobody can dismiss a
+             * keyless phone. */
+            nd_crash_draw_input_failure(&ui, NULL);
+            nap(3.0);
+            nd_crash_draw_input_failure(&ui, why);
+
+            /* THE SCREEN IS NOT A DEAD END. The retry runs underneath it for
+             * the whole hold, so a keypad that finally answers is used and
+             * the phone walks straight out of the panic and into its home
+             * screen. */
+            if (forced)
+                hold_still(ND_CORE_INPUT_HOLD_S);
+            else
+                recovered = wait_for_input_backend(&ui, ND_CORE_INPUT_HOLD_S);
+        }
+
+        if (!recovered) {
+            if (g_quit != 0) {
+                /* A poweroff arrived while we were waiting. That is a clean
+                 * exit, not a keypad verdict. */
+                nd_ui_teardown(&ui);
+                return 0;
+            }
+            nd_log_err(ND_LOG_CORE,
+                       "exiting %d so the supervisor re-runs the privileged boot; the "
+                       "keypad cannot be repaired from inside a UI that is not root",
+                       ND_CORE_EXIT_NO_INPUT);
+            nd_ui_teardown(&ui);
+            return ND_CORE_EXIT_NO_INPUT;
+        }
     }
 
     nd_log(ND_LOG_CORE, "Entering Main Loop...");
@@ -339,6 +498,7 @@ static void core_run(nd_fb *fb, bool idle_measure)
 
     nd_log(ND_LOG_CORE, "Leaving the main loop.");
     nd_ui_teardown(&ui);
+    return 0;
 }
 
 /* ------------------------------------------------------------------ *
@@ -360,6 +520,7 @@ int main(int argc, char **argv)
     bool idle_measure = false;
     nd_fb *fb = NULL;
     char serial[64];
+    int status;
     int i;
 
     for (i = 1; i < argc; i++) {
@@ -440,6 +601,38 @@ int main(int argc, char **argv)
     if (fb != NULL)
         (void)nd_kpsetup_maybe_run(fb, true);
 
+    /* 4a-ter. AND THE OTHER HALF: bring an ALREADY CONFIGURED keypad up,
+     *     still as root, and keep the descriptor.
+     *
+     *     Step 4a-bis above only does anything on a phone with no keymap. The
+     *     instant one exists -- which is every phone after first boot, i.e.
+     *     every phone the owner actually uses -- nd_kpsetup_maybe_run()
+     *     returns at its HAVE_KEYMAP gate having opened no bus at all, and
+     *     the only open of /dev/i2c-3 for the keypad happened afterwards,
+     *     inside nd_ui_init(), as ndusr, once, against a node whose group
+     *     udev may not have applied yet. That is the race, and no retry
+     *     placed after the drop can be sure of winning it.
+     *
+     *     So the bus is opened HERE, where the process still has the
+     *     privilege, with a bounded wait for the node and a bounded probe
+     *     that makes the expander answer before anything is decided. The
+     *     descriptor is then handed to nd_input, which prefers it over
+     *     opening the node itself. open(2) checks permission once, at open
+     *     time, and the I2C_SLAVE address is per-descriptor state -- so the
+     *     keypad crosses the setuid intact and the steady-state UI never
+     *     needs group i2c on that node at all.
+     *
+     *     It is deliberately BEFORE the drop and deliberately AFTER the
+     *     wizard: a fresh phone gets its keymap written first, and on that
+     *     boot the wizard exits for the supervisor anyway. */
+    {
+        nd_kpsetup_bringup keypad;
+        int kfd = nd_kpsetup_open_keypad_as_root(&keypad);
+
+        if (kfd >= 0)
+            nd_input_provide_keypad_fd(kfd, keypad.bus, keypad.addr);
+    }
+
     /* 4b. AND NOW STOP BEING ROOT.
      *
      *     What nd-core actually needed uid 0 for was measured rather than
@@ -488,12 +681,15 @@ int main(int argc, char **argv)
     /* 5. The UI. Nothing between the framebuffer and here: see the header
      *    comment for what used to be, and why it is not. */
     nd_log(ND_LOG_LAUNCHER, "Starting UI...");
-    core_run(fb, idle_measure);
+    status = core_run(fb, idle_measure);
 
     nd_proc_reaper_stop();
     nd_broker_set_default(NULL);
     nd_broker_stop(broker);
     if (fb != NULL)
         nd_fb_close(fb);
-    return 0;
+    /* Not always zero any more: ND_CORE_EXIT_NO_INPUT tells nd-crashguard.sh
+     * that this boot ended with no keypad, so that it restarts the phone --
+     * as root -- rather than leaving it on a screen nothing can dismiss. */
+    return status;
 }

@@ -104,6 +104,7 @@ static struct {
     const char *const *msg_cannot_write_prefix;
     const char *const *msg_cannot_stage_prefix;
     const char *const *msg_no_reader;
+    const char *const *msg_no_restart;
 } api;
 
 static bool api_open(void *h)
@@ -138,6 +139,7 @@ static bool api_open(void *h)
     *(void **)&api.record_get = sa_sym(h, "nd_upd_record_get");
     *(void **)&api.stage_package = sa_sym(h, "nd_upd_stage_package");
 
+    api.msg_no_restart = dlsym(h, "nd_update_msg_no_restart");
     api.no_card_help = dlsym(h, "nd_update_no_card_help");
     api.not_ready_help = dlsym(h, "nd_update_not_ready_help");
     api.no_package_help = dlsym(h, "nd_update_no_package_help");
@@ -165,7 +167,7 @@ static bool api_open(void *h)
            api.msg_wrong_prefix != NULL && api.msg_install_anyway != NULL &&
            api.msg_no_update_folder != NULL && api.msg_no_release_notes != NULL &&
            api.msg_cannot_write_prefix != NULL && api.msg_cannot_stage_prefix != NULL &&
-           api.msg_no_reader != NULL;
+           api.msg_no_reader != NULL && api.msg_no_restart != NULL;
 }
 
 /* ------------------------------------------------------------------ *
@@ -361,6 +363,49 @@ static void test_help_strings(void)
  * with it to test_svc.c's test_the_halt_tables_are_the_pythons(). This app
  * no longer knows what a reboot binary is called.
  * docs/c-rewrite/spec-app-services.md section 9. */
+
+/* ------------------------------------------------------------------ *
+ * 1b. What the owner is told when the restart does not start
+ * ------------------------------------------------------------------ *
+ *
+ * nd_update_reboot() used to discard nd_svc_reboot()'s return and dwell for
+ * thirty seconds either way. That was defensible while false could only mean
+ * "this image has no reboot binary" -- nothing an owner can act on. It stopped
+ * being defensible when false also came to mean "the core refused", which is
+ * what it meant on every 0.5.x phone: the update was staged, the phone never
+ * restarted, the Ready page sat there for half a minute and then went back to
+ * the menu, and the version number never changed. "I installed an update and
+ * nothing happened."
+ *
+ * The composition still cannot be tested -- nd_update_reboot() calls
+ * nd_svc_reboot(), and in a process with no service channel that IS the halt,
+ * on this machine. What can be tested is the sentence, and the sentence is the
+ * part that has to be right: the update really is staged (nd_update_stage()
+ * wrote and synced pending.prop before this screen was ever drawn), and the
+ * next boot by any means installs it. So it must tell the owner to switch the
+ * phone off and on, and it must NOT read as a failed update.
+ */
+static void test_a_restart_that_does_not_start_is_not_silence(void)
+{
+    const char *msg = *api.msg_no_restart;
+
+    CHECK(msg != NULL && msg[0] != '\0', "there is something to say at all");
+    if (msg == NULL)
+        return;
+
+    /* The instruction, which is the only thing the owner can act on. */
+    CHECK(strstr(msg, "off and on") != NULL, "it says to switch the phone off and on");
+    /* And the reassurance, because the alternative reading -- that the update
+     * is lost and has to be downloaded again -- is both wrong and expensive on
+     * a phone that fetched 51 MB over a modem. */
+    CHECK(strstr(msg, "ready") != NULL, "it says the update is still ready");
+
+    /* It is not one of the refusals. Those mean the package is bad and should
+     * be thrown away; this one means the opposite. */
+    CHECK(strcmp(msg, *api.msg_invalid) != 0, "not the InvalidUpdate refusal");
+    CHECK(strcmp(msg, *api.msg_bad_signature) != 0, "not the BadSignature refusal");
+    CHECK(strcmp(msg, *api.msg_cannot_stage_prefix) != 0, "not the staging failure");
+}
 
 /* ------------------------------------------------------------------ *
  * 2. Formatting
@@ -1209,6 +1254,7 @@ int main(void)
 
     RUN(test_constants);
     RUN(test_help_strings);
+    RUN(test_a_restart_that_does_not_start_is_not_silence);
     RUN(test_format_size);
     RUN(test_format_date);
     RUN(test_size_detail);

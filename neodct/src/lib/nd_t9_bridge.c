@@ -25,6 +25,34 @@
  * keypress with a list of candidate words, and there is no candidate UI on
  * the far side of a uinput keyboard, so the mode would look like keys that do
  * nothing.
+ *
+ * ============ EVERY KEY THE PHONE HAS DOES SOMETHING IN CURSOR MODE ====
+ *
+ * It used not to. Cursor mode answered 2/4/5/6/8 and the six passthrough
+ * keys, and 1, 3, 7, 9, 0 and * were dropped on the floor -- six of the
+ * sixteen keys this phone has, dead in the app the owner reported the keypad
+ * broken in. The bottom half of the map below is that recovered, and the two
+ * halves are recovered in two different ways because the far side of the
+ * uinput device is not ours:
+ *
+ *   1 3 7 9   the diagonals, and they work today. Read the nine digits as
+ *             the 3x3 grid they are printed as and the corners ARE the
+ *             diagonals -- 2/4/6/8 are already the edges of that grid and 5
+ *             its centre, so nothing had to be invented, only finished. A
+ *             diagonal is sent as the two arrows it is made of, which is
+ *             exactly what a person would otherwise press one after the
+ *             other, so netsurf needs to know nothing about it.
+ *
+ *   * 0       page up and page down, and they need the netsurf half that
+ *             nd_t9.h specifies. There is no way to express "scroll a
+ *             screenful" in arrows: the cursor steps six pixels and only
+ *             scrolls once it is pinned at an edge, so a screenful is about
+ *             thirty presses, and thirty synthesised arrows would cost
+ *             netsurf thirty pointer warps and redraws on a single core.
+ *             They are sent anyway, because until that half lands they are
+ *             consumed with no effect -- the same nothing they did before --
+ *             and the day it lands the phone gains the keys with no change
+ *             here.
  */
 
 #include <pthread.h>
@@ -42,16 +70,51 @@
 
 static const int32_t PASSTHROUGH_CODES[] = {28, 14, 103, 105, 106, 108};
 
-/* Keypad digit -> arrow, for the browser's cursor mode. */
+/* Keypad key -> one keycode, for the browser's cursor mode.
+ *
+ * Spelled with the ND_KEY_* names on both sides now that the table has grown
+ * past the five entries a reader could hold in their head: every number in it
+ * was a bare literal, and "{9, 108}" is two different keys wearing each
+ * other's numbers -- keypad 8 sending KEY_DOWN. The values are unchanged. */
 static const struct {
     int32_t from;
     uint16_t to;
 } BROWSER_NAV_CODES[] = {
-    {3, 103}, /* keypad 2 -> up            */
-    {5, 105}, /* keypad 4 -> left          */
-    {6, 28},  /* keypad 5 -> follow a link */
-    {7, 106}, /* keypad 6 -> right         */
-    {9, 108}, /* keypad 8 -> down          */
+    {ND_KEY_2, ND_KEY_UP},
+    {ND_KEY_4, ND_KEY_LEFT},
+    {ND_KEY_5, ND_KEY_ENTER}, /* follow a link */
+    {ND_KEY_6, ND_KEY_RIGHT},
+    {ND_KEY_8, ND_KEY_DOWN},
+    /* The two that netsurf owes an implementation; see nd_t9.h. * takes page
+     * up and 0 page down because 0 sits directly under 8, the down key, and
+     * reads as "further down" -- and because * is the only other key left,
+     * # having been the mode cycle since the Python. */
+    {ND_KEY_STAR, ND_T9_BROWSER_KEY_PAGE_UP},
+    {ND_KEY_0, ND_T9_BROWSER_KEY_PAGE_DOWN},
+};
+
+/* Keypad corner -> the two arrows that corner means. Sent in the order given:
+ * vertical first, so a diagonal into a page edge scrolls the way the pointer
+ * was already going before the horizontal half is clamped against the side. */
+static const struct {
+    int32_t from;
+    uint16_t first;
+    uint16_t second;
+} BROWSER_DIAG_CODES[] = {
+    {ND_KEY_1, ND_KEY_UP, ND_KEY_LEFT},
+    {ND_KEY_3, ND_KEY_UP, ND_KEY_RIGHT},
+    {ND_KEY_7, ND_KEY_DOWN, ND_KEY_LEFT},
+    {ND_KEY_9, ND_KEY_DOWN, ND_KEY_RIGHT},
+};
+
+/* Which mode the pad is in, one keycode each, sent on every change. The index
+ * is b->pos: 0 is cursor mode and 1..3 are the engine's, which is the order
+ * nd_t9_bridge_mode_label() names and the order # walks. */
+static const uint16_t BROWSER_MODE_CODES[] = {
+    ND_T9_BROWSER_KEY_MODE_NAV,
+    ND_T9_BROWSER_KEY_MODE_ABC,
+    ND_T9_BROWSER_KEY_MODE_UPPER,
+    ND_T9_BROWSER_KEY_MODE_123,
 };
 
 /* nd_input.h spells the keyboard as an ANONYMOUS struct typedef
@@ -109,6 +172,23 @@ static void browser_cycle_mode(nd_t9_bridge *b)
             }
         }
     }
+
+    /* TELL THE FAR SIDE. nd_t9_bridge_mode_label() has always known which of
+     * the four the pad is in, and for three releases the only thing that ever
+     * asked was a log line at launch -- so the mode changed under the owner
+     * with nothing on the screen saying so, on a phone where the same key
+     * types 'a' or '2' or scrolls depending on a state they could not see.
+     *
+     * The core cannot draw it: netsurf owns the panel from the moment it
+     * starts until it exits. A keycode can get there, because a keycode is
+     * the one channel that already runs from here to inside netsurf's own
+     * event loop. See nd_t9.h for what netsurf does with it.
+     *
+     * The bounds check is not decoration: b->pos is taken modulo n_modes + 1
+     * and n_modes comes from the engine's list, so a mode added to the engine
+     * would walk this table off its end rather than fail to say something. */
+    if (b->pos < ND_ARRAY_LEN(BROWSER_MODE_CODES))
+        (void)nd_uinput_send_key(b->kbd, BROWSER_MODE_CODES[b->pos], false);
 }
 
 /* KEY_TAB. Spelled out rather than included from linux/input-event-codes.h,
@@ -186,10 +266,26 @@ void nd_t9_bridge_handle_code(nd_t9_bridge *b, int32_t code)
                     return;
                 }
             }
+            for (i = 0u; i < ND_ARRAY_LEN(BROWSER_DIAG_CODES); i++) {
+                if (BROWSER_DIAG_CODES[i].from == code) {
+                    /* Two whole keystrokes, not a chord: netsurf moves its
+                     * pointer once per press and clamps each axis on its own,
+                     * so a diagonal into a corner has to arrive as the two
+                     * moves it is or one of them is lost. The second is sent
+                     * even if the first failed -- a half-written keystroke is
+                     * a pointer that drifts sideways, which is worse than a
+                     * press that did nothing. */
+                    (void)nd_uinput_send_key(b->kbd, BROWSER_DIAG_CODES[i].first, false);
+                    (void)nd_uinput_send_key(b->kbd, BROWSER_DIAG_CODES[i].second, false);
+                    return;
+                }
+            }
             if (is_passthrough(code))
                 (void)nd_uinput_send_key(b->kbd, (uint16_t)code, false);
-            /* Every other key is inert here: typing a letter by accident
-             * while scrolling is worse than the press doing nothing. */
+            /* Nothing is left but a key the phone does not have. Letters stay
+             * out of cursor mode on purpose -- typing one by accident while
+             * scrolling is worse than the press doing nothing -- and every key
+             * the phone DOES have is answered above. */
             return;
         }
     }

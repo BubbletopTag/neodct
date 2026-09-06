@@ -27,14 +27,23 @@
 #   S00userdata   creates /NeoDCT/User/{db,logs,...}; the UI opens its
 #                 databases during nd_ui_init and a missing directory there
 #                 is not something it recovers from.
-#   S06sdcard     mounts a card that was already in the slot. Wallpapers and
+#   S10udevd      every device node the UI opens AFTER IT STOPS BEING ROOT.
+#                 devtmpfs makes each node root:root 0600 and only udev's
+#                 processing of its uevent applies the group; the list, and
+#                 the check that the group actually landed, are in that file.
+#                 It also settles /dev/input/event*, which nd_input picks its
+#                 keyboard from once, at startup.
+#   S12sdcard     mounts a card that was already in the slot. Wallpapers and
 #                 ringtones can live on it, so a late mount would mean a
-#                 first home frame with the wallpaper missing.
-#   S10udevd      /dev/input/event*. nd_input picks its keyboard once, at
-#                 startup; if the node is not there yet the phone comes up
-#                 with no keys at all.
+#                 first home frame with the wallpaper missing. AFTER S10udevd,
+#                 because a card the controller finds a moment late is mounted
+#                 by the udev rule instead, and that needs udevd to be up to
+#                 receive the event.
 #   S90display    the ST7789 panel daemon. Nothing crashes without it, but
-#                 until it runs the panel shows whatever was on it before.
+#                 until it runs the panel shows whatever was on it before. It
+#                 also exports and grants the backlight GPIO, which nothing
+#                 else can do -- an exported pin generates no uevent, so no
+#                 udev rule can reach it.
 #
 # Anything not on that list runs late. If you add a script that the UI must
 # wait for, add it here -- the failure mode otherwise is a race, and a race
@@ -54,7 +63,7 @@
 # without it the answer to "why is boot slow" is guesswork, which is how the
 # zram mkswap hid in plain sight for as long as it did.
 #
-NEODCT_BOOT_CRITICAL="S00userdata S06sdcard S10udevd S90display"
+NEODCT_BOOT_CRITICAL="S00userdata S10udevd S12sdcard S90display"
 BOOT_SLOW_S="${BOOT_SLOW_S:-0.20}"
 
 # Colours, shared with the rest of the system so a [BOOT] tag is the same

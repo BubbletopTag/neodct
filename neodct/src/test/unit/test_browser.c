@@ -35,8 +35,12 @@
  *     last one is the whole reason the pump exists: main.py's comment says
  *     the pipe fills and blocks netsurf if nobody reads it.
  *  6. Keypad presses arriving on the inherited channel while netsurf owns the
- *     screen reach the uinput keyboard, through the BROWSER bridge -- 2 is Up,
- *     4 is Left, 6 is Right, 8 is Down, 5 follows a link.
+ *     screen are DRAINED. They used to be typed into a uinput keyboard this
+ *     app created; that device belongs to the core now (nd_proc.h, THE KEY
+ *     DEVICE) because an ndusr_ut process may not open /dev/uinput, so all
+ *     that is left here is the obligation not to let the pipe fill. The
+ *     gate that decides whether a device is wanted at all is still this
+ *     app's, and case 10 pins it against NEODCT_T9 in both directions.
  *  7. _drain_input empties both the raw descriptor and the decoder's queue,
  *     and tolerates a missing one.
  *  8. app_run end to end: the started line, the stderr, the exit line, and a
@@ -86,8 +90,7 @@ typedef struct {
     void (*cpu_init)(nd_browser_cpu *c, pid_t pid);
     bool (*cpu_percent)(nd_browser_cpu *c, double *out);
     bool (*cpu_percent_at)(nd_browser_cpu *c, double now, double *out);
-    void (*pump)(int stderr_fd, int console_fd, nd_browser_cpu *cpu, nd_input *in,
-                 nd_t9_bridge *br);
+    void (*pump)(int stderr_fd, int console_fd, nd_browser_cpu *cpu, nd_input *in);
     void (*drain_input)(nd_ui *ui);
     void (*dump_dmesg_tail)(int lines);
     bool (*needs_key_bridge)(const nd_ui *ui);
@@ -182,25 +185,75 @@ static void write_exec(const char *path, const char *text)
     }
 }
 
-/* /dev/console and /dev/null as ordinary files under the case root. The
- * launcher opens both by their real absolute names; nd_path_resolve is what
- * puts them here instead. */
+/* ============ THE CONSOLE IS fd 2 NOW ============
+ *
+ * nd_browser_log_console() used to open("/dev/console") per call, and this
+ * fixture observed it by staging a writable file at that path under the case
+ * root. On a real phone that open ALWAYS failed -- /dev/console is root:root
+ * 0600 and the app is ndusr_ut -- so the fixture was proving something the
+ * device never did, which is exactly why the browser produced no log on
+ * hardware for a year. The launcher writes to its inherited stderr instead.
+ *
+ * So the fixture points fd 2 at the same staged file. That is a truthful
+ * mock: the core really does hand its stderr down, and nd-crashguard.sh
+ * really does append it to core.log. `/dev/null` is still staged because the
+ * launcher opens THAT by name, for netsurf's stdout.
+ *
+ * console_restore() is idempotent and is called from console_text() and from
+ * every RUN, so a failing CHECK's message goes to the terminal and not into
+ * the file the next assertion is about to read. */
+static int g_saved_stderr = -1;
+
+static void console_restore(void)
+{
+    if (g_saved_stderr < 0)
+        return;
+    (void)dup2(g_saved_stderr, STDERR_FILENO);
+    (void)close(g_saved_stderr);
+    g_saved_stderr = -1;
+}
+
 static void make_devices(void)
 {
+    char cpath[ND_PATH_MAX];
+    int fd;
+
+    console_restore();
     pt_write_text("/dev/console", "");
     pt_write_text("/dev/null", "");
+
+    CHECK(nd_path_resolve(cpath, sizeof cpath, "/dev/console") == ND_OK);
+    fd = open(cpath, O_WRONLY | O_APPEND);
+    CHECK(fd >= 0);
+    if (fd < 0)
+        return;
+    g_saved_stderr = dup(STDERR_FILENO);
+    (void)dup2(fd, STDERR_FILENO);
+    (void)close(fd);
 }
 
 static const char *console_text(void)
 {
-    size_t n = pt_read_text("/dev/console", g_console_buf, CONSOLE_CAP);
+    size_t n;
 
+    console_restore();
+    n = pt_read_text("/dev/console", g_console_buf, CONSOLE_CAP);
     if (n == (size_t)-1) {
         g_console_buf[0] = '\0';
         return g_console_buf;
     }
     return g_console_buf;
 }
+
+/* Restore stderr around every case, whatever the case did with it. */
+#undef RUN
+#define RUN(fn)            \
+    do {                   \
+        pt_new_case();     \
+        console_restore(); \
+        fn();              \
+        console_restore(); \
+    } while (0)
 
 static void check_has(const char *hay, const char *needle)
 {
@@ -361,21 +414,32 @@ static void t_tagged(void)
 
 static void t_log_console(void)
 {
-    char buf[128];
-    size_t n;
+    const char *out;
 
     make_devices();
     g_api.log_console("first");
     g_api.log_console("second");
-    n = pt_read_text("/dev/console", buf, sizeof buf);
-    CHECK_INT(n, 15);
+    out = console_text();
+    CHECK_INT(strlen(out), 15);
     /* CRLF, not LF: a serial terminal with no ONLCR needs the return. */
-    CHECK_STR(buf, "first\r\nsecond\r\n");
+    CHECK_STR(out, "first\r\nsecond\r\n");
 
-    /* No console, no crash and no complaint. */
+    /* A stderr that has gone -- an app whose log file was rotated out from
+     * under it -- must not crash the browser or make it complain. This is the
+     * case the old code reached by failing to open /dev/console, which is
+     * what it did on every real phone. */
     pt_new_case();
-    g_api.log_console("nowhere");
-    g_api.log_console(NULL);
+    console_restore();
+    {
+        int saved = dup(STDERR_FILENO);
+
+        CHECK(saved >= 0);
+        (void)close(STDERR_FILENO);
+        g_api.log_console("nowhere");
+        g_api.log_console(NULL);
+        (void)dup2(saved, STDERR_FILENO);
+        (void)close(saved);
+    }
     CHECK(true);
 }
 
@@ -471,7 +535,7 @@ static void pump_text(const char *text, nd_browser_cpu *cpu)
     CHECK_INT((int)write(fds[1], text, strlen(text)), (int)strlen(text));
     (void)close(fds[1]);
 
-    g_api.pump(fds[0], console, cpu, NULL, NULL);
+    g_api.pump(fds[0], console, cpu, NULL);
 
     (void)close(fds[0]);
     (void)close(console);
@@ -583,108 +647,28 @@ static void t_pump_drains_more_than_a_pipe(void)
 }
 
 /* ------------------------------------------------------------------ *
- * 7. the browser key bridge
- * ------------------------------------------------------------------ */
-
-#define EV_KEY_T 0x01
-
-typedef struct {
-    long tv_sec;
-    long tv_usec;
-    uint16_t type;
-    uint16_t code;
-    int32_t value;
-} ev_native;
-
-/* Collect the key-down codes the bridge typed into the uinput descriptor. */
-static size_t read_downs(int fd, uint16_t *out, size_t max)
-{
-    uint8_t buf[8192];
-    ssize_t got = read(fd, buf, sizeof buf);
-    size_t off = 0u;
-    size_t n = 0u;
-
-    if (got <= 0)
-        return 0u;
-    while (off + sizeof(ev_native) <= (size_t)got) {
-        ev_native ev;
-
-        memcpy(&ev, buf + off, sizeof ev);
-        off += sizeof ev;
-        if (ev.type == EV_KEY_T && ev.value == 1 && n < max)
-            out[n++] = ev.code;
-    }
-    return n;
-}
-
-static void t_key_bridge_through_pump(void)
-{
-    nd_input_channel ch;
-    nd_input *input = NULL;
-    nd_uinput_kbd kbd;
-    nd_t9_bridge *bridge;
-    int kbd_fds[2];
-    int err_fds[2];
-    uint16_t downs[16];
-    size_t n;
-    int flags;
-
-    memset(&ch, 0, sizeof ch);
-    CHECK_INT(nd_input_channel_open(&ch), ND_OK);
-    CHECK_INT(nd_input_open_pipe(&input, ch.read_fd), ND_OK);
-
-    CHECK_INT(pipe(kbd_fds), 0);
-    flags = fcntl(kbd_fds[0], F_GETFL, 0);
-    CHECK_INT(fcntl(kbd_fds[0], F_SETFL, flags | O_NONBLOCK), 0);
-    CHECK_INT(nd_uinput_attach(&kbd, kbd_fds[1]), ND_OK);
-
-    bridge = nd_t9_bridge_new_for_test(ND_BRIDGE_BROWSER, &kbd);
-    CHECK(bridge != NULL);
-    /* The browser starts as a d-pad, which is the whole reason it has its own
-     * bridge: the enrolment wizard collects no Left and no Right at all. */
-    CHECK_STR(nd_t9_bridge_mode_label(bridge), "nav");
-
-    /* Queue the presses BEFORE the pump runs, then close netsurf's stderr so
-     * the pump reaches EOF and returns. Both descriptors are ready in the
-     * same poll, which is the situation the launcher is built for. */
-    CHECK_INT(nd_input_channel_send(&ch, 3, true), ND_OK); /* keypad 2 -> Up    */
-    CHECK_INT(nd_input_channel_send(&ch, 3, false), ND_OK);
-    CHECK_INT(nd_input_channel_send(&ch, 5, true), ND_OK); /* keypad 4 -> Left  */
-    CHECK_INT(nd_input_channel_send(&ch, 5, false), ND_OK);
-    CHECK_INT(nd_input_channel_send(&ch, 7, true), ND_OK); /* keypad 6 -> Right */
-    CHECK_INT(nd_input_channel_send(&ch, 7, false), ND_OK);
-    CHECK_INT(nd_input_channel_send(&ch, 9, true), ND_OK); /* keypad 8 -> Down  */
-    CHECK_INT(nd_input_channel_send(&ch, 9, false), ND_OK);
-    CHECK_INT(nd_input_channel_send(&ch, 6, true), ND_OK); /* keypad 5 -> Enter */
-    CHECK_INT(nd_input_channel_send(&ch, 6, false), ND_OK);
-
-    CHECK_INT(pipe(err_fds), 0);
-    CHECK_INT((int)write(err_fds[1], "nsfb ready\n", 11u), 11);
-    (void)close(err_fds[1]);
-
-    g_api.pump(err_fds[0], -1, NULL, input, bridge);
-    (void)close(err_fds[0]);
-
-    n = read_downs(kbd_fds[0], downs, ND_ARRAY_LEN(downs));
-    CHECK_INT(n, 5);
-    if (n == 5u) {
-        CHECK_INT(downs[0], 103); /* KEY_UP     */
-        CHECK_INT(downs[1], 105); /* KEY_LEFT   */
-        CHECK_INT(downs[2], 106); /* KEY_RIGHT  */
-        CHECK_INT(downs[3], 108); /* KEY_DOWN   */
-        CHECK_INT(downs[4], 28);  /* KEY_ENTER  */
-    }
-
-    nd_t9_bridge_free_for_test(bridge);
-    nd_uinput_close(&kbd); /* closes kbd_fds[1] */
-    (void)close(kbd_fds[0]);
-    nd_input_channel_close_write(&ch);
-    nd_input_close(input); /* owns ch.read_fd */
-}
+ * 7. the key channel is drained, and nothing is injected from here
+ * ------------------------------------------------------------------ *
+ *
+ * The case that used to be here queued 2/4/6/8/5 on the channel, ran the
+ * pump, and read KEY_UP/LEFT/RIGHT/DOWN/ENTER back out of a uinput
+ * descriptor. It proved the BROWSER map, which is correct and still tested --
+ * in test_uinput.c, against nd_t9_bridge directly -- but it proved it about a
+ * bridge this app can no longer build. apps/Browser is launched as ndusr_ut
+ * and /dev/uinput is granted to group ndusr, so nd_uinput_open() returned
+ * EACCES on every phone and the pump's `if (ev.pressed && bridge != NULL)`
+ * quietly dropped every key. A test that passes on a pipe cannot see that:
+ * nd_uinput_attach() issues no ioctls and needs no permission, which is why
+ * this file was green for the whole life of the bug.
+ *
+ * The device is the core's now. What is left to claim here is the thing the
+ * launcher is still responsible for, and the thing whose absence would fill a
+ * pipe and stop netsurf dead.
+ */
 
 /* With no bridge the presses are still consumed, so the channel cannot fill
  * behind a browsing session. */
-static void t_pump_consumes_keys_without_a_bridge(void)
+static void t_pump_drains_the_key_channel(void)
 {
     nd_input_channel ch;
     nd_input *input = NULL;
@@ -710,7 +694,7 @@ static void t_pump_consumes_keys_without_a_bridge(void)
     CHECK_INT(pipe(err_fds), 0);
     CHECK_INT((int)write(err_fds[1], "x\n", 2u), 2);
     (void)close(err_fds[1]);
-    g_api.pump(err_fds[0], -1, NULL, input, NULL);
+    g_api.pump(err_fds[0], -1, NULL, input);
     (void)close(err_fds[0]);
 
     /* Nothing is left for the launcher to replay. */
@@ -843,6 +827,35 @@ static void t_needs_key_bridge(void)
     ui->has_matrix_keypad = true;
     CHECK(!g_api.needs_key_bridge(ui));
     ui->has_matrix_keypad = false;
+
+    /* ============ AND NEODCT_T9 MOVES NEITHER ANSWER ============
+     *
+     * This is the assertion that would have caught the bug in nd_proc.c.
+     * NEODCT_KEYPAD_MATRIX is supposed to carry the HARDWARE FACT and nothing
+     * else -- nd_app.h says so in as many words -- but nd_proc.c filled it
+     * from ui->has_matrix_keypad, which already has the T9 override folded
+     * in. Both directions broke, on the phone and on a dev box:
+     *
+     *   NEODCT_T9=0 on a real phone made the core's flag false, the variable
+     *   went unset, this gate answered "no bridge wanted", and turning T9 off
+     *   took the browser's keypad away entirely.
+     *
+     *   NEODCT_T9=1 on a dev box set the variable over a real keyboard, a
+     *   bridge went up beside it, and netsurf -- which opens every EV_KEY
+     *   device it finds -- read every press twice, mangled through multi-tap.
+     *
+     * The gate reads nd_app_keypad_is_matrix(), so pinning it here pins the
+     * contract from the consuming end: whatever the core does with T9, this
+     * answer must move only with the variable that names the hardware. */
+    (void)setenv(ND_ENV_T9, "0", 1);
+    CHECK(!g_api.needs_key_bridge(ui)); /* no matrix, T9 off: still no */
+    (void)setenv(ND_ENV_KEYPAD_MATRIX, "1", 1);
+    CHECK(g_api.needs_key_bridge(ui)); /* matrix, T9 forced OFF: still YES */
+    (void)setenv(ND_ENV_T9, "1", 1);
+    CHECK(g_api.needs_key_bridge(ui));
+    (void)unsetenv(ND_ENV_KEYPAD_MATRIX);
+    CHECK(!g_api.needs_key_bridge(ui)); /* no matrix, T9 forced ON: still no */
+    (void)unsetenv(ND_ENV_T9);
 
     /* A keymap.json on disk is NOT enough on its own, and that is the point
      * of the change: it is a claim about the hardware, not evidence that the
@@ -1073,11 +1086,23 @@ static void t_run_killed_dumps_dmesg(void)
     nd_log_set_colour(was);
 }
 
-/* A console that will not open must not stop the browser, and -- unlike the
+/* A log that goes nowhere must not stop the browser, and -- unlike the
  * Python, which skipped the pump entirely in this case -- must not leave the
- * pipe unread either. BR-4. */
+ * pipe unread either. BR-4.
+ *
+ * The case used to be "there is no /dev/console to open", which was the
+ * PHONE'S EVERYDAY STATE and not an edge at all: the node is root:root 0600
+ * and this app is ndusr_ut, so the open failed on every boot and every line
+ * netsurf ever wrote was discarded. The launcher writes to its inherited
+ * stderr now, so the honest version of the same claim is a stderr pointed at
+ * a sink: three thousand lines of chatter, nothing to read them back out of,
+ * and the pipe still drained. */
 static void t_run_without_a_console(void)
 {
+    char devnull[ND_PATH_MAX];
+    int saved;
+    int sink;
+
     write_exec(ND_BROWSER_BIN, "#!/bin/sh\n"
                                "i=0\n"
                                "while [ $i -lt 3000 ]; do\n"
@@ -1086,9 +1111,25 @@ static void t_run_without_a_console(void)
                                "done\n"
                                "exit 0\n");
     pt_write_text("/dev/null", "");
-    /* No /dev/console in this case root at all. */
+    /* Nothing is staged at /dev/console, and nothing looks for one. */
     CHECK(!nd_path_exists("/dev/console"));
+
+    CHECK(nd_path_resolve(devnull, sizeof devnull, "/dev/null") == ND_OK);
+    sink = open(devnull, O_WRONLY | O_APPEND);
+    CHECK(sink >= 0);
+    saved = dup(STDERR_FILENO);
+    CHECK(saved >= 0);
+    if (sink >= 0)
+        (void)dup2(sink, STDERR_FILENO);
+
     CHECK_INT(g_api.app_run(bare_ui()), 0);
+
+    if (saved >= 0) {
+        (void)dup2(saved, STDERR_FILENO);
+        (void)close(saved);
+    }
+    if (sink >= 0)
+        (void)close(sink);
     CHECK(true); /* reaching here at all is the claim: it did not deadlock */
 }
 
@@ -1129,8 +1170,7 @@ int main(void)
     RUN(t_pump_colours);
     RUN(t_pump_memory_cpu);
     RUN(t_pump_drains_more_than_a_pipe);
-    RUN(t_key_bridge_through_pump);
-    RUN(t_pump_consumes_keys_without_a_bridge);
+    RUN(t_pump_drains_the_key_channel);
     RUN(t_drain_input);
     RUN(t_dmesg_tail);
     RUN(t_dmesg_timeout);

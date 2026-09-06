@@ -97,7 +97,17 @@
  * +CMGL header plus a 160-character body, well inside this. */
 #define ND_MODEM_LINE_MAX 512
 
-/* Candidate AT ports considered in one probe. A SIM7600 enumerates five. */
+/* Candidate AT ports considered in one probe. A SIM7600 enumerates five.
+ *
+ * This is a bound on CANDIDATES and it used to be applied, wrongly, as a
+ * bound on DIRECTORY ENTRIES: sorted_listdir() stopped reading after 32
+ * names and only then sorted them. /sys/class/tty on a CONFIG_VT kernel
+ * holds tty0..tty63 plus console, ptmx, tty and ttyFIQ0 before any ttyUSB
+ * node, sysfs readdir order is a name hash rather than anything alphabetical,
+ * and so whether the modem's ports were among the 32 that survived was
+ * decided by the kernel config. Both copies of sorted_listdir() now filter
+ * by prefix INSIDE the readdir loop, so the directory is walked in full and
+ * the cap counts the thing it was written for. */
 #define ND_MODEM_CAND_MAX 32
 
 /* ND_MODEM_PROBE_WHY_MAX is public now -- the reason crosses the service wire
@@ -105,6 +115,10 @@
 
 #define ND_MODEM_PORT_MAX 96
 #define ND_MODEM_WHY_MAX  128
+
+/* How often the AT-port lock file is re-opened after a failure. See
+ * nd_modem__lock_reopen(). */
+#define ND_MODEM_LOCK_RETRY_S 2.0
 
 /* AT+CLCC <stat>. */
 #define ND_CLCC_CONNECTED 0
@@ -239,6 +253,26 @@ struct nd_modem {
      * nd_battery_take_pending_warning() -- see nd_modem_take_pending_fault(). */
     bool faulted;
     bool fault_pending;
+
+    /* ---- and the THIRD way of answering "no", which is the common one ----
+     *
+     * `saw_candidates` is what the last probe found in /sys/class/tty: at
+     * least one ttyUSB node (or a configured port) that could in principle
+     * be the radio. It is the difference between ND_MODEM_LINK_SIM and
+     * ND_MODEM_LINK_UNREACHABLE, and therefore between a phone that calmly
+     * says "Simulation" and a phone that admits its radio is broken.
+     *
+     * It is deliberately the CANDIDATE count and not "did the open succeed":
+     * a node in /sys/class/tty is the kernel saying a serial device is
+     * plugged in, which no amount of EACCES or EBUSY can un-say.
+     *
+     * `unreachable_announced` is the same edge latch `faulted` is for a
+     * dropped modem: the probe repeats every ND_PROBE_RETRY_S for ever, and
+     * a notice per probe is a modal in front of the user six times a minute.
+     * Cleared when a modem is adopted, and when the candidates go away --
+     * a radio that has been unplugged is not an unreachable one. */
+    bool saw_candidates;
+    bool unreachable_announced;
     /* This fault came from ND_MODEM_SIM_FAULT rather than from a real modem
      * dying, so removing the file undoes it. A real fault has no undo short
      * of adopting a modem again. */
@@ -271,6 +305,24 @@ struct nd_modem {
     int fd;
     int lock_fd;
     bool lock_held;
+    /* The last nd_modem__acquire() failed because there is no usable lock
+     * FILE, not because somebody else holds the lock. The two are opposite
+     * diagnoses -- "another process is talking to the modem right now" is
+     * evidence the modem is alive, "I cannot serialise with that process at
+     * all" is a refusal to touch the port -- and they used to be the same
+     * silent `return true`. See nd_modem__acquire(). */
+    bool lock_unusable;
+    /* "<path>: <strerror>" from the last failed attempt to open the lock
+     * file, "" when it is open. Reaches the screen through probe_why. */
+    char lock_why[ND_MODEM_WHY_MAX];
+    /* Rate limit on re-opening the lock file. /tmp is a tmpfs that both this
+     * process and root's atcmd create the file in, so an attempt that failed
+     * at startup can succeed a second later; retrying it on every acquire
+     * would be an open(2) ten times a second for ever. */
+    double next_lock_try;
+    /* When the current tick took the AT-port lock, for the fair-share
+     * back-off at the end of nd_modem_poll(). */
+    double lock_taken_at;
     uint8_t rx[ND_MODEM_RXBUF_MAX];
     size_t rx_len;
     bool rx_overflow_logged;
@@ -280,10 +332,17 @@ struct nd_modem {
     double next_net;
     double next_cops;
     double next_probe;
-    /* When the boot grace runs out (nd_modem.h). Written once at creation,
-     * read by the modem thread and, under st_mu, by the readouts. A test
-     * moves it to bring the window forward or push it back. */
+    /* When the boot grace runs out (nd_modem.h). Set at creation and then
+     * PUSHED OUT by a probe that had nothing to probe -- see
+     * ND_MODEM_LATE_GRACE_MAX_S. Written by the modem thread under st_mu
+     * because the readouts read it under st_mu; a test moves it directly to
+     * bring the window forward or push it back. */
     double boot_deadline;
+    /* The configured grace, kept because the extension above needs it after
+     * creation, and 0 (QEMU, every test fixture) must extend nothing. */
+    double boot_grace;
+    /* The hard ceiling on those extensions: created_at + LATE_GRACE_MAX_S. */
+    double late_grace_deadline;
     bool sim_announced; /* "Running in Simulation Mode" has been logged */
     /* The last reason the probe gave, so a failure that repeats every
      * PROBE_RETRY_S is printed ONCE and not forever. Cleared on success, so a
@@ -389,6 +448,17 @@ void nd_modem__unlock(nd_modem *m);
 
 bool nd_modem__acquire(nd_modem *m);
 void nd_modem__release(nd_modem *m);
+/* Re-open the AT-port lock file if it is not open, no faster than once every
+ * ND_MODEM_LOCK_RETRY_S. Lives in nd_modem.c beside the settings and the
+ * path resolution; called from nd_modem__acquire() in nd_modem_at.c. */
+void nd_modem__lock_reopen(nd_modem *m);
+
+/* Should a dial or an SMS with no live modem be FAKED, or REFUSED?
+ *
+ * Pure, so the policy is one table a test can read: `link` is what
+ * nd_modem_link_state() would return and `has_radio` is m->saw_candidates.
+ * Faking is honest only on a device that genuinely has no radio. */
+bool nd_modem__may_simulate(nd_modem_link link, bool has_radio);
 
 /* --- the AT engine, nd_modem_at.c --- */
 int nd_modem__open_port(const char *dev);

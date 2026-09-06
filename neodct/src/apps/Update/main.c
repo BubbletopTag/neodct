@@ -425,22 +425,43 @@ static void dwell(double seconds)
     }
 }
 
+/* Shown when the restart did not start. Its wording is the whole of what the
+ * owner has to go on, so it says the two true things: the update is already
+ * staged, and switching the phone off and on finishes it. */
+const char *const nd_update_msg_no_restart =
+    "The update is ready but the phone could not restart itself. Switch it off and on again "
+    "and the update will finish installing.";
+
 void nd_update_reboot(nd_ui *ui)
 {
-    ND_UNUSED(ui); /* the Python takes it and never uses it either */
-
     /* The candidate walk and the sync that preceded it are the core's now.
      * It resolves the binary, ANSWERS, syncs and only then spawns, which is
      * why the ordinary five-second wait for that answer cannot abort a
      * reboot that was about to happen. spec-app-services.md 9.4 and 9.5. */
-    (void)nd_svc_reboot();
+    if (nd_svc_reboot()) {
+        dwell(UPDATE_REBOOT_DWELL);
+        return;
+    }
 
-    /* Note there is still no failure dialog: unlike the Power app, _reboot()
-     * does not tell anybody when nothing could be started, which is why the
-     * return is discarded rather than acted on. It sits for thirty seconds
-     * either way. That is the Python's, and it is what a phone with no
-     * reboot binary looks like today. */
-    dwell(UPDATE_REBOOT_DWELL);
+    /* ============ THE RETURN IS NO LONGER DISCARDED ============
+     *
+     * It used to be, and the comment here defended it: the Python did not tell
+     * anybody either, and false meant "this image has no reboot binary", which
+     * is not a thing an owner can act on.
+     *
+     * That stopped being what false means. It now also covers "the core
+     * refused" and "no answer from the core" -- and the state the phone is
+     * left in is one the owner CAN act on, because nd_update_stage() has
+     * already written the pending record and synced it. The image installs
+     * from that record at the next boot, by any means. So the honest screen is
+     * not silence and not "the update failed"; it is "it is ready, switch the
+     * phone off and on".
+     *
+     * Silence here is what "I installed an update and nothing happened" looked
+     * like: thirty seconds of a Ready page, then back to the menu, with a
+     * version number that had not changed. */
+    nd_log_err(ND_LOG_UPDATE, "the update is staged but the phone would not restart");
+    nd_update_refuse(ui, nd_update_msg_no_restart);
 }
 
 /* ------------------------------------------------------------------ *

@@ -1537,7 +1537,13 @@ static void test_clcc_ends_a_call_the_modem_forgot(void)
     fake_stop(&fm);
 }
 
-static void test_a_dead_port_drops_back_to_simulation(void)
+/* Renamed from test_a_dead_port_drops_back_to_simulation(). It never did
+ * drop back to Simulation -- a port that dies under an ADOPTED modem sets
+ * `faulted` and the link reads ND_MODEM_LINK_FAULT -- and leaving that name
+ * on it is how "Simulation" came to look like the normal answer to every
+ * kind of failure. The assertions below are unchanged; only the sentence
+ * they are filed under was wrong. */
+static void test_a_dead_port_drops_the_modem(void)
 {
     fake_modem fm;
     nd_modem *m = attach(&fm);
@@ -1698,7 +1704,7 @@ static void test_a_fault_is_not_simulation(void)
     CHECK(nd_modem_take_pending_fault(m) == NULL);
 
     /* Yank the descriptor the way a USB unplug does -- the same move
-     * test_a_dead_port_drops_back_to_simulation() makes, because it is the
+     * test_a_dead_port_drops_the_modem() makes, because it is the
      * real path into nd_modem__drop_hardware(): the write fails with a hard
      * errno and the modem is dropped. */
     {
@@ -2778,6 +2784,419 @@ static void test_a_modem_lost_during_the_boot_grace_is_not_a_fault(void)
     fake_stop(&fm);
 }
 
+/* ------------------------------------------------------------------ *
+ * 13. "There is a modem in this phone and I cannot reach it"
+ * ------------------------------------------------------------------ *
+ *
+ * Every test in this section is about one sentence: ND_MODEM_LINK_SIM means
+ * there is NO radio, and it was being used for "there is a radio and every
+ * way of opening it failed" -- which on the phone is the common case and on
+ * a build host cannot happen at all. See nd_modem.h's nd_modem_link.
+ */
+
+/* The policy, as a table, because the policy is what was wrong. Faking a
+ * call or a text is honest on a desktop with no radio and nowhere else. */
+static void test_simulation_is_only_honest_with_no_radio(void)
+{
+    /* No radio in the device: the whole point of Simulation Mode. */
+    CHECK(nd_modem__may_simulate(ND_MODEM_LINK_SIM, false));
+    CHECK(nd_modem__may_simulate(ND_MODEM_LINK_PROBING, false));
+
+    /* A radio that has not answered yet is still a radio. "Not yet" is the
+     * truthful answer to a dial during the boot grace, not a fake connect. */
+    CHECK(!nd_modem__may_simulate(ND_MODEM_LINK_PROBING, true));
+    CHECK(!nd_modem__may_simulate(ND_MODEM_LINK_SIM, true));
+
+    /* And the two broken states never fake anything, radio or not. */
+    CHECK(!nd_modem__may_simulate(ND_MODEM_LINK_UNREACHABLE, true));
+    CHECK(!nd_modem__may_simulate(ND_MODEM_LINK_UNREACHABLE, false));
+    CHECK(!nd_modem__may_simulate(ND_MODEM_LINK_FAULT, true));
+    CHECK(!nd_modem__may_simulate(ND_MODEM_LINK_FAULT, false));
+
+    /* A live modem places real calls. allow_calls=OFF is handled at the call
+     * site, not here, so this stays false in both directions. */
+    CHECK(!nd_modem__may_simulate(ND_MODEM_LINK_LIVE, true));
+    CHECK(!nd_modem__may_simulate(ND_MODEM_LINK_LIVE, false));
+}
+
+/* A candidate port that cannot be opened is NOT Simulation Mode.
+ *
+ * This is the headline bug of 0.5.x on real hardware. /dev/ttyUSB2 was still
+ * root:root 0600 because the foreground udev coldplug does not include the
+ * tty subsystem, the ndusr UI got EACCES, `faulted` stayed false because the
+ * port had never been adopted, and the phone printed "Simulation" in the
+ * carrier line next to a FULL four-bar meter. */
+static void test_a_modem_that_cannot_be_opened_is_not_simulation(void)
+{
+    nd_modem *m;
+
+    /* A directory where the port should be: open() gives EISDIR, which is a
+     * real errno on a candidate that really is enumerated -- the same shape
+     * as the EACCES the phone gets, without needing another uid. */
+    use_scratch_settings("system.hw.modem_at_port=/notaport\n");
+    CHECK_INT(nd_mkdir_p("/notaport", 0755u), ND_OK);
+
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+
+    /* Before any probe there is no evidence either way, and a core that has
+     * not looked yet must not accuse the phone of being broken. */
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_SIM);
+
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK(m->saw_candidates);
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_UNREACHABLE);
+
+    /* An EMPTY meter, not the route-derived four bars, and a carrier line
+     * that says what is wrong instead of the word "Simulation". */
+    nd_modem__sim_route_forget();
+    CHECK_INT(nd_modem_signal_level(m), 0);
+    CHECK_STR(nd_modem_operator_display(m), ND_MODEM_UNREACHABLE_CARRIER);
+
+    /* A stale hook file must not be able to paint over it either: both
+     * readouts check the link before they read /tmp/neodct_sim_*. */
+    pt_write_text(ND_MODEM_SIM_CSQ, "31\n");
+    pt_write_text(ND_MODEM_SIM_OPS, "Tello\n");
+    CHECK_INT(nd_modem_signal_level(m), 0);
+    CHECK_STR(nd_modem_operator_display(m), ND_MODEM_UNREACHABLE_CARRIER);
+
+    /* The notice fires once and carries the probe's own reason... */
+    {
+        const char *why = nd_modem_take_pending_fault(m);
+
+        CHECK(why != NULL);
+        if (why != NULL)
+            CHECK(strstr(why, "/notaport") != NULL);
+        CHECK(nd_modem_take_pending_fault(m) == NULL);
+    }
+
+    /* ...and NOT once per probe. The probe repeats every PROBE_RETRY_S for
+     * the life of the phone; a modal six times a minute is not a diagnosis. */
+    m->next_probe = 0.0;
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK(nd_modem_take_pending_fault(m) == NULL);
+
+    /* `faulted` is deliberately untouched: this modem was never adopted, so
+     * it did not "fail" in the sense drop_hardware() means. */
+    CHECK(!m->faulted);
+
+    nd_modem__destroy(m);
+}
+
+/* And while it is unreachable the phone must not pretend.
+ *
+ * do_dial() used to arm a two-second fake connect and do_send_sms() used to
+ * queue SMS_SENT and return true, both gated on `hardware` -- the one flag
+ * that is false in exactly this state. The owner watched a call timer run
+ * for a call that was never placed. */
+static void test_an_unreachable_modem_refuses_to_fake_a_call_or_a_text(void)
+{
+    nd_modem *m;
+    char detail[ND_MODEM_DETAIL_MAX];
+    nd_mev e;
+
+    use_scratch_settings("system.hw.modem_at_port=/notaport\n");
+    CHECK_INT(nd_mkdir_p("/notaport", 0755u), ND_OK);
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_UNREACHABLE);
+    while (nd_modem__take(m, &e))
+        ;
+
+    CHECK(!nd_modem_dial(m, "5551234"));
+    CHECK_INT(nd_modem_state(m), ND_CALL_IDLE);
+    CHECK(!m->sim_connect_armed);
+
+    /* Messages renders `detail` verbatim as "Send failed: <detail>", so the
+     * reason has to be a sentence and it has to name the port. */
+    detail[0] = '\0';
+    CHECK(!nd_modem_send_sms(m, "5551234", "hello", detail, sizeof detail));
+    CHECK(strstr(detail, "/notaport") != NULL);
+
+    /* Nothing was queued for the UI to celebrate. */
+    CHECK(!nd_modem__take(m, &e));
+
+    nd_modem__destroy(m);
+}
+
+/* /sys/class/tty has about seventy entries on a CONFIG_VT kernel and the
+ * listing kept the first THIRTY-TWO of them, then sorted.
+ *
+ * ND_MODEM_CAND_MAX is "a SIM7600 enumerates five AT ports" and was being
+ * spent on tty0..tty63. sysfs readdir order is a name hash, so which names
+ * survived was decided by the kernel build; on a kernel where the ttyUSB
+ * nodes hashed past the cut the phone reported "no candidate AT ports" with
+ * the modem plainly plugged in, for ever.
+ *
+ * Sixty-four decoys against five real nodes is not a certainty on any one
+ * filesystem, but the old code had to win a 32-from-71 draw five times over
+ * to pass this (about two chances in a thousand) and the new code cannot
+ * lose it at all: the prefix is checked before the entry is counted. */
+static void test_the_tty_listing_is_not_truncated_before_the_ttyusb_nodes(void)
+{
+    nd_modem *m;
+    char ports[ND_MODEM_CAND_MAX][ND_MODEM_PORT_MAX];
+    char pcm[ND_MODEM_PORT_MAX];
+    char name[32];
+    int i;
+
+    use_scratch_settings("");
+
+    /* The VT consoles, plus the other tty-class names a phone kernel has. */
+    for (i = 0; i < 64; i++) {
+        (void)nd_snprintf(name, sizeof name, "tty%d", i);
+        write_tty(name, NULL);
+    }
+    write_tty("console", NULL);
+    write_tty("ptmx", NULL);
+    write_tty("tty", NULL);
+    write_tty("ttyFIQ0", NULL);
+
+    /* ...and the modem, created LAST, which is what a USB device that
+     * enumerates after boot looks like in the directory. */
+    write_tty("ttyUSB0", "00\n"); /* DIAG, dropped on purpose  */
+    write_tty("ttyUSB1", "01\n");
+    write_tty("ttyUSB2", "02\n");
+    write_tty("ttyUSB3", "03\n");
+    write_tty("ttyUSB4", "04\n"); /* the PCM port              */
+
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+
+    CHECK_INT(nd_modem__candidate_ports(m, ports, ND_ARRAY_LEN(ports)), 4);
+    CHECK_STR(ports[0], "/dev/ttyUSB2");
+    CHECK_STR(ports[1], "/dev/ttyUSB3");
+
+    /* The identical truncation in nd_modem_audio.c decides which port a call
+     * pipes its audio through, and a miss there falls back to a hardcoded
+     * /dev/ttyUSB4 -- silently right on this board and silently wrong on any
+     * other. Same directory, same 64 decoys. */
+    nd_modem__pcm_port(pcm, sizeof pcm);
+    CHECK_STR(pcm, "/dev/ttyUSB4");
+
+    nd_modem__destroy(m);
+}
+
+/* THE LOCK FILE THIS PROCESS DID NOT CREATE.
+ *
+ * /tmp is a tmpfs and the lock file is made on demand by whichever of nd-core
+ * (ndusr, umask 0027) and atcmd (root, umask 0022) reaches it first. When
+ * root wins it is 0644 root:root and the core's O_RDWR open fails -- after
+ * which the core used to run with NO LOCK AT ALL against a root process on
+ * the same tty. flock(2) locks the open file description regardless of access
+ * mode, so read-only is a real exclusive lock and the write bit was never
+ * needed. */
+static void test_a_lock_file_this_user_cannot_write_is_still_a_lock(void)
+{
+    nd_modem *m;
+    char resolved[ND_PATH_MAX];
+    int other;
+
+    if (geteuid() == 0u) {
+        /* root ignores the mode, so there is nothing to lock out. */
+        return;
+    }
+
+    use_scratch_settings("");
+    pt_write_text(ND_MODEM_LOCK_FILE, "");
+    CHECK_INT(nd_path_resolve(resolved, sizeof resolved, ND_MODEM_LOCK_FILE), ND_OK);
+    CHECK_INT(chmod(resolved, 0444u), 0);
+
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+    CHECK(m->lock_fd >= 0); /* the read-only retry */
+    CHECK_STR(m->lock_why, "");
+
+    /* And it is a real lock, not a descriptor that happens to be open. */
+    other = open(resolved, O_RDONLY);
+    CHECK(other >= 0);
+    if (other >= 0) {
+        CHECK_INT(flock(other, LOCK_EX | LOCK_NB), 0);
+        CHECK(!nd_modem__acquire(m));
+        CHECK(!m->lock_unusable); /* held by somebody, not unusable */
+        CHECK_INT(flock(other, LOCK_UN), 0);
+        CHECK(nd_modem__acquire(m));
+        nd_modem__release(m);
+        (void)close(other);
+    }
+    nd_modem__destroy(m);
+}
+
+/* And when there is no lock file to be had at all, the port is left alone.
+ *
+ * `if (m->lock_fd < 0) return true;` was the old answer -- "serialise with
+ * nobody, but keep working" -- which is the interleaving the lock exists to
+ * prevent, run silently against a root process. Refusing is loud, reaches the
+ * probe reason, and self-heals the moment the file becomes openable. */
+static void test_an_unusable_lock_refuses_the_port_and_then_recovers(void)
+{
+    nd_modem *m;
+    char dir[ND_PATH_MAX];
+    const char *slash;
+    char resolved[ND_PATH_MAX];
+
+    if (geteuid() == 0u)
+        return;
+
+    use_scratch_settings("system.hw.modem_at_port=/notaport\n");
+    CHECK_INT(nd_mkdir_p("/notaport", 0755u), ND_OK);
+
+    /* Take away the right to create the file, the way a sticky /tmp with a
+     * root-owned lock in it does. */
+    (void)nd_strlcpy(dir, ND_MODEM_LOCK_FILE, sizeof dir);
+    slash = strrchr(dir, '/');
+    CHECK(slash != NULL);
+    if (slash == NULL)
+        return;
+    dir[(size_t)(slash - dir)] = '\0';
+    CHECK_INT(nd_mkdir_p(dir, 0755u), ND_OK);
+    CHECK_INT(nd_path_resolve(resolved, sizeof resolved, dir), ND_OK);
+    CHECK_INT(chmod(resolved, 0500u), 0);
+
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL) {
+        (void)chmod(resolved, 0755u);
+        return;
+    }
+    CHECK_INT(m->lock_fd, -1);
+    CHECK(m->lock_why[0] != '\0');
+
+    CHECK(!nd_modem__acquire(m));
+    CHECK(m->lock_unusable);
+
+    /* And the probe says so, in the WHY row the engineering Modem app draws,
+     * instead of quietly driving the tty. */
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK(strstr(m->last_probe_why, "lock unusable") != NULL);
+
+    /* The file becoming openable later -- root's atcmd creating it, or udev
+     * fixing the mode -- must be picked up without a restart. */
+    CHECK_INT(chmod(resolved, 0755u), 0);
+    m->next_lock_try = 0.0;
+    CHECK(nd_modem__acquire(m));
+    CHECK(!m->lock_unusable);
+    nd_modem__release(m);
+
+    nd_modem__destroy(m);
+}
+
+/* A busy S45modem must not be able to fault a healthy modem.
+ *
+ * The ND_MODEM_FAULT_AFTER_S watchdog measures "how long since a transaction
+ * succeeded", and nd_modem_poll() returns before every transaction while the
+ * AT-port lock is held -- but the watchdog sits ABOVE that return and kept
+ * counting. `at 'AT+CGATT=1' 40` is one atcmd invocation holding the flock
+ * for up to forty seconds, and two of those plus the gaps is ninety. The
+ * phone then put a MODEM FAULT modal on screen for a radio that was
+ * answering somebody else the whole time. */
+static void test_a_held_lock_is_not_ninety_seconds_of_silence(void)
+{
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+    nd_modem *other;
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+    other = make_modem();
+    CHECK(other != NULL);
+    if (other == NULL || other->lock_fd < 0 || m->lock_fd < 0) {
+        nd_modem__destroy(other);
+        nd_modem__destroy(m);
+        fake_stop(&fm);
+        return;
+    }
+
+    /* S45modem takes the port and holds it past the watchdog's patience. */
+    CHECK(nd_modem__acquire(other));
+    m->last_ok_at = nd_modem__now() - (ND_MODEM_FAULT_AFTER_S + 10.0);
+    poll_now(m);
+
+    CHECK(nd_modem_has_hardware(m));
+    CHECK(!m->faulted);
+    /* Another process holding this lock is evidence the modem is ALIVE, so
+     * the clock is stamped forward rather than left to run out. */
+    CHECK(m->last_ok_at > nd_modem__now() - 1.0);
+
+    /* The watchdog still works for a modem that is genuinely silent: with
+     * the port free and nothing answering, the same age faults it. */
+    nd_modem__release(other);
+    m->last_ok_at = nd_modem__now() - (ND_MODEM_FAULT_AFTER_S + 10.0);
+    poll_now(m);
+    CHECK(!nd_modem_has_hardware(m));
+    CHECK(m->faulted);
+
+    nd_modem__destroy(other);
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
+/* The boot grace must not run while there is nothing to probe.
+ *
+ * It was measured from nd_ui_init, which on the phone is about two seconds
+ * after power-on -- and a SIM7600 needs longer than that just to enumerate,
+ * with the ttyUSB group arriving later still from the background coldplug.
+ * So the thirty seconds were spent waiting for a bus that had not settled
+ * and the verdict was announced before the radio finished starting. */
+static void test_the_boot_grace_waits_for_the_bus_to_settle(void)
+{
+    nd_modem *m;
+
+    nd_settings_set_paths(SETTINGS_PATH, VERSION_PATH);
+    pt_write_text(SETTINGS_PATH, "system.modem.boot_grace_s=5\n");
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+
+    /* Nearly out of time, and /sys/class/tty is empty: a probe that had
+     * nothing to probe is not an answer, so the window reopens. */
+    m->boot_deadline = nd_modem__now() + 0.5;
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK(m->boot_deadline - nd_modem__now() > 4.0);
+
+    /* It cannot reopen for ever: ND_MODEM_LATE_GRACE_MAX_S is measured from
+     * the start of the service and is the hard stop. */
+    m->late_grace_deadline = nd_modem__now() + 2.0;
+    m->boot_deadline = nd_modem__now() + 0.5;
+    m->next_probe = 0.0;
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK(m->boot_deadline - nd_modem__now() <= 2.0);
+    CHECK(m->boot_deadline - nd_modem__now() > 1.0);
+
+    nd_modem__destroy(m);
+}
+
+/* And with the grace switched off -- QEMU, and every fixture in this file --
+ * nothing is extended at all. A test that asks for no waiting must get none. */
+static void test_a_zero_boot_grace_extends_nothing(void)
+{
+    nd_modem *m;
+
+    use_scratch_settings(""); /* system.modem.boot_grace_s=0 */
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+    m->boot_deadline = 0.0;
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK_INT((int)(m->boot_deadline * 1000.0), 0);
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_SIM);
+    nd_modem__destroy(m);
+}
+
 int main(void)
 {
     (void)nd_settings_init();
@@ -2824,7 +3243,7 @@ int main(void)
     RUN(test_dial_and_hangup_on_real_hardware);
     RUN(test_a_junk_number_logs_an_empty_dial_and_fails);
     RUN(test_clcc_ends_a_call_the_modem_forgot);
-    RUN(test_a_dead_port_drops_back_to_simulation);
+    RUN(test_a_dead_port_drops_the_modem);
 
     RUN(test_sim_signal_and_operator_hooks);
     RUN(test_sim_bars_follow_the_default_route);
@@ -2856,6 +3275,16 @@ int main(void)
     RUN(test_boot_grace_is_neither_simulation_nor_a_fault);
     RUN(test_boot_grace_comes_from_the_setting);
     RUN(test_a_modem_lost_during_the_boot_grace_is_not_a_fault);
+
+    RUN(test_simulation_is_only_honest_with_no_radio);
+    RUN(test_a_modem_that_cannot_be_opened_is_not_simulation);
+    RUN(test_an_unreachable_modem_refuses_to_fake_a_call_or_a_text);
+    RUN(test_the_tty_listing_is_not_truncated_before_the_ttyusb_nodes);
+    RUN(test_a_lock_file_this_user_cannot_write_is_still_a_lock);
+    RUN(test_an_unusable_lock_refuses_the_port_and_then_recovers);
+    RUN(test_a_held_lock_is_not_ninety_seconds_of_silence);
+    RUN(test_the_boot_grace_waits_for_the_bus_to_settle);
+    RUN(test_a_zero_boot_grace_extends_nothing);
 
     RUN(test_the_thread_runs_and_stops_cleanly);
     RUN(test_requeue_puts_an_event_back_at_the_front);

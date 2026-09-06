@@ -25,10 +25,14 @@
  *     that ordering" (nd_storage.h).
  *
  *  6. TonePreviewPlayer really spawns and really stops. Driven against a stub
- *     `nice` on $PATH, so no mpv is required and nothing is played: the claim
- *     is that a child appears, that stopping it reaps it, and that
- *     app_shutdown() stops it too -- which is the SIGTERM teardown contract
- *     in nd_app.h, and the reason the phone does not ring silently.
+ *     `mpv` on $PATH -- the only program the spawn has to find, because
+ *     MPV_CMD execs the player itself -- so no real mpv is required and
+ *     nothing is played: the claim is that a child appears, that stopping it
+ *     reaps it, and that app_shutdown() stops it too -- which is the SIGTERM
+ *     teardown contract in nd_app.h, and the reason the phone does not ring
+ *     silently. $PATH holding NOTHING BUT that stub is itself the assertion
+ *     that argv[0] is the player: an MPV_CMD that went back to naming a
+ *     wrapper would have nothing to exec and no preview would start.
  *
  *  7. THE GOLDEN FRAME. app-tones is the PagedList's first page, judged by
  *     the SHA-256 over raw RGB that goldenframe.py compares.
@@ -99,6 +103,37 @@ static bool api_open(void *h)
  * 1. The strings
  * ------------------------------------------------------------------ */
 
+/* ============ THE SHAPE OF MPV_CMD, NOT ITS SPELLING ============
+ *
+ * Checking the argv element by element is not enough on its own, and this
+ * test is the proof: `nice -n -10 mpv ...` passed an element-by-element
+ * check of its own spelling for a whole release while every preview on the
+ * handset was silent. What was wrong with that argv was structural. argv[0]
+ * was a WRAPPER, so the program the kernel exec'd was not the player, and
+ * busybox nice dies on setpriority rather than degrading -- and an ndusr app
+ * has no CAP_SYS_NICE and no RLIMIT_NICE headroom, so it always died.
+ *
+ * So this pins the shape: the exec target is the player itself, and is none
+ * of the wrappers a future edit might reach for to influence scheduling or
+ * identity. Every name below needs a privilege this phone grants no app, so
+ * putting one in front of mpv makes the spawn dead on the handset -- and it
+ * can be dead there while working perfectly on a developer's desktop, where
+ * a negative nice level is often allowed and sudo exists at all. */
+static void check_exec_target_is_the_player(const char *argv0)
+{
+    static const char *const wrappers[] = {"nice",    "renice", "chrt", "ionice",
+                                           "setpriv", "sudo",   "su",   "doas"};
+    size_t i;
+
+    CHECK_STR(argv0, "mpv", "MPV_CMD[0] is the program that actually gets exec'd");
+    for (i = 0u; i < sizeof wrappers / sizeof wrappers[0]; i++) {
+        char what[96];
+
+        (void)nd_snprintf(what, sizeof what, "MPV_CMD[0] is not the wrapper `%s`", wrappers[i]);
+        CHECK(strcmp(argv0, wrappers[i]) != 0, what);
+    }
+}
+
 static void test_strings(void)
 {
     CHECK_STR(*api.add_more_label, "Add more...", "ADD_MORE_LABEL");
@@ -123,15 +158,15 @@ static void test_strings(void)
               "phone, and they appear in this list next to the built-in ones.",
               "ADD_MORE_HELP_WITH_CARD");
 
-    /* MPV_CMD, including `nice -n -10`: a preview that stutters because the
-     * UI is redrawing is the problem the nice was added to solve. */
-    CHECK_STR(api.mpv_cmd[0], "nice", "MPV_CMD[0]");
-    CHECK_STR(api.mpv_cmd[1], "-n", "MPV_CMD[1]");
-    CHECK_STR(api.mpv_cmd[2], "-10", "MPV_CMD[2]");
-    CHECK_STR(api.mpv_cmd[3], "mpv", "MPV_CMD[3]");
-    CHECK_STR(api.mpv_cmd[4], "--no-video", "MPV_CMD[4]");
-    CHECK_STR(api.mpv_cmd[5], "--audio-buffer=4", "MPV_CMD[5]");
-    CHECK_STR(api.mpv_cmd[6], "--quiet", "MPV_CMD[6]");
+    /* MPV_CMD, which is the Python's minus its `nice -n -10`; tones.h says at
+     * length why the nice had to go. Four elements, so anything that reads a
+     * fifth is reading off the end of the array. */
+    CHECK_INT(ND_TONES_MPV_ARGC, 4, "MPV_CMD is four elements long");
+    CHECK_STR(api.mpv_cmd[0], "mpv", "MPV_CMD[0]");
+    CHECK_STR(api.mpv_cmd[1], "--no-video", "MPV_CMD[1]");
+    CHECK_STR(api.mpv_cmd[2], "--audio-buffer=4", "MPV_CMD[2]");
+    CHECK_STR(api.mpv_cmd[3], "--quiet", "MPV_CMD[3]");
+    check_exec_target_is_the_player(api.mpv_cmd[0]);
 
     CHECK_STR(ND_TONES_SYSTEM_DIR, "/NeoDCT/System/tones", "SYSTEM_TONES_DIR");
     CHECK_STR(ND_TONES_USER_DIR, "/NeoDCT/User/tones", "USER_TONES_DIR");
@@ -280,15 +315,18 @@ static void test_scan(void)
 
 static char g_bindir[ND_PATH_MAX];
 
-/* A stub `nice` that blocks, so a preview can be started and stopped without
- * mpv, without a sound card and without playing anything. MPV_CMD's argv[0]
- * is `nice`, so this is the only program the spawn needs to find. */
-static bool make_stub_nice(void)
+/* A stub `mpv` that blocks, so a preview can be started and stopped without
+ * a real mpv, without a sound card and without playing anything. MPV_CMD's
+ * argv[0] is `mpv`, so this is the only program the spawn needs to find --
+ * and, with $PATH cut down to this directory below, the only program it CAN
+ * find. That is deliberate: it is what makes test_preview fail if argv[0]
+ * ever goes back to being a wrapper. */
+static bool make_stub_mpv(void)
 {
     char path[ND_PATH_MAX];
     FILE *f;
 
-    if (nd_snprintf(path, sizeof path, "%s/nice", g_bindir) != ND_OK)
+    if (nd_snprintf(path, sizeof path, "%s/mpv", g_bindir) != ND_OK)
         return false;
     f = fopen(path, "w");
     if (f == NULL)
@@ -315,15 +353,20 @@ static void test_preview(void)
     CHECK_INT(api.preview_pid(), -1, "stopping nothing is a no-op");
 
     (void)nd_strlcpy(keep, (saved_path != NULL) ? saved_path : "", sizeof keep);
-    if (!make_stub_nice()) {
-        CHECK(false, "stub nice");
+    if (!make_stub_mpv()) {
+        CHECK(false, "stub mpv");
         return;
     }
+    /* $PATH is now exactly one directory holding exactly one program, `mpv`.
+     * The spawn resolves argv[0] against it, so this check does not merely
+     * say that SOMETHING started: it says the thing that started was the
+     * player. Prefixing MPV_CMD with a wrapper again would leave which_exec()
+     * with nothing to find and this line would fail. */
     (void)setenv("PATH", g_bindir, 1);
 
     api.preview_play(ND_TONES_SYSTEM_DIR "/Beta.mp3");
     first = api.preview_pid();
-    CHECK(first > 0, "a preview process was started");
+    CHECK(first > 0, "a preview process was started, and it is mpv itself");
 
     /* "self.stop()" is the FIRST line of play(): a second preview replaces
      * the first rather than playing over it. */

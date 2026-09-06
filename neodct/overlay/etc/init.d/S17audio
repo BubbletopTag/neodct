@@ -30,8 +30,38 @@
 : "${NEODCT_PROC_ASOUND:=/proc/asound}"
 : "${NEODCT_AMIXER:=amixer}"
 : "${NEODCT_CAPTURE_LEVEL:=80}"
+# Who owns the file afterwards. nd_btaudio.c rewrites it; that code runs in the
+# core and in Settings, both of which are ndusr now. See conf_owner().
+: "${NEODCT_ASOUND_OWNER:=ndusr}"
 
 CONF="$NEODCT_ASOUND_CONF"
+
+# ============ AND WHO MAY REWRITE IT AFTERWARDS ============
+#
+# This file is not written once. nd_btaudio_route_to() rewrites it every time
+# earbuds connect or disconnect -- that is the entire routing mechanism, since
+# everything on this phone opens ALSA's "default" and this is what "default"
+# resolves to. Before 0.5.0b the process doing the rewriting was root and this
+# did not have to be said; now it is the core, or Settings, and both are ndusr.
+#
+# /run is a 0755 root:root tmpfs (see /etc/fstab), so ndusr cannot CREATE a
+# file there. What it can do is rewrite one it owns, in place -- which is why
+# the owner is handed over here, at boot, by the one process that still can.
+# Without it nd_btaudio_write_conf() returns ND_ERR_IO and the phone cannot
+# route audio to earbuds, or back off them again.
+#
+# 0644 rather than 0640, and it is deliberate: mpv and netsurf run as ndusr_ut
+# and they read this file to find the sound card. It says which card is card 1.
+# There is nothing in it to keep.
+#
+# Silent when there is no ndusr -- an image built without
+# BR2_ROOTFS_USERS_TABLES runs everything as root and needs none of this.
+conf_owner() {
+    [ -e "$CONF" ] || return 0
+    chown "$NEODCT_ASOUND_OWNER:$NEODCT_ASOUND_OWNER" "$CONF" 2>/dev/null
+    chmod 0644 "$CONF" 2>/dev/null
+    return 0
+}
 
 find_usb_card() {
     # USB cards are the ones with a usbid. That is a more reliable test
@@ -120,12 +150,16 @@ ctl.!default {
     card $CARD
 }
 EOF
+        conf_owner
         echo "[AUDIO] default -> card $CARD (${NAME:-USB}), dmix bypassed"
         enable_capture "$CARD"
         echo "[AUDIO] capture enabled on card $CARD at ${NEODCT_CAPTURE_LEVEL}%"
         ;;
     stop)
-        rm -f "$CONF"
+        # The speaker backup nd_btaudio.c leaves behind goes with it: a saved
+        # route from the last session would otherwise be restored on top of a
+        # card that may have been renumbered since.
+        rm -f "$CONF" "$CONF.speaker"
         ;;
     restart|reload)
         "$0" stop

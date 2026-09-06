@@ -955,6 +955,68 @@ bool nd_nap_is_installed(const char *apps_dir, const char *dir)
     return nd_path_is_file(manifest);
 }
 
+/* One installed app's manifest "id" and "name". False when the directory has
+ * no readable manifest, which is a dead install rather than an app. */
+static bool installed_app_id(const char *apps_dir, const char *dir, int32_t *id_out, char *name_out,
+                             size_t name_sz)
+{
+    char manifest[ND_PATH_MAX];
+    nd_json_doc *doc = NULL;
+    const nd_json_val *root;
+    bool ok = false;
+
+    if (nd_snprintf(manifest, sizeof manifest, "%s/%s/manifest.json", apps_dir, dir) != ND_OK)
+        return false;
+    if (nd_json_parse_file(manifest, &doc, NULL, 0u) != ND_OK)
+        return false;
+    root = nd_json_root(doc);
+    if (root != NULL && nd_json_type_of(root) == ND_JSON_OBJECT && manifest_id(root, id_out)) {
+        if (name_out != NULL)
+            (void)nd_strlcpy(name_out, nd_json_get_str(root, "name", dir), name_sz);
+        ok = true;
+    }
+    nd_json_free(doc);
+    return ok;
+}
+
+bool nd_nap_id_conflict(const char *apps_dir, int32_t id, const char *skip_dir, char *out_name,
+                        size_t out_sz)
+{
+    char resolved[ND_PATH_MAX];
+    DIR *d;
+    struct dirent *e;
+    bool clash = false;
+
+    if (out_name != NULL && out_sz > 0u)
+        out_name[0] = '\0';
+    if (apps_dir == NULL)
+        return false;
+    if (nd_path_resolve(resolved, sizeof resolved, apps_dir) != ND_OK)
+        return false;
+    d = opendir(resolved);
+    if (d == NULL)
+        return false;
+
+    while (!clash && (e = readdir(d)) != NULL) {
+        int32_t other = 0;
+        char name[ND_APP_NAME_MAX];
+
+        if (e->d_name[0] == '.')
+            continue;
+        if (skip_dir != NULL && strcmp(e->d_name, skip_dir) == 0)
+            continue;
+        if (!installed_app_id(apps_dir, e->d_name, &other, name, sizeof name))
+            continue;
+        if (other != id)
+            continue;
+        clash = true;
+        if (out_name != NULL)
+            (void)nd_strlcpy(out_name, name, out_sz);
+    }
+    (void)closedir(d);
+    return clash;
+}
+
 nd_err nd_nap_install(const char *path, const char *apps_dir, const char *arch, nd_nap_info *out,
                       char *why, size_t why_sz)
 {
@@ -996,6 +1058,28 @@ nd_err nd_nap_install(const char *path, const char *apps_dir, const char *arch, 
         say(why, why_sz, "The card has no apps folder.");
         rc = ND_ERR_NOTFOUND;
         goto done;
+    }
+
+    /* The menu position. Neither of these refuses the install: an app that
+     * sorts in a surprising place is still an app, and an owner who wanted it
+     * has already said so. They exist because the alternative -- what
+     * happened -- is that the order is decided by readdir and nothing
+     * anywhere says a word about it. See ND_NAP_ID_MIN in nd_nap.h. */
+    if (c.info.id < ND_NAP_ID_MIN || c.info.id > ND_NAP_ID_MAX) {
+        nd_log_err(ND_LOG_OS,
+                   "nap: %s claims menu id %ld, outside the %d-%d band reserved for installed "
+                   "apps; it will sort among the stock apps",
+                   c.info.name, (long)c.info.id, ND_NAP_ID_MIN, ND_NAP_ID_MAX);
+    }
+    {
+        char clash[ND_APP_NAME_MAX];
+
+        if (nd_nap_id_conflict(apps_dir, c.info.id, c.info.dir, clash, sizeof clash)) {
+            nd_log_err(ND_LOG_OS,
+                       "nap: %s and the installed app %s both claim menu id %ld; their order in "
+                       "the menu is whatever the card's directory happens to return",
+                       c.info.name, clash, (long)c.info.id);
+        }
     }
 
     /* Whatever an earlier attempt left behind. The staging name is ours and

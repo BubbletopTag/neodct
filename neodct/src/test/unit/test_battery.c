@@ -9,13 +9,26 @@
  * rather than the first -- that is the five-sample moving average lagging, and
  * it is the behaviour the home screen depends on.
  *
- * Everything here runs in Simulation Mode, because there is no i2c bus on the
- * machine this runs on. That is not a weakness of the test: the sim path feeds
- * the identical state machine, and the state machine is the part with the
- * hysteresis, the latches and the three-sample shutdown confirmation in it.
- * The register-level code is exercised on the phone, by tests/hw.
+ * The voltage vectors run in Simulation Mode, because there is no i2c bus on
+ * the machine this runs on. That is not a weakness of the test: the sim path
+ * feeds the identical state machine, and the state machine is the part with
+ * the hysteresis, the latches and the three-sample shutdown confirmation in
+ * it. The register-level code is exercised on the phone, by tests/hw.
+ *
+ * ============ AND THE THREE-WAY VERDICT, WHICH IS NOT THE SIM PATH ============
+ *
+ * The cases at the bottom do NOT run in Simulation Mode, and they are the
+ * ones that would have caught the bug the phone actually had. They write a
+ * plain file where the character device belongs, so that open() succeeds and
+ * everything after it fails -- which is exactly the shape of a bus node whose
+ * udev grant has not landed. What matters is the VERDICT that produces:
+ * ND_BATT_SRC_UNREADABLE, no voltage, no mention of QEMU. Reporting that as
+ * an absent gauge with a comfortable 3.85 V is what disabled the low-battery
+ * warning and the protective shutdown on the owner's phone, and one of the
+ * cases below used to assert it.
  */
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -418,8 +431,121 @@ static void test_the_i2c_bus_and_address_come_from_settings(void)
 
     CHECK(strstr(log, "/dev/i2c-7") != NULL);
     CHECK(strstr(log, "I2C_SLAVE 0x40") != NULL);
-    CHECK(strstr(log, "Running in Simulation Mode") != NULL);
+    /* ============ THIS LINE USED TO ASSERT THE BUG ============
+     *
+     * It read `strstr(log, "Running in Simulation Mode") != NULL`, and it was
+     * the only test that ever exercised a bus node that EXISTS and cannot be
+     * used -- which is precisely the shape the phone hits when udev has not
+     * applied group i2c yet. Asserting that the phone answers that with
+     * "HARDWARE NOT FOUND ... a stub for the QEMU dev environment" is what
+     * kept a soldered fuel gauge being reported as an absent one, with a
+     * fixed 3.85 V behind it and the low-battery warning and the protective
+     * shutdown quietly switched off.
+     *
+     * The fixture is unchanged; only the expected verdict moved. A node the
+     * probe could open and not use is ND_BATT_SRC_UNREADABLE, and the log
+     * must NOT mention QEMU. */
+    CHECK(strstr(log, "FUEL GAUGE UNREADABLE") != NULL);
+    CHECK(strstr(log, "Simulation Mode") == NULL);
+    CHECK(strstr(log, "QEMU") == NULL);
+    CHECK(nd_battery_source_of(b) == ND_BATT_SRC_UNREADABLE);
     CHECK(!nd_battery_has_hardware(b));
+    nd_battery_close(b);
+}
+
+/* --- absent is not the same as unreadable --- */
+
+/* The pure decision, which is the whole of the difference. Everything the
+ * phone can produce at open(2) except these three means the node is there. */
+static void test_the_absent_errnos_are_told_apart_from_the_unreachable_ones(void)
+{
+    CHECK(nd_battery_errno_means_absent(ENOENT));
+    CHECK(nd_battery_errno_means_absent(ENODEV));
+    CHECK(nd_battery_errno_means_absent(ENXIO));
+
+    /* The one that cost the owner the gauge: devtmpfs made the node the
+     * instant the adapter registered, and udev had not got to it yet. */
+    CHECK(!nd_battery_errno_means_absent(EACCES));
+    CHECK(!nd_battery_errno_means_absent(EPERM));
+    CHECK(!nd_battery_errno_means_absent(EBUSY));
+    CHECK(!nd_battery_errno_means_absent(EIO));
+    /* No errno at all is not a missing node either. */
+    CHECK(!nd_battery_errno_means_absent(0));
+}
+
+/* A gauge that is there and cannot be read must report NOTHING, not 3.85 V.
+ *
+ * 3.85 V is above ND_LOW_WARN_V, above ND_CRITICAL_WARN_V and above
+ * ND_SHUTDOWN_V, so reporting it is not merely a wrong number on the meter --
+ * it disables the entire warning and shutdown state machine for the rest of
+ * the session, on the one phone that most needs it. */
+static void test_an_unreadable_gauge_reports_no_voltage_at_all(void)
+{
+    nd_battery *b = NULL;
+    double v = -1.0;
+
+    (void)unsetenv(ND_SIM_ENV_VAR);
+    clear_sim_vcell();
+    pt_write_text("/dev/i2c-6", "");
+
+    mute_stdout();
+    CHECK(nd_battery_open(&b, 6, 0x36) == ND_OK);
+    unmute_stdout();
+
+    CHECK(nd_battery_source_of(b) == ND_BATT_SRC_UNREADABLE);
+    CHECK(!nd_battery_has_hardware(b));
+    /* "no reading yet", which is distinct from a voltage -- nd_battery.h. */
+    CHECK(!nd_battery_vcell(b, &v));
+    /* The meter therefore sits on the pre-first-read 3 with a "?" over it
+     * (nd_layout.c draws the "?" from nd_battery_has_hardware()), rather than
+     * on a confident 3 with no "?" at all. */
+    CHECK_INT(nd_battery_level(b), 3);
+    /* And it says why, in the kernel's words, for the FuelGauge app and for a
+     * log somebody greps. */
+    CHECK(strstr(nd_battery_fault(b), "/dev/i2c-6") != NULL);
+    nd_battery_close(b);
+}
+
+/* ...except when a developer has explicitly named one. The sim file is how
+ * the warning and shutdown flow is driven from a serial console, and it must
+ * keep working on a board whose i2c node happens to exist. */
+static void test_an_explicit_override_still_drives_an_unreadable_gauge(void)
+{
+    nd_battery *b = NULL;
+
+    (void)unsetenv(ND_SIM_ENV_VAR);
+    set_sim_vcell("3.30");
+    pt_write_text("/dev/i2c-6", "");
+
+    mute_stdout();
+    CHECK(nd_battery_open(&b, 6, 0x36) == ND_OK);
+    unmute_stdout();
+
+    CHECK(nd_battery_source_of(b) == ND_BATT_SRC_UNREADABLE);
+    CHECK_INT(nd_battery_level(b), 0);
+    nd_battery_close(b);
+    clear_sim_vcell();
+}
+
+/* An absent node is still Simulation Mode, still says so, and still reports
+ * the designed 3.85 V. The new state must not have eaten the old one. */
+static void test_an_absent_node_is_still_plain_simulation(void)
+{
+    char log[4096];
+    nd_battery *b = NULL;
+
+    (void)unsetenv(ND_SIM_ENV_VAR);
+    clear_sim_vcell();
+
+    capture_begin();
+    /* Bus 5 has no node under the case root at all. */
+    CHECK(nd_battery_open(&b, 5, 0x36) == ND_OK);
+    capture_end(log, sizeof log);
+
+    CHECK(nd_battery_source_of(b) == ND_BATT_SRC_SIM);
+    CHECK(strstr(log, "Running in Simulation Mode") != NULL);
+    CHECK(strstr(log, "stub for the QEMU dev environment") != NULL);
+    CHECK_INT(nd_battery_level(b), 3);
     nd_battery_close(b);
 }
 
@@ -491,6 +617,10 @@ int main(void)
     RUN(test_polling_twice_inside_two_seconds_changes_nothing);
     RUN(test_simulation_mode_has_no_registers_to_show);
     RUN(test_the_i2c_bus_and_address_come_from_settings);
+    RUN(test_the_absent_errnos_are_told_apart_from_the_unreachable_ones);
+    RUN(test_an_unreadable_gauge_reports_no_voltage_at_all);
+    RUN(test_an_explicit_override_still_drives_an_unreadable_gauge);
+    RUN(test_an_absent_node_is_still_plain_simulation);
     RUN(test_an_explicit_bus_and_address_win_over_settings);
     RUN(test_a_nonsense_bus_setting_falls_back_to_three);
     RUN(test_the_constructor_polls_once_so_the_first_frame_is_real);

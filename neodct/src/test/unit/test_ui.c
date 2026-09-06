@@ -299,6 +299,132 @@ static const char *golden_digest(const nd_json_doc *doc, const char *name)
  * Unit checks that need no rendering
  * ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ *
+ * T9: the rule, and the fact that it is asked again
+ * ------------------------------------------------------------------ */
+
+/* nd_ui_t9_active_for() decides whether multi-tap, predictive text, the #
+ * mode cycle and the mode indicator run at all. It is worth a test of its own
+ * because two files now depend on getting the identical answer -- nd_ui.c on
+ * every key wait, nd_main.c when a keypad turns up during the boot grace
+ * window -- and because being wrong in EITHER direction ruins text entry: T9
+ * off on a 16-key matrix means letters cannot be typed at all, T9 on with a
+ * QWERTY keyboard means every letter key cycles somebody else's alphabet. */
+static void test_the_t9_rule(void)
+{
+    const char *saved = getenv(ND_ENV_T9);
+    char keep[16];
+
+    keep[0] = '\0';
+    if (saved != NULL)
+        (void)nd_strlcpy(keep, saved, sizeof keep);
+    (void)unsetenv(ND_ENV_T9);
+
+    CHECK(nd_ui_t9_active_for(true), "unset: what the process detected");
+    CHECK(!nd_ui_t9_active_for(false), "unset: what the process detected");
+
+    CHECK(setenv(ND_ENV_T9, "", 1) == 0, "NEODCT_T9=");
+    CHECK(nd_ui_t9_active_for(true), "empty is not a decision either");
+    CHECK(!nd_ui_t9_active_for(false), "empty is not a decision either");
+
+    /* Exactly "0" is off. A developer who exports NEODCT_T9=0 to turn it off
+     * must not get it turned on. */
+    CHECK(setenv(ND_ENV_T9, "0", 1) == 0, "NEODCT_T9=0");
+    CHECK(!nd_ui_t9_active_for(true), "0 overrides a detected matrix");
+
+    CHECK(setenv(ND_ENV_T9, "1", 1) == 0, "NEODCT_T9=1");
+    CHECK(nd_ui_t9_active_for(false), "1 overrides a keyboard");
+    CHECK(setenv(ND_ENV_T9, "yes", 1) == 0, "NEODCT_T9=yes");
+    CHECK(nd_ui_t9_active_for(false), "anything non-empty but 0 is on");
+    /* "00" is not "0". The rule is the exact string, not a prefix. */
+    CHECK(setenv(ND_ENV_T9, "00", 1) == 0, "NEODCT_T9=00");
+    CHECK(nd_ui_t9_active_for(false), "only the one-character 0 is off");
+
+    (void)unsetenv(ND_ENV_T9);
+    if (keep[0] != '\0')
+        (void)setenv(ND_ENV_T9, keep, 1);
+}
+
+/* ------------------------------------------------------------------ *
+ * The soft watchdog
+ * ------------------------------------------------------------------ *
+ *
+ * The half of it that is worth a unit test is the BOOKKEEPING -- which label
+ * is in force, and whether a beat is expected at all. The other half is a
+ * thread that waits five seconds, and a test that waits five seconds to watch
+ * it is a test nobody runs; nd_ui_watch_age_ms() exists so the decision the
+ * thread makes can be reached without one.
+ */
+
+static void test_the_watchdog_labels_nest(void)
+{
+    const char *label = NULL;
+    const char *outer;
+    const char *inner;
+
+    /* Save-and-restore, not set-and-clear, for the reason nd_ui_set_repaint()
+     * is: a dialog opened from inside a long operation has to give the
+     * operation its name back on the way out, or the phone reports the last
+     * dialog it drew as the thing it is stuck in. */
+    outer = nd_ui_watch_begin("outer thing");
+    inner = nd_ui_watch_begin("inner thing");
+    (void)nd_ui_watch_age_ms(&label, NULL);
+    CHECK_STR(label, "inner thing", "the innermost label is the one in force");
+    CHECK_STR(inner, "outer thing", "begin() hands back what it displaced");
+
+    nd_ui_watch_end(inner);
+    (void)nd_ui_watch_age_ms(&label, NULL);
+    CHECK_STR(label, "outer thing", "end() restores the outer label");
+
+    nd_ui_watch_end(outer);
+    (void)nd_ui_watch_age_ms(&label, NULL);
+    CHECK(label != NULL && label[0] != '\0', "there is always a label to name");
+
+    /* NULL is "back to the default", not "no label" -- the log line reads
+     * "it is in: <this>" and an empty one would say nothing. */
+    (void)nd_ui_watch_begin(NULL);
+    (void)nd_ui_watch_age_ms(&label, NULL);
+    CHECK(label != NULL && label[0] != '\0', "a NULL label falls back, it does not blank");
+}
+
+static void test_a_beat_is_what_says_the_ui_is_alive(void)
+{
+    uint32_t age;
+
+    nd_ui_watch_beat();
+    age = nd_ui_watch_age_ms(NULL, NULL);
+    /* One second, not five: what is being checked is that a beat lands and is
+     * read back, not the threshold. A host busy enough to lose a whole second
+     * between two adjacent statements has a different problem. */
+    CHECK(age < 1000u, "a fresh beat reads as fresh");
+}
+
+static void test_a_hold_suspends_the_watch_and_nests(void)
+{
+    bool held = false;
+
+    nd_ui_watch_hold();
+    (void)nd_ui_watch_age_ms(NULL, &held);
+    CHECK(held, "a held section is not expected to beat");
+
+    nd_ui_watch_hold();
+    nd_ui_watch_release();
+    (void)nd_ui_watch_age_ms(NULL, &held);
+    CHECK(held, "holds nest: an inner release does not end the outer hold");
+
+    nd_ui_watch_release();
+    (void)nd_ui_watch_age_ms(NULL, &held);
+    CHECK(!held, "and the last release ends it");
+
+    /* THE ONE THAT MATTERS. An unbalanced release must not wrap the counter,
+     * because a wrapped counter is a hold that never ends -- a watchdog
+     * silently disarmed for the life of the process, which is worse than not
+     * having one, since the log then says nothing and nobody knows why. */
+    nd_ui_watch_release();
+    (void)nd_ui_watch_age_ms(NULL, &held);
+    CHECK(!held, "an extra release does not wrap the count into a permanent hold");
+}
+
 static void test_geometry(void)
 {
     nd_ui ui;
@@ -1075,6 +1201,58 @@ static void test_animated_wallpaper(nd_fb *fb)
  * manifest.json's "useWallpaper"
  * ------------------------------------------------------------------ */
 
+/* ============ THE FLAG IS A CACHE, NOT A VERDICT ============
+ *
+ * ui.has_matrix_keypad was decided once, inside nd_ui_init(), from an
+ * nd_input that had had exactly one attempt at the i2c bus -- and then the
+ * layer underneath it learned to change its mind twice over: 0.5.7b's
+ * try_reopen_matrix() brings a matrix up after a lost udev race, and 0.5.9b
+ * tears one down at ND_MATRIX_DEAD_SCANS when the bus dies. Neither told the
+ * UI, so a phone that RECOVERED its keypad -- the exact phone the retry was
+ * written for -- ran the rest of its session with working keys and no T9,
+ * and handed the same stale answer to every app it launched afterwards
+ * through NEODCT_KEYPAD_MATRIX.
+ *
+ * There is no i2c bus on the machine this runs on, so the environment
+ * override stands in for the backend changing underneath: it goes through the
+ * same nd_ui_t9_active_for() the live detection does, and the assertion that
+ * matters is not WHICH input moved but that the key path re-derives the field
+ * at all instead of returning what nd_ui_init() decided. */
+static void test_the_t9_flag_is_re_derived_not_remembered(nd_fb *fb)
+{
+    nd_ui ui;
+
+    write_settings("Palestine.jpg");
+    nd_vclock_enable();
+    nd_ui_sim_clear(&ui);
+    (void)unsetenv(ND_ENV_T9);
+    if (nd_ui_init(&ui, fb) != ND_OK) {
+        CHECK(false, "nd_ui_init (t9 refresh)");
+        return;
+    }
+
+    CHECK(ui.owns_input_backend, "the core opened its own backend and may re-ask it");
+    CHECK(!ui.has_matrix_keypad, "no i2c matrix on this host, so T9 starts off");
+
+    if (ui.input == NULL) {
+        g_skips++;
+        fprintf(stderr, "SKIP t9 refresh: no nd_input on this host\n");
+        nd_ui_teardown(&ui);
+        return;
+    }
+
+    CHECK(setenv(ND_ENV_T9, "1", 1) == 0, "NEODCT_T9=1");
+    (void)nd_ui_read_keypress(&ui, 0.0);
+    CHECK(ui.has_matrix_keypad, "the key path re-derived the flag; it is not a boot verdict");
+
+    CHECK(setenv(ND_ENV_T9, "0", 1) == 0, "NEODCT_T9=0");
+    (void)nd_ui_read_keypress(&ui, 0.0);
+    CHECK(!ui.has_matrix_keypad, "and it goes back off when the keypad goes away");
+
+    (void)unsetenv(ND_ENV_T9);
+    nd_ui_teardown(&ui);
+}
+
 static void test_manifest_use_wallpaper(void)
 {
     /* Absent means true, which is what every manifest written before the key
@@ -1265,6 +1443,10 @@ int main(void)
     test_home_path_fixup();
     test_app_scan();
     test_manifest_use_wallpaper();
+    test_the_t9_rule();
+    test_the_watchdog_labels_nest();
+    test_a_beat_is_what_says_the_ui_is_alive();
+    test_a_hold_suspends_the_watch_and_nests();
 
     golden = load_golden_manifest();
     if (golden == NULL) {
@@ -1279,6 +1461,7 @@ int main(void)
              * reference frames depend on. */
             test_chrome_background(nd_capture_fb(cap));
             test_animated_wallpaper(nd_capture_fb(cap));
+            test_the_t9_flag_is_re_derived_not_remembered(nd_capture_fb(cap));
             CHECK(nd_capture_write_manifest(cap) == ND_OK, "manifest written");
             printf("test_ui: frames in %s/frames\n", g_stage);
             nd_capture_close(cap);

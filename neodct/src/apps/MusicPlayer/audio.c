@@ -106,6 +106,10 @@
 #define MUSIC_CHUNK_MAX    65536u
 #define MUSIC_ABUF_MS_MAX  2000
 
+/* How long the FIRST mpv of an app session is watched, to see whether it is
+ * still there a moment after the fork. See start_mpv(). */
+#define MUSIC_MPV_PROBE_S 0.05
+
 /* The Python gives mpv 0.2 s between terminate() and kill(). Same number for
  * aplay, which has nothing to flush that we want kept. */
 #define MUSIC_TERM_GRACE 0.2
@@ -631,9 +635,13 @@ static int32_t abuf_ms(void)
     return (int32_t)ms;
 }
 
-/* mpv, with the Python's argv verbatim including `nice -n -10` -- playback
- * that stutters because the UI is redrawing is what the nice was for -- plus
- * one argument the Python did not pass.
+/* Whether the once-per-session "did mpv actually start" measurement has been
+ * made. File-static for the same reason g is: there is one player per app. */
+static bool g_mpv_probed;
+
+/* mpv, with the Python's argv minus its `nice -n -10` -- which killed every
+ * fallback track on the phone once apps stopped running as root; music.h has
+ * the whole story -- plus one argument the Python did not pass.
  *
  * ============ WHY --volume, AND WHY IT IS A ONE-WAY DOOR ============
  *
@@ -673,6 +681,40 @@ static bool start_mpv(const char *real_path)
 
     if (!spawn_quiet(argv, -1, &pid))
         return false;
+
+    /* DID mpv ACTUALLY START?
+     *
+     * nd_proc_spawn() returns ND_OK the moment fork(2) succeeds; an execve
+     * failure reaches the caller as the child exiting 127, and a refused
+     * privilege drop as 120 + the step. Both were invisible here, because the
+     * child's stderr is on /dev/null and a live player and a corpse look
+     * identical from the parent. That is how `nice` dying on setpriority
+     * turned every .flac on the card into a track that "finished" instantly.
+     *
+     * Asked once per app session and no more: a player that cannot start
+     * cannot start for any track, so one 50 ms measurement answers for all of
+     * them and no track change after the first pays for it. */
+    if (!g_mpv_probed) {
+        nd_proc_status st;
+
+        g_mpv_probed = true;
+        if (nd_proc_wait(pid, MUSIC_MPV_PROBE_S, &st) == ND_OK) {
+            if (st.exited)
+                nd_log(ND_LOG_MUSIC, "mpv exited %d%s", st.exit_status,
+                       (st.exit_status >= 120 && st.exit_status <= 127)
+                           ? " without ever reaching execve"
+                           : " immediately");
+            else
+                nd_log(ND_LOG_MUSIC, "mpv was killed by signal %d", st.signo);
+            /* Already reaped, so the pid must not be kept: nd_music_stop()
+             * would otherwise signal a number the kernel may have reissued.
+             * ECHILD so the caller's own "playback failed: mpv: %s" line says
+             * something true rather than whatever errno happened to hold. */
+            errno = ECHILD;
+            return false;
+        }
+    }
+
     g.pid = pid;
     g.child_gone = false;
     g.paused = false;

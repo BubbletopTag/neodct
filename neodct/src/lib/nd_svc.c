@@ -23,6 +23,14 @@
  * they pressed during it, on the hardware only -- under evdev the kernel
  * buffers and the bug is invisible on every desktop.
  *
+ * A THREAD IS NOT ENOUGH ON ITS OWN, and the card format proved it. That
+ * request waited four minutes for a root helper, and it did the waiting
+ * through the broker -- whose round-trip mutex the UI thread takes on every
+ * turn of that same pump loop. So the serving thread was not blocking the UI
+ * by running inline; it was blocking it by holding a lock. Nothing served from
+ * here may wait for anything: the format is now START, POLL and CANCEL, three
+ * answers in microseconds, and the waiting belongs to whoever asked.
+ *
  * ============ WHY NOTHING HERE NEEDS A LOCK IT DOES NOT TAKE ============
  *
  * nd_modem.h states its own calls are safe from another thread. The battery
@@ -51,6 +59,7 @@
 #include <math.h>
 #include <poll.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -86,9 +95,41 @@ typedef enum {
     SVC_OP_REBOOT = 5,
     SVC_OP_POWEROFF = 6,
     SVC_OP_SET_CLOCK = 7,
-    SVC_OP_FORMAT_CARD = 8,
-    SVC_OP_LAYOUT_CARD = 9
+    /* RETIRED. It was "format the card and answer when you are done", and the
+     * core answered from its serving thread -- so for up to four minutes that
+     * thread was inside a wait, the broker was inside a wait, and the core's
+     * round-trip mutex was held by both. The UI thread takes that mutex on
+     * every turn of the pump loop that SCANS THE I2C KEY MATRIX, so the whole
+     * phone stopped: no keys (the matrix has no kernel queue, so they were
+     * lost rather than delayed), no repaint, no way to cancel. That is the
+     * owner's "trying to format the sdcard froze the system".
+     *
+     * The number is kept and refused rather than reused, so a mixed build gets
+     * a refusal it can print instead of a different operation. */
+    SVC_OP_FORMAT_CARD_RETIRED = 8,
+    SVC_OP_LAYOUT_CARD = 9,
+    /* Appended, so no number an existing build sends changes meaning. The
+     * format is now a JOB the core supervises: start it, poll it, cancel it,
+     * each of them a short bounded answer. */
+    SVC_OP_FORMAT_START = 10,
+    SVC_OP_FORMAT_POLL = 11,
+    SVC_OP_FORMAT_CANCEL = 12
 } svc_op;
+
+/* nd_svc.h states the untrusted set in prose and spells it as bit numbers,
+ * because the op numbers are the WIRE and the wire does not belong in a
+ * public header. This is the join between the two: if anybody renumbers an
+ * operation, the build stops here rather than quietly handing an installed
+ * app a different pair of verbs. */
+_Static_assert(ND_SVC_OPS_UNTRUSTED == ((1u << SVC_OP_MODEM_STATUS) | (1u << SVC_OP_BATTERY)),
+               "ND_SVC_OPS_UNTRUSTED must still be MODEM_STATUS and BATTERY and nothing else");
+
+/* The mask is 32 bits, so an op at or above 32 has no bit to test and
+ * shifting by it is undefined. Nothing sends one -- valid_request() refuses
+ * every op this build does not serve -- but op_allowed() must not depend on
+ * that, because it runs before dispatch and its whole job is to be the last
+ * word. */
+#define SVC_OP_BITS 32u
 
 /* Outcome of the exchange, as opposed to the outcome of the operation. */
 typedef enum {
@@ -130,6 +171,13 @@ typedef struct {
     uint32_t have_vcell;
     uint32_t hardware; /* battery only: nd_battery_has_hardware() */
     int32_t level;
+    /* FORMAT_START/POLL/CANCEL only: nd_svc_format_state, and how long the
+     * helper has been running. Placed here so `level` and this pair land the
+     * following double on its natural alignment with no hole -- every byte of
+     * this record crosses a process boundary and none of it may be padding
+     * nobody wrote. */
+    uint32_t format_state;
+    double format_secs;
 } svc_resp;
 
 /* The receive buffers are one byte longer than the record, so an oversized
@@ -158,6 +206,19 @@ static double svc_now(void)
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
         return 0.0;
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+/* A real sleep, for the poll loops. Deliberately not a virtual-clock dwell:
+ * these wait for a child process, not for a frame. */
+static void svc_nap(double seconds)
+{
+    struct timespec ts;
+
+    if (seconds <= 0.0)
+        return;
+    ts.tv_sec = (time_t)seconds;
+    ts.tv_nsec = (long)((seconds - (double)ts.tv_sec) * 1e9);
+    (void)nanosleep(&ts, NULL);
 }
 
 static int svc_ms_until(double deadline)
@@ -400,9 +461,14 @@ static bool valid_request(const svc_req *r)
      * not an omission. spec-app-services.md 9.7 and 10.4. */
     case SVC_OP_REBOOT:
     case SVC_OP_POWEROFF:
-    case SVC_OP_FORMAT_CARD:
     case SVC_OP_LAYOUT_CARD:
+    case SVC_OP_FORMAT_START:
+    case SVC_OP_FORMAT_POLL:
+    case SVC_OP_FORMAT_CANCEL:
         return true;
+    /* SVC_OP_FORMAT_CARD_RETIRED falls through to the refusal with everything
+     * else this build does not serve. See the enum for what it used to do to
+     * the phone. */
     default:
         return false;
     }
@@ -517,10 +583,17 @@ static nd_err nd_svc__wait_child(pid_t pid, double timeout_s, nd_proc_status *ou
     return (b != NULL) ? nd_broker_wait(b, pid, timeout_s, out) : nd_proc_wait(pid, timeout_s, out);
 }
 
-/* Step 2's answer, carried from before the reply to after it. */
+/* Step 2's answer, carried from before the reply to after it.
+ *
+ * `delegate` is decided WITH the plan and carried beside it, rather than asked
+ * again after the reply. The core answers the app on the strength of one
+ * decision, and acting on a different one afterwards -- because a broker
+ * appeared or went away in between -- would make the answer a lie in whichever
+ * direction the two disagreed. */
 typedef struct {
     bool pending;
     bool reboot;
+    bool delegate;           /* the broker spawns it, not this process */
     const char *const *argv; /* the candidate that resolved */
     char exe[ND_PATH_MAX];
 } svc_halt_plan;
@@ -531,6 +604,12 @@ bool nd_svc_halt_allowed(void)
 {
     return nd_svc_halt_allowed_for(g_halt_sim_on, g_halt_disarmed, getenv(ND_ENV_ROOT) != NULL,
                                    geteuid() == 0);
+}
+
+bool nd_svc_halt_delegate_allowed(void)
+{
+    return nd_svc_halt_delegate_allowed_for(
+        g_halt_sim_on, g_halt_disarmed, getenv(ND_ENV_ROOT) != NULL, nd_broker_default() != NULL);
 }
 
 void nd_svc_halt_disarm(void)
@@ -552,6 +631,27 @@ bool nd_svc_halt_allowed_for(bool sim_installed, bool disarmed, bool in_test_roo
     return is_root;
 }
 
+/* The same four rows, with "there is a broker to ask" where the table above
+ * has "this process is root". nd_svc.h carries the argument; the short version
+ * is that the core stopped being the process that spawns the halt, so the
+ * question it has to answer stopped being whether it could.
+ *
+ * `have_broker` comes first because it is a fact, not a rule: with no broker
+ * there is nobody to delegate to and the other rows have nothing to decide. */
+bool nd_svc_halt_delegate_allowed_for(bool sim_installed, bool disarmed, bool in_test_root,
+                                      bool have_broker)
+{
+    if (!have_broker)
+        return false;
+    if (sim_installed)
+        return true;
+    if (disarmed)
+        return false;
+    if (in_test_root)
+        return false;
+    return true;
+}
+
 /* Which row refused, for the log line: the person reading a serial console
  * or a test log should not have to work out which of four rules fired. */
 static const char *halt_refusal_why(void)
@@ -560,27 +660,51 @@ static const char *halt_refusal_why(void)
         return "this process was disarmed as a test binary (nd_svc_halt_disarm)";
     if (getenv(ND_ENV_ROOT) != NULL)
         return "NEODCT_ROOT is set, so this is a test and no nd_svc_halt_simulate() fake was installed";
-    return "not root -- a real halt is the broker's to spawn, and a non-root process asking for "
-           "one is a test or a bug";
+    if (nd_broker_default() == NULL)
+        return "not root and there is no broker to ask -- a real halt is the broker's to spawn, "
+               "and a non-root process asking for one is a test or a bug";
+    return "not root -- a real halt is the broker's to spawn";
 }
 
-static bool halt_resolve(bool reboot, svc_halt_plan *plan)
+/* Resolve the binary and decide who spawns it.
+ *
+ * `delegate` says the BROKER will perform this halt, and it is the caller's
+ * answer to nd_svc_halt_delegate_allowed() rather than something asked again
+ * here -- serve() has to know before it replies whether the halt is going to
+ * happen, and the broker is the thing that makes that true.
+ *
+ * `why` receives the sentence to log when this returns false. It is never
+ * NULL-checked because both callers pass one: a refusal that could not say
+ * which of three unrelated things went wrong is how "the core will not halt
+ * because it is not root" spent a week being reported as "this image has no
+ * poweroff". */
+static bool halt_resolve(bool reboot, bool delegate, svc_halt_plan *plan, const char **why)
 {
     const char *const *const *tab;
     size_t n;
     size_t i;
 
+    *why = NULL;
+
     /* BEFORE the lookup, so nothing is resolved and nothing is spawned.
      * Refusing here surfaces as "this image has no halt binary", which is
      * already the one failure an app is told about -- a test sees a false
-     * return instead of the machine going down under it. */
-    if (!nd_svc_halt_allowed()) {
-        nd_log_err(ND_LOG_OS, "refusing a real halt: %s", halt_refusal_why());
+     * return instead of the machine going down under it.
+     *
+     * Skipped when the halt is the broker's to spawn: this process is not
+     * going to fork anything, and the broker asks the same table again from
+     * uid 0 before it does. A test binary reaches this branch only if it built
+     * a real broker, and that broker inherited its disarm latch across the
+     * fork. */
+    if (!delegate && !nd_svc_halt_allowed()) {
+        *why = halt_refusal_why();
+        nd_log_err(ND_LOG_OS, "refusing a real halt: %s", *why);
         memset(plan, 0, sizeof *plan);
         return false;
     }
 
     memset(plan, 0, sizeof *plan);
+    plan->delegate = delegate;
 
     if (g_halt_sim_on && g_halt_sim.poweroff != NULL && g_halt_sim.reboot != NULL) {
         tab = reboot ? g_halt_sim.reboot : g_halt_sim.poweroff;
@@ -601,6 +725,8 @@ static bool halt_resolve(bool reboot, svc_halt_plan *plan)
         }
         /* `except OSError: continue` */
     }
+    *why = reboot ? "this image has no reboot binary anywhere on $PATH"
+                  : "this image has no poweroff binary anywhere on $PATH";
     return false;
 }
 
@@ -617,8 +743,19 @@ static bool halt_resolve(bool reboot, svc_halt_plan *plan)
  * CODING-STANDARDS.md 1.1 exists for; nd_proc_spawn() is the function that
  * satisfies it, and it is why nothing is done between the fork and the
  * execve. ND_OWNER_SYSTEM is nd_proc.h's own tag for this child: its
- * documentation for that tag begins with the word "poweroff". */
-static void halt_perform(const svc_halt_plan *plan)
+ * documentation for that tag begins with the word "poweroff".
+ *
+ * ============ AND WHY THIS RETURNS SOMETHING ============
+ *
+ * It used to return void and merely LOG a failed spawn, and nd_svc_halt_now()
+ * returned true regardless. Inside the broker that became rep.err = ND_OK, so
+ * nd_broker_halt() reported a halt that had not started, and the core had
+ * already told the app the same thing before the fork was even attempted. The
+ * identical shape one layer up is what once made a confinement probe print
+ * "*** ALLOWED ***" for rebooting the phone -- see the client half of this
+ * file, which records it. A function whose only failure is a log line is a
+ * function whose caller cannot be honest. */
+static bool halt_perform(const svc_halt_plan *plan)
 {
     nd_proc_spec spec;
     pid_t pid = -1;
@@ -627,15 +764,18 @@ static void halt_perform(const svc_halt_plan *plan)
 
     if (g_halt_sim_on && g_halt_sim.spawn != NULL) {
         g_halt_sim.spawn(plan->reboot, plan->exe, g_halt_sim.user);
-        return;
+        return true;
     }
 
     memset(&spec, 0, sizeof spec);
     spec.argv = plan->argv;
     spec.owner = ND_OWNER_SYSTEM;
     spec.n_fds = 0u;
-    if (nd_proc_spawn(plan->exe, &spec, &pid) != ND_OK)
+    if (nd_proc_spawn(plan->exe, &spec, &pid) != ND_OK) {
         nd_log_err(ND_LOG_POWER, "cannot start %s: %s", plan->exe, strerror(errno));
+        return false;
+    }
+    return true;
 }
 
 /* ------------------------------------------------------------------ *
@@ -722,12 +862,80 @@ void nd_svc_format_simulate(const nd_svc_format_sim *sim)
  * "the helper checks" is a second line, not a first, and this removes the
  * need for it. */
 static bool run_sdcard_helper(const char *const *argv, double wait_s);
+static nd_err sdcard_helper_spawn(const char *const *argv, pid_t *pid_out);
+static nd_err sdcard_helper_stop(pid_t pid, nd_proc_status *out);
 
-static bool format_card(void)
+/* ------------------------------------------------------------------ *
+ * The format, as a JOB rather than a call
+ * ------------------------------------------------------------------ *
+ *
+ * ============ WHY THIS IS NOT ONE FUNCTION ANY MORE ============
+ *
+ * It was: spawn the helper, wait up to four minutes, answer. Every layer of
+ * that turned out to be a place the whole phone stopped -- the core's serving
+ * thread sat in the wait, the broker's serial loop sat in the wait, and the
+ * core's round-trip mutex was held for the duration by both, which is the
+ * mutex the UI thread needs on every turn of the loop that scans the i2c key
+ * matrix. The matrix has no kernel queue, so the keys pressed during a format
+ * were not delayed, they were LOST, and nothing repainted either. On QEMU a
+ * mkfs on a host-backed image file finishes in well under a second and the
+ * evdev path buffers keys across a stall, so none of it was visible.
+ *
+ * So the format is now a job with three short verbs: START it, POLL it, CANCEL
+ * it. Every one of them answers in microseconds. The waiting belongs to
+ * whoever wants to wait, which is either the Settings screen (drawing a
+ * progress bar and offering a way out) or nd_svc_format_card()'s own loop.
+ *
+ * ============ WHERE THE STATE LIVES ============
+ *
+ * Four file-scope statics, and they belong to the CORE process -- the serving
+ * thread is the only thing that touches them there, because the core has no
+ * client socket of its own and therefore never calls the client verbs. In a
+ * process with no channel (nd-shoot, a unit test) the same statics are touched
+ * by that process's only thread. The precedent and the barriers are the halt
+ * simulation's, documented in nd_svc.h.
+ *
+ * The pid outlives the SERVING THREAD on purpose. That thread is created per
+ * app launch and stopped when the app exits, but a root helper the broker
+ * forked keeps writing the card regardless -- so if Settings is killed
+ * mid-format, the next launch can still poll the same job instead of starting
+ * a second mke2fs on top of the first.
+ */
+static pid_t g_fmt_pid = -1;       /* the helper, while it runs           */
+static double g_fmt_started = 0.0; /* svc_now() when it was spawned       */
+static bool g_fmt_have_result = false;
+static bool g_fmt_result_ok = false;
+static double g_fmt_secs = 0.0; /* how long the finished run took      */
+
+static void format_finish(bool ok)
+{
+    g_fmt_secs = (g_fmt_started > 0.0) ? svc_now() - g_fmt_started : 0.0;
+    g_fmt_pid = -1;
+    g_fmt_started = 0.0;
+    g_fmt_have_result = true;
+    g_fmt_result_ok = ok;
+}
+
+/* Start one. True means there IS a format running when this returns -- which
+ * includes the case where one was already running, because a second Format
+ * press must not lay a second mke2fs over the first. */
+static bool format_start(void)
 {
     nd_card card;
     const char *argv[4];
-    int rc;
+    pid_t pid = -1;
+    nd_err rc;
+
+    if (g_fmt_pid > 0) {
+        nd_log(ND_LOG_OS, "App service: a format of the card is already running (pid %ld)",
+               (long)g_fmt_pid);
+        return true;
+    }
+
+    /* A verdict nobody collected is not a reason to refuse a new run, but it
+     * must not be handed back as this one's. */
+    g_fmt_have_result = false;
+    g_fmt_result_ok = false;
 
     /* Never fails; an unreadable state file reads as an absent card. */
     nd_storage_card(&card);
@@ -752,9 +960,16 @@ static bool format_card(void)
     }
 
     if (g_format_sim_on && g_format_sim.run != NULL) {
-        rc = g_format_sim.run(card.device, g_format_sim.user);
-        nd_log(ND_LOG_OS, "App service: format of %s (simulated) exited %d", card.device, rc);
-        return rc == 0;
+        /* The simulation replaces the spawn-and-wait and nothing else, so
+         * there is no child to poll: it runs here and the job is finished
+         * before START has answered. A test therefore sees exactly the
+         * sequence a very fast card would produce. */
+        int rc2 = g_format_sim.run(card.device, g_format_sim.user);
+
+        nd_log(ND_LOG_OS, "App service: format of %s (simulated) exited %d", card.device, rc2);
+        g_fmt_started = svc_now();
+        format_finish(rc2 == 0);
+        return true;
     }
 
     argv[0] = ND_PATH_SDCARD_HELPER;
@@ -763,7 +978,96 @@ static bool format_card(void)
     argv[3] = NULL;
 
     nd_log(ND_LOG_OS, "App service: formatting %s", card.device);
-    return run_sdcard_helper(argv, ND_SVC_FORMAT_WAIT_S);
+    rc = sdcard_helper_spawn(argv, &pid);
+    if (rc != ND_OK) {
+        nd_log_err(ND_LOG_OS, "cannot run %s: %s", ND_PATH_SDCARD_HELPER, nd_strerror(rc));
+        return false;
+    }
+    g_fmt_pid = pid;
+    g_fmt_started = svc_now();
+    return true;
+}
+
+/* One non-blocking look. `secs` receives how long the job has been running, or
+ * how long the finished one took, so a screen can draw something that moves
+ * even though mkfs reports no progress of its own.
+ *
+ * A DONE verdict is handed out ONCE and then forgotten. A verdict that latched
+ * would outlive the screen that asked for it and be shown to the next one. */
+static nd_svc_format_state format_poll(double *secs)
+{
+    nd_proc_status st;
+    double elapsed;
+
+    if (secs != NULL)
+        *secs = 0.0;
+
+    if (g_fmt_have_result) {
+        if (secs != NULL)
+            *secs = g_fmt_secs;
+        g_fmt_have_result = false;
+        return g_fmt_result_ok ? ND_SVC_FORMAT_DONE_OK : ND_SVC_FORMAT_DONE_FAIL;
+    }
+    if (g_fmt_pid <= 0)
+        return ND_SVC_FORMAT_IDLE;
+
+    elapsed = svc_now() - g_fmt_started;
+    if (secs != NULL)
+        *secs = elapsed;
+
+    memset(&st, 0, sizeof st);
+    if (nd_svc__wait_child(g_fmt_pid, 0.0, &st) == ND_OK) {
+        /* subprocess.call()'s "0 is success" and nothing else: a signalled
+         * helper is a failure, which the app's own `== 0` already said, since
+         * a signal gave it a negative. */
+        bool ok = st.exited && st.exit_status == 0;
+
+        /* Recorded and consumed in the same breath: this poll IS the one that
+         * collects it, so it must not be left waiting for the next. */
+        format_finish(ok);
+        if (secs != NULL)
+            *secs = g_fmt_secs;
+        g_fmt_have_result = false;
+        return ok ? ND_SVC_FORMAT_DONE_OK : ND_SVC_FORMAT_DONE_FAIL;
+    }
+
+    if (elapsed >= ND_SVC_FORMAT_WAIT_S) {
+        /* Four minutes with no exit is not a slow card, it is a wedged
+         * helper. Killing an mkfs is destructive -- but so is the state it is
+         * already in, and the alternative is a root process writing the card
+         * for ever with nothing able to stop it. */
+        nd_log_err(ND_LOG_OS, "App service: %s format has not finished in %.0fs; stopping it",
+                   ND_PATH_SDCARD_HELPER, elapsed);
+        (void)sdcard_helper_stop(g_fmt_pid, NULL);
+        format_finish(false); /* and collected here, as above */
+        if (secs != NULL)
+            *secs = g_fmt_secs;
+        g_fmt_have_result = false;
+        return ND_SVC_FORMAT_DONE_FAIL;
+    }
+    return ND_SVC_FORMAT_RUNNING;
+}
+
+/* Stop whatever is running and forget any verdict. True when there is nothing
+ * running afterwards, which is also the answer when there was nothing running
+ * to begin with. */
+static bool format_cancel(void)
+{
+    pid_t pid = g_fmt_pid;
+    nd_err rc;
+
+    g_fmt_have_result = false;
+    g_fmt_result_ok = false;
+    if (pid <= 0) {
+        g_fmt_pid = -1;
+        g_fmt_started = 0.0;
+        return true;
+    }
+    nd_log(ND_LOG_OS, "App service: cancelling the format of the card (pid %ld)", (long)pid);
+    rc = sdcard_helper_stop(pid, NULL);
+    g_fmt_pid = -1;
+    g_fmt_started = 0.0;
+    return rc == ND_OK;
 }
 
 /* Set only by nd_svc_layout_simulate(); same barriers as the format's. */
@@ -817,11 +1121,10 @@ static bool layout_card(void)
  * the privilege route and the wedged-helper rule cannot differ between them.
  * Returns the helper's "exited 0", which is subprocess.call()'s notion of
  * success and the one Settings always used. */
-static bool run_sdcard_helper(const char *const *argv, double wait_s)
+static nd_err sdcard_helper_spawn(const char *const *argv, pid_t *pid_out)
 {
     nd_proc_spec spec;
-    nd_proc_status st;
-    pid_t pid = -1;
+    nd_broker *b = nd_broker_default();
     int fd;
 
     memset(&spec, 0, sizeof spec);
@@ -836,36 +1139,94 @@ static bool run_sdcard_helper(const char *const *argv, double wait_s)
         spec.n_fds++;
     }
 
-    {
-        /* The helper mounts and partitions, which needs root, and the core is
-         * not root any more. It is one of the two executables the broker will
-         * run undropped (ND_BROKER_ROOT_EXEC) -- a fixed path on the read-only
-         * rootfs, so "ask for it by name" cannot become "ask for anything".
-         *
-         * Found by auditing after the drop rather than by the phone, like the
-         * halt and the clock before it. Three privileged things went out with
-         * the same change; the count is the reason this file now says which
-         * side of the socket each one runs on. */
-        nd_broker *b = nd_broker_default();
-        nd_err rc2 = (b != NULL) ? nd_broker_spawn(b, ND_PATH_SDCARD_HELPER, &spec, NULL, &pid)
-                                 : nd_proc_spawn(ND_PATH_SDCARD_HELPER, &spec, &pid);
+    /* The helper mounts and partitions, which needs root, and the core is not
+     * root any more. It is one of the two executables the broker will run
+     * undropped (ND_BROKER_ROOT_EXEC) -- a fixed path on the read-only rootfs,
+     * so "ask for it by name" cannot become "ask for anything".
+     *
+     * Found by auditing after the drop rather than by the phone, like the halt
+     * and the clock before it. Three privileged things went out with the same
+     * change; the count is the reason this file now says which side of the
+     * socket each one runs on. */
+    if (b != NULL)
+        return nd_broker_spawn(b, ND_PATH_SDCARD_HELPER, &spec, NULL, pid_out);
+    return nd_proc_spawn(ND_PATH_SDCARD_HELPER, &spec, pid_out);
+}
 
-        if (rc2 != ND_OK) {
-            nd_log_err(ND_LOG_OS, "cannot run %s: %s", ND_PATH_SDCARD_HELPER, nd_strerror(rc2));
-            return false;
-        }
+/* ============ THE ESCAPE HATCH, AND WHY IT NEEDED A BROKER VERB ============
+ *
+ * This used to be nd_proc_terminate(pid, ...) and it could not work. The
+ * helper is spawned UNDROPPED, so it is root and it is the BROKER's child; the
+ * core that calls this is ndusr and is nobody's parent to it. kill(2) from uid
+ * 1000 to uid 0 is EPERM, and nd_proc_terminate only logs that. Worse, the
+ * waitpid() it does next returns ECHILD -- this process never forked the thing
+ * -- and nd_proc.c's collect() reads ECHILD as "exited cleanly, status 0". So
+ * nd_proc_terminate returned ND_OK on its first try, never sent SIGKILL, and
+ * the log line above it ("has not finished; stopping it") was false in both
+ * halves. A root mke2fs went on writing the card while Settings drew
+ * "Formatting failed."
+ *
+ * Both halves go through the broker now: it is root, it is the parent, and it
+ * refuses any pid that is not one of its own children and any signal that is
+ * not SIGTERM or SIGKILL. See nd_broker_kill().
+ *
+ * The sequence is nd_proc_terminate's, restated here rather than reused,
+ * because the two syscalls it is made of are exactly the two this process no
+ * longer has. */
+static nd_err sdcard_helper_stop(pid_t pid, nd_proc_status *out)
+{
+    nd_broker *b = nd_broker_default();
+    nd_proc_status local;
+
+    if (pid <= 0)
+        return ND_ERR_INVAL;
+    if (out == NULL)
+        out = &local;
+    memset(out, 0, sizeof *out);
+
+    if (b == NULL)
+        return nd_proc_terminate(pid, ND_SVC_JOIN_S, out);
+
+    /* It may already have gone: the poll that decided to stop it raced with
+     * the helper exiting, and a cancel from the owner races with everything.
+     * Reap it first, so the broker is not asked to signal a pid it has
+     * rightly forgotten and the log does not carry a refusal for something
+     * that worked. */
+    if (nd_broker_wait(b, pid, 0.0, out) == ND_OK)
+        return ND_OK;
+
+    if (!nd_broker_kill(b, pid, SIGTERM))
+        nd_log_err(ND_LOG_OS, "the broker would not send SIGTERM to pid %ld", (long)pid);
+    if (nd_broker_wait(b, pid, ND_SVC_JOIN_S, out) == ND_OK)
+        return ND_OK;
+
+    nd_log(ND_LOG_OS, "pid %ld ignored SIGTERM after %.1fs; killing it", (long)pid, ND_SVC_JOIN_S);
+    if (!nd_broker_kill(b, pid, SIGKILL))
+        nd_log_err(ND_LOG_OS, "the broker would not send SIGKILL to pid %ld", (long)pid);
+    return nd_broker_wait(b, pid, 2.0, out);
+}
+
+/* Spawn the helper with `argv` -- as root, through the broker -- and wait at
+ * most `wait_s` for it, in short non-blocking probes so nothing else in the
+ * core is held up. Used by the LAYOUT verb, whose work is a chown and a chmod
+ * per file and is measured in a second or two; the format has its own start/
+ * poll/cancel machinery above because it is measured in minutes. */
+static bool run_sdcard_helper(const char *const *argv, double wait_s)
+{
+    nd_proc_status st;
+    pid_t pid = -1;
+    nd_err rc = sdcard_helper_spawn(argv, &pid);
+
+    if (rc != ND_OK) {
+        nd_log_err(ND_LOG_OS, "cannot run %s: %s", ND_PATH_SDCARD_HELPER, nd_strerror(rc));
+        return false;
     }
 
     memset(&st, 0, sizeof st);
     if (nd_svc__wait_child(pid, wait_s, &st) != ND_OK) {
-        /* Four minutes with no exit is not a slow card, it is a wedged
-         * helper, and leaving it wedged would leave the serving thread in
-         * here for the life of the core. Killing an mkfs is destructive --
-         * but so is the state it is already in, and the alternative is a
-         * phone that cannot be told anything again until it reboots. */
         nd_log_err(ND_LOG_OS, "App service: %s %s has not finished in %.0fs; stopping it",
                    ND_PATH_SDCARD_HELPER, argv[1], wait_s);
-        (void)nd_proc_terminate(pid, ND_SVC_JOIN_S, NULL);
+        (void)sdcard_helper_stop(pid, NULL);
         return false;
     }
 
@@ -905,10 +1266,43 @@ static void resp_init(svc_resp *out, uint32_t op)
  * ordering the whole design of the two verbs rests on, and a serve() that
  * halted where it stood would put the unbounded sync(2) in front of the
  * reply. spec-app-services.md 9.4. */
-static void serve(nd_ui *ui, const svc_req *req, svc_resp *out, svc_halt_plan *halt)
+/* Is this op on the socket it arrived through?
+ *
+ * A pure function of the request and the mask, so a test can ask it directly
+ * rather than having to stand up a server and a child for every verb. See
+ * nd_svc.h for why the mask is trustworthy when nothing else about the sender
+ * is. */
+bool nd_svc__op_allowed(uint32_t allowed_ops, uint32_t op)
+{
+    if (op >= SVC_OP_BITS)
+        return false;
+    return (allowed_ops & (1u << op)) != 0u;
+}
+
+static void serve(nd_ui *ui, uint32_t allowed_ops, const svc_req *req, svc_resp *out,
+                  svc_halt_plan *halt)
 {
     resp_init(out, req->op);
     memset(halt, 0, sizeof *halt);
+
+    /* BEFORE the dispatch below, and not inside each case.
+     *
+     * Putting it here is what makes a verb added later safe by default: it is
+     * refused to an untrusted caller until somebody deliberately puts its bit
+     * in ND_SVC_OPS_UNTRUSTED. A per-case check would have the opposite
+     * property -- the verb nobody remembered to guard would be the one that
+     * got through.
+     *
+     * SVC_ST_NO_SERVICE and not SVC_ST_BAD_REQUEST, because from the app's
+     * side that is the truth: this socket does not carry that operation, and
+     * the sentence it already draws for a core with no modem ("ModemService
+     * is not running.") is the right one. BAD_REQUEST would say the app had
+     * built a malformed record, which it had not. */
+    if (!nd_svc__op_allowed(allowed_ops, req->op)) {
+        nd_log(ND_LOG_OS, "App service: op %u is not carried by this socket", (unsigned)req->op);
+        out->status = SVC_ST_NO_SERVICE;
+        return;
+    }
 
     switch (req->op) {
     case SVC_OP_REBOOT:
@@ -917,15 +1311,27 @@ static void serve(nd_ui *ui, const svc_req *req, svc_resp *out, svc_halt_plan *h
 
         /* There is no service object to be absent: the phone is not a
          * pointer the core holds. It is always "present"; whether the halt
-         * can start is `ok`. */
+         * can start is `ok`.
+         *
+         * THE DELEGATION QUESTION IS ASKED HERE, not inside the resolver: on
+         * a phone this thread is ndusr and cannot spawn a halt, but the root
+         * broker it forked before dropping can. Asking "may I spawn this"
+         * instead is what refused every power-off the phone was ever asked
+         * for. nd_svc.h has the whole trace. */
+        const char *why = NULL;
+        bool delegate = nd_svc_halt_delegate_allowed();
+
         out->present = 1u;
-        out->ok = halt_resolve(reboot, halt) ? 1u : 0u;
+        out->ok = halt_resolve(reboot, delegate, halt, &why) ? 1u : 0u;
         if (out->ok != 0u)
-            nd_log(ND_LOG_POWER, "App service: %s, via %s", reboot ? "reboot" : "power off",
-                   halt->exe);
+            nd_log(ND_LOG_POWER, "App service: %s, via %s%s", reboot ? "reboot" : "power off",
+                   halt->exe, delegate ? " (the broker will spawn it)" : "");
         else
-            nd_log_err(ND_LOG_POWER, "App service: %s asked for, but this image has no %s",
-                       reboot ? "reboot" : "power off", reboot ? "reboot" : "poweroff");
+            /* The REAL reason, which is the line somebody debugging this reads
+             * first. It used to say "this image has no poweroff" for all three
+             * causes -- on a phone whose /sbin/poweroff was right there. */
+            nd_log_err(ND_LOG_POWER, "App service: %s refused: %s", reboot ? "reboot" : "power off",
+                       (why != NULL) ? why : "no reason given");
         return;
     }
 
@@ -938,9 +1344,28 @@ static void serve(nd_ui *ui, const svc_req *req, svc_resp *out, svc_halt_plan *h
         out->ok = clock_set_bounded((time_t)req->when) ? 1u : 0u;
         return;
 
-    case SVC_OP_FORMAT_CARD:
+    /* Three short answers where there used to be one four-minute one. None of
+     * them waits for anything, so the serving thread is back inside svc_recv()
+     * within microseconds and the UI thread gets its key scan back. */
+    case SVC_OP_FORMAT_START:
         out->present = 1u;
-        out->ok = format_card() ? 1u : 0u;
+        out->ok = format_start() ? 1u : 0u;
+        return;
+
+    case SVC_OP_FORMAT_POLL: {
+        double secs = 0.0;
+        nd_svc_format_state fst = format_poll(&secs);
+
+        out->present = 1u;
+        out->format_state = (uint32_t)fst;
+        out->format_secs = secs;
+        out->ok = (fst != ND_SVC_FORMAT_IDLE) ? 1u : 0u;
+        return;
+    }
+
+    case SVC_OP_FORMAT_CANCEL:
+        out->present = 1u;
+        out->ok = format_cancel() ? 1u : 0u;
         return;
 
     case SVC_OP_LAYOUT_CARD:
@@ -1012,6 +1437,12 @@ static void serve(nd_ui *ui, const svc_req *req, svc_resp *out, svc_halt_plan *h
 struct nd_svc_server {
     int fd;       /* our end; the thread owns it once started */
     int child_fd; /* the child's end, until we close it       */
+    /* Bound at nd_svc_server_open(), never touched again, and never sent
+     * anywhere. It is the only reason this socket is safe to give an
+     * untrusted app at all -- see nd_svc.h. Read from the serving thread
+     * without a lock because it is written once, before that thread exists,
+     * and pthread_create() is the barrier. */
+    uint32_t allowed_ops;
     nd_ui *ui;
     pthread_t tid;
     bool started;
@@ -1073,7 +1504,7 @@ static void *svc_thread(void *arg)
             resp_init(&resp, req.op);
             resp.status = SVC_ST_BAD_REQUEST;
         } else {
-            serve(s->ui, &req, &resp, &halt);
+            serve(s->ui, s->allowed_ops, &req, &resp, &halt);
         }
         sent = svc_send(s->fd, &resp, sizeof resp, svc_now() + ND_SVC_TIMEOUT_S);
 
@@ -1086,16 +1517,28 @@ static void *svc_thread(void *arg)
              * takes: the app has a service socket, so it asks the core rather
              * than doing it itself, and this is where the core obliges.
              *
-             * It was left behind when svc_halt() was routed to the broker, and
-             * the phone said so: "Power off failed." on the panel, with the
-             * core at uid 1000 and /sbin/poweroff needing CAP_SYS_BOOT. Two
-             * paths reach halt_perform() and only one had been moved. */
+             * `halt.delegate` and not another nd_broker_default() call: serve()
+             * answered the app on the strength of that decision, and the
+             * decision it acts on has to be the same one.
+             *
+             * The reply has already gone, so a failure here cannot reach the
+             * app -- which is why it is logged as loudly as it is. A phone
+             * that has said "yes" and then sat there is the exact thing the
+             * owner reports as "power off does nothing". */
             nd_broker *b = nd_broker_default();
+            bool started;
 
-            if (b != NULL)
-                (void)nd_broker_halt(b, halt.reboot);
+            if (halt.delegate && b != NULL)
+                started = nd_broker_halt(b, halt.reboot);
             else
-                halt_perform(&halt);
+                started = halt_perform(&halt);
+            if (!started)
+                nd_log_err(ND_LOG_POWER,
+                           "App service: %s was accepted but did not start: %s (%s). The phone "
+                           "is still up.",
+                           halt.reboot ? "reboot" : "power off",
+                           halt.delegate ? "the broker would not spawn it" : "the spawn failed",
+                           halt.exe);
         }
 
         if (!sent)
@@ -1116,7 +1559,7 @@ static void *svc_thread(void *arg)
     return NULL;
 }
 
-nd_err nd_svc_server_open(nd_svc_server **out)
+nd_err nd_svc_server_open(nd_svc_server **out, uint32_t allowed_ops)
 {
     nd_svc_server *s;
     int sv[2] = {-1, -1};
@@ -1142,6 +1585,7 @@ nd_err nd_svc_server_open(nd_svc_server **out)
     }
     s->fd = sv[0];
     s->child_fd = sv[1];
+    s->allowed_ops = allowed_ops;
     if (pthread_mutex_init(&s->mu, NULL) != 0) {
         (void)close(sv[0]);
         (void)close(sv[1]);
@@ -1617,14 +2061,24 @@ bool nd_svc_battery_quickstart(const nd_ui *ui)
 bool nd_svc_halt_now(bool reboot)
 {
     svc_halt_plan plan;
+    const char *why = NULL;
 
-    if (!halt_resolve(reboot, &plan)) {
-        nd_log_err(ND_LOG_POWER, "no %s on this image", reboot ? "reboot" : "poweroff");
+    /* `delegate` is false and must be: this is the end of the line. In the
+     * broker there is nobody left to hand it to (broker_loop() clears the
+     * default broker on purpose, so a REQ_HALT cannot loop back out), and in a
+     * root core with no broker this process IS the one that spawns. So the
+     * interlock's rule 4 applies here, where the fork happens, which is where
+     * nd_svc.h now says it belongs. */
+    if (!halt_resolve(reboot, false, &plan, &why)) {
+        nd_log_err(ND_LOG_POWER, "not halting: %s", (why != NULL) ? why : "no reason given");
         return false;
     }
     nd_log(ND_LOG_POWER, "%s, via %s", reboot ? "Rebooting" : "Powering off", plan.exe);
-    halt_perform(&plan);
-    return true;
+    /* Propagated rather than swallowed. The broker turns this into the reply
+     * the core reads, and the core turns that into "Power off failed." -- so a
+     * poweroff that could not be forked now reaches the panel instead of being
+     * reported as a success to a phone that is visibly still on. */
+    return halt_perform(&plan);
 }
 
 static bool svc_halt(bool reboot)
@@ -1642,7 +2096,11 @@ static bool svc_halt(bool reboot)
                        reboot ? "reboot" : "power off");
             return false;
         }
-        if (b != NULL)
+        /* The same delegation rule serve() applies, asked the same way, so
+         * the two paths cannot answer differently. Without the predicate a
+         * disarmed test binary that happened to hold a broker would delegate a
+         * REAL halt, which is the hole the latch exists to close. */
+        if (b != NULL && nd_svc_halt_delegate_allowed())
             return nd_broker_halt(b, reboot);
         return nd_svc_halt_now(reboot);
     }
@@ -1716,7 +2174,17 @@ bool nd_svc_layout_card(void)
     return resp.ok != 0u;
 }
 
-bool nd_svc_format_card(void)
+/* ------------------------------------------------------------------ *
+ * Formatting a card: start, poll, cancel
+ * ------------------------------------------------------------------ *
+ *
+ * Each of the three is one short round trip, so the core answers in
+ * microseconds and nothing anywhere is blocked. The local branch calls the
+ * same three functions the serving thread calls, which is this file's standing
+ * rule: one implementation, so it cannot differ by caller.
+ */
+
+bool nd_svc_format_start(void)
 {
     svc_resp resp;
 
@@ -1725,12 +2193,85 @@ bool nd_svc_format_card(void)
         return false;
     }
     if (g_client_fd < 0)
-        return format_card();
-
-    /* ND_SVC_FORMAT_TIMEOUT_S, which sits above the ND_SVC_FORMAT_WAIT_S the
-     * core allows the helper, so that the side which knows why it failed is
-     * the side that gives up first. nd_svc.h. */
-    if (svc_call(SVC_OP_FORMAT_CARD, NULL, NULL, &resp, ND_SVC_FORMAT_TIMEOUT_S) != SVC_ST_OK)
+        return format_start();
+    if (svc_call(SVC_OP_FORMAT_START, NULL, NULL, &resp, ND_SVC_TIMEOUT_S) != SVC_ST_OK)
         return false;
     return resp.ok != 0u;
+}
+
+nd_svc_format_state nd_svc_format_poll(double *elapsed_s)
+{
+    svc_resp resp;
+
+    if (elapsed_s != NULL)
+        *elapsed_s = 0.0;
+    if (app_without_a_channel())
+        return ND_SVC_FORMAT_IDLE;
+    if (g_client_fd < 0)
+        return format_poll(elapsed_s);
+
+    if (svc_call(SVC_OP_FORMAT_POLL, NULL, NULL, &resp, ND_SVC_TIMEOUT_S) != SVC_ST_OK) {
+        /* A core that has stopped answering is not a format that is still
+         * going. Saying RUNNING here would leave a screen polling for ever;
+         * saying DONE_FAIL is the honest end of it -- nobody can tell the
+         * caller whether the card was written, and the caller must stop. */
+        nd_log_err(ND_LOG_OS, "no answer from the core while a format was running");
+        return ND_SVC_FORMAT_DONE_FAIL;
+    }
+    if (resp.format_state > (uint32_t)ND_SVC_FORMAT_DONE_FAIL)
+        return ND_SVC_FORMAT_DONE_FAIL;
+    if (elapsed_s != NULL)
+        *elapsed_s = resp.format_secs;
+    return (nd_svc_format_state)resp.format_state;
+}
+
+bool nd_svc_format_cancel(void)
+{
+    svc_resp resp;
+
+    if (app_without_a_channel())
+        return false;
+    if (g_client_fd < 0)
+        return format_cancel();
+    if (svc_call(SVC_OP_FORMAT_CANCEL, NULL, NULL, &resp, ND_SVC_TIMEOUT_S) != SVC_ST_OK)
+        return false;
+    return resp.ok != 0u;
+}
+
+/* The blocking convenience, written ON TOP of the three above rather than
+ * beside them. It is what a caller with nothing else to draw wants, and it is
+ * what the wire verb used to be -- except that the waiting now happens in the
+ * CALLER's process, in slices, so the core, the broker and the UI thread are
+ * all free the whole time. A caller that has a screen to keep alive should use
+ * start/poll/cancel and draw something. */
+bool nd_svc_format_card(void)
+{
+    if (!nd_svc_format_start())
+        return false;
+
+    for (;;) {
+        double secs = 0.0;
+        nd_svc_format_state st = nd_svc_format_poll(&secs);
+
+        if (st == ND_SVC_FORMAT_DONE_OK)
+            return true;
+        if (st != ND_SVC_FORMAT_RUNNING)
+            return false; /* DONE_FAIL, or IDLE: nothing is running */
+
+        /* nd_app.h's teardown contract: the phone is ringing and this app has
+         * to go. The format is stopped rather than orphaned, because a root
+         * mke2fs nobody is watching is the thing the escape hatch exists for. */
+        if (nd_app_should_exit()) {
+            (void)nd_svc_format_cancel();
+            return false;
+        }
+        /* ND_SVC_FORMAT_TIMEOUT_S sits above the ND_SVC_FORMAT_WAIT_S the core
+         * allows the helper, so the side that KNOWS WHY gives up first and the
+         * owner gets "Formatting failed." rather than a silent timeout. */
+        if (secs > ND_SVC_FORMAT_TIMEOUT_S) {
+            (void)nd_svc_format_cancel();
+            return false;
+        }
+        svc_nap(ND_SVC_FORMAT_POLL_S);
+    }
 }

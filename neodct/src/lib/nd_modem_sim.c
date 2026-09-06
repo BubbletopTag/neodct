@@ -234,9 +234,22 @@ void nd_modem__poll_sim(nd_modem *m, double now)
 {
     /* The boot grace ran out with nothing answering: NOW it is Simulation
      * Mode, and the console is told once, where nd_modem_open() used to say
-     * it before the modem had a chance. */
+     * it before the modem had a chance.
+     *
+     * Only when there is genuinely nothing to talk to, though. A phone whose
+     * ttyUSB nodes enumerated and could not be opened is
+     * ND_MODEM_LINK_UNREACHABLE, and nd_modem__probe_hardware() has already
+     * said so in the words that fit; "HARDWARE NOT FOUND" about hardware
+     * that is plainly found is how the console came to agree with the
+     * carrier line about something neither of them knew. */
     if (!m->sim_announced && now >= m->boot_deadline) {
-        nd_log(ND_LOG_MODEM, "HARDWARE NOT FOUND: Running in Simulation Mode.");
+        bool radio;
+
+        nd_modem__lock(m);
+        radio = m->saw_candidates;
+        nd_modem__unlock(m);
+        if (!radio)
+            nd_log(ND_LOG_MODEM, "HARDWARE NOT FOUND: Running in Simulation Mode.");
         m->sim_announced = true;
     }
 

@@ -25,6 +25,195 @@ UDEVD_ARGS=""
 # letting the UI start anyway. Overridable in /etc/default/udevd; see the long
 # comment in start(). Never a hard failure -- the core keeps looking.
 KBD_WAIT_MS=1500
+# How long to wait for the GRANTS below to actually land, same deal: a bound,
+# not a guarantee, and only a boot that lost the race pays any of it.
+GRANT_WAIT_MS=1000
+# And how long to wait for the modem's serial ports to enumerate, on hardware
+# only. See wait_for_ttyusb().
+TTYUSB_WAIT_MS=600
+# The advisory lock that serialises the AT port between the UI, S45modem and
+# atcmd. Created here, as root, before anything can want it -- see modem_lock().
+MODEM_LOCK=/tmp/neodct-modem.lock
+
+# ============ THE COLDPLUG SET, WHICH IS THE WHOLE CONTRACT ============
+#
+# Every subsystem named by a rule in 61-neodct-devices.rules, plus the ones
+# eudev's own stock rules cover for devices the dropped core opens. If you add
+# a rule to that file for a subsystem that is not in this list, the grant it
+# makes is applied by S11udevall INSTEAD -- in the background, while nd-core is
+# already running as ndusr with the device open -- and you have written a race.
+#
+#   input     /dev/input/event* and the by-path links nd_evdev_discover() picks
+#             the keypad from
+#   i2c-dev   /dev/i2c-3: the PCF8575 keypad matrix and the MAX17048 fuel gauge
+#   tty       /dev/ttyUSB*, group dialout. The SIM7600 is SOLDERED on this
+#             board, so it enumerates during kernel boot, before udevd exists,
+#             and depends entirely on this replay -- there is no later hotplug
+#             event to save it. An EACCES here is the "Simulation Mode" the
+#             owner sees in the status bar
+#   sound     /dev/snd/*, group audio: every tone, every ringtone, every call
+#   misc      /dev/uinput, which is how the browser is fed its arrow keys
+#   rtc       /dev/rtc0, which nd_clock.c writes after an SNTP sync
+#   backlight the PWM brightness attribute (the GPIO tier is S90display's)
+#   cpu       the cpufreq attributes
+#   block     the SD card. S12sdcard runs after this one and scans for a card
+#             that is already in the slot; a card that arrives later comes in
+#             through 60-neodct-sdcard.rules, which needs udevd up to fire
+#
+# graphics is not here: /dev/fb0 is opened by neodct_displayd (root) and by the
+# core, and eudev's stock rule puts it in `video`, which devtmpfs's 0600 does
+# not defeat because the core opens it after S90display has run.
+COLDPLUG_SUBSYSTEMS="input i2c-dev tty sound misc rtc backlight cpu block"
+
+# ============ AND WHAT PROVES IT LANDED ============
+#
+# "<glob>:<group>" -- a node the dropped core has to be able to open, and the
+# group that makes it openable. Verified BY ATTRIBUTE, because that is the only
+# thing that means anything here:
+#
+#   udevadm settle waits for the QUEUE. It returns success instantly when the
+#   queue is empty, which is exactly the state a boot is in when the uevent it
+#   is waiting for has not been generated yet. Settling is therefore not a
+#   barrier and never was -- the comment further down records the same lesson
+#   for the keyboard, measured: a boot that LOST the race showed a FASTER
+#   S10udevd than one that won it, because settling nothing is instant.
+#
+# So this asks the filesystem what the node's group actually is. A glob that
+# matches nothing is skipped rather than waited for -- a phone with no modem
+# fitted must not spend the timeout proving it -- and so is a group this image
+# does not have, because an image built without BR2_ROOTFS_USERS_TABLES has no
+# ndusr and everything runs as root anyway.
+DEVICE_GRANTS="
+/dev/i2c-[0-9]*:i2c
+/dev/ttyUSB[0-9]*:dialout
+/dev/uinput:ndusr
+/dev/rtc[0-9]*:ndusr
+/dev/snd/pcmC[0-9]*D[0-9]*:audio
+/dev/input/event[0-9]*:input
+/sys/class/backlight/*/brightness:video
+"
+
+have_group() {   # have_group NAME
+	grep -q "^$1:" /etc/group 2>/dev/null
+}
+
+# Names every grant that has NOT landed yet, space separated, and returns 0
+# when there is at least one. `find -maxdepth 0 -group` rather than stat(1): busybox
+# here is built without CONFIG_STAT, and a missing applet inside a command
+# substitution is an empty string rather than an error -- which would make this
+# check quietly pass on every boot, which is the failure it exists to catch.
+pending_grants() {
+	_pending=""
+	for _entry in $DEVICE_GRANTS; do
+		_pat="${_entry%:*}"
+		_grp="${_entry##*:}"
+		have_group "$_grp" || continue
+		# Unquoted on purpose: this is where the glob expands.
+		# shellcheck disable=SC2086
+		for _path in $_pat; do
+			[ -e "$_path" ] || continue
+			[ -n "$(find "$_path" -maxdepth 0 -group "$_grp" 2>/dev/null)" ] \
+				&& continue
+			_pending="$_pending $_path($_grp)"
+		done
+	done
+	[ -n "$_pending" ] || return 1
+	echo "$_pending"
+}
+
+# The modem's serial ports, on the board that has a soldered one.
+#
+# Deliberately NOT part of DEVICE_GRANTS: that table is about a node that
+# exists having the wrong group, and this is about the node not existing yet.
+# Waiting for a device to appear is a bet that it is coming, so it is placed
+# where the bet is safe -- a board with the SPI panel is a NeoDCT phone, and a
+# NeoDCT phone has a SIM7600 on its USB bus.
+#
+# After the ports appear, the grant loop is what makes sure they are in
+# `dialout`; this only closes the earlier half of the window.
+wait_for_ttyusb() {
+	[ -e /dev/spidev0.0 ] || return 0
+	[ "${TTYUSB_WAIT_MS:-0}" -gt 0 ] || return 0
+
+	_t=0
+	_max=$((TTYUSB_WAIT_MS / 100))
+	while :; do
+		set -- /dev/ttyUSB[0-9]*
+		[ -e "$1" ] && break
+		if [ "$_t" -ge "$_max" ]; then
+			echo "udev: no /dev/ttyUSB* after ${TTYUSB_WAIT_MS}ms;" \
+				"the modem will re-probe on its own timer"
+			return 0
+		fi
+		_t=$((_t + 1))
+		sleep 0.1
+	done
+	# It exists now, so the replay is what is missing -- the uevent for a port
+	# that enumerated while udevd was still reading its rules went nowhere.
+	udevadm trigger --type=devices --action=add --subsystem-match=tty
+	udevadm settle --timeout=$SETTLE_TIMEOUT
+}
+
+# ============ AND THE LOCK THAT GUARDS THE PORT THE GRANT OPENS ==========
+#
+# /dev/ttyUSB2 being group dialout is only half of what the dropped core needs
+# to talk to the modem. The other half is /tmp/neodct-modem.lock, the advisory
+# lock that keeps nd_modem_poll(), S45modem's APN walk and the atcmd helper off
+# the tty at the same moment -- and it is a file on a tmpfs, so at this point
+# in the boot it does not exist yet.
+#
+# Whoever creates it decides who may use it, and two principals race to be
+# first on every boot:
+#
+#   root's atcmd, out of S45modem, under init's umask 0022 -> root:root 0644
+#   nd-core, ndusr, under run_neodct.sh's umask 0027       -> ndusr:ndusr 0640
+#
+# Root can open either of those; ndusr can open only the second, and /tmp is
+# sticky 1777 so it cannot replace the first. So on a boot where root got there
+# first the core could not take the lock at all -- and the version of
+# nd_modem__acquire() that shipped with the drop reported "no lock file" to its
+# callers as a lock successfully TAKEN. Both sides then drove /dev/ttyUSB2 at
+# once, each eating the other's reply lines. It is decided afresh every boot,
+# which is precisely the shape of "the modem rarely works". nd_modem_at.c
+# carries the same story from the core's side, and its read-only retry is the
+# half of the cure that needed no cooperation from this file.
+#
+# This is the other half, and it removes the race rather than surviving it: the
+# file exists, owned by root, before either racer starts. S10udevd is where it
+# goes because it is in rcS's FOREGROUND set, which finishes before the LATE
+# scripts (S45modem among them) are backgrounded and before init reaches
+# run_neodct.sh -- so both racers are still ahead of it -- and because a lock on
+# the AT port belongs next to the grant that makes the AT port openable.
+#
+# 0660 root:dialout, NOT 0666. ndusr is in dialout and root ignores modes, so
+# both principals that have any business talking to the modem can take the
+# lock. ndusr_ut -- the browser, mpv, every installed app -- is deliberately
+# not in dialout (users-table.txt says why: `echo ATD1900555xxxx > /dev/ttyUSB2`
+# is real money), and it must not be able to take this lock either: holding it
+# would stall the radio for the whole phone without ever opening the port.
+#
+# No group in this image means no ndusr either, everything runs as root, and
+# root-only is then the honest mode.
+modem_lock() {
+	[ -e "$MODEM_LOCK" ] && return 0
+	if have_group dialout; then
+		install -m 0660 -o root -g dialout /dev/null "$MODEM_LOCK" 2>/dev/null \
+			|| echo "udev: could not create $MODEM_LOCK"
+	else
+		install -m 0600 /dev/null "$MODEM_LOCK" 2>/dev/null
+	fi
+	return 0
+}
+
+coldplug_trigger() {
+	# shellcheck disable=SC2086 # the match list must word-split
+	set --
+	for _s in $COLDPLUG_SUBSYSTEMS; do
+		set -- "$@" --subsystem-match="$_s"
+	done
+	udevadm trigger --type=devices --action=add "$@"
+	udevadm settle --timeout=$SETTLE_TIMEOUT || echo "udevadm settle failed"
+}
 
 # shellcheck source=/dev/null
 [ -r "/etc/default/$DAEMON" ] && . "/etc/default/$DAEMON"
@@ -42,7 +231,7 @@ start() {
 	else
 		echo "FAIL"
 	fi
-	# ============ NEODCT: only the input subsystem waits here ============
+	# ============ NEODCT: the coldplug the dropped core depends on =========
 	#
 	# This used to be the full coldplug --
 	#
@@ -54,33 +243,93 @@ start() {
 	# until the last one is done. Measured in QEMU that is 2.8 seconds, and
 	# rcS holds the UI until it finishes, so the user waits all of it.
 	#
-	# Almost none of it is anything the UI needs. What it DOES need is
-	# /dev/input/by-path/*-kbd, which is how nd_evdev_discover() picks the
-	# keypad (nd_input.h): devtmpfs gives us /dev/input/event0 with no udev
-	# at all, but event0 is not reliably the keyboard -- under QEMU there is
-	# a virtio tablet on the same bus, and a phone that came up reading the
-	# tablet would have no working keys.
+	# Then it was two subsystems: input, because nd_evdev_discover() picks the
+	# keypad off /dev/input/by-path/*-kbd, and i2c-dev, because on the Luckfox
+	# the keypad is a PCF8575 on /dev/i2c-3 and the UI stopped being root.
 	#
-	# So: trigger the input subsystem AND i2c-dev, and settle those -- a handful
-	# of devices that returns almost at once. The rest of the coldplug is
-	# S11udevall, which rcS runs in the background while the phone is already up.
+	# Two was still wrong, and it was wrong for the same reason the first
+	# version was right for the wrong one. devtmpfs creates EVERY node the
+	# instant the kernel registers the device, root:root 0600, and the group
+	# that makes it reachable by a non-root process is applied afterwards, when
+	# udevd processes the uevent. Everything not in the trigger list got that
+	# from S11udevall -- which rcS deliberately runs in the BACKGROUND, at nice
+	# 10, concurrently with nd-core. So the phone was racing the rules that were
+	# written to make its own privilege drop survivable, on five more device
+	# classes than the one that had already bitten:
 	#
-	# i2c-dev is here for the Luckfox, where the keypad is a PCF8575 on
-	# /dev/i2c-3 and there is no input device at all. devtmpfs makes that node
-	# root:root 0600; it becomes group i2c 0660 -- readable by the non-root UI --
-	# only when udev applies 61-neodct-devices.rules to it. Leave that grant to
-	# the background S11udevall and it RACES nd-core dropping privilege and
-	# opening the keypad at S90display: root (the first-boot wizard) ignores the
-	# mode and reads the keypad fine, but the steady-state UI running as ndusr
-	# gets EACCES and the phone has no keys. A spurious /dev/input/event0 then
-	# masks it as "a backend is present", so the phone shows its alpha notice
-	# and never answers a press. Settling i2c-dev HERE, before the UI, closes
-	# that race. Unlike the keyboard below, i2c-3 is a fixed platform bus already
-	# in /sys before udevd starts, so there is no 'the uevent fired into the
-	# void' problem -- the replay this trigger issues is enough -- and the fuel
-	# gauge on the same bus (nd_battery.c) gets its group at the same time.
-	udevadm trigger --type=devices --action=add --subsystem-match=input --subsystem-match=i2c-dev
-	udevadm settle --timeout=$SETTLE_TIMEOUT || echo "udevadm settle failed"
+	#   /dev/ttyUSB*  the modem. "HARDWARE NOT FOUND: Running in Simulation
+	#                 Mode." in the status bar, on a phone with a modem in it
+	#   /dev/snd/*    no tone, no ringtone, no call audio in the first seconds
+	#   /dev/uinput   the browser gets no keys
+	#   /dev/rtc0     the clock cannot be set after an SNTP sync
+	#   backlight     the panel cannot be dimmed or restored
+	#
+	# As root none of it mattered, because root ignores the mode -- which is
+	# why the whole class appeared at 0.5.0b and not before.
+	#
+	# COLDPLUG_SUBSYSTEMS at the top of this file is now the list, and
+	# DEVICE_GRANTS is what proves the replay actually landed. The cost is
+	# bounded: these are a few dozen devices, the settle returns at once when
+	# the queue is empty, and the verification is a handful of forks on a boot
+	# that already won.
+	coldplug_trigger
+
+	# ============ AND THE MODEM'S PORTS, ON HARDWARE ONLY ============
+	#
+	# The SIM7600 is soldered to this board and enumerates during kernel boot,
+	# but USB enumeration is not instant and rcS does not wait for it. nd-core
+	# opens the AT port inside nd_ui_init, after the drop; a port that is not
+	# there yet reads to the owner as "Simulation Mode", and although
+	# nd_modem_open() re-probes on a timer, the status bar has already lied.
+	#
+	# Gated on /dev/spidev0.0 -- the ST7789 panel, i.e. "this is the phone" --
+	# so QEMU, where the modem is a hot-plugged USB device that arrives well
+	# after udevd is up, pays none of it. A board with no modem fitted pays the
+	# timeout once per boot, which is the honest cost of not being able to tell
+	# "not fitted" from "not enumerated yet" without asking the USB tree.
+	#
+	# BEFORE the grant loop, not after: a port that appears during this wait
+	# still has to be checked for its dialout group, and the loop below is what
+	# does that. The other way round the port would arrive after the only thing
+	# that verifies it had already finished.
+	wait_for_ttyusb
+
+	# Before the UI and before S45modem, which is the whole point of it being
+	# here rather than in either of them.
+	modem_lock
+
+	# ============ AND THEN CHECK THE ATTRIBUTE, NOT THE QUEUE ============
+	#
+	# settle is not a barrier. It waits for the event QUEUE and returns success
+	# instantly when the queue is empty -- which is precisely the state of a
+	# boot whose uevent has not been generated yet, or was generated into the
+	# void while udevd was still reading its rules. Both commands above can
+	# therefore succeed having waited for nothing at all.
+	#
+	# So ask the node. pending_grants() reads the group off each device that
+	# EXISTS and names the ones that are still root's; a glob that matches
+	# nothing is not waited for, so a phone with no modem and no sound card
+	# pays one glob and moves on. Each retry re-triggers, because on a losing
+	# boot the missing thing is the EVENT and no amount of waiting produces a
+	# second one -- see the keyboard loop below, which learned this the
+	# expensive way.
+	_tries=0
+	_max=$((GRANT_WAIT_MS / 100))
+	while _late="$(pending_grants)"; do
+		if [ "$_tries" -ge "$_max" ]; then
+			# Loud, and naming the node: this is the difference between
+			# "the phone has no keypad" and "the phone cannot open the
+			# keypad it has", and nothing downstream can tell them apart.
+			echo "udev: STILL ROOT-ONLY after $_tries retries:$_late"
+			echo "udev: the UI runs as ndusr and will fail to open these"
+			break
+		fi
+		_tries=$((_tries + 1))
+		sleep 0.05
+		coldplug_trigger
+	done
+	[ "$_tries" -gt 0 ] && [ -z "${_late:-}" ] && \
+		echo "udev: device grants landed after $_tries retries"
 
 	# ============ AND THEN WAIT FOR ONE TO ACTUALLY BE THERE ============
 	#

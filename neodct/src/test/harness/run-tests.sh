@@ -16,6 +16,35 @@
 #
 # NEODCT_ROOT is set per binary, as before, to a scratch root that is
 # removed afterwards.
+#
+# ============ AND ONE LINE THAT SAYS WHAT THIS RUN COULD NOT TEST ============
+#
+# Added after 0.5.8b, in which eight releases of a phone that made no sound
+# at all shipped behind a green suite.
+#
+# The privilege drop is not a mode bit, it is a capability: setgroups(2)
+# needs CAP_SETGID, so a process that is ALREADY ndusr cannot hand a child to
+# ndusr -- it can only kill it at exit 122 before execve. That is what
+# silenced the phone. The suite could not see it and STRUCTURALLY CANNOT,
+# for a reason worth printing rather than remembering:
+#
+#   on a build host getpwnam("ndusr") misses, so nd_priv_lookup() leaves
+#   run_as invalid and nd_priv_become() is a documented no-op -- the drop
+#   never happens and the working branch is taken;
+#
+#   inside QEMU `make test` runs as root, so the drop genuinely succeeds.
+#
+# Neither environment is the one that breaks and neither ever will be. The
+# only uid that breaks it is an unprivileged process that is already ndusr,
+# and no test process ever has it.
+#
+# So this cannot be fixed by asserting harder. What it CAN do is stop the
+# green from being read as coverage: the banner below names the configuration
+# this run was in, and the closing line repeats the caveat beside "all tests
+# passed". A person who knows the suite never exercised the drop will not
+# conclude from a pass that the drop works. nd-selftest, run on the phone, is
+# where that question is actually answered -- its `tone` section forks twice
+# to reach the failing configuration on purpose.
 
 set -u
 
@@ -30,6 +59,28 @@ NEODCT_TEST_HARNESS=1
 NEODCT_FAKEBIN="$HARNESS/fakebin"
 PATH="$NEODCT_FAKEBIN:$PATH"
 export NEODCT_TEST_HARNESS NEODCT_FAKEBIN PATH
+
+# grep rather than getent or id: the sandbox binds /etc read-only off the
+# host and busybox may have neither applet, and a missing applet inside a
+# command substitution is an empty string rather than an error -- which would
+# make this quietly claim the wrong configuration, which is the failure it
+# exists to describe.
+have_user() {
+    grep -q "^$1:" /etc/passwd 2>/dev/null
+}
+
+drop_testable=0
+if [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
+    drop_note="running as ROOT, so every drop SUCCEEDS and no test reaches the failure"
+elif have_user ndusr && have_user ndusr_ut; then
+    drop_testable=1
+    drop_note="ndusr and ndusr_ut exist here, so the real drop IS exercised"
+elif have_user ndusr || have_user ndusr_ut; then
+    drop_note="only one of ndusr/ndusr_ut exists here, so half the drop is exercised"
+else
+    drop_note="no ndusr/ndusr_ut here, so nd_priv_become() is a no-op and NO test exercises a drop"
+fi
+printf '  %-7s %s\n' 'CONFIG' "$drop_note"
 
 log=$(mktemp) || exit 2
 NEODCT_FAKEBIN_LOG="$log"
@@ -74,3 +125,8 @@ if [ "$fail" -ne 0 ]; then
     exit 1
 fi
 echo "all tests passed"
+if [ "$drop_testable" -eq 0 ]; then
+    echo "  ...but NOT the privilege drop: $drop_note."
+    echo "  A green suite is not evidence that a spawn reaches execve on the phone."
+    echo "  Run nd-selftest there; its 'tone' and 'browser' sections ask the kernel."
+fi

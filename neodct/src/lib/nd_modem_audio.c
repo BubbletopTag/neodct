@@ -122,9 +122,21 @@ static int cmp_name(const void *a, const void *b)
     return strcmp((const char *)a, (const char *)b);
 }
 
-static size_t sorted_listdir(const char *dir, char names[][ND_MODEM_PORT_MAX], size_t max)
+/* Byte-sorted listing of the entries of one directory whose names start with
+ * `prefix`, and the prefix is checked BEFORE the entry is counted against
+ * `max`.
+ *
+ * The twin of nd_modem.c's sorted_listdir(), and it had the same bug for the
+ * same reason: `max` is ND_MODEM_CAND_MAX = 32, which is a bound on modem
+ * ports, and it was being spent on /sys/class/tty's tty0..tty63. The victim
+ * here is nd_modem__pcm_port(): a miss falls through to a hardcoded
+ * /dev/ttyUSB4 and stops being a detection at all, so a phone whose PCM port
+ * enumerated as anything else got a call with no audio and no error. */
+static size_t sorted_listdir(const char *dir, const char *prefix,
+                             char names[][ND_MODEM_PORT_MAX], size_t max)
 {
     char resolved[ND_PATH_MAX];
+    size_t plen = (prefix != NULL) ? strlen(prefix) : 0u;
     DIR *d;
     struct dirent *ent;
     size_t n = 0u;
@@ -136,6 +148,8 @@ static size_t sorted_listdir(const char *dir, char names[][ND_MODEM_PORT_MAX], s
         return 0u;
     while ((ent = readdir(d)) != NULL && n < max) {
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+            continue;
+        if (plen > 0u && strncmp(ent->d_name, prefix, plen) != 0)
             continue;
         (void)nd_strlcpy(names[n], ent->d_name, ND_MODEM_PORT_MAX);
         n++;
@@ -157,12 +171,10 @@ void nd_modem__pcm_port(char *out, size_t out_sz)
         return;
     }
 
-    n = sorted_listdir(ND_MODEM_TTY_DIR, names, ND_ARRAY_LEN(names));
+    n = sorted_listdir(ND_MODEM_TTY_DIR, "ttyUSB", names, ND_ARRAY_LEN(names));
     for (i = 0u; i < n; i++) {
         int32_t iface;
 
-        if (strncmp(names[i], "ttyUSB", 6u) != 0)
-            continue;
         if (read_iface_hex(names[i], &iface) && iface == 4) {
             (void)snprintf(out, out_sz, "/dev/%s", names[i]);
             return;
@@ -194,7 +206,7 @@ static bool capture_node_in(const char *card, char *out, size_t out_sz)
 
     if (nd_snprintf(dir, sizeof dir, "%s/%s", ND_MODEM_ASOUND_DIR, card) != ND_OK)
         return false;
-    n_nodes = sorted_listdir(dir, nodes, ND_ARRAY_LEN(nodes));
+    n_nodes = sorted_listdir(dir, "pcm", nodes, ND_ARRAY_LEN(nodes));
     for (j = 0u; j < n_nodes; j++) {
         size_t len = strlen(nodes[j]);
 
@@ -234,7 +246,7 @@ bool nd_modem__find_capture_device(char *out, size_t out_sz)
     size_t n_cards;
     size_t i;
 
-    n_cards = sorted_listdir(ND_MODEM_ASOUND_DIR, cards, ND_ARRAY_LEN(cards));
+    n_cards = sorted_listdir(ND_MODEM_ASOUND_DIR, "card", cards, ND_ARRAY_LEN(cards));
 
     /* THE USB CARD FIRST, and the reason is the difference between this phone
      * and the emulator it was written on. In QEMU card 0 is USB Audio with no

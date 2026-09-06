@@ -217,6 +217,39 @@ const char *const nd_setapp_sdcard_legacy_help =
     "There is no hurry. A card in the old format is not unsafe -- it simply "
     "has nowhere for apps to live.";
 
+/* Five lines, the whole dialog, same as the legacy one. The order is what a
+ * person needs in the order they need it: what the card is, what the phone
+ * cannot do with it, and what it would cost to change that. The second remedy
+ * -- copy the files across on the computer that owns them -- is a paragraph,
+ * not a line, so it is in the help below. */
+const char *const nd_setapp_sdcard_foreign = "Card made on another\n"
+                                             "computer. The phone\n"
+                                             "cannot write to it.\n"
+                                             "Formatting it here\n"
+                                             "erases everything.";
+
+const char *const nd_setapp_sdcard_foreign_help =
+    "This card carries the file ownership of the computer that made it, and "
+    "the phone honours it. Your files are on the card and the card is "
+    "working; what the phone does not have is permission to read or write "
+    "them.\n"
+    "\n"
+    "That is deliberate. The card is mounted without being told to pretend "
+    "every file belongs to you, because pretending is exactly what would let "
+    "an app you installed rummage through your music. The price is that a "
+    "card set up somewhere else arrives locked to that somewhere else.\n"
+    "\n"
+    "There are two ways out, and only one of them keeps what is on the "
+    "card.\n"
+    "\n"
+    "On the computer, make the files yours: give the card's folders to your "
+    "own user rather than to root, then put the card back in the phone. "
+    "Nothing is lost.\n"
+    "\n"
+    "Or format the card here. The phone then makes it the way it wants it, "
+    "and it ERASES EVERYTHING ON THE CARD. Copy anything you want to keep to "
+    "a computer first.";
+
 size_t nd_setapp_bt_lines(char lines[][ND_SETAPP_BT_LINE_MAX], size_t max, bool enabled,
                           bool connected)
 {
@@ -505,6 +538,10 @@ const char *const nd_setapp_install_replace = "Replace this app?\n%s\nIts saved 
 const char *const nd_setapp_install_legacy = "Card uses the old format.\n"
                                              "It cannot hold apps.\n"
                                              "See Memory card.";
+
+const char *const nd_setapp_install_foreign = "This card belongs to\n"
+                                              "another computer.\n"
+                                              "See Memory card.";
 
 /* Must read the same way round as nd_msg_style_options in the Messages app:
  * index 0 is CLASSIC. test_settings_app.c pins the strings this writes. */
@@ -995,9 +1032,13 @@ static menu_again wallpaper_menu_once(nd_ui *ui)
     if (list[selection].path[0] == '\0') {
         nd_scroller help;
 
+        /* media_available(), not is_ready(): the question this help answers is
+         * "where do I put wallpaper files", and a legacy FAT card holds them
+         * exactly as well as an ext4 one. Asking the ownership question here
+         * told an owner with a perfectly good card to go and buy one. */
         nd_scroller_init(&help, ui,
-                         nd_storage_is_ready() ? nd_setapp_get_more_help_with_card
-                                               : nd_setapp_get_more_help,
+                         nd_storage_media_available() ? nd_setapp_get_more_help_with_card
+                                                      : nd_setapp_get_more_help,
                          NULL, NULL);
         nd_scroller_show(&help);
         again = MENU_AGAIN;
@@ -1273,9 +1314,216 @@ static void show_about(nd_ui *ui)
  * perfectly good FAT32 card could never get one, which is the whole feature
  * unreachable for the people most likely to want it.
  */
+/* ============ WHAT THE OWNER SEES WHILE A CARD IS FORMATTED ============
+ *
+ * Nothing, until now. offer_format() showed the confirmation, and the instant
+ * it returned ND_KEY_ENTER it called a function that blocked for as long as
+ * the format took. So the last thing put on the panel was the "EVERYTHING ON
+ * IT WILL BE ERASED!" dialog, and it stayed there, unchanged and unresponsive,
+ * for anything up to four minutes. No key did anything, because nothing was
+ * reading keys. The owner's report was "trying to format the sdcard froze the
+ * system", and from the outside there was no way whatsoever to tell that phone
+ * apart from a dead one.
+ *
+ * The core no longer waits either (nd_svc.h: the format is a JOB, started,
+ * polled and cancelled, and every verb answers in microseconds). So the wait
+ * belongs here, on the screen that asked for it, where there is something to
+ * draw and somebody to ask.
+ *
+ * ============ THE BAR IS A CLOCK, AND SAYS SO ============
+ *
+ * mke2fs reports no progress of its own -- there is no percentage to be had
+ * from it, and inventing one out of `sync` calls would be a fiction. What
+ * moves is time, so the bar is elapsed time against ND_SVC_FORMAT_WAIT_S, the
+ * ceiling the core allows the helper. That is an honest "about how long this
+ * usually takes" and the reading beside it is the elapsed time in minutes and
+ * seconds, which is the part an owner can actually check against a watch.
+ *
+ * It stops at 99%. A bar that sits full while the work continues is the one
+ * thing that makes a progress display read as broken, and this one CAN reach
+ * its denominator without being finished -- the cap is a timeout, not an
+ * estimate.
+ */
+
+#define SETAPP_FORMAT_BAR_TOTAL 1000
+
+/* The elapsed clock, right-aligned beside the percentage. */
+static void format_elapsed_detail(void *ctx, int64_t done, int64_t total, char *out, size_t out_sz)
+{
+    const double *secs = (const double *)ctx;
+    int whole;
+
+    (void)done;
+    (void)total;
+    if (out == NULL || out_sz == 0u)
+        return;
+    whole = (secs != NULL) ? nd_trunc32(*secs) : 0;
+    if (whole < 0)
+        whole = 0;
+    (void)snprintf(out, out_sz, "%d:%02d", whole / 60, whole % 60);
+}
+
+typedef enum {
+    FORMAT_DONE_OK = 0, /* the card was formatted                   */
+    FORMAT_NOT_STARTED, /* the core would not start one at all      */
+    FORMAT_FAILED,      /* it ran and did not finish                */
+    FORMAT_STOPPED      /* the owner pressed Clear and confirmed it */
+} format_outcome;
+
+/* Ask before stopping. Cancelling a format is not a way out of a screen, it is
+ * a decision with a consequence: nd_svc.h's contract is that the card is left
+ * in whatever state the mkfs had reached, which after the partition table has
+ * been written and before mke2fs has finished is a card that mounts nowhere.
+ * The owner should be told that before they take it, not after.
+ *
+ * The job keeps running underneath this dialog, which is the point of it being
+ * a job -- answering "no" costs the format nothing. */
+static bool confirm_stop(nd_ui *ui)
+{
+    nd_msgdialog dialog;
+
+    nd_msgdialog_init(&dialog, ui,
+                      "Stop formatting?\n"
+                      "The card will be left\n"
+                      "unusable until it is\n"
+                      "formatted again.");
+    nd_msgdialog_set_button(&dialog, "Stop");
+    return nd_msgdialog_show(&dialog) == ND_KEY_ENTER;
+}
+
+static format_outcome run_format_job(nd_ui *ui)
+{
+    nd_progress bar;
+    double secs = 0.0;
+    int last_whole = -1;
+
+    /* BEFORE the start, not after it. nd_svc_format_start() is a round trip to
+     * the core and the core spawns a root helper on it; short, but the frame
+     * has to be on the panel before anything can go slowly, or the owner is
+     * looking at the confirmation dialog again. */
+    nd_progress_init(&bar, ui, "Formatting", "Memory card", "Clear stops it", format_elapsed_detail,
+                     &secs);
+    (void)nd_progress_draw(&bar, 0, SETAPP_FORMAT_BAR_TOTAL);
+
+    if (!nd_svc_format_start())
+        return FORMAT_NOT_STARTED;
+
+    for (;;) {
+        nd_svc_format_state st;
+        int64_t done;
+        int32_t key;
+        int whole;
+
+        st = nd_svc_format_poll(&secs);
+        if (st == ND_SVC_FORMAT_DONE_OK) {
+            (void)nd_progress_draw(&bar, SETAPP_FORMAT_BAR_TOTAL, SETAPP_FORMAT_BAR_TOTAL);
+            return FORMAT_DONE_OK;
+        }
+        /* IDLE as well as DONE_FAIL: a verdict is handed out once and the job
+         * then reads IDLE, so anything that is not RUNNING means there is
+         * nothing left to wait for. */
+        if (st != ND_SVC_FORMAT_RUNNING)
+            return FORMAT_FAILED;
+
+        done = (int64_t)(secs * (double)SETAPP_FORMAT_BAR_TOTAL / ND_SVC_FORMAT_WAIT_S);
+        if (done > (SETAPP_FORMAT_BAR_TOTAL * 99) / 100)
+            done = (SETAPP_FORMAT_BAR_TOTAL * 99) / 100;
+        if (done < 0)
+            done = 0;
+
+        /* nd_progress_draw() paints nothing when the whole percentage has not
+         * moved, which on a four-minute denominator is once every 2.4 seconds
+         * -- long enough for a panel to look stopped. The clock beside the bar
+         * is what says the phone is alive, so force a repaint when the SECOND
+         * changes and let the gate do its job the rest of the time. */
+        whole = nd_trunc32(secs);
+        if (whole != last_whole) {
+            last_whole = whole;
+            nd_progress_set_step(&bar, "Formatting");
+        }
+        (void)nd_progress_draw(&bar, done, SETAPP_FORMAT_BAR_TOTAL);
+
+        /* THE ONLY WAIT IN THIS LOOP, and it is a key read. Whatever else is
+         * true of a phone formatting a card, its keypad is being scanned. */
+        key = nd_ui_read_keypress(ui, ND_SVC_FORMAT_POLL_S);
+        if (key == ND_KEY_CLEAR) {
+            if (confirm_stop(ui)) {
+                (void)nd_svc_format_cancel();
+                return FORMAT_STOPPED;
+            }
+            /* The dialog painted over the whole screen and the percentage has
+             * not moved, so without this the gate would refuse the repaint and
+             * the owner would be left looking at the dismissed dialog. */
+            nd_progress_set_step(&bar, "Formatting");
+        }
+
+        /* nd_app.h's teardown: the phone is ringing and this app has to go.
+         * The job is stopped rather than orphaned -- a root mke2fs with nobody
+         * watching it is the thing cancel() exists for. */
+        if (nd_app_should_exit()) {
+            (void)nd_svc_format_cancel();
+            return FORMAT_STOPPED;
+        }
+        /* The core caps the helper at ND_SVC_FORMAT_WAIT_S inside poll() and
+         * this is the belt: a poll that keeps saying RUNNING past the caller's
+         * own ceiling is a core that has lost track of its child, and a screen
+         * that trusts it polls for ever. */
+        if (secs > ND_SVC_FORMAT_TIMEOUT_S) {
+            nd_log_err(ND_LOG_OS,
+                       "Settings: the format was still running after %.0f s; stopping it", secs);
+            (void)nd_svc_format_cancel();
+            return FORMAT_FAILED;
+        }
+    }
+}
+
+/* What to say about a format that did not work.
+ *
+ * "The card may be write protected" was the whole vocabulary, and it was a
+ * guess -- write protection is not a thing an SD slot on this board can even
+ * report. The helper leaves a better answer behind on every path it can fail
+ * on, and it is the state file: neodct-sdcard refuses BEFORE it writes
+ * anything when something still holds the card mounted (the record it already
+ * had is deliberately left alone), and publishes `unformatted` from every
+ * failure after that point. So the state the card is in afterwards says which
+ * of the two happened, and those are two different things for the owner to do.
+ */
+static void report_format_failure(nd_ui *ui)
+{
+    nd_msgdialog dialog;
+    nd_card after;
+
+    nd_storage_card(&after);
+    /* FOREIGN belongs in this list for the same reason the other three do: it
+     * is a card the helper still has mounted and still has a full description
+     * of, which is only true on the path where it refused before writing. */
+    if (after.state == ND_CARD_READY || after.state == ND_CARD_NEEDS_SETUP ||
+        after.state == ND_CARD_LEGACY_FORMAT || after.state == ND_CARD_FOREIGN) {
+        /* Still mounted and still described: nothing was written. Almost
+         * always something on the phone still has a file open on the card. */
+        nd_msgdialog_init(&dialog, ui,
+                          "The card is in use.\n"
+                          "Nothing was changed.\n"
+                          "Close other apps and\n"
+                          "try again.");
+    } else {
+        nd_msgdialog_init(&dialog, ui,
+                          "Formatting failed.\n"
+                          "The card is unusable\n"
+                          "until it is formatted.");
+    }
+    nd_msgdialog_set_button(&dialog, "OK");
+    /* cancel_keys=(): a destructive operation that did not finish has to be
+     * acknowledged rather than backed past. */
+    nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
+    (void)nd_msgdialog_show(&dialog);
+}
+
 static void offer_format(nd_ui *ui, const nd_card *card)
 {
     nd_msgdialog dialog;
+    format_outcome outcome;
+    const char *saved;
 
     nd_msgdialog_init(&dialog, ui, nd_setapp_format_warning);
     nd_msgdialog_set_button(&dialog, "Format");
@@ -1288,25 +1536,135 @@ static void offer_format(nd_ui *ui, const nd_card *card)
         (void)nd_msgdialog_show(&dialog);
         return;
     }
-    /* `card` is read again by the core, which is not a duplicated lookup but
+    /* ============ NAMING IT FOR THE WATCHDOG ============
+     *
+     * The four labels in this file mark the operations that can genuinely take
+     * a while, so that a UI thread which stops moving inside one is reported
+     * as stopped IN IT rather than just stopped -- nd_ui.h has the mechanism.
+     * This is the one that earned the mechanism: a format that wedged took the
+     * whole phone with it for minutes and left nothing behind in core.log.
+     *
+     * Recorded in every process; nd_ui.h says which ones run a checker over
+     * them, and an app does not yet. It costs a relaxed store either way.
+     *
+     * `card` is read again by the core, which is not a duplicated lookup but
      * the whole design: the check above is what this SCREEN knows, and the
      * device the helper is pointed at is what the CORE knows. The app never
-     * names it. nd_svc.h.
-     *
-     * This blocks for as long as the format takes, exactly as the spawn it
-     * replaced did. What it can no longer do is cancel: the pid lives in the
-     * core now, so app_shutdown() has nothing to kill and an incoming call
-     * during a format no longer interrupts an mkfs half way through. */
-    if (nd_svc_format_card()) {
+     * names it. nd_svc.h. */
+    saved = nd_ui_watch_begin("formatting the memory card");
+    outcome = run_format_job(ui);
+    nd_ui_watch_end(saved);
+
+    switch (outcome) {
+    case FORMAT_DONE_OK:
         nd_msgdialog_init(&dialog, ui, "Card formatted and ready.");
         nd_msgdialog_set_button(&dialog, "OK");
-    } else {
+        (void)nd_msgdialog_show(&dialog);
+        return;
+    case FORMAT_NOT_STARTED:
+        /* Not "it failed": nothing was started, so nothing was touched. The
+         * core refuses when there is no card, when the card is not removable
+         * (the QEMU host share), and when the helper could not be spawned --
+         * and it names which in the log. */
+        nd_log_err(ND_LOG_OS, "Settings: the core would not start a format");
         nd_msgdialog_init(&dialog, ui,
-                          "Formatting failed.\nThe card may be write "
-                          "protected.");
+                          "Formatting could not\n"
+                          "start. Nothing was\n"
+                          "changed.");
         nd_msgdialog_set_button(&dialog, "OK");
         nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
+        (void)nd_msgdialog_show(&dialog);
+        return;
+    case FORMAT_STOPPED:
+        nd_msgdialog_init(&dialog, ui,
+                          "Formatting stopped.\n"
+                          "The card is unusable\n"
+                          "until it is formatted.");
+        nd_msgdialog_set_button(&dialog, "OK");
+        nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
+        (void)nd_msgdialog_show(&dialog);
+        return;
+    case FORMAT_FAILED:
+    default:
+        report_format_failure(ui);
+        return;
     }
+}
+
+/* ============ SETTING A CARD UP IS TWO JOBS, AND ndusr CAN DO ONE ============
+ *
+ * The five media folders are ordinary directories and the core makes them
+ * itself. The other two are not: apps/<App>/data must belong to ndusr_ut and
+ * so must untrusted/, and changing a file's owner needs CAP_CHOWN -- the exact
+ * privilege the core gave up in 0.5.0b. Without them the card comes out of
+ * "Set up" looking finished and is not: a download has nowhere to land and an
+ * install has nowhere to put an app's saves.
+ *
+ * neodct-sdcard's `layout` verb is the root half, and the core already exposes
+ * it (nd_svc_layout_card(), used after every .nap install). It is asked for
+ * here for the same reason it is asked for there, and its failure is SAID
+ * rather than swallowed -- a card that is "ready" with a silent caveat is how
+ * an owner comes to believe an app is broken.
+ *
+ * It is asked only of an ext card, because that is the only kind the layout
+ * can be written onto. On a FAT card the five folders are the whole of what
+ * "set up" can mean, and the next mount will classify it as legacy and say so.
+ */
+static bool fstype_is_ext(const char *fstype)
+{
+    return strncmp(fstype, "ext", 3u) == 0;
+}
+
+static void setup_card(nd_ui *ui, const nd_card *card)
+{
+    nd_msgdialog dialog;
+
+    /* Both halves of this can take a moment on a slow card -- the layout pass
+     * walks apps/ and the five media folders as root -- and a screen that has
+     * not changed since the key was pressed is the same thing that made the
+     * format read as a freeze. Say what is happening before doing it. */
+    bt_say_working(ui, "Setting up...");
+
+    if (!nd_storage_setup_folders()) {
+        /* Two different faults with two different remedies, and until now they
+         * shared one sentence that was wrong about both. An ext card carries
+         * real numeric ownership and is mounted without uid=/gid= on purpose,
+         * so a card mkfs.ext4 left as root:root -- which is every card made on
+         * a PC -- is one this uid cannot write a byte to. It is not locked and
+         * it is not damaged. In 0.4.x the core was root and this always
+         * worked; the privilege drop turned the offer into one the phone
+         * could not keep. */
+        if (!nd_storage_card_is_writable()) {
+            nd_log_err(ND_LOG_OS, "Settings: %s is not writable by this user; card set-up refused",
+                       card->mountpoint);
+            /* The same sentence the memory-card screen shows for
+             * ND_CARD_FOREIGN, and the same string: this is that card arriving
+             * by the other road, from a helper too old to have classified it,
+             * and two wordings for one condition is how they drift apart. */
+            nd_msgdialog_init(&dialog, ui, nd_setapp_sdcard_foreign);
+        } else {
+            nd_msgdialog_init(&dialog, ui,
+                              "Could not write to the card.\n"
+                              "It may be locked or damaged.");
+        }
+        nd_msgdialog_set_button(&dialog, "OK");
+        /* cancel_keys=(): the failure has to be acknowledged. */
+        nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
+        (void)nd_msgdialog_show(&dialog);
+        return;
+    }
+
+    if (fstype_is_ext(card->fstype) && !nd_svc_layout_card()) {
+        nd_log_err(ND_LOG_OS, "Settings: the card's layout was not restated after setting it up");
+        nd_msgdialog_init(&dialog, ui,
+                          "Folders added.\n"
+                          "Take the card out and\n"
+                          "put it back before\n"
+                          "installing apps.");
+    } else {
+        nd_msgdialog_init(&dialog, ui, "Card is ready to use.");
+    }
+    nd_msgdialog_set_button(&dialog, "OK");
     (void)nd_msgdialog_show(&dialog);
 }
 
@@ -1325,6 +1683,31 @@ static void show_memory_card(nd_ui *ui)
         (void)nd_msgdialog_show(&dialog);
         nd_scroller_init(&help, ui, nd_setapp_sdcard_help, NULL, NULL);
         nd_scroller_show(&help);
+        return;
+    }
+
+    /* ============ AND THE ONE THAT USED TO SAY "No memory card." ============
+     *
+     * The phone could not read the file that says what is in the slot. That is
+     * not an empty slot, and saying it was is what made a card that had just
+     * been formatted disappear until the next reboot -- the format published
+     * its state file as root:root 0640 and the ndusr core could see it and not
+     * open it. nd_storage.h has the whole history.
+     *
+     * The remedy the owner has is real: the record lives in /run, which is a
+     * tmpfs, so anything that rewrites it fixes this -- re-inserting the card
+     * runs the udev handler, and a restart runs the boot scan. Say that rather
+     * than send them looking for a card that is already in the phone. */
+    if (card.state == ND_CARD_UNKNOWN) {
+        nd_log_err(ND_LOG_OS, "Settings: the card status file could not be read");
+        nd_msgdialog_init(&dialog, ui,
+                          "Cannot read the card\n"
+                          "status. Take the card\n"
+                          "out and put it back,\n"
+                          "or restart the phone.");
+        nd_msgdialog_set_button(&dialog, "OK");
+        nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
+        (void)nd_msgdialog_show(&dialog);
         return;
     }
 
@@ -1357,18 +1740,14 @@ static void show_memory_card(nd_ui *ui)
         nd_msgdialog_set_button(&dialog, "Set up");
         if (nd_msgdialog_show(&dialog) != ND_KEY_ENTER)
             return;
-        if (nd_storage_setup_folders()) {
-            nd_msgdialog_init(&dialog, ui, "Card is ready to use.");
-            nd_msgdialog_set_button(&dialog, "OK");
-        } else {
-            nd_msgdialog_init(&dialog, ui,
-                              "Could not write to the card.\n"
-                              "It may be locked or damaged.");
-            nd_msgdialog_set_button(&dialog, "OK");
-            /* cancel_keys=(): the failure has to be acknowledged. */
-            nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
+        {
+            /* Five mkdirs on a card that may be slow, then a root layout pass
+             * through the broker that walks apps/ and all five folders. */
+            const char *saved = nd_ui_watch_begin("setting up the memory card");
+
+            setup_card(ui, &card);
+            nd_ui_watch_end(saved);
         }
-        (void)nd_msgdialog_show(&dialog);
         return;
     }
 
@@ -1390,8 +1769,52 @@ static void show_memory_card(nd_ui *ui)
         return;
     }
 
-    /* "Nothing we can mount: the only way forward is to reformat, which is
-     * destructive, so make that unmistakable." */
+    if (card.state == ND_CARD_FOREIGN) {
+        /* A card made on somebody else's computer. It mounted, it is healthy,
+         * and its files belong to a uid this phone does not have -- see
+         * ND_CARD_FOREIGN in nd_storage.h for why it is mounted that way on
+         * purpose.
+         *
+         * Until this state existed the phone got here by a longer road: it
+         * offered "Set up", the five mkdirs failed, and it said "It may be
+         * locked or damaged", which is neither. Now it says so BEFORE the
+         * offer, and the device is named for the same reason the unformatted
+         * branch names one -- "the card at /dev/mmcblk1p1 is not mine" is
+         * something an owner can act on.
+         *
+         * Then the help, which carries the remedy that KEEPS the files, and
+         * only then the format offer, which does not. */
+        nd_log_err(ND_LOG_OS, "Settings: %s is a foreign card; it belongs to another computer",
+                   (card.device[0] != '\0') ? card.device : card.mountpoint);
+        nd_msgdialog_init(&dialog, ui, nd_setapp_sdcard_foreign);
+        nd_msgdialog_set_button(&dialog, "More");
+        (void)nd_msgdialog_show(&dialog);
+        nd_scroller_init(&help, ui, nd_setapp_sdcard_foreign_help, NULL, NULL);
+        nd_scroller_show(&help);
+        offer_format(ui, &card);
+        return;
+    }
+
+    /* ND_CARD_UNFORMATTED: there IS a card and nothing on it will mount.
+     *
+     * That sentence is the one the owner needed and never got. The helper used
+     * to publish `unmountable` and then overwrite it with `absent` a moment
+     * later, so this state was unreachable and a card the phone could see but
+     * not read came out as an empty slot -- with the Format option behind the
+     * branch that had just been skipped. Now that it arrives, name the device,
+     * because "there is a card at /dev/mmcblk1p1 and I cannot read it" is a
+     * fault an owner can act on and "no memory card" is not.
+     *
+     * Then the help, then the offer: reformatting is the only way forward and
+     * it is destructive, so it stays behind the warning it always was. */
+    (void)nd_snprintf(message, sizeof message,
+                      "Card cannot be read.\n%s\nIt has no filesystem\nthis phone can mount.",
+                      (card.device[0] != '\0') ? card.device : "unknown device");
+    nd_msgdialog_init(&dialog, ui, message);
+    nd_msgdialog_set_button(&dialog, "More");
+    (void)nd_msgdialog_show(&dialog);
+    nd_scroller_init(&help, ui, nd_setapp_sdcard_help, NULL, NULL);
+    nd_scroller_show(&help);
     offer_format(ui, &card);
 }
 
@@ -1522,6 +1945,34 @@ static bool install_one(nd_ui *ui, const char *path)
     return true;
 }
 
+/* Why there is nowhere to install to, in one sentence per reason.
+ *
+ * ============ "SET THE CARD UP FIRST" IS NOT ALWAYS TRUE ============
+ *
+ * It was the answer for every state that is not READY, and for two of them it
+ * is an instruction that cannot be followed. UNKNOWN may be a perfectly good
+ * card the phone momentarily cannot read about, and sending somebody to set up
+ * a card that is already set up is how a fault in the phone becomes an
+ * afternoon with a card reader. FOREIGN is worse: setting up is exactly what
+ * the phone is not allowed to do to that card, so the one instruction on the
+ * screen is the one thing guaranteed to fail.
+ *
+ * All four point at Memory card, because that is the row that can actually do
+ * something about each. */
+static const char *install_blocked_message(const nd_card *card)
+{
+    switch (card->state) {
+    case ND_CARD_ABSENT:
+        return "No memory card.";
+    case ND_CARD_UNKNOWN:
+        return "Cannot read the card\nstatus. See Memory card.";
+    case ND_CARD_FOREIGN:
+        return nd_setapp_install_foreign;
+    default:
+        return "Set the card up first.\nSee Memory card.";
+    }
+}
+
 static void show_install_apps(nd_ui *ui)
 {
     nd_card card;
@@ -1542,10 +1993,7 @@ static void show_install_apps(nd_ui *ui)
          * nowhere for an app to go, and the Memory card row is where that
          * gets fixed. The help says what a .nap is so the trip is not
          * wasted. */
-        nd_msgdialog_init(&dialog, ui,
-                          card.state == ND_CARD_ABSENT
-                              ? "No memory card."
-                              : "Set the card up first.\nSee Memory card.");
+        nd_msgdialog_init(&dialog, ui, install_blocked_message(&card));
         nd_msgdialog_set_button(&dialog, "More");
         (void)nd_msgdialog_show(&dialog);
         nd_scroller_init(&help, ui, nd_setapp_install_help, NULL, NULL);
@@ -1577,7 +2025,15 @@ static void show_install_apps(nd_ui *ui)
             return;
         }
 
-        count = nd_nap_find(paths, ND_NAP_MAX_FOUND);
+        {
+            /* A recursive walk of the card looking for .nap files. Bounded in
+             * entries, not in time: the card decides how long each readdir
+             * takes and a failing one can decide "for ever". */
+            const char *saved = nd_ui_watch_begin("looking for apps on the card");
+
+            count = nd_nap_find(paths, ND_NAP_MAX_FOUND);
+            nd_ui_watch_end(saved);
+        }
         if (count == 0u) {
             nd_msgdialog_init(&dialog, ui, nd_setapp_install_none);
             nd_msgdialog_set_button(&dialog, "More");
@@ -1600,7 +2056,15 @@ static void show_install_apps(nd_ui *ui)
             /* Whatever happened, the list is shown again: the .nap is still
              * on the card, and the notice that closed says what came of it.
              * The rescan is what makes a card pulled out mid-list honest. */
-            (void)install_one(ui, paths[selection]);
+            {
+                /* Inflating a package off the card and writing it into the
+                 * card's apps directory, then a root layout pass. The longest
+                 * thing this app does that is not the format. */
+                const char *saved = nd_ui_watch_begin("installing an app");
+
+                (void)install_one(ui, paths[selection]);
+                nd_ui_watch_end(saved);
+            }
             again = true;
         }
 

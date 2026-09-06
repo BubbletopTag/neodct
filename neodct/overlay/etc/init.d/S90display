@@ -2,8 +2,84 @@
 # NeoDCT display shim - only runs on hardware with the SPI panel
 [ -e /dev/spidev0.0 ] || exit 0
 
+# The pin the panel's BL wire is on: header pin 11, GPIO1_C5, gpio53. Kept in
+# step with ND_BL_GPIO_PIN in neodct/src/include/nd_fb.h by hand -- there is no
+# header a shell script can include -- so change both or neither.
+BL_GPIO_PIN=53
+BL_GPIO_ROOT=/sys/class/gpio
+# ndusr and ndusr_ut are both in `video`, which is the group the PWM backlight
+# rule in 61-neodct-devices.rules already uses. Matching it is deliberate: the
+# untrusted set owns the whole screen while it is up (there is no compositor on
+# a 64 MB phone), so "the browser can blank the panel it is already drawing on"
+# is not a privilege it did not have.
+BL_GPIO_GROUP=video
+
+# ============ WHY THE BACKLIGHT PIN IS GRANTED HERE AND NOT BY A RULE =======
+#
+# nd_backlight.c has two tiers. The PWM tier writes
+# /sys/class/backlight/<dev>/brightness and 61-neodct-devices.rules hands that
+# to group video. The GPIO tier writes /sys/class/gpio/gpio53/value, and there
+# is no rule anywhere that can reach it -- not because one was forgotten, but
+# because the sysfs GPIO class does not emit a uevent for an exported pin:
+# gpio53/ is created synchronously inside the write(2) to `export`, with no
+# `add` for udev to match. A rule keyed on it would match nothing, forever, and
+# a udev rule that matches nothing fails in complete silence.
+#
+# Which tier is live is not a detail. nd_fb.h records that dimming needs pwm9
+# in the device tree, that the DTB is in the boot partition, and that an .ndsw
+# replaces the rootfs and never the boot partition -- so a phone that has only
+# ever been updated over the air has an EMPTY /sys/class/backlight and the GPIO
+# tier is the only one it has. Before this, that phone's panel could not be
+# blanked or lit by anything that was not root, and every failed write was
+# discarded without a word: write_text() in nd_backlight.c returns false on a
+# failed fopen and logs nothing, so "permission denied" and "this kernel has no
+# backlight" produced the same answer and the same silence.
+#
+# So: export the pin, then chgrp what the export created. In that order,
+# because only the process that did the export knows when the directory
+# appeared. It is done from here rather than from a new script because this is
+# already the panel's boot-critical step and already runs as root.
+#
+# The export itself is deliberately NOT granted to any group. export/unexport
+# are per-controller, so a group that can write `export` can claim ANY pin on
+# the chip, and the SPI panel, the modem's reset line and the charger are all
+# on the same controller. One pin's value node is the whole privilege that is
+# wanted here.
+backlight_gpio_grant() {
+    [ -d "$BL_GPIO_ROOT" ] || return 0
+    _pin_dir="$BL_GPIO_ROOT/gpio$BL_GPIO_PIN"
+
+    if [ ! -d "$_pin_dir" ]; then
+        printf '%s' "$BL_GPIO_PIN" > "$BL_GPIO_ROOT/export" 2>/dev/null
+        # `high` rather than `out`: writing "out" drives the pin LOW as a side
+        # effect, and ND_BL_ACTIVE_LOW is false on this board, so the panel
+        # would go dark for as long as it takes the core to ask for light. The
+        # header's rule is that "no software yet" and "software broken" both
+        # show a lit screen, and a boot script is not the place to break it.
+        [ -w "$_pin_dir/direction" ] && \
+            printf 'high' > "$_pin_dir/direction" 2>/dev/null
+    fi
+
+    [ -d "$_pin_dir" ] || {
+        echo "[BL] gpio$BL_GPIO_PIN did not export; the panel cannot be dimmed" >&2
+        return 0
+    }
+    for attr in value direction; do
+        [ -e "$_pin_dir/$attr" ] || continue
+        chgrp "$BL_GPIO_GROUP" "$_pin_dir/$attr" 2>/dev/null
+        chmod 0664 "$_pin_dir/$attr" 2>/dev/null
+    done
+}
+
 case "$1" in
   start)
+    # Before the daemon, not after: neodct_displayd exports pins on the same
+    # controller, and a pin that is already exported when we look is one whose
+    # value node still needs the group. Doing it first also means the grant is
+    # in place before nd-core starts, which is the whole point -- the core has
+    # stopped being root and cannot chgrp anything for itself.
+    backlight_gpio_grant
+
     # NOTE: no fbset here. neodct_displayd v2.2 owns the framebuffer
     # mode: it forces 240x175 @ 32bpp (falling back to 16bpp) and
     # places the band at the bottom of the 240x240 panel, top rows

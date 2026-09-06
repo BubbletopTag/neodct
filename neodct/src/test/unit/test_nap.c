@@ -849,6 +849,62 @@ static void test_find(void)
  * main
  * ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ *
+ * Menu ids: the band, and the collision nobody was checking for
+ * ------------------------------------------------------------------ *
+ *
+ * nd_ui.c sorts the app list by manifest "id" with a STABLE insertion sort,
+ * so two apps claiming the same id keep the order readdir returned them in --
+ * install order on ext4, which is nothing an owner can see or predict. There
+ * was no allocation scheme and no check, and the two .nap packages that exist
+ * today BOTH claim 13, because 13 is the next number after Update's 12 and
+ * both authors counted the same way. Neither the band nor the collision
+ * refuses an install; both have to be VISIBLE, which is what this pins.
+ */
+static void test_id_conflicts(void)
+{
+    char clash[64];
+
+    pt_mkdir("/card/apps");
+
+    /* Nothing installed: nothing to collide with, and an apps directory that
+     * is not there is not an error -- Settings asks before the card is set
+     * up. */
+    CHECK(!nd_nap_id_conflict("/card/apps", 13, NULL, clash, sizeof clash));
+    CHECK_STR(clash, "");
+    CHECK(!nd_nap_id_conflict("/card/nosuch", 13, NULL, clash, sizeof clash));
+    CHECK(!nd_nap_id_conflict(NULL, 13, NULL, clash, sizeof clash));
+
+    write_single("/card/Demo.nap");
+    CHECK_INT(nd_nap_install("/card/Demo.nap", "/card/apps", ND_NAP_ARCH_LUCKFOX, NULL, NULL, 0u),
+              ND_OK);
+
+    /* THE ACTUAL BUG: a second package that also picked 13. The name comes
+     * back so the install screen can say WHICH app it will sit beside. */
+    CHECK(nd_nap_id_conflict("/card/apps", 13, NULL, clash, sizeof clash));
+    CHECK_STR(clash, "Demo App");
+
+    /* A different id is not a collision, and neither is the app colliding
+     * with ITSELF -- re-installing the same package must not warn. */
+    CHECK(!nd_nap_id_conflict("/card/apps", 14, NULL, clash, sizeof clash));
+    CHECK(!nd_nap_id_conflict("/card/apps", 13, "DemoApp", clash, sizeof clash));
+
+    /* A directory with no manifest is a dead install, not an app, so it
+     * claims no id at all -- the same rule nd_nap_is_installed() uses. */
+    pt_mkdir("/card/apps/Dead");
+    CHECK(!nd_nap_id_conflict("/card/apps", 999, NULL, clash, sizeof clash));
+
+    /* And the band itself, which docs/NAP-PACKAGES.md publishes to package
+     * authors. Stock apps are 1-12 today and the 9xx block is reserved for
+     * the two that must sort last, so an installed app belongs strictly
+     * between them. 13 -- what both real packages chose -- is outside it, and
+     * that is the point: it sorts in among the stock apps. */
+    CHECK(ND_NAP_ID_MIN > 99);
+    CHECK(ND_NAP_ID_MAX < 900);
+    CHECK(ND_NAP_ID_MIN < ND_NAP_ID_MAX);
+    CHECK(13 < ND_NAP_ID_MIN);
+}
+
 int main(void)
 {
     RUN(test_machine_to_arch);
@@ -865,6 +921,7 @@ int main(void)
     RUN(test_replace_keeps_data);
     RUN(test_a_failed_replacement_puts_the_old_app_back);
     RUN(test_a_dead_install_is_replaced_quietly);
+    RUN(test_id_conflicts);
     RUN(test_find);
     return pt_report("test_nap");
 }

@@ -2,10 +2,19 @@
 #
 # S11udevall -- the rest of the udev coldplug.
 #
-# S10udevd triggers and settles the input subsystem only, because that is
-# the one part of it the UI cannot start without (see the long comment
-# there). This is everything else: the subsystem pass and every non-input
-# device in /sys.
+# S10udevd triggers, settles AND VERIFIES the subsystems the UI cannot start
+# without: see COLDPLUG_SUBSYSTEMS and DEVICE_GRANTS there. This is everything
+# else -- the subsystem pass, and every device in /sys whose group nothing is
+# waiting on.
+#
+# The division of labour is the whole point and it is easy to get wrong in one
+# direction only. Anything the DROPPED core has to open must be in S10udevd's
+# list, because this script runs in the background, at nice 10, while nd-core
+# is already running as ndusr: a grant applied here is a grant applied after
+# the process that needed it tried to open the device. That is not a slow
+# grant, it is a race, and it presents as "sometimes the phone has no keys /
+# no modem / no sound". If you add a rule to 61-neodct-devices.rules, add its
+# subsystem THERE, not here.
 #
 # It is deliberately NOT in rcS's NEODCT_BOOT_CRITICAL list, so it runs in
 # the background while the home screen is already drawing. It is numbered 11

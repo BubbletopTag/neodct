@@ -102,6 +102,11 @@ const char *const nd_power_ask_reboot = "Restart the phone?";
 const char *const nd_power_ask_recovery = "Restart into recovery?";
 const char *const nd_power_fail_off = "Power off failed.";
 const char *const nd_power_fail_reboot = "Reboot failed.";
+/* Shown only when the recovery flag was written and the restart then did not
+ * start. See request_recovery(): the flag is a booby trap if it is left there,
+ * so it is removed and the owner is told the request is off rather than being
+ * left to discover it at the next battery pull. */
+const char *const nd_power_fail_recovery = "Reboot failed. The recovery request was cancelled.";
 
 /* The dialogs' shared title and buttons, spelled once. */
 static const char *const POWER_TITLE = "Power";
@@ -143,6 +148,29 @@ nd_err nd_power_request_recovery_flag(char *why, size_t why_sz)
         return ND_ERR_IO;
     }
     (void)close(fd);
+    return ND_OK;
+}
+
+/* ============ AND THE OTHER HALF, WHICH WAS MISSING ============
+ *
+ * The flag is a REQUEST, not a record: ndsys-recovery.sh tests only that the
+ * file exists and deletes it as it reads it. So a flag written for a restart
+ * that never happened does not expire -- it sits on the user partition and
+ * redirects the NEXT boot from any cause at all into the recovery menu. Pull
+ * the battery a week later and the phone comes up in recovery with no
+ * explanation, which is exactly the report this fixes.
+ *
+ * ENOENT is success: there is nothing to take back. */
+nd_err nd_power_clear_recovery_flag(void)
+{
+    char flag[ND_PATH_MAX];
+
+    if (nd_path_resolve(flag, sizeof flag, ND_POWER_RECOVERY_FLAG) != ND_OK)
+        return ND_ERR_TOOLONG;
+    if (unlink(flag) != 0 && errno != ENOENT) {
+        nd_log_err(ND_LOG_POWER, "cannot take back the recovery request: %s", strerror(errno));
+        return ND_ERR_IO;
+    }
     return ND_OK;
 }
 
@@ -192,7 +220,14 @@ static void dwell(double seconds)
     }
 }
 
-void nd_power_go_down(nd_ui *ui, bool reboot, const char *failure)
+/* ============ WHY THIS RETURNS SOMETHING NOW ============
+ *
+ * It was void, and one caller badly needed the answer: request_recovery()
+ * writes a one-shot flag BEFORE asking for the restart, and if the restart
+ * does not start, that flag stays on the disk and quietly redirects the next
+ * boot by any means into recovery. A caller that cannot see the failure cannot
+ * undo what it did in front of it. */
+bool nd_power_go_down(nd_ui *ui, bool reboot, const char *failure)
 {
     /* The whole of _go_down's body, in one line, in another process. The
      * core resolves the binary, ANSWERS, syncs and only then spawns -- which
@@ -200,10 +235,12 @@ void nd_power_go_down(nd_ui *ui, bool reboot, const char *failure)
      * why the two sync() calls that used to be in this file are not missed.
      * spec-app-services.md 9.4 and 9.5. */
     if (!(reboot ? nd_svc_reboot() : nd_svc_poweroff())) {
-        nd_power_tell(ui, failure);
-        return;
+        if (failure != NULL)
+            nd_power_tell(ui, failure);
+        return false;
     }
     dwell(POWER_DOWN_DWELL);
+    return true;
 }
 
 /* _request_recovery(): leave the one-shot flag, then reboot into it. */
@@ -228,7 +265,22 @@ static void request_recovery(nd_ui *ui)
      * answers and before it spawns -- is what puts them on the flash. One
      * sync instead of two, and later, and closer to the halt than either of
      * ours could be. spec-app-services.md 9.5. */
-    nd_power_go_down(ui, true, nd_power_fail_reboot);
+    if (nd_power_go_down(ui, true, NULL)) /* NULL: the dialog is drawn below */
+        return;
+
+    /* THE RESTART DID NOT START, AND THE FLAG IS STILL THERE.
+     *
+     * The initramfs treats the file's existence as the whole request and
+     * deletes it as it reads it, so leaving it behind arms every future boot
+     * -- a battery pull, an update, a crash -- to land in the recovery menu
+     * for a reason nobody will connect to a key pressed days earlier. Take it
+     * back, and say so in the same breath as the failure, because "Reboot
+     * failed." on its own would leave the owner believing nothing happened.
+     *
+     * The clear is best-effort by construction: if it fails, the phone is in
+     * the state it would have been in anyway and the log line says why. */
+    (void)nd_power_clear_recovery_flag();
+    nd_power_tell(ui, nd_power_fail_recovery);
 }
 
 /* ------------------------------------------------------------------ *

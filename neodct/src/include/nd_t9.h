@@ -153,6 +153,81 @@ nd_t9_bridge *nd_t9_bridge_start(nd_bridge_kind kind, struct nd_input *in,
 void nd_t9_bridge_handle_code(nd_t9_bridge *b, int32_t code);
 void nd_t9_bridge_stop(nd_t9_bridge *b); /* joins, closes the keyboard */
 
+/* ------------------------------------------------------------------ *
+ * WHAT THE BROWSER BRIDGE PUTS ON THE WIRE, AND WHAT NETSURF OWES BACK
+ * ------------------------------------------------------------------ *
+ *
+ * The six keycodes below are the whole contract between this bridge and the
+ * netsurf framebuffer frontend, which lives in a different repository. They
+ * are written down here because the two halves are built separately and
+ * nothing else connects them: the bridge sends a keycode, libnsfb turns it
+ * into an NSFB_KEY_*, and neodct_shell_input() decides what it means. Get one
+ * number wrong and the key is silently inert, which is exactly the failure
+ * this block exists to stop happening again.
+ *
+ * Two constraints bound the choice, and both are somebody else's code:
+ *
+ *   - libnsfb only carries what its table knows. src/surface/linux_evdev.c
+ *     maps evdev codes 1..111 and answers NSFB_KEY_UNKNOWN for everything
+ *     else, and linux.c drops an UNKNOWN before netsurf ever sees it. So a
+ *     keycode outside that table cannot be used for signalling at all, however
+ *     free it looks here.
+ *   - the codes below are inert in netsurf TODAY. Every one of them reaches
+ *     neodct_shell_input()'s default arm, where fbtk_keycode_to_ucs4() answers
+ *     -1 (its keymap has 130 entries and each of these NSFB_KEY_* values is
+ *     above that), and the press is consumed with no effect. That is what
+ *     makes them safe to send before the netsurf half is written: nothing
+ *     misfires in the meantime, and a phone with an old netsurf and a new core
+ *     behaves exactly as it does now.
+ *
+ * ---- 1. THE TWO PAGE KEYS ----------------------------------------
+ *
+ * Cursor mode steps a virtual pointer six pixels at a time and only scrolls
+ * once that pointer is pinned against an edge, so crossing one screenful of a
+ * web page is about thirty presses of 8. There is no key on this phone that
+ * scrolls by a screen, and synthesising one out of thirty arrows is not an
+ * option -- each one costs netsurf a pointer warp, a hover test and a redraw
+ * on a single-core RV1103, and the burst would read as a hang.
+ *
+ * So * and 0 send the real thing. The netsurf side owes them the same two
+ * lines the stock framebuffer frontend already has in fb_browser_window_input()
+ * (frontends/framebuffer/gui.c): ask the core with NS_KEY_PAGE_UP /
+ * NS_KEY_PAGE_DOWN, and when it declines, widget_scroll_y() by the height of
+ * the browser widget. */
+#define ND_T9_BROWSER_KEY_PAGE_UP   104u /* KEY_PAGEUP   -> NSFB_KEY_PAGEUP   */
+#define ND_T9_BROWSER_KEY_PAGE_DOWN 109u /* KEY_PAGEDOWN -> NSFB_KEY_PAGEDOWN */
+
+/* ---- 2. WHICH MODE THE KEYPAD IS IN ------------------------------
+ *
+ * # cycles the browser's pad through four meanings -- nav, abc, ABC, 123 --
+ * and until this existed the owner had no way to tell which one they were in.
+ * The core cannot paint it: netsurf owns the panel for the whole session, and
+ * nd_t9_bridge_mode_label() only ever reached a log line at launch.
+ *
+ * So the mode travels as a keypress like everything else, and the netsurf side
+ * renders nd_t9_bridge_mode_label()'s string for whichever of these four it
+ * last saw. One keycode PER MODE, not a single "the mode advanced" pulse: a
+ * pulse makes netsurf keep its own copy of the cycle, and the copy is wrong
+ * for the rest of the session if it misses one -- which it does whenever the
+ * owner presses # during the seconds netsurf spends starting up, since the
+ * bridge is already running by then. Each code below restates the whole truth,
+ * so there is nothing to drift.
+ *
+ * The mnemonic is exact and deliberate: the keypad digit IS the position on
+ * the # cycle, counting the cursor mode as zero.
+ *
+ * Sent by the browser bridge only. The shell bridge stays silent because a
+ * shell prompt has nowhere to draw an indicator. */
+#define ND_T9_BROWSER_KEY_MODE_NAV   82u /* KEY_KP0 -> NSFB_KEY_KP0, "nav" */
+#define ND_T9_BROWSER_KEY_MODE_ABC   79u /* KEY_KP1 -> NSFB_KEY_KP1, "abc" */
+#define ND_T9_BROWSER_KEY_MODE_UPPER 80u /* KEY_KP2 -> NSFB_KEY_KP2, "ABC" */
+#define ND_T9_BROWSER_KEY_MODE_123   81u /* KEY_KP3 -> NSFB_KEY_KP3, "123" */
+
+/* Every keycode above has to be declared with UI_SET_KEYBIT before the kernel
+ * will deliver it, which is needed_keycode() in nd_uinput.c. A code added here
+ * and not there is dropped inside the kernel and never reaches libnsfb at all.
+ */
+
 #ifdef __cplusplus
 }
 #endif

@@ -282,12 +282,43 @@ bool nd_modem__is_urc(const char *line)
  * The lock
  * ------------------------------------------------------------------ */
 
+/* ============ "NO LOCK FILE" IS NOT "LOCK ACQUIRED" ============
+ *
+ * This used to read:
+ *
+ *     if (m->lock_fd < 0)
+ *         return true;  // no lock file: serialise with nobody, but keep working
+ *
+ * which is the single worst line in the modem service. The lock file is the
+ * ONLY thing keeping this process off /dev/ttyUSB2 while S45modem's APN walk
+ * and its thirty-second watchdog are driving the same tty through atcmd, and
+ * a failure to open it -- which happens on a real phone, every boot where
+ * root's atcmd created /tmp/neodct-modem.lock before nd-core got there -- was
+ * being reported to every caller as a lock successfully taken.
+ *
+ * The two sides then interleave. The core's 1.0 s probe "AT" gets no OK
+ * because atcmd read it; atcmd's +CEREG? gets an OK that was the answer to
+ * the core's AT+CSQ. Both report failures, neither logs anything, and the
+ * result is a modem that "rarely works". Carrying on unserialised is not a
+ * degraded mode; it is the corruption the lock exists to prevent.
+ *
+ * So: try to get the descriptor back first (the file may have appeared, or
+ * its owner may have changed, since the last attempt -- nd_modem__lock_reopen
+ * rate-limits that), and if there still is none, FAIL, loudly, with
+ * m->lock_unusable set so nd_modem__probe_hardware() can say which of the two
+ * failures this is. A caller that cannot take the lock does not touch the
+ * port. */
 bool nd_modem__acquire(nd_modem *m)
 {
     if (m == NULL)
         return false;
     if (m->lock_fd < 0)
-        return true; /* no lock file: serialise with nobody, but keep working */
+        nd_modem__lock_reopen(m);
+    if (m->lock_fd < 0) {
+        m->lock_unusable = true;
+        return false;
+    }
+    m->lock_unusable = false;
     if (flock(m->lock_fd, LOCK_EX | LOCK_NB) != 0)
         return false; /* S45modem or atcmd owns the port right now */
     m->lock_held = true;

@@ -169,6 +169,61 @@ static void capture_end(char *out, size_t out_sz)
         out[0] = '\0';
 }
 
+/* --- and stderr, which is where nd_log_err puts things ------------- *
+ *
+ * "The phone is making no noise and here is why" is a failure, not a status
+ * line, so it goes to stderr and a test that wants to read it has to look
+ * there. Safe to do around a spawn: spawn_quiet() puts the CHILD's stderr on
+ * /dev/null, so nothing a fake player prints can land in the capture. */
+
+static int g_saved_stderr = -1;
+
+static void capture_err_begin(void)
+{
+    char resolved[ND_PATH_MAX];
+    int fd;
+
+    pt_write_text("/capture-err.log", "");
+    (void)fflush(stderr);
+    g_saved_stderr = dup(STDERR_FILENO);
+    if (nd_path_resolve(resolved, sizeof resolved, "/capture-err.log") != ND_OK)
+        return;
+    fd = open(resolved, O_WRONLY | O_TRUNC);
+    if (fd >= 0) {
+        (void)dup2(fd, STDERR_FILENO);
+        (void)close(fd);
+    }
+}
+
+static void capture_err_end(char *out, size_t out_sz)
+{
+    (void)fflush(stderr);
+    if (g_saved_stderr >= 0) {
+        (void)dup2(g_saved_stderr, STDERR_FILENO);
+        (void)close(g_saved_stderr);
+        g_saved_stderr = -1;
+    }
+    if (pt_read_text("/capture-err.log", out, out_sz) == (size_t)-1)
+        out[0] = '\0';
+}
+
+/* How many times `needle` occurs in `hay`. One log line per failing episode
+ * is a property worth pinning: a DTMF tone fires on every keypress, and a
+ * diagnosis that scrolls the console is a diagnosis nobody reads. */
+static size_t count_occurrences(const char *hay, const char *needle)
+{
+    size_t n = 0u;
+    const char *p = hay;
+
+    for (;;) {
+        p = strstr(p, needle);
+        if (p == NULL)
+            return n;
+        n++;
+        p += strlen(needle);
+    }
+}
+
 /* --- a mono 16-bit PCM WAV, written byte by byte ------------------- *
  *
  * Explicit little-endian assembly rather than a struct write:
@@ -622,6 +677,93 @@ static void test_with_no_player_installed_the_beep_is_reported_not_fatal(void)
     capture_end(log, sizeof log);
     CHECK(strstr(log, "Tone playback unavailable") != NULL);
     nd_notify_close(n);
+    restore_path();
+}
+
+/* ------------------------------------------------------------------ *
+ * The two decisions behind the silent phone
+ * ------------------------------------------------------------------ *
+ *
+ * Both cases below pin a PURE function, and that is the point of them.
+ * test_an_existing_tone_is_handed_to_aplay_and_not_waited_for above is the
+ * assertion that should have caught this bug -- it spawns a fake aplay and
+ * checks the marker file appears -- and it CANNOT fail on any machine anyone
+ * runs it on: on a build host getpwnam("ndusr") misses, so run_as.valid stays
+ * false and nd_priv_become() is a documented no-op, and inside QEMU `make
+ * test` runs as root, so the drop genuinely succeeds. The one configuration
+ * that breaks -- an unprivileged caller that is already ndusr -- is the one
+ * uid no test process ever has. A predicate has no such excuse.
+ */
+
+static void test_only_a_root_caller_asks_a_child_to_change_user(void)
+{
+    /* The whole outage in one line. setgroups(2) needs CAP_SETGID
+     * unconditionally -- even to install the caller's own group list, even
+     * when the target uid is the uid the caller already has -- so a core that
+     * is already ndusr cannot ask a child to become ndusr. It can only kill it
+     * at exit 122 before execve, which is what it did to every DTMF tone, SMS
+     * chirp, calendar alert and ringtone from 0.5.0b to 0.5.8b. */
+    CHECK(nd_tone_drop_to_user(0u));
+    CHECK(!nd_tone_drop_to_user(1000u)); /* ndusr: what nd-core now runs as */
+    CHECK(!nd_tone_drop_to_user(1u));
+}
+
+static void test_the_reserved_exit_codes_say_what_went_wrong(void)
+{
+    const char *setgroups_failed = nd_tone_pre_exec_reason(122);
+
+    CHECK(setgroups_failed != NULL);
+    if (setgroups_failed != NULL)
+        CHECK(strstr(setgroups_failed, "CAP_SETGID") != NULL);
+    CHECK(nd_tone_pre_exec_reason(126) != NULL); /* dup2   */
+    CHECK(nd_tone_pre_exec_reason(127) != NULL); /* execve */
+
+    /* Everything outside 121..127 came from a player that really started --
+     * aplay exits 0 or 1, mpv 0..4 -- and calling one of those a pre-exec
+     * failure would send somebody hunting a privilege bug that is not there.
+     * 120 is excluded too: it is 120 + step 0, and step 0 means success. */
+    CHECK(nd_tone_pre_exec_reason(0) == NULL);
+    CHECK(nd_tone_pre_exec_reason(1) == NULL);
+    CHECK(nd_tone_pre_exec_reason(119) == NULL);
+    CHECK(nd_tone_pre_exec_reason(120) == NULL);
+    CHECK(nd_tone_pre_exec_reason(128) == NULL);
+}
+
+/* And the plumbing that made the bug survivable: a tone child that dies must
+ * produce one log line naming the exit status.
+ *
+ * The fake player here exits 122 exactly as the real one did on the phone.
+ * play_tone() still returns true -- it forked successfully and genuinely
+ * cannot know more than that at the moment it returns -- but the phone must
+ * not go quiet in silence. Two tones are played because the report may come
+ * from either of the two places that look: the once-per-boot probe on the
+ * first tone, or the free collection of the previous corpse at the start of
+ * the next one. Exactly one line either way. */
+static void test_a_player_that_dies_before_execve_is_named_in_the_log(void)
+{
+    nd_notify *n = NULL;
+    int16_t samples[32];
+    char log[4096];
+
+    use_fake_bin(false); /* nothing on PATH but the fake */
+    write_script("aplay", "#!/bin/sh\nexit 122\n");
+    fill_ramp(samples, ND_ARRAY_LEN(samples));
+    write_wav_mono16(ND_TONES_DIR "/sms.wav", 44100u, samples, ND_ARRAY_LEN(samples));
+
+    CHECK_INT(nd_notify_open(&n), ND_OK);
+    capture_err_begin();
+    CHECK(nd_notify_play_tone(n, ND_SMS_TONE));
+    nap_ms(200); /* longer than any sh takes to start and exit */
+    (void)nd_notify_play_tone(n, ND_SMS_TONE);
+    capture_err_end(log, sizeof log);
+
+    CHECK(strstr(log, "No sound") != NULL);
+    CHECK(strstr(log, "122") != NULL);
+    CHECK(strstr(log, "CAP_SETGID") != NULL);
+    CHECK_INT(count_occurrences(log, "No sound"), 1);
+
+    nd_notify_close(n);
+    reap_everything();
     restore_path();
 }
 
@@ -1371,6 +1513,9 @@ int main(void)
     RUN(test_a_missing_tone_is_reported_and_not_played);
     RUN(test_an_existing_tone_is_handed_to_aplay_and_not_waited_for);
     RUN(test_with_no_player_installed_the_beep_is_reported_not_fatal);
+    RUN(test_only_a_root_caller_asks_a_child_to_change_user);
+    RUN(test_the_reserved_exit_codes_say_what_went_wrong);
+    RUN(test_a_player_that_dies_before_execve_is_named_in_the_log);
 
     RUN(test_the_configured_ringtone_wins_when_it_exists);
     RUN(test_the_setting_is_stripped_before_it_is_used);

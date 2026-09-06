@@ -29,6 +29,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "nd_app.h"
 #include "nd_media.h"
 #include "nd_paths.h"
 #include "nd_types.h"
@@ -139,12 +140,55 @@ int main(int argc, char **argv)
      * bridge for anyone who passed --device "". */
     if (device != NULL && device[0] == '\0')
         device = NULL;
+
+    /* ============ ASK BEFORE SEARCHING ============
+     *
+     * NEODCT_KEY_EVDEV is the node the CORE made for the app that started us
+     * -- nd_app.h, and nd_proc.h's THE KEY DEVICE. Reading it here means any
+     * app that asked for a key device can wrap this player and have the keys
+     * work, without knowing that mpv exists or that nd_media has an override
+     * of its own. The browser sets NEODCT_KEYPAD_DEVICE from the same value
+     * and that still wins, because an explicit media override is a narrower
+     * statement than "here is the app's keypad".
+     *
+     * It matters most where the search cannot work at all. On the phone the
+     * keypad is an i2c matrix and /dev/input is EMPTY, so
+     * nd_media_discover_keypad() has exactly one thing it can ever match: a
+     * uinput device called "neodct-t9-keypad". That device used to be created
+     * by the Browser app, which stopped being able to create it the day it
+     * became ndusr_ut -- and from then on mpv had no keys on hardware at all.
+     * A full-screen player that cannot be quit, with the browser SIGSTOPped
+     * underneath it, is a phone the owner has to take the battery out of. */
+    if (device == NULL) {
+        const char *from_core = getenv(ND_ENV_KEY_EVDEV);
+
+        if (from_core != NULL && from_core[0] != '\0')
+            device = from_core;
+    }
     if (device == NULL && nd_media_discover_keypad(discovered, sizeof discovered) == ND_OK)
         device = discovered;
     if (device != NULL) {
         keypad_fd = nd_media_open_keypad(device);
-        if (keypad_fd < 0)
+        if (keypad_fd < 0) {
+            (void)fprintf(stderr,
+                          "neodct-play: %s: cannot be opened for reading; "
+                          "playback will not answer any key\n",
+                          device);
             device = NULL;
+        }
+    }
+
+    /* SAY WHICH, ALWAYS. This used to be printed only under --dry-run, so a
+     * real run with no keypad logged nothing whatsoever and "the video cannot
+     * be stopped" arrived with no evidence at all. The line goes to stderr,
+     * which the Browser tags and forwards to the log. */
+    if (!dry_run) {
+        if (device != NULL)
+            (void)fprintf(stderr, "neodct-play: keypad %s\n", device);
+        else
+            (void)fprintf(stderr, "neodct-play: NO KEYPAD FOUND -- nothing will answer a key, "
+                                  "including C to quit. The app that started this player "
+                                  "should set " ND_ENV_KEY_EVDEV " (see nd_proc.h).\n");
     }
 
     /* Our own socket, keypad or not: the events on it are how a failure

@@ -1,6 +1,177 @@
 # NeoDCT OS Changelog
 
-0.5.8b
+0.5.9a
+Everything 0.5.x broke on a real phone. In 0.5.0a the phone stopped running
+with full permissions, which was the right thing to do and was tested on the
+emulator, where every piece of hardware exists the instant the phone starts and
+nothing has to ask permission to reach it. A real phone is not like that. Its
+keypad, its modem, its memory card and its sound all arrive a moment after it
+switches on, and each of them has to be handed over before the phone may touch
+it. Nothing waited for that. So the phone made its mind up too early, was
+refused, and then -- this is the part that let it go on for nine releases --
+said nothing at all, and carried on as though the hardware simply was not
+fitted.
+
+That is why the phone rang silently, showed "Simulation" with a full set of
+signal bars while its modem was sitting right there, said "Power off failed"
+whenever it was asked to switch off, ignored every key in the browser, could
+not see a memory card that was in the slot, and put up an "input failed" screen
+on perfectly good hardware. One cause, nine symptoms, none of them visible from
+a desk.
+
+This release fixes all of them, and makes the phone say so when something like
+it happens again. It is not a beta and the 0.5 releases before it were not
+either; they are all marked alpha now.
+
+--- The phone makes sounds again ---
+
+Since 0.5.0a nothing on this phone could make a noise: no beep when you pressed
+a number, no chirp when a text arrived, no reminder alert, and no ringtone --
+somebody would call, the screen would light up and show it, and the phone would
+sit there in silence. The part that plays a sound was being started in a way
+that made it stop before it began, and because nothing ever checked whether it
+had started, the phone wrote "Ringing" in its log and believed it.
+
+All four sounds are back. Previewing a ringtone in Tones, and playing .flac and
+.ogg in Music Player, were broken the same way and work again too. And a sound
+that fails now says so, so this particular silence cannot happen twice.
+
+--- The keypad, properly this time ---
+
+Three releases have tried to fix the keypad on a new phone and none of them
+held, because they were all fixing the last symptom rather than the shape of
+the problem. The phone decided whether it had a keypad in the first fraction of
+a second after switching on. This keypad usually takes a second or two longer
+than that. So a phone with a perfectly good keypad would put up the "input
+failed" screen and stay there, and only a battery pull got you out.
+
+The phone now gets the keypad ready earlier in its start-up, while it still has
+the permissions to do it, and then waits for it rather than giving up. If the
+keypad stops answering while you are using it, the phone notices, says so, and
+keeps trying to get it back instead of going quiet. If it genuinely is not
+there, the screen says what actually went wrong, and the phone restarts and
+tries again rather than sitting on a screen with nothing you can press. And
+re-mapping the keys with the engineering tool no longer leaves behind a file
+the phone cannot read the next time it starts.
+
+--- Switching the phone off ---
+
+Power off, Restart, and Restart into recovery all said "failed" and did
+nothing. An update you had installed would sit on its last screen for half a
+minute and never restart to finish itself.
+
+They work. If a restart still cannot be started for some other reason, the
+phone now says which reason instead of blaming a missing part of the system;
+choosing Recovery and failing no longer leaves the phone set to start in the
+recovery menu days later; and after installing an update the phone tells you it
+is ready and that switching off and on will finish it.
+
+--- The modem tells the truth ---
+
+If anything at all went wrong reaching the radio -- a permission, another part
+of the system using it at that moment, or the modem simply still starting up --
+the phone showed "Simulation" and drew a full set of signal bars, which looks
+exactly like a phone that is working. In that state it would show a running
+call timer for a call it had never placed, and mark a text as sent that it had
+never sent.
+
+It now says "Modem ERROR" with an empty meter, explains what it could not do,
+and refuses to fake a call or a message -- a text that cannot go out says so,
+and why. The flakiness itself is fixed as well: the phone and its background
+dialler no longer talk over each other on the same connection, the modem's
+ports can no longer become invisible to the search that looks for them, the
+phone waits for the modem to finish starting instead of giving up on a
+stopwatch, and a busy dialler can no longer make the phone declare a healthy
+modem broken.
+
+--- Keys in the browser, and in everything else ---
+
+The browser opened, drew the page, and ignored every key. Since every way of
+closing it also needed a key, the phone looked frozen until the battery came
+out. Video was the same -- a clip would start full screen and nothing would
+stop it.
+
+The phone was building the keypad connection inside the browser, which is not
+allowed to build one, and then saying nothing when it failed. The phone now
+builds it itself before the app opens, waits until it is genuinely ready rather
+than guessing, and passes on every key on the pad -- the numbers too, not just
+the four arrows. The browser's start page shows what each key does, and # still
+switches the number keys between arrows, letters and digits. If the keypad
+truly cannot be connected the browser says so and takes you back to the menu
+instead of trapping you, and holding C for three seconds now closes whatever is
+on the screen no matter what it is doing -- a way out that did not exist
+before.
+
+Apps you install yourself can ask for the keypad the same way, so a game or an
+emulator works exactly as a built-in app does.
+
+--- The memory card ---
+
+A card set up by an older phone had become invisible: the music, ringtones,
+wallpapers and updates on it all stopped appearing, though the card was in the
+slot and perfectly readable. The phone reads all of it again, and only asks you
+to reformat for the one thing that genuinely needs it, which is installing
+apps. A card the phone cannot read is now reported as a card it cannot read,
+by name, with an offer to format it, rather than as an empty slot. A card made
+on somebody else's computer says so instead of being called damaged.
+
+Formatting no longer looks like a crash. It used to stop the whole phone for as
+long as it took -- keypad, screen, incoming calls -- with no way to cancel. It
+now runs in the background: a Formatting screen with a bar and a running clock,
+the keypad answering throughout, and the Clear key to stop it. If it does not
+work you are told which of the two things happened, rather than a guess about
+write protection.
+
+--- The battery reading was invented ---
+
+If the phone could not reach its battery meter as it started -- which happened
+often, because the meter and the keypad share one connection and the phone was
+looking a fraction of a second too early -- it settled on a made-up
+"comfortably full" figure and kept it until the phone was switched off. That
+also silently disabled the low-battery warning and the automatic shutdown that
+protects the cell, so the phone would show three bars and then run itself flat.
+
+It now keeps asking rather than giving up after one try, so a meter that was
+merely slow starts working within a couple of seconds; and for as long as it
+genuinely cannot read the battery it shows a question mark instead of a number
+it made up.
+
+--- And the phone can check itself now ---
+
+The built-in self-check looked at six things and had a habit of passing a badly
+broken phone -- it gave a tick to the exact setting that left the browser
+unable to take a single keypress. It now asks the questions that actually went
+wrong: whether the phone can open its own keypad, modem, screen, speaker, clock
+and card, and if not whether that is a permission or a missing part; whether it
+can still start the program that plays sounds, and if not which step failed;
+whether the browser can really receive keys rather than merely being allowed
+to; whether the phone could switch itself off if asked -- by asking, never by
+switching anything off; and whether the permissions it sets up at startup
+actually took effect. A check that could not be carried out is no longer
+counted as one that passed.
+
+The build refuses to produce a phone image that would run everything with full
+permissions, too. That check existed already and only ever ran for the
+emulator, never for the real phone.
+
+--- Smaller things ---
+
+Mobile data comes up at boot instead of being lost for the whole session,
+because the dialler and the phone itself no longer count each other's use of
+the modem as a fault.
+
+Apps you install from a card can see the battery, the signal bars and your
+wallpaper, which they could not before; and a game or an emulator can ask the
+phone to run faster while it is open, and the phone puts the speed back when it
+closes.
+
+In the browser, 1, 3, 7 and 9 move the pointer diagonally, so a link in a
+corner takes about half as many presses to reach.
+
+If the screen ever stops responding, the phone writes down that it happened and
+what it was doing at the time, so there is something to read afterwards.
+
+0.5.8a
 The keypad on a brand-new phone, one more time. First-boot setup mapped the
 keys and then the phone came up dead to them, stuck on the opening notice,
 and only a full power cycle brought them back. The setup was saving the key
@@ -10,7 +181,7 @@ slipping past. The map is now saved so the phone can read it straight away.
 And when a map is there but cannot be read, the phone says exactly that
 instead of reporting that there is no map at all.
 
-0.5.7b
+0.5.7a
 The keypad works after first-boot setup now. On a brand-new phone the setup
 would map the keys and then the phone came up dead to the keypad, stuck on
 the opening notice -- because the keypad's connection was handed to the
@@ -22,30 +193,30 @@ says so now looks like the phone's own crash screen: the sick phone to one
 side, "Input failed to initialize" and the reason beside it.
 
 
-0.5.6b
+0.5.6a
 Another attempt at the keypad on a brand-new phone: the first-boot key
 setup now runs with the permissions it needs. And if the keypad still does
 not come up, the phone says so -- a screen with the sick phone and "Input
 failed to initialize", then the reason -- instead of sitting on the opening
 notice with no way past it.
 
-0.5.5b
+0.5.5a
 Two things that broke when the phone gave up running with full permissions in
-0.5.0b are fixed. The phone keeps the time across a reboot again -- it was
+0.5.0a are fixed. The phone keeps the time across a reboot again -- it was
 setting the clock but no longer writing it to the chip that survives a power
 cycle. And setting up the keypad on a brand-new phone works: the first-boot
 key mapping used to leave the phone on a screen it would not respond to, and
 now it finishes and comes straight up ready to use.
 
-0.5.4b
+0.5.4a
 Further fixes to the Fetch engineering app: a file whose name has a space in
 it downloads now, and a refused login says which name it tried instead of
 blaming the password.
 
-0.5.3b
+0.5.3a
 Slight tweaks to the Fetch engineering app.
 
-0.5.2b
+0.5.2a
 Apps now install from a package, and the phone shows you what an app is
 before it goes on. In engineering mode there is a new way to get files onto
 the phone: download them from a server you run.
@@ -106,7 +277,7 @@ core, which asks the card helper, as root, to restate the card's layout.
 The first package is the Bible: neodct/packages/Bible-luckfox-armv7.nap.
 docs/NAP-PACKAGES.md says how to make one; neodct/tools/mknap.py makes it.
 
-0.5.1b
+0.5.1a
 A phone call no longer freezes the phone, the keypad is there whenever the
 home screen is, and a video says what it is doing while you wait for it.
 
@@ -156,7 +327,7 @@ system.modem.boot_grace_s in settings.prop, and 0 turns it off.
 --- A keypad that was sometimes not there ---
 
 On some boots the phone came up with a keypad that did nothing at all, and
-the only cure was to turn it off and on again. Giving up root in 0.5.0b is
+the only cure was to turn it off and on again. Giving up root in 0.5.0a is
 what exposed it. The keys are handled by a device file that the system
 creates immediately but only makes readable a moment later, and the
 interface -- no longer root, and therefore no longer able to ignore the
@@ -207,7 +378,7 @@ Fixed
   before the video begins, and again before it resumes after a stall,
   instead of one packet.
 
-0.5.0b
+0.5.0a
 The phone stops running as root, the browser stops being the phone, memory
 cards change format, the phone keeps a diary, and it says so when it falls
 over.

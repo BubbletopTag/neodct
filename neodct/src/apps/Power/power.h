@@ -74,6 +74,9 @@ extern const char *const nd_power_ask_reboot;
 extern const char *const nd_power_ask_recovery;
 extern const char *const nd_power_fail_off;
 extern const char *const nd_power_fail_reboot;
+/* The recovery path's own failure, which is a different sentence because a
+ * different thing happened: the flag was written and then taken back. */
+extern const char *const nd_power_fail_recovery;
 
 /* ------------------------------------------------------------------ *
  * The pieces underneath
@@ -87,6 +90,15 @@ extern const char *const nd_power_fail_reboot;
  * str(OSError). Pass NULL to discard it. */
 #define ND_POWER_WHY_MAX 160
 nd_err nd_power_request_recovery_flag(char *why, size_t why_sz);
+
+/* And the other half of the pair: remove the flag again.
+ *
+ * The flag is a REQUEST that the initramfs consumes on the next boot, so one
+ * left behind by a restart that never started is a booby trap -- the next boot
+ * from any cause lands in recovery. _request_recovery() calls this when
+ * nd_power_go_down() comes back false. ND_OK when the flag is gone, which
+ * includes it never having been there. */
+nd_err nd_power_clear_recovery_flag(void);
 
 /* ------------------------------------------------------------------ *
  * The screens
@@ -103,8 +115,14 @@ void nd_power_tell(nd_ui *ui, const char *message);
  * test. Asks the core for a halt -- `reboot` picks which of the two verbs --
  * and on false draws `failure`. On true it sits still for thirty seconds, so
  * the key does not look like it did nothing while init brings the phone
- * down. The sync the Python did here is the core's now. */
-void nd_power_go_down(nd_ui *ui, bool reboot, const char *failure);
+ * down. The sync the Python did here is the core's now.
+ *
+ * TRUE means the halt started. It used to return void, and the caller that
+ * needed the answer was the one that had already written the recovery flag:
+ * with no way to see the failure it left the flag on the disk, arming the next
+ * boot for recovery. Pass NULL for `failure` to draw no dialog, which is what
+ * that caller does so it can say something more specific afterwards. */
+bool nd_power_go_down(nd_ui *ui, bool reboot, const char *failure);
 
 #ifdef __cplusplus
 }

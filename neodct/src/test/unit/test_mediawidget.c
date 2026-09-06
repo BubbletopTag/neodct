@@ -8,6 +8,7 @@
  * (test_mediawidget_input_conf.py), and why it is here too.
  */
 
+#include <fcntl.h>
 #include <linux/input.h>
 #include <poll.h>
 #include <signal.h>
@@ -925,6 +926,113 @@ static void test_play_against_a_fake_mpv(void)
     (void)unlink(sock);
 }
 
+/* ---------------------------------- where neodct-play finds the keypad */
+
+/* ============ THE PLAYER USED TO GO LOOKING, AND FIND NOTHING ============
+ *
+ * nd_media_discover_keypad() scans /dev/input for a device named
+ * "neodct-t9-keypad", then anything called "keypad", then anything called
+ * "keyboard". On a development box the third branch matches the real virtio
+ * keyboard and mpv has keys, which is why every automated run of this player
+ * has always worked.
+ *
+ * On the phone /dev/input is EMPTY -- the keypad is a PCF8575 matrix the core
+ * scans over i2c, and a matrix is not an input device -- so the only node
+ * that could ever match was a uinput device the Browser app created. The
+ * browser became ndusr_ut, ndusr_ut may not open /dev/uinput, and from that
+ * day mpv had no keys at all on hardware: a full-screen player that ignored
+ * C, with the browser SIGSTOPped underneath it, which is a phone the owner
+ * has to take the battery out of.
+ *
+ * The core makes the device now and names it in NEODCT_KEY_EVDEV. This pins
+ * that neodct-play ASKS before it searches, and that it says out loud which
+ * answer it got -- the "keypad: none" line used to be printed under
+ * --dry-run only, so a real run with no keypad logged nothing whatsoever. */
+static void test_keypad_comes_from_the_environment(void)
+{
+    char exe[ND_PATH_MAX];
+    char self[ND_PATH_MAX];
+    char node[ND_PATH_MAX];
+    char cmd[ND_PATH_MAX * 3];
+    char line[1024];
+    ssize_t got;
+    char *slash;
+    FILE *p;
+    int fd;
+    bool saw_node = false;
+
+    got = readlink("/proc/self/exe", self, sizeof self - 1u);
+    if (got <= 0)
+        return;
+    self[got] = '\0';
+    slash = strrchr(self, '/');
+    if (slash == NULL)
+        return;
+    *slash = '\0';
+    if (nd_snprintf(exe, sizeof exe, "%s/../bin/neodct-play", self) != ND_OK)
+        return;
+    if (access(exe, X_OK) != 0) {
+        (void)fprintf(stderr, "SKIP keypad from the environment: no %s\n", exe);
+        return;
+    }
+
+    /* An ordinary readable file stands in for the evdev node: neodct-play
+     * only open()s it and hands the descriptor on, so a real character device
+     * -- which no host test may create -- buys nothing here. */
+    if (nd_snprintf(node, sizeof node, "%s/../keydev-fixture", self) != ND_OK)
+        return;
+    fd = open(node, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        (void)fprintf(stderr, "SKIP keypad from the environment: cannot stage %s\n", node);
+        return;
+    }
+    (void)close(fd);
+
+    if (nd_snprintf(cmd, sizeof cmd, "NEODCT_KEY_EVDEV='%s' %s --dry-run --no-suspend -- "
+                                     "http://h/clip.avi 2>&1",
+                    node, exe) != ND_OK) {
+        (void)unlink(node);
+        return;
+    }
+    p = popen(cmd, "r");
+    if (p == NULL) {
+        CHECK(false, "popen neodct-play");
+        (void)unlink(node);
+        return;
+    }
+    while (fgets(line, (int)sizeof line, p) != NULL) {
+        if (strncmp(line, "keypad: ", 8u) == 0 && strstr(line, node) != NULL)
+            saw_node = true;
+    }
+    (void)pclose(p);
+    CHECK(saw_node, "neodct-play uses the node the core named");
+
+    /* And with nothing named and nothing to discover, it SAYS SO on stderr
+     * rather than playing in silence. NEODCT_KEYPAD_DEVICE is cleared too:
+     * an inherited one from the surrounding shell would win. */
+    if (nd_snprintf(cmd, sizeof cmd,
+                    "NEODCT_KEY_EVDEV= NEODCT_KEYPAD_DEVICE= %s --no-suspend --device '' -- "
+                    "/nonexistent-neodct-clip.avi 2>&1",
+                    exe) == ND_OK) {
+        bool saw_complaint = false;
+
+        p = popen(cmd, "r");
+        if (p != NULL) {
+            while (fgets(line, (int)sizeof line, p) != NULL) {
+                if (strstr(line, "NO KEYPAD FOUND") != NULL)
+                    saw_complaint = true;
+            }
+            (void)pclose(p);
+            /* Only assert the complaint on a machine that really has no
+             * keyboard-shaped evdev node; a developer's box has one and
+             * discovery is then RIGHT to find it. */
+            if (nd_media_discover_keypad(line, sizeof line) != ND_OK)
+                CHECK(saw_complaint, "a keypadless run says so on stderr");
+        }
+    }
+    (void)unlink(node);
+}
+
 int main(int argc, char **argv)
 {
     if (getenv("ND_FAKE_MPV") != NULL)
@@ -935,6 +1043,7 @@ int main(int argc, char **argv)
     test_ipc_command();
     test_input_conf_matches_keymap();
     test_browser_command_line();
+    test_keypad_comes_from_the_environment();
     test_outcome_feed();
     test_outcome_feed_text();
     test_exit_status();

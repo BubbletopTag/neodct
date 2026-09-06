@@ -59,6 +59,10 @@ MODEM_RESET_ON_FAIL="${MODEM_RESET_ON_FAIL:-y}" # AT+CFUN=1,1 once if all dials 
 LOG=/tmp/modem-boot.log
 STATUS=/tmp/modem.status
 PIDFILE=/tmp/modem-boot.pid
+# The AT-port lock this script, atcmd and the UI's ModemService share. Created
+# by S10udevd; ensure_modem_lock() below is the fallback for the one case that
+# cannot reach -- see there.
+MODEM_LOCK=/tmp/neodct-modem.lock
 # On the user-data partition, not /etc: the rootfs is a read-only squashfs,
 # so a cache under /etc would silently never persist and every boot would
 # re-scan the APN list.
@@ -139,6 +143,91 @@ at() {
     "$ATCMD" -p "$MODEM_PORT" -t "${2:-6}" "$1" 2>> "$LOG"
 }
 
+# ============ "BUSY" IS NOT "SILENT", AND IT COST THE PHONE ITS DATA ========
+#
+# at_ok answers "did the modem say OK?" the way `at ... | grep -q '^OK$'`
+# did, with one difference that matters more than the whole rest of this
+# script: it hands back atcmd's exit 3, "the AT port lock is held", instead
+# of flattening it into the same no.
+#
+# wait_for_at() below counts strikes and gives up. Exit 3 is not a strike. The
+# lock is shared with nd_modem_poll() in the UI, which takes it several times
+# a minute for CSQ, CEREG and COPS -- so losing that race is an ordinary event
+# on a healthy phone and says nothing at all about the radio. Counted, it
+# reached five, called fail(), and fail() EXITS: no data bring-up, no redial
+# worker, nothing further attempted until the next reboot, under a status line
+# that blames the modem for it. That is the "modem rarely works" report.
+#
+# A pipeline cannot carry this, which is why it is a function: `at ... | grep`
+# is grep's exit status, busybox ash has no PIPESTATUS, and the reply has to
+# be captured before it can be searched.
+at_ok() {   # at_ok COMMAND [TIMEOUT] -- 0 = OK, 3 = port busy, else no
+    _reply="$(at "$1" "${2:-6}")"
+    _rc=$?
+    [ "$_rc" -eq 3 ] && return 3
+    printf '%s\n' "$_reply" | grep -q '^OK$'
+}
+
+# How many consecutive "port busy" answers before this gives up waiting for
+# the other side to finish. atcmd has already waited MODEM_LOCK_WAIT_S (20 s
+# by default) for the lock before it says so, so this is minutes of somebody
+# else holding the port, not seconds -- and the point of the budget is to have
+# an end, not to be reached.
+MODEM_AT_BUSY_TRIES="${MODEM_AT_BUSY_TRIES:-5}"
+
+# Wait for the modem to answer a bare AT. Sets AT_WAIT_WHY on failure, because
+# the two ways to fail need different sentences: a modem that says nothing is
+# a modem, and a lock somebody else is holding is not.
+#
+# STRIKES counts only real no-answers. Busy is retried for free -- see at_ok.
+AT_WAIT_WHY=""
+wait_for_at() {   # wait_for_at STRIKES SLEEP-BETWEEN-S
+    _strikes=0
+    _busy=0
+    AT_WAIT_WHY=""
+    while :; do
+        at_ok "AT" 3
+        _rc=$?
+        [ "$_rc" -eq 0 ] && return 0
+        if [ "$_rc" -eq 3 ]; then
+            _busy=$((_busy + 1))
+            if [ "$_busy" -ge "$MODEM_AT_BUSY_TRIES" ]; then
+                AT_WAIT_WHY="$MODEM_PORT is locked by another process; not the modem"
+                return 1
+            fi
+            sleep 1
+            continue
+        fi
+        _strikes=$((_strikes + 1))
+        if [ "$_strikes" -ge "$1" ]; then
+            AT_WAIT_WHY="modem not answering AT on $MODEM_PORT"
+            return 1
+        fi
+        sleep "$2"
+    done
+}
+
+# The SIM check, under the same rule: a busy port is not an answer.
+#
+# This was one shot -- `at "AT+CPIN?" | grep -q READY` -- and the failure runs
+# fail(), which ends the worker. So losing one race for the port cost the phone
+# its data for the whole boot under "SIM not ready (locked or missing)", which
+# is a worse sentence than the handshake's: it sends the owner to take the SIM
+# card out and look at it. Anything the modem actually says is accepted as the
+# answer, busy is retried, and only then does it fail.
+sim_ready() {
+    _tries=0
+    while :; do
+        _reply="$(at "AT+CPIN?")"
+        _rc=$?
+        case "$_reply" in *READY*) return 0 ;; esac
+        [ "$_rc" -eq 3 ] || return 1   # the modem replied, and not with READY
+        _tries=$((_tries + 1))
+        [ "$_tries" -ge "$MODEM_AT_BUSY_TRIES" ] && return 1
+        sleep 1
+    done
+}
+
 # The qmi_wwan interface is NOT reliably called wwan0: eudev's
 # predictable naming renames it to wwp<path> (seen in QEMU: wwp0s4u3i5).
 # Match by driver first, name prefix as fallback.
@@ -196,12 +285,7 @@ module_reset() {
         [ "$w" -ge 60 ] && { log "AT port never returned after reset"; return 1; }
         sleep 1
     done
-    tries=0
-    until at "AT" 3 | grep -q '^OK$'; do
-        tries=$((tries + 1))
-        [ "$tries" -ge 15 ] && { log "modem silent after reset"; return 1; }
-        sleep 2
-    done
+    wait_for_at 15 2 || { log "after reset: $AT_WAIT_WHY"; return 1; }
     at "ATE0" >> /dev/null
     at "AT+CMEE=2" >> /dev/null
     log "module back after reset"
@@ -597,18 +681,19 @@ worker() {
     log "AT port present after ${waited}s"
 
     # 2. Basic AT handshake (modem may still be settling right after enum).
-    tries=0
-    until at "AT" 3 | grep -q '^OK$'; do
-        tries=$((tries + 1))
-        [ "$tries" -ge 5 ] && fail "modem not answering AT on $MODEM_PORT"
-        sleep 2
-    done
+    #
+    # fail() below is not "log and carry on": it exits, and this worker is the
+    # only thing that ever dials, redials or watches the link. Everything it
+    # gives up on, the phone does without until the next boot -- which is why
+    # the five strikes must be spent on the modem being silent and on nothing
+    # else. See at_ok().
+    wait_for_at 5 2 || fail "$AT_WAIT_WHY"
     at "ATE0" >> /dev/null
     at "AT+CMEE=2" >> /dev/null
     log "modem answering; echo off"
 
     # 3. SIM check.
-    if ! at "AT+CPIN?" | grep -q "READY"; then
+    if ! sim_ready; then
         fail "SIM not ready (locked or missing) -- check AT+CPIN?"
     fi
     log "SIM ready"
@@ -687,8 +772,26 @@ worker() {
     watchdog
 }
 
+# The lock file exists by the time this runs on any normal boot: S10udevd
+# creates it root:dialout 0660, early enough to beat both this script and the
+# UI, and the full reasoning is there next to the dialout grant it belongs to.
+#
+# This covers the one boot it cannot: `S45modem restart` typed at the serial
+# console on a phone whose /tmp somehow has no lock in it. Without it the first
+# atcmd creates the file itself, as root under init's umask, and ndusr -- which
+# is nd-core -- can never open it for writing again.
+ensure_modem_lock() {
+    [ -e "$MODEM_LOCK" ] && return 0
+    install -m 0660 -o root -g dialout /dev/null "$MODEM_LOCK" 2>/dev/null ||
+        install -m 0600 /dev/null "$MODEM_LOCK" 2>/dev/null
+    return 0
+}
+
 case "$1" in
     start)
+        # Before the worker is backgrounded, so the first atcmd it runs cannot
+        # be the process that creates the lock.
+        ensure_modem_lock
         worker &
         echo $! > "$PIDFILE"
         echo "S45modem: bring-up running in background (log: $LOG)"

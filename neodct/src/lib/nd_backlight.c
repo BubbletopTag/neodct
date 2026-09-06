@@ -40,6 +40,7 @@
 #include <unistd.h>
 
 #include "nd_fb.h"
+#include "nd_log.h"
 #include "nd_paths.h"
 #include "nd_types.h"
 
@@ -61,8 +62,12 @@ static bool write_text(const char *path, const char *text)
     FILE *f;
     bool ok;
 
-    if (nd_path_resolve(resolved, sizeof resolved, path) != ND_OK)
+    if (nd_path_resolve(resolved, sizeof resolved, path) != ND_OK) {
+        /* So that a caller reporting strerror(errno) after a false return
+         * names THIS failure rather than whatever errno happened to hold. */
+        errno = ENAMETOOLONG;
         return false;
+    }
     f = fopen(resolved, "wb");
     if (f == NULL)
         return false;
@@ -246,6 +251,49 @@ static bool gpio_value_path(char *out, size_t out_sz)
  * The public six
  * ------------------------------------------------------------------ */
 
+/* ============ THE ONE THING THIS FILE NEVER SAID ============
+ *
+ * Every path here was best-effort and silent, and the two answers it can give
+ * are not the same fact at all: "this kernel has no backlight" is a board
+ * without pwm9 in its device tree, and "permission denied" is a phone whose
+ * gpio53 was never handed to group video. Both came out as `false` with
+ * nothing on the console, so a panel that would not blank looked identical to
+ * a panel that could not be built to blank, and Sleepy -- whose entire first
+ * screen is "turn the backlight off and see whether it comes back" -- had no
+ * way to say which it had hit.
+ *
+ * ONE LINE PER PROCESS, for each of the two questions. These are called from
+ * a slider and from a screen timeout, so anything per-call would fill the
+ * serial console; and the first line is the only one that says when it
+ * started, which is the line worth keeping.
+ */
+static void report_no_backlight(void)
+{
+    static bool logged;
+
+    if (logged)
+        return;
+    logged = true;
+    nd_log_err(ND_LOG_UI,
+               "No backlight control: no device under %s has a brightness file, and "
+               "gpio%d could not be exported through %s. The panel cannot be dimmed "
+               "or blanked by this process.",
+               ND_BL_BACKLIGHT_ROOT, ND_BL_GPIO_PIN, ND_BL_GPIO_ROOT);
+}
+
+static void report_write_failure(const char *path, int err)
+{
+    static bool logged;
+
+    if (logged)
+        return;
+    logged = true;
+    /* EACCES here is the interesting one and it has a specific repair: see
+     * S90display, which exports the pin as root and chgrps it to video,
+     * because the sysfs GPIO class emits no uevent a udev rule could match. */
+    nd_log_err(ND_LOG_UI, "Backlight write to %s failed: %s.", path, strerror(err));
+}
+
 nd_bl_mode nd_backlight_mode(void)
 {
     char device[ND_PATH_MAX];
@@ -254,6 +302,7 @@ nd_bl_mode nd_backlight_mode(void)
         return ND_BL_PWM;
     if (is_directory(ND_BL_GPIO_ROOT) && export_gpio())
         return ND_BL_GPIO;
+    report_no_backlight();
     return ND_BL_NONE;
 }
 
@@ -280,11 +329,30 @@ bool nd_backlight_set_percent(int32_t percent)
             return false;
         top = read_int(path, 255);
         level = nd_trunc32(nd_round_half_even((double)top * (double)percent / 100.0));
+        /* On the ten-step panel, a 5% request rounds to zero. A positive
+         * request must keep the light on even on a coarse brightness table. */
+        if (percent > 0)
+            level = nd_max32(1, level);
         if (nd_snprintf(path, sizeof path, "%s/brightness", device) != ND_OK)
             return false;
         if (nd_snprintf(value, sizeof value, "%d", level) != ND_OK)
             return false;
-        return write_text(path, value);
+        if (!write_text(path, value)) {
+            report_write_failure(path, errno);
+            return false;
+        }
+        /* Older boot images leave bl_power at FB_BLANK_POWERDOWN. Writing
+         * brightness alone succeeds without lighting the panel. Set the
+         * requested level before unblanking so it cannot flash at the old one. */
+        if (percent > 0) {
+            if (nd_snprintf(path, sizeof path, "%s/bl_power", device) != ND_OK)
+                return false;
+            if (path_exists(path) && read_int(path, -1) != 0 && !write_text(path, "0")) {
+                report_write_failure(path, errno);
+                return false;
+            }
+        }
+        return true;
     }
 
     if (is_directory(ND_BL_GPIO_ROOT) && export_gpio()) {
@@ -292,9 +360,13 @@ bool nd_backlight_set_percent(int32_t percent)
 
         if (!gpio_value_path(path, sizeof path))
             return false;
-        return write_text(path, lit == ND_BL_ACTIVE_LOW ? "0" : "1");
+        if (write_text(path, lit == ND_BL_ACTIVE_LOW ? "0" : "1"))
+            return true;
+        report_write_failure(path, errno);
+        return false;
     }
 
+    report_no_backlight();
     return false;
 }
 

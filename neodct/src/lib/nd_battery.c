@@ -3,14 +3,38 @@
  * Port of System/core/BatteryService/__init__.py. Reads VCELL from a
  * MAX17043/44/48/49 at 0x36 on /dev/i2c-3 using the same raw write-then-read
  * pattern as System/hw/pcf8575_keypad.py and engineering/tools/max1704x_watch.py.
- * If the gauge cannot be probed at construction (QEMU, or hardware without the
- * battery board) the service runs in Simulation Mode, exactly as ModemService
- * does.
+ * If there is no bus node at all (QEMU, or hardware without the battery board)
+ * the service runs in Simulation Mode, exactly as ModemService does.
  *
  * Simulation Mode reports a fixed 3.85 V. For testing the warning and shutdown
  * flow in QEMU, override it with NEODCT_BATT_SIM_VCELL, or live at runtime by
  * writing a voltage to /tmp/neodct_sim_vcell (`echo 3.30 > /tmp/neodct_sim_vcell`
  * from the serial console).
+ *
+ * ============ AND SIMULATION IS NOT WHAT A BROKEN GAUGE GETS ============
+ *
+ * It was, for five releases, and it is the worst thing this file ever did.
+ * Every failure -- the path, open(), the I2C_SLAVE ioctl, the register read, a
+ * floating bus -- fell into one `goto simulate` that latched a fixed 3.85 V
+ * for the life of the process. 3.85 V is above every threshold below, so a
+ * phone that could not read its own battery ALSO had its low-battery warning
+ * and its 3.20 V protective shutdown silently switched off, and then ran the
+ * cell flat while drawing three cheerful bars.
+ *
+ * On this phone that was not a hypothetical. nd_battery_open() runs inside
+ * nd_ui_init(), i.e. after nd-core has dropped to ndusr, and /dev/i2c-3 is
+ * root:root 0600 from devtmpfs until udev applies group i2c -- so on any boot
+ * where the coldplug was late the gauge lost the race, once, permanently, and
+ * said "HARDWARE NOT FOUND ... a stub for the QEMU dev environment" about a
+ * chip soldered six millimetres from the CPU.
+ *
+ * Three things changed. The verdict is now one of THREE (nd_battery_source):
+ * absent, live, or present-and-unreadable, split by errno at open(). Unreadable
+ * reports NO voltage rather than a plausible one. And nothing is decided once
+ * -- the probe re-runs from the poll the status bar already turns, fast for
+ * the first half-minute and slowly thereafter, so a gauge whose grant arrived
+ * late, or whose rail was still rising, or that was plugged in afterwards,
+ * simply starts working.
  *
  * Voltage policy, per the 0.2.4a bring-up sweep on the bench supply:
  *   * 3.25-3.35 V is "dead" (gauge segment 0), 3.95-4.10 V is "full" (4)
@@ -40,6 +64,7 @@
 #include <unistd.h>
 
 #include "nd_battery.h"
+#include "nd_keypad.h"
 #include "nd_log.h"
 #include "nd_paths.h"
 #include "nd_settings.h"
@@ -59,9 +84,19 @@ typedef enum { BATT_WARN_NONE = 0, BATT_WARN_LOW, BATT_WARN_CRITICAL } batt_warn
 struct nd_battery {
     int bus;
     int addr;
-    int fd; /* -1 in Simulation Mode; open for the process lifetime otherwise */
+    int fd;       /* -1 unless the gauge is LIVE */
+    bool owns_fd; /* false when the fd came from nd_battery_provide_bus_fd() */
     bool hardware;
     uint16_t version;
+
+    /* Which of the three nd_battery_source answers this is, why, and when it
+     * is worth asking again. `hardware` is kept as the derived boolean the
+     * rest of the tree already reads; `source` is what actually decides. */
+    nd_battery_source source;
+    char why[96];
+    bool retry_possible; /* the errno was one a later attempt could get past */
+    double next_probe;   /* monotonic; when the next reprobe is due */
+    int probe_tries;
 
     /* deque(maxlen=5): head is the oldest, and iteration for the mean runs
      * head, head+1, ... head+count-1 modulo the window. */
@@ -168,62 +203,246 @@ static void config_from_settings(int *bus, int *addr)
     *addr = (int)v_addr;
 }
 
-static void probe_hardware(nd_battery *b)
+/* ------------------------------------------------------------------ *
+ * The bus descriptor that crosses the privilege drop
+ * ------------------------------------------------------------------ */
+
+/* Process-wide, and process-wide for the same reason nd_input's keypad
+ * descriptor is (nd_keypad.h): the boot sequence that can still open this as
+ * root is several modules away from nd_ui_init(), which is where the gauge is
+ * actually constructed, and it IS a process-wide fact -- this process opened
+ * the gauge's bus once, before it stopped being root. */
+static int g_bus_fd = -1;
+static int g_bus_fd_bus = -1;
+
+void nd_battery_provide_bus_fd(int fd, int bus)
+{
+    g_bus_fd = fd;
+    g_bus_fd_bus = bus;
+}
+
+bool nd_battery_open_bus_as_root(void)
+{
+    int bus = ND_BATT_DEFAULT_I2C_BUS;
+    int addr = ND_BATT_DEFAULT_I2C_ADDR;
+    char dev[64];
+    char resolved[ND_PATH_MAX];
+    int fd;
+
+    /* Only from a process that still is root. Called from anywhere else this
+     * would open the node with exactly the permissions the caller already
+     * has, i.e. it would buy nothing and hide the fact that it bought
+     * nothing. */
+    if (geteuid() != 0)
+        return false;
+
+    (void)nd_settings_init();
+    config_from_settings(&bus, &addr);
+
+    (void)nd_snprintf(dev, sizeof dev, "/dev/i2c-%d", bus);
+    if (nd_path_resolve(resolved, sizeof resolved, dev) != ND_OK)
+        return false;
+
+    /* O_CLOEXEC: nd-core forks and execs an app per launch, and the broker has
+     * already forked by the time this runs, so nothing but this process ever
+     * sees the descriptor. */
+    fd = open(resolved, O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        /* Worth a line even as root: if root cannot open it, the node is not
+         * there at all and the phone has no fuel gauge, which is a different
+         * and much larger fact than "udev was late". */
+        nd_log(ND_LOG_BATT, "Fuel gauge bus %s could not be opened as root: %s.", dev,
+               strerror(errno));
+        return false;
+    }
+
+    nd_log(ND_LOG_BATT, "Fuel gauge bus %s opened before the privilege drop.", dev);
+    nd_battery_provide_bus_fd(fd, bus);
+    return true;
+}
+
+/* ------------------------------------------------------------------ *
+ * Probing, and asking again
+ * ------------------------------------------------------------------ */
+
+bool nd_battery_errno_means_absent(int err)
+{
+    switch (err) {
+    /* The node is not there: no i2c-dev, no adapter, or an adapter that has
+     * not registered yet. */
+    case ENOENT:
+    case ENODEV:
+    case ENXIO:
+        return true;
+    default:
+        /* EACCES above all. The node EXISTS -- devtmpfs made it the moment
+         * the kernel registered the adapter -- and something refused us. That
+         * is a phone with a fuel gauge it cannot read, and calling it
+         * "hardware not found" is how a flat battery became a surprise. */
+        return false;
+    }
+}
+
+/* The verdict, in one place: remember it, decide whether it is worth asking
+ * again, and say it out loud EXACTLY ONCE per distinct reason.
+ *
+ * The once-per-reason rule is what makes the retry affordable. This runs
+ * every two seconds for the first half-minute of a bad boot, and a serial
+ * console that prints the same three lines fifteen times has hidden whatever
+ * else went wrong beside it -- which on this phone is the keypad, on the same
+ * bus, in the same second. */
+static void settle(nd_battery *b, nd_battery_source src, const char *why, int err)
+{
+    bool changed = (src != b->source) || strcmp(why, b->why) != 0;
+
+    b->source = src;
+    b->hardware = (src == ND_BATT_SRC_LIVE);
+    (void)nd_strlcpy(b->why, why, sizeof b->why);
+    /* A gauge that has never answered is retried only when the kernel's
+     * refusal was one a later attempt could get past. That table lives in
+     * nd_input (nd_keypad.h) and is deliberately shared: the keypad loses the
+     * identical race, against the identical errnos, on the identical bus. */
+    b->retry_possible = (src != ND_BATT_SRC_LIVE) && nd_input_errno_is_transient(err);
+
+    if (!changed)
+        return;
+
+    switch (src) {
+    case ND_BATT_SRC_LIVE:
+        return; /* the caller logs the two lines that name the chip */
+    case ND_BATT_SRC_SIM:
+        /* The node is genuinely absent. This is the QEMU and dev-board case
+         * and the message is still the reassuring one, because here it is
+         * true. */
+        nd_log(ND_LOG_BATT, "HARDWARE NOT FOUND: Running in Simulation Mode (%s).", why);
+        nd_log(ND_LOG_BATT, "This battery gauge is a stub for the QEMU dev environment.");
+        nd_log(ND_LOG_BATT, "Simulated VCELL=%.2f V (override: %s env var or %s).",
+               ND_SIM_DEFAULT_VCELL, ND_SIM_ENV_VAR, ND_BATT_SIM_FILE);
+        return;
+    case ND_BATT_SRC_UNREADABLE:
+        /* And this is the one that used to print the paragraph above on a
+         * phone that has a fuel gauge soldered to it. Error level, no mention
+         * of QEMU, and it says what it will do next. */
+        nd_log_err(ND_LOG_BATT, "FUEL GAUGE UNREADABLE: %s", why);
+        nd_log_err(ND_LOG_BATT,
+                   "The gauge is present and cannot be read: no voltage is reported "
+                   "at all rather than a plausible one, and the low-battery warning "
+                   "and the %.2f V shutdown are unavailable until it answers.",
+                   ND_SHUTDOWN_V);
+        return;
+    }
+}
+
+/* One attempt at the gauge. Logs nothing itself -- settle() decides, because
+ * unlike the original this now runs over and over. */
+static void probe_once(nd_battery *b)
 {
     char dev[64];
     char resolved[ND_PATH_MAX];
-    char why[80];
+    char why[sizeof b->why];
     uint16_t version = 0u;
     uint16_t raw_v = 0u;
+    bool owned = true;
     int fd;
+    int err;
 
     (void)nd_snprintf(dev, sizeof dev, "/dev/i2c-%d", b->bus);
 
     if (nd_path_resolve(resolved, sizeof resolved, dev) != ND_OK) {
-        (void)nd_snprintf(why, sizeof why, "device path too long");
-        goto simulate;
+        /* Not an errno at all: the bus number produced a name too long for a
+         * path. Nothing a later attempt changes, so errno 0 -- which
+         * nd_input_errno_is_transient() answers false for -- disarms the
+         * retry. */
+        settle(b, ND_BATT_SRC_SIM, "device path too long", 0);
+        return;
     }
 
-    /* O_CLOEXEC because the core forks and execs an app per launch and the
-     * gauge handle has no business crossing that boundary. Python 3 makes
-     * every os.open() non-inheritable for the same reason. */
-    fd = open(resolved, O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-        (void)nd_snprintf(why, sizeof why, "%s: %s", dev, strerror(errno));
-        goto simulate;
+    /* The root-phase descriptor if this process kept one, otherwise our own
+     * open. Note it is NOT a dup of the keypad's: I2C_SLAVE is per-file-
+     * description state, so a shared description would have the expander and
+     * the gauge overwriting each other's target address. */
+    if (g_bus_fd >= 0 && g_bus_fd_bus == b->bus) {
+        fd = g_bus_fd;
+        owned = false;
+    } else {
+        /* O_CLOEXEC because the core forks and execs an app per launch and the
+         * gauge handle has no business crossing that boundary. Python 3 makes
+         * every os.open() non-inheritable for the same reason. */
+        fd = open(resolved, O_RDWR | O_CLOEXEC);
+        if (fd < 0) {
+            err = errno;
+            (void)nd_snprintf(why, sizeof why, "%s: %s", dev, strerror(err));
+            settle(b, nd_battery_errno_means_absent(err) ? ND_BATT_SRC_SIM : ND_BATT_SRC_UNREADABLE,
+                   why, err);
+            return;
+        }
     }
 
     if (ioctl(fd, ND_I2C_SLAVE, (unsigned long)b->addr) != 0) {
-        (void)nd_snprintf(why, sizeof why, "%s: I2C_SLAVE 0x%02X: %s", dev, b->addr,
-                          strerror(errno));
-        (void)close(fd);
-        goto simulate;
+        err = errno;
+        (void)nd_snprintf(why, sizeof why, "%s: I2C_SLAVE 0x%02X: %s", dev, b->addr, strerror(err));
+        if (owned)
+            (void)close(fd);
+        /* Past open() the node demonstrably exists, so every remaining
+         * failure is UNREADABLE by construction -- there is no errno here
+         * that can mean "no gauge in this phone". */
+        settle(b, ND_BATT_SRC_UNREADABLE, why, err);
+        return;
     }
     if (read16(fd, ND_REG_VERSION, &version) != 0 || read16(fd, ND_REG_VCELL, &raw_v) != 0) {
-        (void)nd_snprintf(why, sizeof why, "%s: register read: %s", dev, strerror(errno));
-        (void)close(fd);
-        goto simulate;
+        err = errno;
+        (void)nd_snprintf(why, sizeof why, "%s: register read: %s", dev, strerror(err));
+        if (owned)
+            (void)close(fd);
+        settle(b, ND_BATT_SRC_UNREADABLE, why, err);
+        return;
     }
     /* An all-zero or all-ones read is the bus floating, not a battery. */
     if (raw_v == 0x0000u || raw_v == 0xFFFFu) {
         (void)nd_snprintf(why, sizeof why, "%s: implausible VCELL read 0x%04X", dev, raw_v);
-        (void)close(fd);
-        goto simulate;
+        if (owned)
+            (void)close(fd);
+        /* EIO rather than 0: a floating bus is exactly the transient the
+         * retry exists for -- an expander or a gauge whose rail is still
+         * rising reads 0xFFFF for a few tens of milliseconds. */
+        settle(b, ND_BATT_SRC_UNREADABLE, why, EIO);
+        return;
     }
 
     b->fd = fd;
-    b->hardware = true;
+    b->owns_fd = owned;
     b->version = version;
+    b->read_error_streak = 0;
+    settle(b, ND_BATT_SRC_LIVE, "", 0);
     nd_log(ND_LOG_BATT, "MAX1704x fuel gauge @ 0x%02X on %s (VERSION=0x%04X).", b->addr, dev,
            version);
     nd_log(ND_LOG_BATT, "Using REAL battery gauge: VCELL=%.3f V.", (double)raw_v * ND_VCELL_LSB);
-    return;
+}
 
-simulate:
-    nd_log(ND_LOG_BATT, "HARDWARE NOT FOUND: Running in Simulation Mode (%s).", why);
-    nd_log(ND_LOG_BATT, "This battery gauge is a stub for the QEMU dev environment.");
-    nd_log(ND_LOG_BATT, "Simulated VCELL=%.2f V (override: %s env var or %s).",
-           ND_SIM_DEFAULT_VCELL, ND_SIM_ENV_VAR, ND_BATT_SIM_FILE);
+/* When to ask again. Fast while the boot race could still resolve, then slow
+ * for ever -- see the block above ND_BATT_REPROBE_S in nd_battery.h. */
+static void schedule_next_probe(nd_battery *b, double now)
+{
+    if (b->probe_tries < ND_BATT_REPROBE_FAST_TRIES) {
+        b->next_probe = now + ND_BATT_REPROBE_S;
+        return;
+    }
+    if (b->probe_tries == ND_BATT_REPROBE_FAST_TRIES)
+        nd_log_err(ND_LOG_BATT, "Fuel gauge has not answered in %.0fs; still trying, every %.0fs.",
+                   ND_BATT_REPROBE_S * (double)ND_BATT_REPROBE_FAST_TRIES, ND_BATT_REPROBE_SLOW_S);
+    b->next_probe = now + ND_BATT_REPROBE_SLOW_S;
+}
+
+static void probe_hardware(nd_battery *b, double now)
+{
+    b->probe_tries++;
+    probe_once(b);
+    if (b->source == ND_BATT_SRC_LIVE) {
+        if (b->probe_tries > 1)
+            nd_log(ND_LOG_BATT, "Fuel gauge recovered on attempt %d.", b->probe_tries);
+        return;
+    }
+    schedule_next_probe(b, now);
 }
 
 nd_err nd_battery_open(nd_battery **out, int bus, int addr)
@@ -256,13 +475,14 @@ nd_err nd_battery_open(nd_battery **out, int bus, int addr)
     b->bus = bus;
     b->addr = addr;
     b->fd = -1;
+    b->owns_fd = false;
     /* 3 matches the pre-0.2.4a static gauge, so the home screen never shows an
      * empty battery in the window before the first successful read. */
     b->level = 3;
     b->low_armed = true;
     b->crit_armed = true;
 
-    probe_hardware(b);
+    probe_hardware(b, nd_time_monotonic());
 
     /* Seed the gauge immediately so the first home-screen frame is real. */
     (void)nd_battery_poll(b, true);
@@ -275,7 +495,11 @@ void nd_battery_close(nd_battery *b)
 {
     if (b == NULL)
         return;
-    if (b->fd >= 0)
+    /* Not the descriptor nd_battery_provide_bus_fd() lent us: it belongs to
+     * the process, outlives every gauge built over it, and closing it here
+     * would mean a gauge reopened after a teardown had to win the udev race
+     * all over again. */
+    if (b->fd >= 0 && b->owns_fd)
         (void)close(b->fd);
     free(b);
 }
@@ -309,9 +533,17 @@ static bool parse_double(const char *text, double *out)
     return true;
 }
 
-/* The file wins over the environment variable, so a running phone can be
- * dropped into a low-battery state from the serial console without a restart. */
-static double read_vcell_sim(void)
+/* Has somebody NAMED a voltage? The file wins over the environment variable,
+ * so a running phone can be dropped into a low-battery state from the serial
+ * console without a restart.
+ *
+ * Split out from read_vcell_sim() because the two callers want different
+ * things from it. Simulation Mode wants a voltage whatever happens, and falls
+ * back to 3.85 V. An UNREADABLE gauge wants only the EXPLICIT answer: a
+ * developer who wrote a voltage into the sim file is driving the state
+ * machine on purpose and must keep working, but nobody may be handed 3.85 V
+ * for a gauge that is sitting right there refusing to be read. */
+static bool read_vcell_override(double *out)
 {
     char resolved[ND_PATH_MAX];
     char raw[64];
@@ -326,26 +558,75 @@ static double read_vcell_sim(void)
 
             raw[n] = '\0';
             (void)fclose(f);
-            if (parse_double(raw, &value))
-                return value;
+            if (parse_double(raw, &value)) {
+                *out = value;
+                return true;
+            }
         }
     }
 
     env = getenv(ND_SIM_ENV_VAR);
-    if (env != NULL && parse_double(env, &value))
-        return value;
-
-    return ND_SIM_DEFAULT_VCELL;
+    if (env != NULL && parse_double(env, &value)) {
+        *out = value;
+        return true;
+    }
+    return false;
 }
 
-static bool read_vcell(nd_battery *b, double *out)
+static double read_vcell_sim(void)
+{
+    double value;
+
+    return read_vcell_override(&value) ? value : ND_SIM_DEFAULT_VCELL;
+}
+
+/* A gauge that WAS answering has stopped. Close it, put it back into
+ * UNREADABLE and re-arm the probe.
+ *
+ * Without this a gauge that fell off the bus kept `hardware` true for ever:
+ * the meter went on showing the last level it had managed to read, with no
+ * "?" and nothing on the console after the first line, which is the silent
+ * half of the same bug the constructor had. It is the same decision, for the
+ * same reason, that nd_input makes at ND_MATRIX_DEAD_SCANS on this bus. */
+static void gauge_lost(nd_battery *b, const char *what, double now)
+{
+    char why[sizeof b->why];
+
+    (void)nd_snprintf(why, sizeof why, "/dev/i2c-%d: the gauge stopped answering (%s)", b->bus,
+                      what);
+    if (b->fd >= 0 && b->owns_fd)
+        (void)close(b->fd);
+    b->fd = -1;
+    b->owns_fd = false;
+    b->read_error_streak = 0;
+    /* A gauge that answered once is always worth asking again, whatever the
+     * last errno was -- it demonstrably exists. */
+    settle(b, ND_BATT_SRC_UNREADABLE, why, EIO);
+    /* A fresh budget: this is not the boot race the fast phase was written
+     * for, so it gets its own half-minute of trying to get the gauge back. */
+    b->probe_tries = 0;
+    schedule_next_probe(b, now);
+}
+
+static bool read_vcell(nd_battery *b, double *out, double now)
 {
     uint16_t raw = 0u;
     char why[64];
 
-    if (!b->hardware) {
+    if (b->source == ND_BATT_SRC_SIM) {
         *out = read_vcell_sim();
         return true;
+    }
+
+    if (b->source == ND_BATT_SRC_UNREADABLE) {
+        /* NOT read_vcell_sim(). This is the whole point of the state: a phone
+         * that cannot read its own battery reports NOTHING -- the meter draws
+         * "?" and nd_battery_vcell() answers false -- rather than the 3.85 V
+         * that sits above every threshold in this file and quietly disables
+         * the low-battery warning and the protective shutdown together. An
+         * explicit override still wins, because that is a developer driving
+         * the state machine deliberately. */
+        return read_vcell_override(out);
     }
 
     if (read16(b->fd, ND_REG_VCELL, &raw) != 0)
@@ -362,6 +643,8 @@ static bool read_vcell(nd_battery *b, double *out)
          * whatever else went wrong at the same moment. */
         if (b->read_error_streak == 1)
             nd_log(ND_LOG_BATT, "VCELL read failed: %s", why);
+        if (b->read_error_streak >= ND_BATT_DEAD_READS)
+            gauge_lost(b, why, now);
         return false;
     }
 
@@ -430,9 +713,22 @@ const char *nd_battery_poll(nd_battery *b, bool force)
         return NULL;
     b->last_poll = now;
 
+    /* ============ ASK AGAIN FOR A GAUGE THAT IS NOT THERE ============
+     *
+     * This is the only clock the service has, and it is the one the status
+     * bar already turns: nd_ui_read_keypress() polls the battery on every
+     * key wait, i.e. several times a second on any screen. Putting the
+     * reprobe here rather than in a thread of its own is what makes "the
+     * gauge came back" cost nothing on a phone where it never went away.
+     *
+     * Before the read, so a probe that succeeds this tick produces a real
+     * voltage on this tick instead of on the next one. */
+    if (b->source != ND_BATT_SRC_LIVE && b->retry_possible && now >= b->next_probe)
+        probe_hardware(b, now);
+
     /* A transient read failure keeps the last known state rather than
      * pretending the pack is flat. */
-    if (!read_vcell(b, &vcell))
+    if (!read_vcell(b, &vcell, now))
         return NULL;
 
     samples_append(b, vcell);
@@ -524,6 +820,16 @@ const char *nd_battery_take_pending_warning(nd_battery *b)
 bool nd_battery_has_hardware(const nd_battery *b)
 {
     return b != NULL && b->hardware;
+}
+
+nd_battery_source nd_battery_source_of(const nd_battery *b)
+{
+    return b != NULL ? b->source : ND_BATT_SRC_SIM;
+}
+
+const char *nd_battery_fault(const nd_battery *b)
+{
+    return b != NULL ? b->why : "";
 }
 
 bool nd_battery_debug_snapshot(nd_battery *b, nd_battery_snap *out)

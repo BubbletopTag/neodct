@@ -30,11 +30,38 @@
 #ifndef ND_NOTIFY_PRIV_H_INCLUDED
 #define ND_NOTIFY_PRIV_H_INCLUDED
 
+#include <sys/types.h>
+
 #include "nd_types.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* ------------------------------------------------------------------ *
+ * The two decisions the silent-phone bug turned on
+ * ------------------------------------------------------------------ *
+ *
+ * Both are pure, and both are here rather than static in nd_notify.c for one
+ * reason: they are the parts of the tone path a host test can actually
+ * exercise. The bug they pin -- every tone the phone played dying at exit 122
+ * before execve -- shipped through eight releases behind a test that spawned a
+ * fake aplay and could not fail, because on a build host getpwnam("ndusr")
+ * misses and inside QEMU `make test` runs as root. Neither environment is the
+ * one that breaks, and neither ever will be. A predicate, on the other hand,
+ * can be asked the question directly.
+ */
+
+/* True when a caller whose effective uid is `euid` can perform a privilege
+ * drop at all -- which is to say, when it is root. setgroups(2) needs
+ * CAP_SETGID unconditionally, so an unprivileged caller asking a child to
+ * become ndusr does not get a dropped child, it gets a dead one. */
+bool nd_tone_drop_to_user(uid_t euid);
+
+/* What one of nd_proc.c's reserved 120..127 pre-exec exit codes means, or
+ * NULL when the code is not one of them (and so came from a player that had
+ * really started). */
+const char *nd_tone_pre_exec_reason(int exit_code);
 
 /* 16384 stereo int16 frames == 65536 bytes. This is the "~64 KB ring buffer"
  * the whole exercise is about; it is also one send() to the player, and at

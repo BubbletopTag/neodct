@@ -924,6 +924,100 @@ static void test_a_nonsense_bus_override_disables_setup(void)
 }
 
 /* ------------------------------------------------------------------ *
+ * The root-phase bring-up of an ALREADY CONFIGURED keypad
+ * ------------------------------------------------------------------ */
+
+/* ============ THE HALF THE WIZARD WAS NOT DOING ============
+ *
+ * nd_main.c has always called nd_kpsetup_maybe_run() before the privilege
+ * drop, with a comment saying that the keypad's i2c probe therefore happens
+ * as root. The case directly above -- "skips a phone that already works" --
+ * is the proof that it did not: the gate answers HAVE_KEYMAP the instant
+ * keymap.json exists, and the function returns having opened no bus at all.
+ * So on every phone that HAS a keypad, the privileged phase never touched it,
+ * and the only open of /dev/i2c-3 happened afterwards, as ndusr, once,
+ * straight into the udev race. That is the keypad error screen.
+ *
+ * nd_kpsetup_open_keypad_as_root() is the missing half. A host cannot fake an
+ * i2c adapter, so what these cases pin is the DECIDING: which phones it acts
+ * on, which it stays silent about, and that a failure comes back naming the
+ * node and the errno rather than as a bare -1.
+ */
+
+/* A keymap the loader accepts, on `bus`, naming `driver`. Written by hand:
+ * a fixture built with the code under test cannot catch that code being
+ * wrong. */
+static void write_keymap_for_bringup(const char *driver, int bus)
+{
+    char json[512];
+
+    CHECK(nd_snprintf(json, sizeof json,
+                      "{\n"
+                      "  \"col_pins\": [4, 5, 6, 7],\n"
+                      "  \"driver\": \"%s\",\n"
+                      "  \"format\": \"neodct.keymap.v3.matrix.i2c\",\n"
+                      "  \"i2c_addr\": 32,\n"
+                      "  \"i2c_bus\": %d,\n"
+                      "  \"keys\": {\"navikey\": {\"col\": 0, \"row\": 0}},\n"
+                      "  \"row_pins\": [0, 1, 2, 3]\n"
+                      "}\n",
+                      driver, bus) == ND_OK);
+    pt_write_text(ND_PATH_KEYMAP, json);
+}
+
+static void test_bring_up_says_nothing_on_a_phone_with_no_keymap(void)
+{
+    nd_kpsetup_bringup r;
+
+    /* QEMU, a dev box, and the first boot of a fresh phone. There is nothing
+     * to open and the wizard owns that case; silence is the whole contract. */
+    CHECK_INT(nd_kpsetup_open_keypad_as_root(&r), -1);
+    CHECK_INT(r.fd, -1);
+    CHECK(!r.answered);
+    CHECK_STR(r.why, "");
+}
+
+static void test_bring_up_refuses_a_keymap_for_another_driver(void)
+{
+    nd_kpsetup_bringup r;
+
+    /* The gpiozero backend is deliberately not ported. Opening an i2c bus for
+     * it would be opening the wrong thing, so this is a refusal WITH a reason
+     * rather than a silent nothing -- the owner has to be told which driver,
+     * because the only repair is to re-run the wizard. */
+    write_keymap_for_bringup("gpiozero-matrix", 3);
+    CHECK_INT(nd_kpsetup_open_keypad_as_root(&r), -1);
+    CHECK(r.why[0] != '\0');
+    CHECK(strstr(r.why, "gpiozero-matrix") != NULL);
+}
+
+static void test_bring_up_reports_the_node_and_the_errno_it_failed_on(void)
+{
+    nd_kpsetup_bringup r;
+
+    /* A regular file standing in for the node: it exists, so there is no
+     * wait; it opens, because open() does not care what is behind it; and it
+     * fails the I2C_SLAVE ioctl, which is what a node that is not an i2c bus
+     * does. The point being asserted is that the failure comes back NAMED --
+     * the whole family of bugs here was failures reaching the owner as a
+     * guess about permission and wiring. */
+    write_keymap_for_bringup("pcf8575-i2c", 7);
+    pt_write_text("/dev/i2c-7", "");
+    CHECK_INT(nd_kpsetup_open_keypad_as_root(&r), -1);
+    CHECK_INT(r.bus, 7);
+    CHECK_INT(r.addr, 0x20);
+    CHECK(!r.answered);
+    CHECK(strstr(r.why, "/dev/i2c-7") != NULL);
+}
+
+static void test_bring_up_tolerates_a_null_result(void)
+{
+    /* nd_main.c passes a struct, but the descriptor alone is the useful half
+     * and a caller is entitled to want only that. */
+    CHECK_INT(nd_kpsetup_open_keypad_as_root(NULL), -1);
+}
+
+/* ------------------------------------------------------------------ *
  * The whole wizard
  * ------------------------------------------------------------------ */
 
@@ -1093,6 +1187,11 @@ int main(void)
     RUN(test_maybe_run_skips_a_phone_that_already_works);
     RUN(test_maybe_run_is_quiet_on_a_dev_box);
     RUN(test_a_nonsense_bus_override_disables_setup);
+
+    RUN(test_bring_up_says_nothing_on_a_phone_with_no_keymap);
+    RUN(test_bring_up_refuses_a_keymap_for_another_driver);
+    RUN(test_bring_up_reports_the_node_and_the_errno_it_failed_on);
+    RUN(test_bring_up_tolerates_a_null_result);
 
     RUN(test_the_whole_wizard);
     RUN(test_the_wizard_aborts_when_nobody_presses_anything);

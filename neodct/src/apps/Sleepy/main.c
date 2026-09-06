@@ -59,10 +59,8 @@ const char *const nd_sleepy_title = "Sleepy";
 /* CPU first because it is the reversible one. */
 const char *const nd_sleepy_root_items[SLEEPY_ROOT_ITEMS] = {"CPU", "Display"};
 
-/* The exclamation mark is the warning. There is exactly one row on that
- * screen and pressing it turns the screen off, which is indistinguishable
- * from a crash for the ten seconds it lasts. */
-const char *const nd_sleepy_blank_item = "BLANK!";
+/* Keep the timed blank first so its existing menu shortcut stays the same. */
+const char *const nd_sleepy_display_items[SLEEPY_DISPLAY_ITEMS] = {"BLANK!", "Brightness"};
 
 /* Short on purpose. The dialog gives a title line and three at 14 px, and it
  * TRUNCATES rather than scrolling -- a longer and more precise sentence
@@ -78,6 +76,7 @@ const char *const nd_sleepy_no_backlight = "No backlight.\n\nNo PWM device and n
  * handler (nd_app.h, step 3), so this is an ordinary read on the same thread
  * of control that wrote it. */
 static bool g_blanked;
+static int32_t g_wake_percent = 100;
 
 /* ------------------------------------------------------------------ *
  * Display -> BLANK!
@@ -114,6 +113,16 @@ static void show_dialog(nd_ui *ui, const char *message)
     (void)nd_msgdialog_show(&dialog);
 }
 
+static bool restore_backlight(void)
+{
+    if (!g_blanked)
+        return true;
+    if (!nd_backlight_on(g_wake_percent))
+        return false;
+    g_blanked = false;
+    return true;
+}
+
 static void blank(nd_ui *ui)
 {
     nd_bl_mode mode = nd_backlight_mode();
@@ -133,6 +142,12 @@ static void blank(nd_ui *ui)
     nd_softkey_update(&bar, "Wake", false);
     if (nd_ui_present(ui) != ND_OK)
         return;
+
+    /* A blank/wake measurement must not overwrite the level just chosen in
+     * Brightness. An unreadable or already-dark panel still wakes at full. */
+    g_wake_percent = nd_backlight_get_percent();
+    if (g_wake_percent <= 0)
+        g_wake_percent = 100;
 
     if (!nd_backlight_off()) {
         /* The tier said it was there and the write was still refused, which on
@@ -163,9 +178,53 @@ static void blank(nd_ui *ui)
             break;
     }
 
-    (void)nd_backlight_on(100);
-    g_blanked = false;
+    if (!restore_backlight()) {
+        /* Leave g_blanked set so shutdown can retry the restore. */
+        show_dialog(ui, "Backlight wake failed.\n\nCould not restore brightness.");
+        return;
+    }
     nd_log(ND_LOG_SLEEPY, "Sleepy: panel lit");
+}
+
+static void show_brightness(nd_ui *ui)
+{
+    nd_bl_mode mode = nd_backlight_mode();
+
+    if (mode == ND_BL_NONE) {
+        show_dialog(ui, nd_sleepy_no_backlight);
+        return;
+    }
+    if (mode != ND_BL_PWM) {
+        show_dialog(ui, "No PWM dimming.\n\nGPIO is on/off only.");
+        return;
+    }
+
+    while (!nd_app_should_exit()) {
+        nd_levelsel picker;
+        int32_t percent = nd_backlight_get_percent();
+        int32_t current;
+        int32_t picked;
+
+        if (percent < 0) {
+            show_dialog(ui, "Cannot read brightness.");
+            return;
+        }
+        current = nd_clamp32((percent + 5) / 10, 1, SLEEPY_BRIGHTNESS_LEVELS);
+        nd_levelsel_init(&picker, ui, current, SLEEPY_BRIGHTNESS_LEVELS, "Brightness",
+                         SLEEPY_APP_ID);
+        picked = nd_levelsel_show(&picker);
+        if (picked == ND_WIDGET_BACK || nd_app_should_exit())
+            return;
+
+        /* Level 5 is the middle table index, not 50% optical brightness.
+         * The API scales onto max_brightness; the kernel owns the curve. */
+        if (!nd_backlight_on(picked * 10)) {
+            show_dialog(ui, "Brightness refused.\n\nCheck backlight permissions.");
+            return;
+        }
+        nd_log(ND_LOG_SLEEPY, "Sleepy: brightness level %d/%d", picked,
+               SLEEPY_BRIGHTNESS_LEVELS);
+    }
 }
 
 static void show_display_menu(nd_ui *ui)
@@ -175,14 +234,18 @@ static void show_display_menu(nd_ui *ui)
         nd_softkey bar;
         int32_t choice;
 
-        nd_vlist_init(&menu, ui, "Display", &nd_sleepy_blank_item, 1u, SLEEPY_APP_ID);
+        nd_vlist_init(&menu, ui, "Display", nd_sleepy_display_items, SLEEPY_DISPLAY_ITEMS,
+                      SLEEPY_APP_ID);
         nd_softkey_init(&bar, ui, false);
         nd_softkey_update(&bar, "Select", false);
 
         choice = nd_vlist_show(&menu);
         if (choice == ND_WIDGET_BACK)
             return;
-        blank(ui);
+        if (choice == 0)
+            blank(ui);
+        else if (choice == 1)
+            show_brightness(ui);
         if (nd_app_should_exit())
             return;
     }
@@ -337,8 +400,5 @@ int app_run(nd_ui *ui)
  * The CPU pin is deliberately NOT undone here -- see the header block. */
 void app_shutdown(void)
 {
-    if (g_blanked) {
-        (void)nd_backlight_on(100);
-        g_blanked = false;
-    }
+    (void)restore_backlight();
 }

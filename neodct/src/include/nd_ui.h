@@ -156,6 +156,20 @@ typedef struct nd_ui {
     bool has_matrix_keypad; /* framework._t9_active(): the T9 indicator is
                                   * drawn only when this is true */
 
+    /* --- may this process ASK the input layer again? --- *
+     *
+     * True in the core, which opened a real backend and can watch it come and
+     * go. False in an app, whose `input` is the pipe nd-apprun inherited and
+     * whose has_matrix_keypad came from the core through NEODCT_KEYPAD_MATRIX
+     * -- asking that pipe would answer "no matrix" and switch T9 off in every
+     * app on every phone, which is the mistake nd_ui_init_app() already warns
+     * about at length. False as well for a hand-built test context, which
+     * runs no loop and re-derives nothing.
+     *
+     * The two fields above are a CACHE in the core and a FACT in an app, and
+     * this is the flag that says which. See keypad_tick() in nd_ui.c. */
+    bool owns_input_backend;
+
     /* --- chrome --- */
     nd_ui_state state;
     bool softkey_exists;        /* see the header comment; set at step 9 */
@@ -307,6 +321,101 @@ int32_t nd_ui_read_keypress(nd_ui *ui, double timeout_s);
 nd_err nd_ui_present(nd_ui *ui);
 
 /* ------------------------------------------------------------------ *
+ * The soft watchdog
+ * ------------------------------------------------------------------ *
+ *
+ * ============ WHAT IT IS FOR ============
+ *
+ * Formatting an SD card froze the phone for minutes and left NOTHING in
+ * core.log. The cause of that particular freeze is fixed. What fixing it did
+ * not fix is that the phone had no way to tell a wedged UI thread from a dead
+ * board, and no way to say which it was -- not to the owner, who saw a screen
+ * that had stopped, and not to the log, which said nothing at all for the
+ * whole of it.
+ *
+ * This is the smallest thing that can tell them apart. The UI thread stamps a
+ * monotonic timestamp wherever it goes round -- the key wait, every present,
+ * every frame -- and a thread that is NOT the UI thread reads that stamp once
+ * a second. Five seconds without one is a stall: one line on stderr naming
+ * what the UI last said it was doing, and one more line when it moves again.
+ *
+ * IT IS NOT /dev/watchdog AND MUST NOT BECOME ONE. A hardware watchdog would
+ * have rebooted the phone in the middle of the mke2fs this was written for,
+ * turning a card that was merely slow into a card that is broken. This one
+ * observes and writes a line. It never acts.
+ *
+ * ============ THE COST, BECAUSE IT IS ON THE HOTTEST LOOP ============
+ *
+ * A beat is one clock_gettime(CLOCK_MONOTONIC) -- a vDSO read on both targets,
+ * not a syscall -- and one relaxed atomic store. There is NO LOCK anywhere on
+ * the UI thread's side of this, deliberately: a watchdog that can block the
+ * thread it is watching is worse than no watchdog. The reader is allowed to be
+ * approximately right, because "approximately right about a five-second
+ * interval" is the whole of what it has to be.
+ *
+ * ============ NAMING WHAT IT IS BLOCKED ON ============
+ *
+ * "The UI has stopped" is half a sentence. The other half is WHICH operation,
+ * and only the caller knows that, so a caller entering something that can take
+ * a while says so:
+ *
+ *     const char *saved = nd_ui_watch_begin("formatting the memory card");
+ *     ... the long thing ...
+ *     nd_ui_watch_end(saved);
+ *
+ * Save-and-restore rather than set-and-clear, exactly like nd_ui_set_repaint()
+ * and for the same reason: these nest.
+ *
+ * THE LABEL MUST HAVE STATIC STORAGE -- a string literal, or a buffer that
+ * outlives the process. The watchdog thread reads the pointer, not a copy, at
+ * a moment the labelling code knows nothing about; a label on the stack of a
+ * function that has since returned is a use-after-free in the one code path
+ * whose entire job is to be readable after something has gone wrong.
+ *
+ * ============ WHERE THE CHECKER LIVES ============
+ *
+ * In the CORE, and only there: nd_ui_init() starts one thread and
+ * nd_ui_teardown() joins it. An app process gets the beats and the labels but
+ * no thread, because several apps arrange their forks around being
+ * single-threaded (apps/LinuxShell and apps/Koki both say so in writing) and a
+ * thread this file adds behind their backs would quietly invalidate that.
+ */
+
+/* Stamp. Cheap enough for the key loop; call it from any loop that runs long
+ * enough to be mistaken for a stall. */
+void nd_ui_watch_beat(void);
+
+/* Name the long operation about to start. Returns the label that was in force,
+ * to be handed back to nd_ui_watch_end(). Both stamp a beat, so the five
+ * seconds are measured from the operation rather than from whenever the last
+ * beat happened to land. NULL is accepted and means "back to the default". */
+const char *nd_ui_watch_begin(const char *what);
+void nd_ui_watch_end(const char *saved);
+
+/* "I have handed the screen to somebody else and may not beat until I have it
+ * back." Nests; every hold needs its release. Used around a child process that
+ * owns the panel, where the UI thread is alive but beating somewhere the
+ * watchdog cannot see -- a stall reported there would be false, and a watchdog
+ * that cries wolf is one nobody reads.
+ *
+ * IT IS NOT "STOP LOOKING". A hold suppresses reporting only for as long as
+ * nothing inside it beats; the first beat that lands puts the held section
+ * back under the ordinary five-second rule. So the suppression retires itself
+ * the day the code inside learns to report, without anyone having to remember
+ * to take the hold away. */
+void nd_ui_watch_hold(void);
+void nd_ui_watch_release(void);
+
+/* What the checker would see right now: milliseconds since the last beat, and
+ * through the out-parameters the current label and whether beats are being
+ * expected at all. Either pointer may be NULL.
+ *
+ * MEANINGLESS BEFORE THE FIRST BEAT, which is why both constructors stamp one.
+ * Exposed so the decision can be tested without a test that sleeps for five
+ * seconds. */
+uint32_t nd_ui_watch_age_ms(const char **label_out, bool *held_out);
+
+/* ------------------------------------------------------------------ *
  * Core-owned screens and plumbing. An app must not call these.
  * ------------------------------------------------------------------ */
 
@@ -354,6 +463,31 @@ void nd_ui_show_pending_modem_fault(nd_ui *ui);
 /* True when the radio is in ND_MODEM_LINK_FAULT. The home screen drops the
  * carrier line entirely when it is. */
 bool nd_ui_status_modem_faulted(nd_ui *ui);
+
+/* framework._t9_active(), as a rule rather than as a remembered answer.
+ *
+ * `detected` is what the process can see for itself -- the real backend in
+ * the core, the core's word for it in an app (nd_app.h). NEODCT_T9 overrides
+ * both and is the only way to exercise T9 on a QWERTY keyboard: exactly "0"
+ * is off, anything else non-empty is on, and an unset or empty variable
+ * leaves `detected` alone.
+ *
+ * PUBLIC because two other places need the identical answer and one of them
+ * had already copied it: nd_main.c re-derives the flag when a keypad turns up
+ * during the boot grace window, and got a duplicate of this function rather
+ * than an approximation precisely because being wrong in either direction
+ * ruins text entry. There is now one rule to be wrong in. */
+bool nd_ui_t9_active_for(bool detected);
+
+/* The alpha security notice, shown once and then acknowledged on disk.
+ * Returns true when it put the dialog on the screen.
+ *
+ * nd_ui_init() calls this for itself, but ONLY when there was already an
+ * input backend -- it is a modal that waits for a key, and on a keyless phone
+ * it would sit there for ever. A core that later recovers its keypad (see
+ * nd_input_retry_backend()) has therefore skipped a notice it still owes, and
+ * this is how it can pay it once the phone can be driven. */
+bool nd_ui_show_security_notice_once(nd_ui *ui);
 
 void nd_ui_handle_incoming_call(nd_ui *ui, const char *number);
 

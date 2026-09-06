@@ -2,17 +2,32 @@
  *
  * Nothing here mounts anything. The shell helper /bin/neodct-sdcard mounts a
  * card and publishes what it found to /run/neodct/sdcard.prop; this turns
- * that into the four questions the UI actually asks:
+ * that into the questions the UI actually asks:
  *
  *   absent       no card in the slot
  *   ready        a NeoDCT card: mounted, with all five folders
  *   legacy       a NeoDCT card in the pre-0.5.0b FAT format: mounted and
  *                readable, but it cannot hold an installed app
+ *   foreign      an ext card made on somebody else's computer: mounted, and
+ *                owned by a uid this phone does not have
  *   needs_setup  mountable, but not laid out as a NeoDCT card yet
  *   unformatted  a card is there but carries no filesystem we can mount
+ *   unknown      the state file is there and this process cannot read it
  *
- * Only "ready" hands out paths, so an app can never write into a card that is
- * about to be reformatted.
+ * ============ TWO QUESTIONS, NOT ONE ============
+ *
+ * "May I read the owner's music off this card" and "may I install an app onto
+ * it" are different questions with different answers, and for five releases
+ * this file only knew how to ask the second one. nd_storage_folder() was gated
+ * on nd_storage_is_ready(), which is READY and nothing else, so a legacy FAT
+ * card -- mounted, healthy, full of the owner's files -- handed out no music
+ * directory, no tones directory, no wallpapers directory and no update
+ * directory. Every media app on the phone saw an empty slot.
+ *
+ * So the media gate is nd_storage_media_available() (READY or LEGACY_FORMAT)
+ * and the ownership gate stays nd_storage_is_ready(). The rule for choosing:
+ * if the operation depends on a file's OWNER meaning something, it needs
+ * is_ready(); if it just opens files, it needs media_available().
  *
  * ============ PATHS ============
  *
@@ -25,9 +40,13 @@
  */
 
 #include <dirent.h>
+#include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
+#include "nd_log.h"
 #include "nd_paths.h"
 #include "nd_props.h"
 #include "nd_storage.h"
@@ -66,6 +85,86 @@ static bool has_folders(void)
     return true;
 }
 
+/* ============ TELLING "NO CARD" FROM "I CANNOT READ THE ANSWER" ============
+ *
+ * nd_props_parse_lenient() returns nd_props*, not nd_err, so every way of
+ * failing to read the state file -- it is not there, it is there and this uid
+ * may not open it, the tmpfs threw EIO -- comes back as the same empty map and
+ * leaves here as the same ND_CARD_ABSENT. That was tolerable while the file
+ * was written and read by the same root process. It stopped being tolerable in
+ * 0.5.0b, when the reader became ndusr and the writer stayed root: a format
+ * run through the broker inherited run_neodct.sh's umask 0027 and published
+ * root:root 0640, and from that moment the phone said "No memory card." about
+ * a card that was mounted, working, and named in a file it could see but not
+ * open. It came back after a reboot, because /run is a tmpfs and the boot scan
+ * rewrote the file under a different umask.
+ *
+ * The cure for that particular umask is in the writer (neodct-sdcard's
+ * write_state chmods the file 0644 explicitly). What is here is the ability to
+ * NOTICE, so the next member of this family is one grep of core.log rather
+ * than another month of "it does not see my card".
+ *
+ * fopen() rather than access(): access() answers for the real uid and about
+ * the mode bits, and this has to answer the same question nd_props does, with
+ * the same call, in the same process. A file that opens and then cannot be
+ * parsed is not a read failure -- test_storage.c writes b"\x00\xffgarbage"
+ * and expects ABSENT -- so only the open is examined here.
+ */
+typedef enum { STATE_FILE_OK = 0, STATE_FILE_MISSING, STATE_FILE_UNREADABLE } state_file_health;
+
+static state_file_health state_file_probe(int *errno_out)
+{
+    char resolved[ND_PATH_MAX];
+    FILE *f;
+
+    if (errno_out != NULL)
+        *errno_out = 0;
+    if (nd_path_resolve(resolved, sizeof resolved, g_state_file) != ND_OK)
+        return STATE_FILE_MISSING;
+
+    errno = 0;
+    f = fopen(resolved, "rb");
+    if (f != NULL) {
+        (void)fclose(f);
+        return STATE_FILE_OK;
+    }
+    if (errno_out != NULL)
+        *errno_out = errno;
+    /* ENOENT is a phone with nothing in the slot, which is not a fault and
+     * must not be logged: it is the answer on every boot of every phone that
+     * has no card. ENOTDIR is the same answer arrived at through a missing
+     * /run/neodct. */
+    if (errno == ENOENT || errno == ENOTDIR)
+        return STATE_FILE_MISSING;
+    return STATE_FILE_UNREADABLE;
+}
+
+/* Once per transition, not once per call. nd_storage_card() is asked several
+ * times per screen and the status bar asks it on a timer; a log line per call
+ * would bury the one line that matters. Per process, because each app has its
+ * own copy of these statics and each of them is a separate reader that may
+ * have a different answer -- an app running as ndusr_ut genuinely cannot read
+ * what the ndusr core can. */
+static bool g_read_failure_reported;
+
+static void note_state_file_health(state_file_health health, int why)
+{
+    if (health == STATE_FILE_UNREADABLE) {
+        if (!g_read_failure_reported) {
+            g_read_failure_reported = true;
+            nd_log_err(ND_LOG_OS,
+                       "card state %s cannot be read: %s -- the card is reported as UNKNOWN, "
+                       "not as absent",
+                       g_state_file, strerror(why));
+        }
+        return;
+    }
+    if (g_read_failure_reported) {
+        g_read_failure_reported = false;
+        nd_log(ND_LOG_OS, "card state %s can be read again", g_state_file);
+    }
+}
+
 void nd_storage_card(nd_card *out)
 {
     /* Dialect B-2: errors="replace", so a corrupt state file still yields
@@ -79,8 +178,10 @@ void nd_storage_card(nd_card *out)
     const char *device;
     const char *label;
 
-    if (out == NULL)
+    if (out == NULL) {
+        nd_props_free(values);
         return;
+    }
 
     memset(out, 0, sizeof *out);
     (void)nd_strlcpy(out->mountpoint, g_mount_point, sizeof out->mountpoint);
@@ -89,6 +190,11 @@ void nd_storage_card(nd_card *out)
     fstype = nd_props_get(values, "fstype", "");
     device = nd_props_get(values, "device", "");
     label = nd_props_get(values, "label", "");
+    /* A file that named a state was readable, whatever it went on to say, so
+     * the recovery is recorded here rather than paying for a probe to learn
+     * something the parse already proved. */
+    if (reported[0] != '\0')
+        note_state_file_health(STATE_FILE_OK, 0);
     /* Missing on a card with no arrival partition, and on every state file
      * written before there was such a thing -- the default is the empty
      * string either way, which is exactly "there is nowhere to put a
@@ -115,6 +221,26 @@ void nd_storage_card(nd_card *out)
         goto done;
     }
 
+    /* Mounted, ext, and OWNED BY SOMEBODY ELSE -- see ND_CARD_FOREIGN. It sits
+     * beside `legacy` rather than below the absent/mounted split for the same
+     * reason legacy does: the card is there, the phone can see it and name it,
+     * and the one thing it cannot do is use it. Everything the helper knows
+     * about it is kept, because the device name is what the format offer needs
+     * and what makes "there is a card at /dev/mmcblk1p1" sayable at all.
+     *
+     * The arrival directory is cleared with the same reasoning as legacy's: a
+     * card whose root this uid cannot enter has nowhere inside it a download
+     * could be written, and handing out a path anyway would turn one honest
+     * refusal into an EACCES in the browser. */
+    if (strcmp(reported, "foreign") == 0) {
+        out->state = ND_CARD_FOREIGN;
+        (void)nd_strlcpy(out->device, device, sizeof out->device);
+        (void)nd_strlcpy(out->fstype, fstype, sizeof out->fstype);
+        (void)nd_strlcpy(out->label, label, sizeof out->label);
+        out->untrusted[0] = '\0';
+        goto done;
+    }
+
     if (strcmp(reported, "unmountable") == 0 || strcmp(reported, "unformatted") == 0) {
         out->state = ND_CARD_UNFORMATTED;
         (void)nd_strlcpy(out->device, device, sizeof out->device);
@@ -125,6 +251,20 @@ void nd_storage_card(nd_card *out)
 
     if (strcmp(reported, "mounted") != 0 && strcmp(reported, "share") != 0 &&
         strcmp(reported, "ready") != 0) {
+        /* Nothing parsed at all is the one case that has two causes, and only
+         * here is it worth paying a syscall to tell them apart: a state file
+         * that names a state was plainly readable. */
+        if (reported[0] == '\0') {
+            int why = 0;
+            state_file_health health = state_file_probe(&why);
+
+            note_state_file_health(health, why);
+            if (health == STATE_FILE_UNREADABLE) {
+                out->state = ND_CARD_UNKNOWN;
+                out->untrusted[0] = '\0';
+                goto done;
+            }
+        }
         /* device, fstype and label are deliberately left blank here: the
          * Python passes "" for all three on this branch even though it read
          * values for them. The arrival mount goes with them, for a reason of
@@ -152,6 +292,49 @@ bool nd_storage_is_ready(void)
     return card.state == ND_CARD_READY;
 }
 
+/* ============ THE GATE THE MEDIA APPS SHOULD HAVE HAD ============
+ *
+ * READY is "an ext4 card the phone laid out". LEGACY_FORMAT is the same card
+ * in the FAT32 layout NeoDCT used until 0.5.0b: mounted, readable, and holding
+ * whatever the owner put on it. The single thing FAT cannot do is record who
+ * owns a file, and the single thing that needs is confining an installed app.
+ *
+ * Opening a .mp3 needs none of it. Neither does reading a wallpaper, listing
+ * ringtones, or copying an .ndsw off the card -- those are the four things the
+ * legacy dialog's own help text promises still work, and for five releases
+ * none of them did, because every one of them went through nd_storage_folder()
+ * and nd_storage_folder() asked is_ready().
+ *
+ * UNFORMATTED, NEEDS_SETUP, UNKNOWN and ABSENT are all false here, and for
+ * the same reason in each case: there is no mounted filesystem to read from
+ * (NEEDS_SETUP has one, but not the folders, and nd_storage_folder() would be
+ * handing out a path to a directory that does not exist).
+ *
+ * FOREIGN is false for a reason of its own, and it is worth stating because it
+ * is the one mounted, healthy, populated card that answers no. Its root is not
+ * readable by this uid -- that IS what "foreign" means -- so every path handed
+ * out of it would open EACCES. A media app that got one would show an empty
+ * list with no explanation; the card screen says the true thing instead. */
+bool nd_storage_media_available(void)
+{
+    nd_card card;
+
+    nd_storage_card(&card);
+    return card.state == ND_CARD_READY || card.state == ND_CARD_LEGACY_FORMAT;
+}
+
+bool nd_storage_card_is_writable(void)
+{
+    char resolved[ND_PATH_MAX];
+
+    if (nd_path_resolve(resolved, sizeof resolved, g_mount_point) != ND_OK)
+        return false;
+    /* X_OK as well as W_OK: a directory that cannot be entered cannot be
+     * written into either, and 0644 on a mount root is a real way for a card
+     * to arrive from somebody else's computer. */
+    return access(resolved, W_OK | X_OK) == 0;
+}
+
 bool nd_storage_untrusted_dir(char *out, size_t out_sz)
 {
     nd_card card;
@@ -168,7 +351,11 @@ bool nd_storage_folder(const char *name, char *out, size_t out_sz)
 {
     if (name == NULL || out == NULL || out_sz == 0u)
         return false;
-    if (!nd_storage_is_ready())
+    /* media_available(), not is_ready(): see the comment on it. The two
+     * callers that genuinely need ext4 ownership -- installing a .nap
+     * (nd_nap.c) and Fetch's download landing -- ask is_ready() themselves
+     * before they get here, and still do. */
+    if (!nd_storage_media_available())
         return false;
 
     /* Note there is no check that `name` is one of the five. The Python does

@@ -43,8 +43,9 @@ const char *const nd_music_no_card_help =
 
 const char *const nd_music_unknown_artist = "Unknown Artist";
 
-const char *const nd_music_mpv_cmd[ND_MUSIC_MPV_ARGC] = {
-    "nice", "-n", "-10", "mpv", "--no-video", "--audio-buffer=4", "--quiet"};
+/* No `nice -n -10` in front of it any more; music.h says why at length. */
+const char *const nd_music_mpv_cmd[ND_MUSIC_MPV_ARGC] = {"mpv", "--no-video", "--audio-buffer=4",
+                                                         "--quiet"};
 
 /* ------------------------------------------------------------------ *
  * ASCII case folding

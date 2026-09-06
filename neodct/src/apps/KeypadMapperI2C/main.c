@@ -868,6 +868,29 @@ nd_err nd_kmi2c_save(const char *path, const char *text)
     if (rename(tmp, final) != 0)
         rc = ND_ERR_IO;
 
+    /* ============ WHO OWNS THE FILE THIS APP JUST WROTE ============
+     *
+     * This app is an ENGINEERING app (nd_proc.h: "LinuxShell, Modem,
+     * KeypadMapperI2C and FuelGauge exist to poke at hardware"), which means
+     * that with engineering mode on it keeps the core's privileges and runs
+     * as ROOT. /NeoDCT/User belongs to ndusr, and run_neodct.sh's inherited
+     * umask is 0027 -- so the keymap it writes lands root:root 0640 in a
+     * directory owned by somebody else, and the UI, which is ndusr from the
+     * moment it drops, gets EACCES from the very file it was just handed.
+     * The owner sees "The keypad map exists but could not be read" on the
+     * next boot, from an app whose entire job was to fix the keypad.
+     *
+     * 09ec9642 fixed exactly this for the first-boot wizard, inside
+     * nd_keymap_save(). This writer does its own atomic write and so never
+     * went through that fix. It does now.
+     *
+     * Failing to hand it over is logged and NOT an error: the file is on disk
+     * and correct, and S00userdata's ownership pass will chown it on the next
+     * cold boot. The log line is what a debugger needs in the meantime. */
+    if (rc == ND_OK && !nd_path_give_to_dir_owner(path))
+        nd_log_err(KMI2C_TAG, "%s written, but could not be given to its directory's owner: %s",
+                   path, strerror(errno));
+
 done:
     if (fd >= 0)
         (void)close(fd);

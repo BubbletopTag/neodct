@@ -1,0 +1,32 @@
+Subject: [PATCH] arm: dts: keep the NeoDCT backlight independent of a panel driver
+
+The SDK builds device trees with symbols enabled (-@), so a label creates
+an otherwise unused phandle for the backlight. Linux 5.10's pwm-backlight
+initial power check treats that as a display consumer and can leave
+bl_power at FB_BLANK_POWERDOWN. NeoDCT's userspace panel daemon has no
+kernel display driver to clear it; brightness writes alone cannot do so.
+
+Remove the unused label so the backlight starts at its configured default
+brightness. Keep PWM9_M1, polarity, timing and brightness levels unchanged.
+
+Apply from the Luckfox SDK root after the existing NeoDCT backlight edits.
+This changes the DTB in boot.img; an .ndsw rootfs update cannot carry it.
+
+---
+diff --git a/sysdrv/source/kernel/arch/arm/boot/dts/rv1103g-luckfox-pico-mini.dts b/sysdrv/source/kernel/arch/arm/boot/dts/rv1103g-luckfox-pico-mini.dts
+--- a/sysdrv/source/kernel/arch/arm/boot/dts/rv1103g-luckfox-pico-mini.dts
++++ b/sysdrv/source/kernel/arch/arm/boot/dts/rv1103g-luckfox-pico-mini.dts
+@@ -18,7 +18,12 @@
+ 	 * driver. Levels are read as percentages because the list tops
+ 	 * out at 100; System/hw/backlight.py scales 0-100 onto whatever
+ 	 * max_brightness this ends up reporting. */
+-	backlight: backlight {
++	/*
++	 * No label: dtc -@ would give this standalone node a phandle.
++	 * This kernel then waits for a display driver to unblank it, but
++	 * NeoDCT's panel is driven from userspace and has no such consumer.
++	 */
++	backlight {
+ 		compatible = "pwm-backlight";
+ 		pwms = <&pwm9 0 25000 0>;
+ 		brightness-levels = <0 1 2 4 8 16 32 48 64 80 100>;

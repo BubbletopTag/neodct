@@ -120,6 +120,68 @@ bool nd_app_manifest_use_wallpaper(const char *app_dir)
     return use;
 }
 
+/* ------------------------------------------------------------------ *
+ * manifest.json's "useKeypadDevice" / "keypadDeviceMap"
+ * ------------------------------------------------------------------ */
+
+nd_app_keydev nd_app_keydev_from_name(const char *text)
+{
+    if (text == NULL || text[0] == '\0')
+        return ND_APP_KEYDEV_RAW;
+    if (strcmp(text, "raw") == 0)
+        return ND_APP_KEYDEV_RAW;
+    if (strcmp(text, "browser") == 0)
+        return ND_APP_KEYDEV_BROWSER;
+    if (strcmp(text, "shell") == 0)
+        return ND_APP_KEYDEV_SHELL;
+    return ND_APP_KEYDEV_NONE; /* "not a map name"; the caller decides */
+}
+
+nd_app_keydev nd_app_manifest_key_device(const char *app_dir)
+{
+    char path[ND_PATH_MAX];
+    nd_json_doc *doc = NULL;
+    const nd_json_val *root;
+    nd_app_keydev kind = ND_APP_KEYDEV_NONE;
+
+    /* The core passes "" and gets NONE, which is right: the core has no
+     * manifest, and it is the process that MAKES the device rather than one
+     * that could ask for one. */
+    if (app_dir == NULL || app_dir[0] == '\0')
+        return ND_APP_KEYDEV_NONE;
+    if (nd_snprintf(path, sizeof path, "%s/manifest.json", app_dir) != ND_OK)
+        return ND_APP_KEYDEV_NONE;
+    if (nd_json_parse_file(path, &doc, NULL, 0u) != ND_OK)
+        return ND_APP_KEYDEV_NONE;
+
+    root = nd_json_root(doc);
+    if (root != NULL && nd_json_type_of(root) == ND_JSON_OBJECT &&
+        nd_json_get_bool(root, ND_APP_KEY_USE_KEYPAD_DEVICE, false)) {
+        const char *map = nd_json_get_str(root, ND_APP_KEY_KEYPAD_DEVICE_MAP, NULL);
+
+        kind = nd_app_keydev_from_name(map);
+        if (kind == ND_APP_KEYDEV_NONE) {
+            /* A typo in a preference must not take the keypad away: the app
+             * asked for a device and gets one, untranslated, and the log says
+             * which word was not understood so the author can fix it. */
+            nd_log_err(ND_LOG_INPUT,
+                       "%s: manifest " ND_APP_KEY_KEYPAD_DEVICE_MAP
+                       "=\"%s\" is not raw, browser or shell; using raw",
+                       app_dir, map);
+            kind = ND_APP_KEYDEV_RAW;
+        }
+    }
+    nd_json_free(doc);
+    return kind;
+}
+
+const char *nd_app_key_evdev(void)
+{
+    const char *env = getenv(ND_ENV_KEY_EVDEV);
+
+    return (env != NULL && env[0] != '\0') ? env : NULL;
+}
+
 nd_err nd_app_asset_path(char *out, size_t out_sz, const char *name)
 {
     if (out == NULL || out_sz == 0u || name == NULL)

@@ -77,6 +77,13 @@
  * tries at one second covers the race with slack, then stops. */
 #define ND_MATRIX_REOPEN_MAX_TRIES 30
 
+/* The keypad bus descriptor nd-core opened while it was still root, or -1.
+ * See nd_input_provide_keypad_fd() in nd_keypad.h for why this is process-
+ * wide and why it is the thing that finally closes the udev race. */
+static int g_keypad_fd = -1;
+static int g_keypad_bus = -1;
+static int g_keypad_addr = -1;
+
 typedef struct {
     int32_t code;
     bool used;
@@ -101,6 +108,13 @@ struct nd_input {
      * boot race on the i2c bus. See try_reopen_matrix(). */
     uint64_t matrix_reopen_after_us;
     int32_t matrix_reopen_tries;
+
+    /* Why the matrix is not open, as a policy rather than as prose. A
+     * PERMANENT failure -- a keymap naming a driver this OS does not have, or
+     * pins that are not a matrix -- is not worth one retry, let alone thirty;
+     * every other failure a cold boot can produce is. See
+     * nd_input_classify_open_failure(). */
+    nd_input_fail matrix_fail;
 
     bool have_matrix;
     nd_matrix_input matrix;
@@ -277,6 +291,10 @@ static bool take_repeat(nd_input *in, uint64_t now, nd_key_event *out)
  * Backends
  * ------------------------------------------------------------------ */
 
+/* Defined with the other opening and closing code below; used from the scan
+ * path above it. */
+static void drop_matrix(nd_input *in, const char *why);
+
 /* One matrix scan, turned into release edges plus at most one press. */
 static void matrix_poll_into_queue(nd_input *in)
 {
@@ -286,6 +304,30 @@ static void matrix_poll_into_queue(nd_input *in)
     size_t col;
 
     code = nd_matrix_input_poll(&in->matrix);
+
+    /* ============ A BUS THAT DIED AFTER IT OPENED ============
+     *
+     * nd_matrix_input_poll() cannot report an error -- it returns a keycode
+     * -- so it counts consecutive failures instead and this is where the
+     * count is read. Twenty in a row is a tenth of a second of a bus that is
+     * not there any more, which no amount of debounce explains.
+     *
+     * Tearing the matrix down here is what makes every other mechanism in
+     * this file work again: with have_matrix false, nd_input_has_backend()
+     * stops lying, the core can put a screen up, and try_reopen_matrix() --
+     * which refuses to run while a matrix is open -- is re-armed to bring it
+     * back if the bus returns. Leaving it open, which is what happened
+     * before, disabled all three at once and silently. */
+    if (nd_matrix_input_bus_dead(&in->matrix)) {
+        char why[ND_INPUT_REASON_MAX];
+
+        (void)nd_snprintf(why, sizeof why, "The keypad on %s stopped answering (%s).",
+                          nd_matrix_input_dev(&in->matrix),
+                          strerror(nd_matrix_input_last_errno(&in->matrix)));
+        drop_matrix(in, why);
+        return;
+    }
+
     at = now_us();
 
     /* Releases first: on this hardware a new press has already displaced
@@ -375,11 +417,118 @@ static void input_defaults(nd_input *in)
     }
 }
 
-/* core/main.py:542 -- the matrix half of the backend selection. */
+/* ------------------------------------------------------------------ *
+ * Classifying a failure to open the keypad
+ * ------------------------------------------------------------------ */
+
+bool nd_input_errno_is_transient(int err)
+{
+    switch (err) {
+    /* The udev race, on either bus: devtmpfs makes the node root:root 0600
+     * and udev applies the group afterwards. Both spellings, because a
+     * kernel may answer either. */
+    case EACCES:
+    case EPERM:
+    /* The node has not been made yet at all -- i2c-dev registering late, or
+     * the whole adapter still probing. */
+    case ENOENT:
+    case ENODEV:
+    case ENXIO:
+    /* The bus ran and nobody answered, or somebody else had it: an expander
+     * whose rail is still rising, an rk3x arbitration loss against the fuel
+     * gauge being read on the same bus milliseconds earlier, a controller
+     * that has only just come up. */
+    case EAGAIN:
+    case EBUSY:
+    case EIO:
+    case EREMOTEIO:
+    case ETIMEDOUT:
+    case EINTR:
+        return true;
+    default:
+        /* Includes 0. A failure with no errno behind it was not the kernel
+         * refusing us anything, so there is nothing for a later attempt to
+         * get past. */
+        return false;
+    }
+}
+
+nd_input_fail nd_input_classify_open_failure(nd_err rc, int err)
+{
+    if (rc == ND_OK)
+        return ND_INPUT_FAIL_NONE;
+    /* validate_pins() and the keymap arithmetic. A file that says pin 19, or
+     * lists the same pin as a row and a column, will say it again in a
+     * second and in an hour; only a person with an editor can change that
+     * answer, so retrying is spending the phone's budget on nothing. */
+    if (rc == ND_ERR_INVAL || rc == ND_ERR_TOOLONG)
+        return ND_INPUT_FAIL_PERMANENT;
+    return nd_input_errno_is_transient(err) ? ND_INPUT_FAIL_TRANSIENT : ND_INPUT_FAIL_PERMANENT;
+}
+
+void nd_input_provide_keypad_fd(int fd, int bus, int addr)
+{
+    g_keypad_fd = fd;
+    g_keypad_bus = bus;
+    g_keypad_addr = addr;
+}
+
+/* The one-line reason for the screen, built from what the kernel actually
+ * said rather than from a guess.
+ *
+ * The message this replaced was "The keypad on /dev/i2c-3 did not open (a
+ * permission or wiring problem)", printed for all five distinct causes. Two
+ * of them are neither permission nor wiring, and the two it does name have
+ * completely different repairs -- one is a udev rule, the other is a soldering
+ * iron. Naming the syscall and the errno costs nothing and is the difference
+ * between a bug report somebody can act on and a phone that "just does not
+ * work". */
+static void describe_matrix_failure(nd_input *in, const char *dev, nd_err rc)
+{
+    int err = nd_matrix_input_last_errno(&in->matrix);
+    const char *stage = nd_pcf8575_stage_name(nd_matrix_input_last_stage(&in->matrix));
+
+    if (err == EACCES || err == EPERM) {
+        /* Named exactly, because this one has a specific repair and it is not
+         * the one the old message sent people to. */
+        (void)nd_snprintf(in->no_backend, sizeof in->no_backend,
+                          "%s: permission denied (udev has not applied group i2c).", dev);
+        return;
+    }
+    if (err != 0) {
+        (void)nd_snprintf(in->no_backend, sizeof in->no_backend, "%s: %s failed - %s.", dev,
+                          stage[0] != '\0' ? stage : "access", strerror(err));
+        return;
+    }
+    (void)nd_snprintf(in->no_backend, sizeof in->no_backend, "%s: the keypad did not open (%s).",
+                      dev, nd_strerror(rc));
+}
+
+/* core/main.py:542 -- the matrix half of the backend selection.
+ *
+ * ============ EVERY FAILURE IN HERE USED TO BE PERMANENT ============
+ *
+ * This function is called once, at the first instant the UI wants keys, and
+ * for three releases whatever it decided in that instant was the phone's
+ * keypad for the rest of the boot. Five things can go wrong in it and exactly
+ * ONE of them is a phone that really has no keypad (a keymap naming a driver
+ * this OS does not have). The other four -- /NeoDCT/User not mounted yet, a
+ * keymap that is there but unreadable, an i2c node that has not registered
+ * yet, and an open that lost the udev race or met an expander that had not
+ * finished powering up -- are all "not yet", and all four were reported to
+ * the owner as "not at all".
+ *
+ * So the outcome is now classified as well as described: in->matrix_fail says
+ * whether trying again could ever help, and the callers -- the read path's
+ * bounded self-heal and the core's boot-time grace window -- use it to decide
+ * whether to keep asking. */
 static void try_open_matrix(nd_input *in)
 {
     nd_keymap cfg;
     char i2c_dev[32];
+    nd_err rc;
+
+    in->matrix_fail = ND_INPUT_FAIL_TRANSIENT;
 
     if (nd_keymap_load(ND_PATH_KEYMAP, &cfg) != ND_OK) {
         /* Two different phones. One has never run the wizard. The other ran
@@ -404,35 +553,142 @@ static void try_open_matrix(nd_input *in)
          * naming a different driver AND /dev/gpiochip*, neither of which the
          * target has, and porting it means reimplementing gpiozero over
          * libgpiod for a path that cannot run. Recorded in
-         * OPEN-QUESTIONS.md; the refusal line is kept. */
+         * OPEN-QUESTIONS.md; the refusal line is kept.
+         *
+         * THE ONE GENUINELY PERMANENT VERDICT in this function: no amount of
+         * waiting turns a keymap that names another driver into one that
+         * names this one. */
         nd_log(ND_LOG_INPUT, "Keymap present, but the %s driver is not supported.", cfg.driver);
         (void)nd_snprintf(in->no_backend, sizeof in->no_backend,
                           "Keymap names an unsupported keypad driver: %s.", cfg.driver);
+        in->matrix_fail = ND_INPUT_FAIL_PERMANENT;
         return;
     }
 
-    if (snprintf(i2c_dev, sizeof i2c_dev, "/dev/i2c-%d", cfg.i2c_bus) < 0)
+    if (snprintf(i2c_dev, sizeof i2c_dev, "/dev/i2c-%d", cfg.i2c_bus) < 0) {
+        in->matrix_fail = ND_INPUT_FAIL_PERMANENT;
         return;
+    }
+
+    /* ============ THE DESCRIPTOR ROOT LEFT BEHIND ============
+     *
+     * If nd-core opened this bus before it dropped privilege -- which on a
+     * phone with a keymap it always does, see
+     * nd_kpsetup_open_keypad_as_root() -- then the node's group is not this
+     * process's problem and never was. Permission was checked at that open()
+     * and the I2C_SLAVE address is state on that descriptor, so reusing it
+     * here is both correct and the only path that cannot lose the udev race.
+     *
+     * It is tried FIRST and the node is not even looked at: on the boots this
+     * bug is about, /dev/i2c-3 exists and is unopenable, and asking whether
+     * it exists would prove nothing either way. Falling through to opening it
+     * ourselves stays in place for every other caller -- a test, a dev box,
+     * an nd-core that was never root. */
+    if (g_keypad_fd >= 0 && g_keypad_bus == cfg.i2c_bus && g_keypad_addr == cfg.i2c_addr) {
+        rc = nd_matrix_input_open_fd(&in->matrix, &cfg, g_keypad_fd);
+        if (rc == ND_OK) {
+            in->no_backend[0] = '\0';
+            in->have_matrix = true;
+            in->backend = ND_INPUT_MATRIX;
+            in->matrix_fail = ND_INPUT_FAIL_NONE;
+            nd_log(ND_LOG_INPUT,
+                   "I2C matrix input active on the descriptor opened before the privilege drop "
+                   "(bus=%d addr=0x%02X rows=%u cols=%u).",
+                   cfg.i2c_bus, (unsigned)cfg.i2c_addr, (unsigned)cfg.n_rows, (unsigned)cfg.n_cols);
+            return;
+        }
+        /* It did not answer -- and there is nothing to fall back to. A
+         * descriptor root opened is strictly more capable than one this
+         * process can open now, so a chip that will not answer on it will not
+         * answer on a fresh one either; trying anyway would only replace a
+         * true reason ("no ACK from 0x20") with a misleading one ("permission
+         * denied"), which is the exact class of wrong message this work is
+         * removing.
+         *
+         * The descriptor survives -- nd_pcf8575_adopt() never owned it and
+         * nd_matrix cannot have closed it -- so every later retry gets to use
+         * it again, which is what makes an expander that is merely slow to
+         * power up recoverable. */
+        in->matrix_fail =
+            nd_input_classify_open_failure(rc, nd_matrix_input_last_errno(&in->matrix));
+        describe_matrix_failure(in, i2c_dev, rc);
+        nd_log_err(ND_LOG_INPUT,
+                   "the keypad descriptor opened before the drop did not answer "
+                   "(%s): %s",
+                   in->matrix_fail == ND_INPUT_FAIL_PERMANENT ? "permanent" : "will retry",
+                   in->no_backend);
+        return;
+    }
+
     if (!nd_path_exists(i2c_dev)) {
-        nd_log(ND_LOG_INPUT, "Keymap wants %s, but %s does not exist.", cfg.driver, i2c_dev);
+        /* NOT a verdict. i2c-dev can register after the UI has started, which
+         * is why the first-boot wizard waits ND_KPSETUP_BUS_WAIT_S for this
+         * very node -- there was simply no wait on this path. The caller
+         * retries; all that is needed here is to say what is missing and to
+         * classify it honestly. */
+        nd_log(ND_LOG_INPUT, "Keymap wants %s, but %s does not exist (yet).", cfg.driver, i2c_dev);
         (void)nd_snprintf(in->no_backend, sizeof in->no_backend,
-                          "The keypad's i2c bus %s does not exist.", i2c_dev);
+                          "The keypad's i2c bus %s has not appeared.", i2c_dev);
+        in->matrix_fail = ND_INPUT_FAIL_TRANSIENT;
         return;
     }
 
-    if (nd_matrix_input_open(&in->matrix, &cfg) != ND_OK) {
-        nd_log(ND_LOG_INPUT, "I2C matrix init failed; falling back to evdev.");
-        (void)nd_snprintf(in->no_backend, sizeof in->no_backend,
-                          "The keypad on %s did not open (a permission or wiring problem).",
-                          i2c_dev);
+    rc = nd_matrix_input_open(&in->matrix, &cfg);
+    if (rc != ND_OK) {
+        in->matrix_fail =
+            nd_input_classify_open_failure(rc, nd_matrix_input_last_errno(&in->matrix));
+        describe_matrix_failure(in, i2c_dev, rc);
+        nd_log_err(ND_LOG_INPUT, "I2C matrix init failed (%s): %s",
+                   in->matrix_fail == ND_INPUT_FAIL_PERMANENT ? "permanent" : "will retry",
+                   in->no_backend);
         return;
     }
     in->no_backend[0] = '\0'; /* a backend exists */
     in->have_matrix = true;
     in->backend = ND_INPUT_MATRIX;
+    in->matrix_fail = ND_INPUT_FAIL_NONE;
     nd_log(ND_LOG_INPUT, "I2C matrix input active from %s (bus=%d addr=0x%02X rows=%u cols=%u).",
            cfg.path, cfg.i2c_bus, (unsigned)cfg.i2c_addr, (unsigned)cfg.n_rows,
            (unsigned)cfg.n_cols);
+}
+
+/* The matrix is gone: put every key it had down back up, close it, and let
+ * the rest of the module discover there is no backend.
+ *
+ * The releases matter. A phone whose bus died with a key held would otherwise
+ * keep that code in its held set for ever -- nd_input_is_held() would answer
+ * true, and a game or a scrolling list would behave as if a finger were still
+ * on the pad long after the keypad had stopped existing. */
+static void drop_matrix(nd_input *in, const char *why)
+{
+    uint64_t at = now_us();
+    size_t row;
+    size_t col;
+
+    for (row = 0u; row < ND_MATRIX_MAX_PINS; row++) {
+        for (col = 0u; col < ND_MATRIX_MAX_PINS; col++) {
+            if (in->matrix_down[row][col] < 0)
+                continue;
+            queue_push(in, in->matrix_down[row][col], false, at);
+            in->matrix_down[row][col] = -1;
+        }
+    }
+
+    nd_matrix_input_close(&in->matrix);
+    in->have_matrix = false;
+    in->backend = (in->fd >= 0) ? ND_INPUT_EVDEV : ND_INPUT_NONE;
+    if (in->fd < 0)
+        (void)nd_strlcpy(in->no_backend, why, sizeof in->no_backend);
+
+    /* A fresh budget and no rate limit. This is not the boot race the bound
+     * was written for -- it is a bus that worked and then stopped -- and the
+     * phone deserves the same thirty seconds of trying to get it back that it
+     * would have had at startup. */
+    in->matrix_fail = ND_INPUT_FAIL_TRANSIENT;
+    in->matrix_reopen_tries = 0;
+    in->matrix_reopen_after_us = 0u;
+
+    nd_log_err(ND_LOG_INPUT, "%s", why);
 }
 
 /* ============ WHEN THE KEYBOARD IS LATE, AND NOT ABSENT ============
@@ -468,14 +724,14 @@ static void try_open_matrix(nd_input *in)
  * keyboard plugged into a real handset arrives through exactly this path,
  * which is what nd_input_open()'s "both backends can coexist" comment
  * promises and could not previously deliver. */
-static void try_reopen_evdev(nd_input *in, uint64_t now)
+static void try_reopen_evdev(nd_input *in, uint64_t now, bool force)
 {
     char path[ND_PATH_MAX];
     int fd;
 
     if (!in->may_reopen || in->fd >= 0)
         return;
-    if (in->reopen_after_us != 0u && now < in->reopen_after_us)
+    if (!force && in->reopen_after_us != 0u && now < in->reopen_after_us)
         return;
     in->reopen_after_us = now + ND_REOPEN_INTERVAL_US;
 
@@ -504,13 +760,19 @@ static void try_reopen_evdev(nd_input *in, uint64_t now)
  * is open: on a real phone a spurious /dev/input/event0 is not the keypad, and
  * it must not stop the real one from coming back. Bounded, because a soldered
  * keypad is not hot-plugged; see ND_MATRIX_REOPEN_MAX_TRIES. */
-static void try_reopen_matrix(nd_input *in, uint64_t now)
+static void try_reopen_matrix(nd_input *in, uint64_t now, bool force)
 {
     if (!in->may_reopen || in->have_matrix)
         return;
-    if (in->matrix_reopen_tries >= ND_MATRIX_REOPEN_MAX_TRIES)
+    /* A keymap that names a driver this OS does not have, or pins that are
+     * not a matrix, fails identically for ever. Thirty attempts at it is
+     * thirty log lines and thirty seconds spent proving something already
+     * known. */
+    if (in->matrix_fail == ND_INPUT_FAIL_PERMANENT)
         return;
-    if (in->matrix_reopen_after_us != 0u && now < in->matrix_reopen_after_us)
+    if (!force && in->matrix_reopen_tries >= ND_MATRIX_REOPEN_MAX_TRIES)
+        return;
+    if (!force && in->matrix_reopen_after_us != 0u && now < in->matrix_reopen_after_us)
         return;
     in->matrix_reopen_after_us = now + ND_REOPEN_INTERVAL_US;
 
@@ -521,10 +783,42 @@ static void try_reopen_matrix(nd_input *in, uint64_t now)
     if (!nd_path_exists(ND_PATH_KEYMAP))
         return;
 
-    in->matrix_reopen_tries++;
+    /* `force` is the boot-time grace window, which has its own deadline and
+     * must not spend the steady-state budget before the phone is even up:
+     * thirty tries is a sensible cap on a running phone and a nonsense one on
+     * a phone that has been alive for four seconds. */
+    if (!force)
+        in->matrix_reopen_tries++;
     try_open_matrix(in);
     if (in->have_matrix)
         nd_log(ND_LOG_INPUT, "Input recovered: i2c keypad matrix now readable.");
+}
+
+/* ============ WHY THIS IS PUBLIC ============
+ *
+ * 0.5.7b added the bounded matrix re-open above and called it from exactly one
+ * place: nd_input_read_event(). On a Luckfox that call site is unreachable in
+ * the case it was written for. There is no /dev/input/event* on that phone, so
+ * a matrix that lost the udev race leaves NO backend at all, and core_run()
+ * decides what to draw before it ever reads a key -- it goes to the input
+ * failure screen and sits in a loop that reads nothing. The self-heal was
+ * dead code on the only hardware that needed it, which is why three releases
+ * of fixing this did not fix it.
+ *
+ * The recovery therefore has to be callable from where the DECISION is made.
+ * This is that call. */
+bool nd_input_retry_backend(nd_input *in)
+{
+    uint64_t now;
+
+    if (in == NULL)
+        return false;
+    now = now_us();
+    try_reopen_matrix(in, now, true);
+    try_reopen_evdev(in, now, true);
+    if (nd_input_has_backend(in))
+        in->no_backend[0] = '\0';
+    return nd_input_has_backend(in);
 }
 
 nd_err nd_input_open(nd_input **out)
@@ -736,7 +1030,7 @@ bool nd_input_read_event(nd_input *in, double timeout_s, nd_key_event *out)
          * spurious /dev/input/event0 is not the keypad. See
          * try_reopen_matrix(); rate-limited and bounded inside, so this is one
          * comparison on every phone that already has its keys. */
-        try_reopen_matrix(in, now_us());
+        try_reopen_matrix(in, now_us(), false);
 
         if (in->have_matrix) {
             matrix_poll_into_queue(in);
@@ -749,7 +1043,7 @@ bool nd_input_read_event(nd_input *in, double timeout_s, nd_key_event *out)
          * inside, so this costs one comparison on every phone that already
          * has its keyboard. */
         if (in->fd < 0)
-            try_reopen_evdev(in, now_us());
+            try_reopen_evdev(in, now_us(), false);
 
         if (in->fd >= 0) {
             double slice;

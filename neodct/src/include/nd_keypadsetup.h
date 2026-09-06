@@ -106,6 +106,22 @@ extern "C" {
 #define ND_KPSETUP_BUS_WAIT_S 8.0
 #define ND_KPSETUP_BUS_POLL_S 0.25
 
+/* The root-phase bring-up's own budget -- see nd_kpsetup_open_keypad_as_root().
+ * Shorter than the wizard's eight seconds because it sits in front of the home
+ * screen on EVERY boot rather than on the one boot that has no keymap, and
+ * because the only thing it can be waiting for is i2c-dev registering, which
+ * the kernel does long before userspace gets this far. Six seconds is the
+ * measured coldplug (~2.7 s) with slack on top. */
+#define ND_KPSETUP_ROOT_WAIT_S 6.0
+#define ND_KPSETUP_ROOT_POLL_S 0.05
+
+/* How many times the bring-up opens the node, and how long it waits between
+ * attempts. Three, spread over half a second: as root the open only fails if
+ * the node is not really there, and the wait above has already established
+ * that it is. */
+#define ND_KPSETUP_ROOT_OPEN_TRIES 3
+#define ND_KPSETUP_ROOT_OPEN_GAP_S 0.2
+
 /* The on-screen dwells, in the order they appear. */
 #define ND_KPSETUP_DWELL_INTRO_S   2.0
 #define ND_KPSETUP_DWELL_ABORT_S   2.5
@@ -318,6 +334,52 @@ nd_err nd_kpsetup_counter(char *out, size_t out_sz, size_t index, size_t total);
  * The chip is NOT closed on the ordinary return paths; the caller owns it,
  * exactly as maybe_run_first_time_setup()'s `finally` does. */
 bool nd_kpsetup_run_wizard(nd_fb *fb, nd_pcf8575 *chip, int addr, int bus, bool restart);
+
+/* ------------------------------------------------------------------ *
+ * Bringing an ALREADY CONFIGURED keypad up, as root, before the drop
+ * ------------------------------------------------------------------ */
+
+/* ============ WHY THIS EXISTS, AND WHY THE WIZARD IS NOT IT ============
+ *
+ * nd_main.c calls nd_kpsetup_maybe_run() before the privilege drop and says
+ * in its comment that the keypad's i2c probe therefore happens as root. On a
+ * FRESH phone that is true. On every phone that has been through first boot
+ * it is not: the first thing maybe_run() does is ask the gate, the gate
+ * answers ND_KPSETUP_GATE_HAVE_KEYMAP the instant /NeoDCT/User/keymap.json
+ * exists, and the function returns having opened nothing and waited for
+ * nothing. So on every phone that HAS a working keypad, the privileged phase
+ * of the boot never touched the bus, and the only open of /dev/i2c-3 for the
+ * keypad happened inside nd_ui_init() -- after the drop, into the udev race,
+ * with one attempt and no wait.
+ *
+ * This is the other half. It runs on exactly the phones the wizard skips: a
+ * keymap exists, so there is nothing to enrol and everything to open. It
+ * waits for the node, opens it, points it at the expander and makes the
+ * expander answer, all while the process still has the privilege to do so --
+ * and then hands the descriptor to nd_input_provide_keypad_fd(), which is
+ * what lets the UI read keys after the drop without the node's group ever
+ * mattering again.
+ *
+ * The verification is the point. Before this the phone did not know whether
+ * it had a keypad until it had already given away the privilege to find out.
+ *
+ * Returns the descriptor, or -1. A descriptor is returned EVEN WHEN the
+ * expander did not answer (`answered` false): the bus is open and privileged
+ * either way, and an expander whose rail is still rising is exactly the case
+ * a later retry can win -- but only if it has a descriptor to retry on.
+ *
+ * The caller owns the descriptor and should never close it: it must outlive
+ * every nd_input built over it. */
+typedef struct {
+    int fd;                        /* -1 when nothing could be opened             */
+    int bus;                       /* the keymap's i2c_bus                        */
+    int addr;                      /* the keymap's i2c_addr                       */
+    bool answered;                 /* the expander ACKed: the phone HAS a keypad  */
+    double waited_s;               /* how long the node took to appear            */
+    char why[ND_KPSETUP_LINE_MAX]; /* empty when fd >= 0 && answered              */
+} nd_kpsetup_bringup;
+
+int nd_kpsetup_open_keypad_as_root(nd_kpsetup_bringup *out);
 
 /* maybe_run_first_time_setup(): the boot entry point, called from
  * core/nd_main.c before nd_ui_init(). A no-op unless this is a fresh image

@@ -1,6 +1,8 @@
 {
     "name": "Browser",
     "useWallpaper": false,
+    "useKeypadDevice": true,
+    "keypadDeviceMap": "browser",
     "id": "11",
     "icon": "icon.png",
     "exec": "main.py",

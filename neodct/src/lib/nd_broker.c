@@ -1,7 +1,19 @@
 /* nd_broker.c -- see nd_broker.h for why any of this exists.
  *
- * Two verbs, SPAWN and WAIT, because those are the only two operations that
- * measurement showed nd-core could not do once it stopped being root.
+ * SPAWN and WAIT, because those are the two operations that measurement showed
+ * nd-core could not do once it stopped being root; HALT and CLOCK, found by
+ * reading the code after the drop worked; and KILL, found by the phone -- the
+ * core cannot signal a root helper it started through here, and the escape
+ * hatch that was supposed to stop a wedged mke2fs got EPERM and then reported
+ * success. See nd_broker_kill() in the header.
+ *
+ * ============ NO VERB HERE MAY BLOCK ============
+ *
+ * This is a serial server: one recv, one handler, one send. A handler that
+ * waits is therefore a handler that stops every other thread in the core, and
+ * REQ_WAIT used to be handed timeouts of up to four minutes. do_wait() no
+ * longer reads the timeout at all -- the waiting is the caller's, in
+ * nd_broker_wait(), as a loop of short probes.
  *
  * ============ THE RECORD IS FIXED-SIZE AND THE STRINGS ARE NOT ============
  *
@@ -42,7 +54,14 @@
  * The wire
  * ------------------------------------------------------------------ */
 
-typedef enum { REQ_SPAWN = 1, REQ_WAIT = 2, REQ_HALT = 3, REQ_CLOCK = 4 } nd_broker_op;
+typedef enum {
+    REQ_SPAWN = 1,
+    REQ_WAIT = 2,
+    REQ_HALT = 3,
+    REQ_CLOCK = 4,
+    /* Appended, so no number an existing build sends changes meaning. */
+    REQ_KILL = 5
+} nd_broker_op;
 
 typedef struct {
     uint32_t op;
@@ -62,9 +81,11 @@ typedef struct {
     uint32_t owner;
     uint32_t blob_len;
     char blob[ND_BROKER_BLOB_MAX];
-    /* WAIT */
+    /* WAIT / KILL */
     int64_t pid;
     double timeout_s;
+    /* KILL. SIGTERM or SIGKILL and nothing else; see do_kill(). */
+    int32_t signo;
     /* HALT / CLOCK */
     uint8_t reboot;
     int64_t when;
@@ -72,7 +93,7 @@ typedef struct {
 
 typedef struct {
     uint32_t seq; /* the request this answers */
-    int32_t err; /* nd_err */
+    int32_t err;  /* nd_err */
     int64_t pid;
     uint8_t exited;
     int32_t exit_status;
@@ -272,6 +293,105 @@ static bool blob_take(const char *blob, uint32_t blob_len, uint32_t *off, uint32
 /* ------------------------------------------------------------------ *
  * The broker side
  * ------------------------------------------------------------------ */
+
+/* ============ WHAT THE BROKER KNOWS ABOUT ITS OWN CHILDREN ============
+ *
+ * Only ever touched inside the broker process, whose loop is single-threaded,
+ * so a plain array needs no lock. The core's copy of this file compiles the
+ * same code and never runs it.
+ *
+ * The table exists for one reason: to make "is this pid mine" a fact the
+ * broker can check rather than a claim the caller makes. A KILL that trusted
+ * the pid would let a compromised core signal init. Entries go in when a spawn
+ * succeeds and come out when the child is reaped, because a pid whose process
+ * has been reaped may be handed to somebody else's process by the kernel a
+ * moment later -- and a stale entry is the one way this table could become a
+ * weapon rather than a limit. */
+static pid_t g_children[ND_BROKER_CHILDREN_MAX];
+
+static void child_remember(pid_t pid)
+{
+    size_t i;
+
+    if (pid <= 0)
+        return;
+    for (i = 0u; i < (size_t)ND_BROKER_CHILDREN_MAX; i++) {
+        if (g_children[i] <= 0) {
+            g_children[i] = pid;
+            return;
+        }
+    }
+    /* Full. Forgetting the oldest makes THAT child unkillable, which is the
+     * safe direction to fail in; remembering a pid we can no longer prove is
+     * ours would be the unsafe one. */
+    memmove(&g_children[0], &g_children[1], sizeof g_children - sizeof g_children[0]);
+    g_children[ND_BROKER_CHILDREN_MAX - 1] = pid;
+}
+
+static void child_forget(pid_t pid)
+{
+    size_t i;
+
+    for (i = 0u; i < (size_t)ND_BROKER_CHILDREN_MAX; i++) {
+        if (g_children[i] == pid)
+            g_children[i] = -1;
+    }
+}
+
+static bool child_is_ours(pid_t pid)
+{
+    size_t i;
+
+    if (pid <= 0)
+        return false;
+    for (i = 0u; i < (size_t)ND_BROKER_CHILDREN_MAX; i++) {
+        if (g_children[i] == pid)
+            return true;
+    }
+    return false;
+}
+
+bool nd_broker__kill_signo_allowed(int32_t signo)
+{
+    /* Two, named as literals rather than a range. "Stop the helper" and "stop
+     * it now" are the whole of what the core asks for; a range would let the
+     * next number somebody puts on this wire mean SIGSTOP, and a stopped root
+     * mkfs holding the card open is worse than one that is still running. */
+    return signo == SIGTERM || signo == SIGKILL;
+}
+
+static void do_kill(const nd_broker_req *req, nd_broker_rep *rep)
+{
+    pid_t pid = (pid_t)req->pid;
+
+    if (!nd_broker__kill_signo_allowed(req->signo)) {
+        nd_log_err(ND_LOG_OS, "broker: REFUSING to send signal %ld to pid %ld", (long)req->signo,
+                   (long)pid);
+        rep->err = ND_ERR_PERM;
+        return;
+    }
+    if (!child_is_ours(pid)) {
+        /* The core is untrusted input on this socket. A pid it did not get
+         * from a spawn of ours is a pid it has no business naming. */
+        nd_log_err(ND_LOG_OS, "broker: REFUSING to signal pid %ld: not a child of mine", (long)pid);
+        rep->err = ND_ERR_PERM;
+        return;
+    }
+    if (kill(pid, (int)req->signo) != 0) {
+        /* ESRCH means it has already gone, which is what the caller wanted;
+         * saying so as an error would make the escape hatch report a failure
+         * every time it worked on the first try. */
+        if (errno == ESRCH) {
+            rep->err = ND_OK;
+            return;
+        }
+        nd_log_err(ND_LOG_OS, "broker: kill(%ld, %ld): %s", (long)pid, (long)req->signo,
+                   strerror(errno));
+        rep->err = ND_ERR_IO;
+        return;
+    }
+    rep->err = ND_OK;
+}
 
 static bool user_is_allowed(const char *user)
 {
@@ -587,19 +707,38 @@ static void do_spawn(const nd_broker_req *req, int *fds, size_t n_fds, nd_broker
 
     rep->err = (int32_t)nd_proc_spawn(req->path, &spec, &pid);
     rep->pid = (int64_t)pid;
+    if (rep->err == (int32_t)ND_OK)
+        child_remember(pid);
 }
 
+/* ============ THIS VERB MUST NEVER BLOCK ============
+ *
+ * `req->timeout_s` is not honoured here and is not even read. broker_loop() is
+ * a serial server: while it is inside a handler it is not reading the socket,
+ * so a verb that waited four minutes for an mke2fs stalled every other thread
+ * in the core -- the app launcher, the halt, the NTP clock -- for four
+ * minutes, on top of holding the core's round-trip mutex for the same span.
+ * That is the phone freezing during a card format.
+ *
+ * The waiting belongs to the caller, which has its own deadline and its own
+ * other work to do; nd_broker_wait() does it as a loop of these probes. Making
+ * the wire verb structurally non-blocking is what stops the next long timeout
+ * anybody passes from doing this again. */
 static void do_wait(const nd_broker_req *req, nd_broker_rep *rep)
 {
     nd_proc_status st;
 
     memset(&st, 0, sizeof st);
-    rep->err = (int32_t)nd_proc_wait((pid_t)req->pid, req->timeout_s, &st);
+    rep->err = (int32_t)nd_proc_wait((pid_t)req->pid, 0.0, &st);
     rep->pid = (int64_t)st.pid;
     rep->exited = st.exited ? 1u : 0u;
     rep->exit_status = st.exit_status;
     rep->signalled = st.signalled ? 1u : 0u;
     rep->signo = st.signo;
+    /* Reaped: the pid may be reissued to somebody else's process now, so it
+     * stops being one this broker will agree to signal. */
+    if (rep->err == (int32_t)ND_OK)
+        child_forget((pid_t)req->pid);
 }
 
 /* Never returns. */
@@ -666,6 +805,9 @@ static void broker_loop(int fd)
         } else if (req.op == REQ_WAIT) {
             close_all(fds, n_fds);
             do_wait(&req, &rep);
+        } else if (req.op == REQ_KILL) {
+            close_all(fds, n_fds);
+            do_kill(&req, &rep);
         } else if (req.op == REQ_HALT) {
             close_all(fds, n_fds);
             rep.err = nd_svc_halt_now(req.reboot != 0u) ? (int32_t)ND_OK : (int32_t)ND_ERR_IO;
@@ -856,19 +998,41 @@ nd_err nd_broker_spawn(nd_broker *b, const char *path, const nd_proc_spec *spec,
     return (nd_err)rep.err;
 }
 
-nd_err nd_broker_wait(nd_broker *b, pid_t pid, double timeout_s, nd_proc_status *out)
+/* A real monotonic clock, for the same reason nd_svc.c states one: these are
+ * deadlines on real syscalls, not on drawn frames. */
+static double broker_now(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0.0;
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+static void broker_nap(double seconds)
+{
+    struct timespec ts;
+
+    if (seconds <= 0.0)
+        return;
+    ts.tv_sec = (time_t)seconds;
+    ts.tv_nsec = (long)((seconds - (double)ts.tv_sec) * 1e9);
+    (void)nanosleep(&ts, NULL);
+}
+
+/* One probe: the wire verb, which never blocks. */
+static nd_err broker_wait_once(nd_broker *b, pid_t pid, nd_proc_status *out)
 {
     nd_broker_req req;
     nd_broker_rep rep;
     nd_err rc;
 
-    if (b == NULL || out == NULL)
-        return ND_ERR_INVAL;
-
     memset(&req, 0, sizeof req);
     req.op = REQ_WAIT;
     req.pid = (int64_t)pid;
-    req.timeout_s = timeout_s;
+    /* Sent as zero and ignored on the far side; the field survives only so the
+     * record's shape does not change under a mixed build. */
+    req.timeout_s = 0.0;
 
     memset(&rep, 0, sizeof rep);
     rc = round_trip(b, &req, NULL, 0u, &rep);
@@ -882,6 +1046,57 @@ nd_err nd_broker_wait(nd_broker *b, pid_t pid, double timeout_s, nd_proc_status 
     out->signalled = rep.signalled != 0u;
     out->signo = rep.signo;
     return (nd_err)rep.err;
+}
+
+nd_err nd_broker_wait(nd_broker *b, pid_t pid, double timeout_s, nd_proc_status *out)
+{
+    double deadline;
+
+    if (b == NULL || out == NULL)
+        return ND_ERR_INVAL;
+
+    /* The first probe happens before any deadline arithmetic, so a wait of
+     * 0.0 -- which is what nd_proc_launch_app()'s pump loop passes on every
+     * turn, between key scans -- costs exactly one round trip and no sleep. */
+    {
+        nd_err rc = broker_wait_once(b, pid, out);
+
+        if (rc != ND_ERR_TIMEOUT || timeout_s == 0.0)
+            return rc;
+    }
+
+    deadline = broker_now() + (timeout_s < 0.0 ? 0.0 : timeout_s);
+    for (;;) {
+        nd_err rc;
+
+        /* The lock is released between probes, which is the whole point: the
+         * UI thread needs it back on every turn of its pump loop or the i2c
+         * key matrix stops being scanned. See nd_broker.h. */
+        broker_nap(ND_BROKER_WAIT_POLL_S);
+        rc = broker_wait_once(b, pid, out);
+        if (rc != ND_ERR_TIMEOUT)
+            return rc;
+        if (timeout_s > 0.0 && broker_now() >= deadline)
+            return ND_ERR_TIMEOUT;
+    }
+}
+
+bool nd_broker_kill(nd_broker *b, pid_t pid, int signo)
+{
+    nd_broker_req req;
+    nd_broker_rep rep;
+
+    if (b == NULL || pid <= 0)
+        return false;
+
+    memset(&req, 0, sizeof req);
+    req.op = REQ_KILL;
+    req.pid = (int64_t)pid;
+    req.signo = (int32_t)signo;
+    memset(&rep, 0, sizeof rep);
+    if (round_trip(b, &req, NULL, 0u, &rep) != ND_OK)
+        return false;
+    return rep.err == (int32_t)ND_OK;
 }
 
 static nd_broker *g_default = NULL;

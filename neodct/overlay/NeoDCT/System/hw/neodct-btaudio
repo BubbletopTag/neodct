@@ -1,0 +1,198 @@
+#!/bin/sh
+# Bring the Bluetooth audio stack up, and take it down again.
+#
+#   neodct-btaudio start        dbus-daemon --system, then bluetoothd
+#   neodct-btaudio audio-on     bluealsa, once something is connected
+#   neodct-btaudio audio-off    bluealsa away again
+#   neodct-btaudio stop         all three away
+#   neodct-btaudio status       exit 0 if dbus and bluetoothd are both up
+#
+# ============ WHY THIS FILE EXISTS AT ALL ============
+#
+# Settings drives Bluetooth, and Settings stopped being root at 0.5.0b when
+# ROOT_STOCK_APPS was emptied. nd_btaudio_daemons_start() still forks the
+# daemons directly out of that process, and every one of the three needs uid 0
+# for a different reason:
+#
+#   dbus-daemon --system  binds its socket in /run, which is a 0755 root:root
+#                         tmpfs, and then drops to the `messagebus` user. Both
+#                         halves are root's.
+#   bluetoothd            needs CAP_NET_ADMIN for HCIDEVUP, and the shipped
+#                         policy in /usr/share/dbus-1/system.d/bluetooth.conf
+#                         grants `own="org.bluez"` to <policy user="root">
+#                         and to nobody else. A non-root bluetoothd cannot
+#                         claim its own bus name, so nothing can call it.
+#   bluealsa              owns org.bluealsa, granted the same way. The CLIENT
+#                         side is already fine: bluealsa.conf allows group
+#                         `audio` to send to it, and ndusr and ndusr_ut are
+#                         both in `audio`, so mpv can play through earbuds
+#                         without any of this.
+#
+# So the ask is root, and the shape of the ask is what matters. This is a
+# FIXED EXECUTABLE with a FIXED VERB SET and NO free arguments -- the same
+# shape neodct-sdcard's `layout` verb has, and for the same reason
+# (nd_broker.h): the broker must decide nothing. There is no path here for a
+# caller to name, no daemon for it to choose and no flag for it to pass. What
+# starts is what is written below.
+#
+# The alternative -- an S18bt that starts all three at boot -- was rejected on
+# memory. The luckfox defconfig records the measurement: ~6 MB PSS with all
+# three up, on a phone with 64 MB, and post-build-bt-on-demand.sh deletes
+# buildroot's own S30dbus and S40bluetoothd precisely so that idle cost is
+# zero. On demand is the design; this makes on demand possible for a caller
+# that is no longer root.
+#
+# ============ AND WHY IT VERIFIES RATHER THAN ASSUMES ============
+#
+# The thing this replaces reported success on a successful fork(). A daemon
+# that execs and exits half a second later -- which is exactly what a non-root
+# bluetoothd does -- is a fork that succeeded, so Settings said the stack was
+# up and the owner watched pairing fail with no explanation anywhere. Every
+# start below waits for EVIDENCE: the bus socket for dbus, and the process
+# still being alive for the other two.
+set -u
+
+DBUS=/usr/bin/dbus-daemon
+BLUETOOTHD=/usr/libexec/bluetooth/bluetoothd
+BLUEALSA=/usr/bin/bluealsa
+
+# The bus socket dbus-daemon --system creates. Its existence is the only
+# honest "the bus is up" -- a running pid proves the process, not the socket,
+# and bluetoothd dialling a bus that is not listening yet fails once and does
+# not retry.
+DBUS_SOCKET=/run/dbus/system_bus_socket
+
+RUN_DIR="${NEODCT_RUN_DIR:-/run/neodct}"
+PID_DIR="$RUN_DIR/bt"
+
+# BlueZ keeps link keys under /var/lib/bluetooth and bluealsa its per-device
+# volume under /var/lib/bluealsa; the overlay makes both symlinks onto the user
+# partition because the rootfs is read-only squashfs. S16btusb creates the
+# targets at boot -- this repeats it because a stack started on a phone whose
+# user partition was mounted late would otherwise report a successful pairing
+# and forget it the moment the daemon stops.
+BLUEZ_STATE=/NeoDCT/User/.bluetooth
+BLUEALSA_STATE=/NeoDCT/User/.bluealsa
+
+log() { echo "[btaudio] $*" >&2; }
+
+# start-stop-daemon rather than a bare `&`: it writes the pid file, it will not
+# start a second copy of something already running, and --background detaches
+# without this script having to hold the child. busybox has it, and S10udevd
+# already depends on it.
+SSD=start-stop-daemon
+
+running() {   # running NAME
+    [ -s "$PID_DIR/$1.pid" ] || return 1
+    kill -0 "$(cat "$PID_DIR/$1.pid" 2>/dev/null)" 2>/dev/null
+}
+
+# Wait up to ~2s for a path to appear. Only a losing start pays any of it.
+wait_for_path() {   # wait_for_path PATH
+    _n=0
+    while [ "$_n" -lt 20 ]; do
+        [ -e "$1" ] && return 0
+        _n=$((_n + 1))
+        sleep 0.1
+    done
+    return 1
+}
+
+start_dbus() {
+    running dbus && return 0
+    [ -x "$DBUS" ] || { log "no dbus-daemon in this build"; return 1; }
+    mkdir -p /run/dbus "$PID_DIR" 2>/dev/null
+    # --nopidfile matters more than it looks: dbus-daemon refuses to start when
+    # its own pid file is already there, and a daemon we killed does not get to
+    # remove it -- so without this, Enable works once per boot and every
+    # attempt afterwards fails with "The pid file exists". The pid file that
+    # tracks it is start-stop-daemon's, which is ours to remove.
+    "$SSD" --start --background --make-pidfile --pidfile "$PID_DIR/dbus.pid" \
+        --exec "$DBUS" -- --system --nofork --nopidfile || {
+        log "dbus-daemon would not start"
+        return 1
+    }
+    if ! wait_for_path "$DBUS_SOCKET"; then
+        log "dbus-daemon started but $DBUS_SOCKET never appeared"
+        return 1
+    fi
+    return 0
+}
+
+start_bluetoothd() {
+    running bluetoothd && return 0
+    [ -x "$BLUETOOTHD" ] || { log "no bluetoothd in this build"; return 1; }
+    mkdir -p "$BLUEZ_STATE" "$PID_DIR" 2>/dev/null
+    # -n keeps it in the foreground so the pid we hold is the daemon and not a
+    # corpse: without it bluetoothd forks and the parent exits within a second.
+    "$SSD" --start --background --make-pidfile \
+        --pidfile "$PID_DIR/bluetoothd.pid" --exec "$BLUETOOTHD" -- -n || {
+        log "bluetoothd would not start"
+        return 1
+    }
+    # It registers on the bus before bluetoothctl can talk to it, and a
+    # bluetoothd that is going to fail fails in about that time.
+    sleep 1
+    running bluetoothd || { log "bluetoothd exited immediately"; return 1; }
+    return 0
+}
+
+start_bluealsa() {
+    running bluealsa && return 0
+    [ -x "$BLUEALSA" ] || { log "no bluealsa in this build"; return 1; }
+    mkdir -p "$BLUEALSA_STATE" "$PID_DIR" 2>/dev/null
+    # SOURCE, and the direction is not the obvious one: -p names the profile
+    # THIS device implements. The phone sends the music, so the phone is the
+    # A2DP Source. Registering a2dp-sink offers the phone as a speaker and the
+    # connection then fails with br-connection-profile-unavailable, which
+    # arrives when pairing would and reads like a pairing failure.
+    "$SSD" --start --background --make-pidfile \
+        --pidfile "$PID_DIR/bluealsa.pid" --exec "$BLUEALSA" -- -p a2dp-source || {
+        log "bluealsa would not start"
+        return 1
+    }
+    sleep 1
+    running bluealsa || { log "bluealsa exited immediately"; return 1; }
+    return 0
+}
+
+stop_one() {   # stop_one NAME
+    [ -s "$PID_DIR/$1.pid" ] || return 0
+    "$SSD" --stop --quiet --oknodo --pidfile "$PID_DIR/$1.pid" 2>/dev/null
+    rm -f "$PID_DIR/$1.pid"
+}
+
+case "${1:-status}" in
+    start)
+        start_dbus || exit 1
+        start_bluetoothd || exit 1
+        log "dbus and bluetoothd up"
+        ;;
+    audio-on)
+        # The bus first: bluealsa is a bus client and starting it against a
+        # dead bus produces a daemon that never registers anything.
+        running dbus || { log "audio-on before start"; exit 1; }
+        start_bluealsa || exit 1
+        log "bluealsa up (a2dp-source)"
+        ;;
+    audio-off)
+        stop_one bluealsa
+        ;;
+    stop)
+        # bluealsa first. Killing it while asound.conf still names its PCM
+        # leaves every later open failing on a device that no longer exists,
+        # which looks like broken audio rather than like Bluetooth being off --
+        # so the caller reroutes to the speaker BEFORE asking for this.
+        stop_one bluealsa
+        stop_one bluetoothd
+        stop_one dbus
+        ;;
+    status)
+        running dbus && running bluetoothd || exit 1
+        ;;
+    *)
+        echo "usage: neodct-btaudio {start|audio-on|audio-off|stop|status}" >&2
+        exit 2
+        ;;
+esac
+exit 0

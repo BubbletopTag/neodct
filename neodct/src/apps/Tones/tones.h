@@ -72,10 +72,29 @@ extern const char *const nd_tones_menu[ND_TONES_MENU_ITEMS];
 #define ND_TONES_RINGING_ITEMS 2
 extern const char *const nd_tones_ringing_options[ND_TONES_RINGING_ITEMS];
 
-/* MPV_CMD, without the path. `nice -n -10` is the Python's and is kept:
- * a ringtone preview that stutters because the UI is redrawing is the
- * problem it was added to solve. */
-#define ND_TONES_MPV_ARGC 7
+/* MPV_CMD, without the path.
+ *
+ * ============ THE `nice -n -10` THE PYTHON HAD IS GONE ============
+ *
+ * The Python's argv was `nice -n -10 mpv ...`, and it was ported verbatim,
+ * and on 0.4.x it worked because apps ran as root. Since 27cf79bf an app is
+ * ndusr, and a negative nice needs CAP_SYS_NICE or RLIMIT_NICE headroom that
+ * nothing on this phone grants (the kernel default is 0 and neither
+ * run_neodct.sh nor inittab raises it).
+ *
+ * That would be survivable if nice(1) degraded. GNU coreutils warns and runs
+ * the program anyway; the phone ships BUSYBOX nice, which calls
+ * bb_perror_msg_and_die and never reaches its exec. So the process that was
+ * actually spawned -- nice, not mpv -- exited 1 on every preview, and because
+ * the spawn puts stderr on /dev/null and treats a successful fork as
+ * playback, highlighting a tone simply made no sound and said nothing.
+ *
+ * The honest options were normal priority or giving ndusr RLIMIT_NICE
+ * headroom, and normal priority is plainly better than silence: the stutter
+ * the nice was added to prevent is a cosmetic fault, and this was a total
+ * one. mpv is now the exec target itself, which also means execve failure is
+ * reported about the program we actually wanted. */
+#define ND_TONES_MPV_ARGC 4
 extern const char *const nd_tones_mpv_cmd[ND_TONES_MPV_ARGC];
 
 /* ------------------------------------------------------------------ *
@@ -124,6 +143,17 @@ size_t nd_tones_scan(nd_tone *out, size_t max);
 
 /* The Python gives mpv 0.2 s between terminate() and kill(). */
 #define ND_TONES_PREVIEW_GRACE 0.2
+
+/* How long the FIRST preview of an app session is watched for, to see whether
+ * the player is still there a moment after the fork.
+ *
+ * The spawn puts the child's stderr on /dev/null and treats a successful fork
+ * as playback, so for eight releases a preview that died before execve looked
+ * exactly like one that was playing -- which is how `nice` exiting 1 on every
+ * single preview went unnoticed. One measurement per session is enough: a
+ * player that cannot start cannot start for any tone, and 50 ms is invisible
+ * next to the half-second PREVIEW_DELAY that precedes it. */
+#define ND_TONES_PREVIEW_PROBE 0.05
 
 /* Start a preview, stopping whatever was playing first. A NULL or empty path
  * does nothing, which is `if not path: return`.

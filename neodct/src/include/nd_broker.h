@@ -196,8 +196,73 @@ nd_err nd_broker_spawn(nd_broker *b, const char *path, const nd_proc_spec *spec,
 
 /* nd_proc_wait(), likewise: the app is the BROKER's child, so only the broker
  * can reap it. Same contract as nd_proc_wait -- ND_ERR_TIMEOUT while it is
- * still running, which is what the launch loop polls on. */
+ * still running, which is what the launch loop polls on.
+ *
+ * ============ THE WAITING HAPPENS ON THIS SIDE, ALWAYS ============
+ *
+ * `timeout_s` is honoured HERE, by a loop of short non-blocking round trips.
+ * It is never sent to the broker as a duration, and the broker has no verb
+ * that blocks.
+ *
+ * That is not an implementation detail, it is the fix for a phone that froze.
+ * The core asks the helper that formats the SD card for up to
+ * ND_SVC_FORMAT_WAIT_S (240 s), and both halves of the old shape made that a
+ * stop-the-world:
+ *
+ *   - round_trip() holds b->lock across its send AND its recv, so a REQ_WAIT
+ *     that blocked for four minutes held the lock for four minutes. The core's
+ *     UI thread takes that same lock on every turn of nd_proc_launch_app()'s
+ *     pump loop -- and that loop is what SCANS THE I2C KEY MATRIX. The matrix
+ *     has no kernel queue, so every key pressed during a format was not
+ *     delayed, it was lost, and nothing repainted either.
+ *   - broker_loop() serves one request at a time. A verb that blocks inside
+ *     the server also stalls REQ_SPAWN, REQ_HALT and REQ_CLOCK for every other
+ *     thread in the core, whatever the lock does.
+ *
+ * Neither was visible under QEMU, where mkfs on a host-backed image file
+ * finishes in well under a second and the evdev input path buffers keys across
+ * a stall anyway. A poll loop on this side costs one tiny round trip every
+ * ND_BROKER_WAIT_POLL_S and cannot stall anybody. */
 nd_err nd_broker_wait(nd_broker *b, pid_t pid, double timeout_s, nd_proc_status *out);
+
+/* How often nd_broker_wait() probes while it waits. 50 ms is far below what a
+ * person notices at the end of a format and far above the cost of a socketpair
+ * round trip on this SoC; a wait of 0.0 naps not at all, which is the case the
+ * app-launch pump loop takes on every turn. */
+#define ND_BROKER_WAIT_POLL_S 0.05
+
+/* ============ SIGNALLING A CHILD THE BROKER STARTED ============
+ *
+ * The core cannot signal its own helpers any more, and found out the
+ * expensive way. `neodct-sdcard format` is spawned UNDROPPED (root) by the
+ * broker, so it is the broker's child and root's process. When the core's
+ * 240-second escape hatch fired, it called kill(2) from uid 1000 against uid
+ * 0 and got EPERM -- and then waitpid()ed a process it had never forked, got
+ * ECHILD, and nd_proc.c's collect() reported that as a clean exit. So the
+ * hatch reported success, nothing was stopped, nothing was reaped, and a root
+ * mke2fs carried on writing the card underneath "Formatting failed."
+ *
+ * This verb is what the hatch needs, and it is pinned two ways so the broker
+ * still decides nothing:
+ *
+ *   THE SIGNAL is exactly SIGTERM or SIGKILL. Nothing else is a request the
+ *   core makes, and a signal number off the wire is otherwise a way to send
+ *   SIGSTOP to init.
+ *
+ *   THE PID must be one the broker itself forked and has not yet reaped. The
+ *   broker already sees every spawn, so this is a fact it owns rather than a
+ *   policy it applies -- and it is strictly narrower than what the core could
+ *   do before it dropped, which was to signal anything it owned.
+ *
+ * False means the signal was not delivered: a pid the broker did not start, a
+ * signal it will not send, or a channel that has gone. */
+bool nd_broker_kill(nd_broker *b, pid_t pid, int signo);
+
+/* How many live children the broker remembers. One app, plus the sdcard
+ * helper, plus room to spare: the design has never had more than two at once,
+ * and a table that overflows forgets its OLDEST entry, which makes that child
+ * unkillable rather than making somebody else's process killable. */
+#define ND_BROKER_CHILDREN_MAX 16
 
 /* reboot(2) and clock_settime(2), which an unprivileged core also lost.
  *
@@ -241,6 +306,11 @@ bool nd_broker__root_exec_allowed(const char *path, const char *const *argv, uin
 bool nd_broker__spawn_stays_root(const char *user, bool resolved);
 void nd_broker__root_env_filter(const char *const *in, uint32_t n_in, const char **out,
                                 size_t out_max);
+/* nd_broker__kill_signo_allowed: half of the KILL verb's pinning, and the half
+ *   that is a pure function of the request. The other half -- "is this pid one
+ *   of mine" -- is a fact about the broker's own bookkeeping and is tested
+ *   through a real spawn. */
+bool nd_broker__kill_signo_allowed(int32_t signo);
 
 #ifdef __cplusplus
 }

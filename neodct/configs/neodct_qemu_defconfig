@@ -52,8 +52,9 @@ BR2_ROOTFS_OVERLAY="../neodct/overlay"
 # principal. SECURITY-PLAN.md section 1; the table itself carries the
 # reasoning, including why the ids are written out rather than allocated.
 BR2_ROOTFS_USERS_TABLES="../neodct/configs/users-table.txt"
+# post-image-neodct.sh ends by running check-users.sh, so it is not listed twice.
 BR2_ROOTFS_POST_IMAGE_SCRIPT="board/qemu/post-image.sh ../neodct/scripts/post-image-neodct.sh"
-BR2_ROOTFS_POST_BUILD_SCRIPT="../neodct/scripts/post-build-prune-tests.sh ../neodct/scripts/post-build-system-metadata.sh ../neodct/scripts/post-build-nonfree-firmware.sh ../neodct/scripts/post-build-bt-on-demand.sh"
+BR2_ROOTFS_POST_BUILD_SCRIPT="../neodct/scripts/post-build-prune-tests.sh ../neodct/scripts/post-build-system-metadata.sh ../neodct/scripts/post-build-nonfree-firmware.sh ../neodct/scripts/post-build-bt-on-demand.sh ../neodct/scripts/post-build-devenv-marker.sh"
 BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS="qemu-aarch64"
 BR2_ROOTFS_POST_SCRIPT_ARGS="$(BR2_DEFCONFIG)"
 BR2_LINUX_KERNEL=y

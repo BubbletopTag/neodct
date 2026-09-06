@@ -351,6 +351,37 @@ static void set_state(nd_modem *m, nd_call_state s)
     unlock_state(m);
 }
 
+/* Did the last probe see a candidate AT port? The one input to
+ * nd_modem__may_simulate() that is not the link state, and the reason a dial
+ * on a desktop is still faked while a dial on a phone with an unopenable
+ * SIM7600 is refused. */
+static bool saw_radio(nd_modem *m)
+{
+    bool v;
+
+    lock_state(m);
+    v = m->saw_candidates;
+    unlock_state(m);
+    return v;
+}
+
+/* One short phrase for "why can this phone not use its radio", for the two
+ * refusals the user actually sees. The probe's own per-port reason is the
+ * best answer there is -- "/dev/ttyUSB2: Permission denied" names the fault
+ * exactly -- and the fault reason is the fallback for a modem that was
+ * adopted and then died. */
+static void no_modem_reason(nd_modem *m, char *out, size_t out_sz)
+{
+    lock_state(m);
+    if (m->last_probe_why[0] != '\0')
+        (void)nd_strlcpy(out, m->last_probe_why, out_sz);
+    else if (m->fault_why[0] != '\0')
+        (void)nd_strlcpy(out, m->fault_why, out_sz);
+    else
+        (void)nd_strlcpy(out, "no modem is answering", out_sz);
+    unlock_state(m);
+}
+
 /* The call coming up, from whichever of VOICE CALL: BEGIN, CLCC <stat> 0,
  * ATA or the simulated dial reports it first. The timer starts on the first
  * report and the audio work is armed on the first report, and a second report
@@ -792,10 +823,34 @@ static bool read_iface(const char *name, int32_t *out)
     return nd_modem__parse_hex(text, out);
 }
 
-/* Byte-sorted listing of one directory. Returns the count written. */
-static size_t sorted_listdir(const char *dir, char names[][ND_MODEM_PORT_MAX], size_t max)
+/* Byte-sorted listing of the entries of one directory whose names start with
+ * `prefix`. Returns the count written.
+ *
+ * THE FILTER IS INSIDE THE LOOP, AND THAT IS THE WHOLE POINT.
+ *
+ * This used to take every name until the array was full and filter
+ * afterwards, with `max` = ND_MODEM_CAND_MAX = 32 -- a number sized for "a
+ * SIM7600 enumerates five AT ports", applied to a directory listing. The
+ * directory is /sys/class/tty, which on the phone's CONFIG_VT kernel holds
+ * tty0..tty63, console, ptmx, tty and ttyFIQ0 as well as the modem's nodes:
+ * about seventy-five entries, of which the caller wants five.
+ *
+ * readdir on sysfs returns kernfs order -- an rbtree keyed on a name hash --
+ * so it is neither alphabetical nor creation order, and which 32 of the 75
+ * names survived the truncation was an arbitrary, deterministic function of
+ * the kernel build. On a kernel where "ttyUSB2" and "ttyUSB3" hashed past the
+ * cut, candidate_ports() returned nothing at all and the phone reported "no
+ * candidate AT ports (no ttyUSB* in /sys/class/tty)" for ever, with the modem
+ * sitting there enumerated. Sorting afterwards cannot undo a name that was
+ * never read.
+ *
+ * Filtering first makes the cap mean what its name says. A NULL prefix keeps
+ * the old take-everything behaviour for callers that want it. */
+static size_t sorted_listdir(const char *dir, const char *prefix,
+                             char names[][ND_MODEM_PORT_MAX], size_t max)
 {
     char resolved[ND_PATH_MAX];
+    size_t plen = (prefix != NULL) ? strlen(prefix) : 0u;
     DIR *d;
     struct dirent *ent;
     size_t n = 0u;
@@ -807,6 +862,8 @@ static size_t sorted_listdir(const char *dir, char names[][ND_MODEM_PORT_MAX], s
         return 0u;
     while ((ent = readdir(d)) != NULL && n < max) {
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+            continue;
+        if (plen > 0u && strncmp(ent->d_name, prefix, plen) != 0)
             continue;
         (void)nd_strlcpy(names[n], ent->d_name, ND_MODEM_PORT_MAX);
         n++;
@@ -837,14 +894,14 @@ size_t nd_modem__candidate_ports(nd_modem *m, char ports[][ND_MODEM_PORT_MAX], s
         return 1u;
     }
 
-    n_names = sorted_listdir(ND_MODEM_TTY_DIR, names, ND_ARRAY_LEN(names));
+    /* The "ttyUSB" filter now runs inside the listing rather than here, so
+     * the 32-name array bounds the modem's ports and not the tty class. */
+    n_names = sorted_listdir(ND_MODEM_TTY_DIR, "ttyUSB", names, ND_ARRAY_LEN(names));
     for (i = 0u; i < n_names; i++) {
         int32_t iface;
         bool have_iface;
         char dev[ND_MODEM_PORT_MAX];
 
-        if (strncmp(names[i], "ttyUSB", 6u) != 0)
-            continue;
         if (nd_snprintf(dev, sizeof dev, "/dev/%s", names[i]) != ND_OK)
             continue;
         have_iface = read_iface(names[i], &iface);
@@ -908,6 +965,9 @@ void nd_modem__init_modem(nd_modem *m)
     m->faulted = false;
     m->fault_pending = false;
     m->fault_why[0] = '\0';
+    /* And the same for "unreachable": we just reached it. A modem that goes
+     * unreachable again after this must be free to say so again. */
+    m->unreachable_announced = false;
     /* Stamped here, not left at 0.0, so the watchdog measures "quiet since we
      * adopted it" rather than "quiet since the epoch" -- a modem that goes
      * silent the instant it is adopted still gets its full grace period. */
@@ -980,10 +1040,14 @@ static void why_add(char *why, size_t why_sz, const char *sep, const char *text)
         (void)nd_strlcpy(why + len, text, why_sz - len);
 }
 
-static bool probe_ports(nd_modem *m, char *why, size_t why_sz)
+/* The candidate list is gathered by the caller now, so that the count is
+ * known even on the paths that never get as far as opening a port -- the
+ * AT-port lock being held is the important one. "Are there candidates" is
+ * the difference between Simulation and ND_MODEM_LINK_UNREACHABLE, and it
+ * must not depend on how far into the probe we got. */
+static bool probe_ports(nd_modem *m, char ports[][ND_MODEM_PORT_MAX], size_t n, char *why,
+                        size_t why_sz)
 {
-    char ports[ND_MODEM_CAND_MAX][ND_MODEM_PORT_MAX];
-    size_t n = nd_modem__candidate_ports(m, ports, ND_ARRAY_LEN(ports));
     size_t i;
 
     if (n == 0u) {
@@ -1068,9 +1132,74 @@ static void probe_note(nd_modem *m, const char *why)
     nd_log(ND_LOG_MODEM, "No AT port: %s", why);
 }
 
+/* Record what the kernel is showing us, and hold the boot grace open while
+ * there is nothing there yet.
+ *
+ * Two jobs, both about the same mistake: latching a verdict on a bus that has
+ * not settled. `saw_candidates` decides Simulation vs UNREACHABLE and must be
+ * set from the CANDIDATE LIST, not from how far the probe got -- a lock held
+ * by S45modem stops the probe dead and says nothing at all about whether the
+ * phone has a radio. And the grace is pushed out whenever the candidate list
+ * is empty, or the first time it stops being empty, so that the window the
+ * header promises is measured against the modem appearing rather than against
+ * the UI starting. ND_MODEM_LATE_GRACE_MAX_S caps the whole thing. */
+static void note_candidates(nd_modem *m, size_t n)
+{
+    double now = nd_modem__now();
+    bool appeared;
+
+    lock_state(m);
+    appeared = (n > 0u) && !m->saw_candidates;
+    m->saw_candidates = (n > 0u);
+    if (n == 0u) {
+        /* No radio in the phone at all now. Whatever we announced about an
+         * unreachable one is stale, and a modem plugged back in later must
+         * be able to announce itself again. */
+        m->unreachable_announced = false;
+    }
+    if (m->boot_grace > 0.0 && (n == 0u || appeared)) {
+        double want = now + m->boot_grace;
+
+        if (want > m->late_grace_deadline)
+            want = m->late_grace_deadline;
+        if (want > m->boot_deadline)
+            m->boot_deadline = want;
+    }
+    unlock_state(m);
+}
+
+/* Arm the one-shot notice for "there is a radio here and I cannot reach it".
+ *
+ * The same latch nd_modem__drop_hardware() uses for a modem that died, and
+ * armed on the EDGE for the same reason: the probe repeats for the life of
+ * the phone, and a modal every ten seconds is a denial of service rather
+ * than a diagnosis. `faulted` is deliberately NOT set -- that flag means "we
+ * had one and lost it" and clearing it is nd_modem__init_modem()'s job, so
+ * borrowing it here would make an unreachable modem indistinguishable from a
+ * dropped one in every other place that reads it. */
+static void announce_unreachable(nd_modem *m, const char *why)
+{
+    bool first;
+
+    lock_state(m);
+    first = !m->unreachable_announced && !m->faulted;
+    if (first) {
+        m->unreachable_announced = true;
+        m->fault_pending = true;
+        (void)nd_strlcpy(m->fault_why, (why != NULL) ? why : "", sizeof m->fault_why);
+    }
+    unlock_state(m);
+    if (first)
+        nd_log_err(ND_LOG_MODEM, "MODEM UNREACHABLE: a modem is enumerated and none of its "
+                                 "ports could be used (%s).",
+                   (why != NULL && why[0] != '\0') ? why : "no reason recorded");
+}
+
 bool nd_modem__probe_hardware(nd_modem *m)
 {
+    char ports[ND_MODEM_CAND_MAX][ND_MODEM_PORT_MAX];
     char why[ND_MODEM_PROBE_WHY_MAX];
+    size_t n_cand;
     bool ok;
 
     /* Armed BEFORE the attempt, so a port held by S45modem still costs a full
@@ -1079,15 +1208,45 @@ bool nd_modem__probe_hardware(nd_modem *m)
      * "No Service" past the moment it answers is ten seconds too many. */
     m->next_probe = nd_modem__now() +
                     (nd_modem__now() < m->boot_deadline ? ND_MODEM_BOOT_PROBE_S : ND_PROBE_RETRY_S);
+
+    n_cand = nd_modem__candidate_ports(m, ports, ND_ARRAY_LEN(ports));
+    note_candidates(m, n_cand);
+
     if (!nd_modem__acquire(m)) {
         /* Silent until now, and it is a real cause on a phone that has one:
          * S45modem's background redial takes the lock per transaction, and a
-         * probe that lands inside one looks exactly like having no modem. */
-        probe_note(m, "the AT port lock is held (S45modem or atcmd is mid-session)");
+         * probe that lands inside one looks exactly like having no modem.
+         *
+         * The two failures are told apart because they are opposite facts.
+         * "Held" means another process is mid-transaction with the modem,
+         * which is proof the modem is there; try again shortly. "Unusable"
+         * means there is no lock file this process can open -- root's atcmd
+         * created /tmp/neodct-modem.lock 0644 root:root before we got there
+         * and we are ndusr -- and the service will not drive a shared tty
+         * unserialised, because that is the corruption the lock exists to
+         * prevent and it is what "works sometimes" is made of. */
+        char note[ND_MODEM_PROBE_WHY_MAX];
+
+        if (m->lock_unusable) {
+            (void)nd_snprintf(note, sizeof note,
+                              "AT port lock unusable (%s); refusing to share the tty "
+                              "unserialised",
+                              m->lock_why[0] != '\0' ? m->lock_why : "unknown");
+        } else {
+            (void)nd_strlcpy(note, "the AT port lock is held (S45modem or atcmd is mid-session)",
+                             sizeof note);
+        }
+        probe_note(m, note);
+        /* Only the unusable case is a verdict. A lock somebody else is
+         * holding is a modem being talked to, and saying "unreachable" for
+         * that would fire a notice at every phone whose data connection is
+         * coming up normally. */
+        if (m->lock_unusable && n_cand > 0u && nd_modem__now() >= m->boot_deadline)
+            announce_unreachable(m, note);
         return false;
     }
     why[0] = '\0';
-    ok = probe_ports(m, why, sizeof why);
+    ok = probe_ports(m, ports, n_cand, why, sizeof why);
     nd_modem__release(m);
     if (ok) {
         lock_state(m);
@@ -1095,6 +1254,11 @@ bool nd_modem__probe_hardware(nd_modem *m)
         unlock_state(m);
     } else {
         probe_note(m, why);
+        /* Candidates existed and not one of them worked. Past the grace that
+         * is not Simulation and never was; it is a radio this phone cannot
+         * reach, and it says so out loud exactly once. */
+        if (n_cand > 0u && nd_modem__now() >= m->boot_deadline)
+            announce_unreachable(m, why);
     }
     return ok;
 }
@@ -1309,8 +1473,37 @@ void nd_modem_poll(nd_modem *m)
         return;
     m->next_urc = now + ND_POLL_URC_S;
 
-    if (!nd_modem__acquire(m))
+    if (!nd_modem__acquire(m)) {
+        /* CONTENTION IS NOT SILENCE, AND THE WATCHDOG ABOVE CANNOT TELL.
+         *
+         * This early return sits BELOW the ND_MODEM_FAULT_AFTER_S check, and
+         * last_ok_at is fed only by a transaction that completed -- so every
+         * tick spent locked out was being counted as a tick the modem failed
+         * to answer. S45modem holds the port in long stretches during its
+         * data bring-up (`at 'AT+CGATT=1' 40` is one atcmd invocation
+         * holding the flock for up to forty seconds, and dial_rounds walks
+         * four rounds of an APN matrix), so two of those plus the gaps is
+         * ninety seconds of "silence" from a modem that was answering
+         * somebody else the whole time. The phone then put a MODEM FAULT
+         * modal on screen and blanked the carrier line for a healthy radio.
+         *
+         * Another process holding this lock is POSITIVE evidence that the
+         * modem is there and being talked to, so the clock is stamped
+         * forward. A genuinely dead modem is still caught: nothing holds the
+         * lock for it, so the ticks that time out do count.
+         *
+         * The lock being unusable is the other failure and is deliberately
+         * NOT stamped -- see nd_modem__acquire(). We are not talking to the
+         * modem and neither is anything we can prove, so the watchdog is
+         * left to do its job. */
+        if (!m->lock_unusable) {
+            lock_state(m);
+            m->last_ok_at = now;
+            unlock_state(m);
+        }
         return; /* boot script or atcmd session in progress */
+    }
+    m->lock_taken_at = now;
 
     (void)nd_modem__read_pending(m, &m->rx_lines);
     for (i = 0u; i < m->rx_lines.n; i++)
@@ -1368,6 +1561,37 @@ void nd_modem_poll(nd_modem *m)
     }
 
     nd_modem__release(m);
+
+    /* FAIR SHARE OF THE PORT WITH S45modem.
+     *
+     * The two sides of this flock are asymmetric. This one takes it
+     * non-blocking every ND_POLL_URC_S = 0.5 s and, having taken it, may sit
+     * on it for 3.0 s waiting out an AT+COPS? on a modem that is busy
+     * registering. The other side is atcmd, which retries `flock -x -n` once
+     * a second and gives up after $TIMEOUT tries with exit 3; S45modem's
+     * bring-up counts that as a failed AT and calls fail() after five of
+     * them, so the phone ends the boot with no data connection and the log
+     * line "modem not answering AT" about a modem that answered us sixty
+     * times in the same minute.
+     *
+     * A tick that held the port longer than the tick interval therefore owes
+     * the rest of the system an equal window with the lock free. This never
+     * delays anything the user is waiting on -- dial(), hangup() and
+     * send_sms() take the lock themselves on the UI thread's request and are
+     * not gated by next_urc -- it only slows the background CSQ/CEREG/COPS
+     * polling down to at most half the port's time, which is what the
+     * cadence assumed it was doing all along. */
+    {
+        double released = nd_modem__now();
+        double held = released - m->lock_taken_at;
+
+        if (held > ND_POLL_URC_S) {
+            double resume = released + held;
+
+            if (resume > m->next_urc)
+                m->next_urc = resume;
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ *
@@ -1389,8 +1613,28 @@ static bool do_dial(nd_modem *m, const char *raw)
         return false;
 
     if (!m->hardware || !m->allow_calls) {
-        if (m->hardware)
+        if (m->hardware) {
+            /* A live modem with system.modem.allow_calls=OFF. A deliberate
+             * development switch, and the log line has always said so. */
             nd_log(ND_LOG_MODEM, "Calls not enabled yet; simulating this dial.");
+        } else if (!nd_modem__may_simulate(nd_modem_link_state(m), saw_radio(m))) {
+            char reason[ND_MODEM_PROBE_WHY_MAX];
+
+            /* THE PHONE MUST NOT PRETEND IT PLACED A CALL.
+             *
+             * This branch used to be reached for every kind of "no modem",
+             * including the common one on real hardware: a SIM7600 sitting
+             * in the phone whose ports the service could not open. The owner
+             * then watched ND_CALL_CALLING become ND_CALL_CONNECTED two
+             * seconds later, with a call timer running and an End key to
+             * press, for a call that was never dialled -- and no audio,
+             * because mark_connected() gates the pipes on m->hardware. A
+             * failed dial the dialer can report is not a worse outcome than
+             * that; it is the only honest one. */
+            no_modem_reason(m, reason, sizeof reason);
+            nd_log_err(ND_LOG_MODEM, "Dial refused: no usable modem (%s).", reason);
+            return false;
+        }
         set_state(m, ND_CALL_CALLING);
         m->sim_connect_at = nd_modem__now() + 2.0;
         m->sim_connect_armed = true;
@@ -1576,6 +1820,20 @@ static bool do_send_sms(nd_modem *m, const char *raw_number, const char *raw_tex
     nd_log(ND_LOG_MODEM, "Sending SMS to %s (%u chars)", number, (unsigned)utf8_chars(text));
 
     if (!m->hardware) {
+        if (!nd_modem__may_simulate(nd_modem_link_state(m), saw_radio(m))) {
+            char reason[ND_MODEM_PROBE_WHY_MAX];
+
+            /* Reported as sent, never transmitted, no way for the owner to
+             * tell -- the same lie as a faked dial and quieter. `detail` is
+             * rendered verbatim by Messages as "Send failed: <detail>"
+             * (nd_modem.h), so the probe's own reason goes on the screen:
+             * "Send failed: /dev/ttyUSB2: Permission denied" is a sentence
+             * somebody can act on. */
+            no_modem_reason(m, reason, sizeof reason);
+            (void)nd_snprintf(detail, detail_sz, "no modem: %s", reason);
+            nd_log_err(ND_LOG_MODEM, "SMS refused: %s", detail);
+            return false;
+        }
         nd_log(ND_LOG_MODEM, "(Simulation Mode: pretending the SMS went out.)");
         queue_simple(m, ND_MEV_SMS_SENT, number);
         (void)nd_strlcpy(detail, "simulated", detail_sz);
@@ -1924,12 +2182,42 @@ static bool calls_enabled_setting(void)
     return nd_setting_modem_truthy(nd_settings_get(ND_SET_MODEM_ALLOW_CALLS, "ON"));
 }
 
-static int open_lock_file(void)
+/* Open (creating if need be) the AT-port lock file. `why` gets
+ * "<path>: <strerror>" on failure and "" on success.
+ *
+ * ============ WHY THE READ-ONLY RETRY IS THE WHOLE FIX ============
+ *
+ * /tmp is a tmpfs, so this file does not exist until somebody makes it, and
+ * two different principals race to be that somebody every boot. nd-core is
+ * ndusr (since 0.5.0b) under run_neodct.sh's umask 0027, so when it wins the
+ * file is 0640 ndusr:ndusr and root can still open it -- root ignores modes.
+ * atcmd is root out of S45modem under init's umask 0022, so when IT wins the
+ * file is 0644 root:root, and this open, asking for O_RDWR, gets EACCES. /tmp
+ * is sticky 1777, so ndusr cannot replace it either.
+ *
+ * That was the end of the lock for the rest of the session: lock_fd stayed
+ * -1 and nd_modem__acquire() returned true anyway, so the core drove
+ * /dev/ttyUSB2 while S45modem's APN walk was driving the same port -- each
+ * side eating the other's reply lines, both reporting failures, nothing
+ * logged. It is decided per boot, which is exactly the shape of "the modem
+ * rarely works, though once it showed Tello".
+ *
+ * flock(2) locks the open file DESCRIPTION and does not care what access
+ * mode it was opened with, so LOCK_EX on an O_RDONLY descriptor is a real
+ * exclusive lock against busybox flock in S45modem. The write permission was
+ * never needed -- nothing is ever written to this file. Retrying read-only
+ * therefore makes the create order stop mattering, from this side alone,
+ * with no cooperation from a script this module does not own. */
+static int open_lock_file(char *why, size_t why_sz)
 {
     char resolved[ND_PATH_MAX];
     char dir[ND_PATH_MAX];
     const char *slash;
     int fd;
+    int saved;
+
+    if (why != NULL && why_sz > 0u)
+        why[0] = '\0';
 
     /* ND_ROOT-resolved so a host test locks its own scratch file rather than
      * fighting a real phone's. mkdir -p of the parent is a C-only addition:
@@ -1940,12 +2228,57 @@ static int open_lock_file(void)
         dir[(size_t)(slash - dir)] = '\0';
         (void)nd_mkdir_p(dir, 0755u);
     }
-    if (nd_path_resolve(resolved, sizeof resolved, ND_MODEM_LOCK_FILE) != ND_OK)
+    if (nd_path_resolve(resolved, sizeof resolved, ND_MODEM_LOCK_FILE) != ND_OK) {
+        if (why != NULL)
+            (void)nd_snprintf(why, why_sz, "%s: path too long", ND_MODEM_LOCK_FILE);
         return -1;
+    }
     fd = open(resolved, O_RDWR | O_CREAT | O_CLOEXEC, 0666);
-    if (fd < 0)
-        nd_log_err(ND_LOG_MODEM, "cannot open %s: %s", resolved, strerror(errno));
-    return fd;
+    if (fd >= 0)
+        return fd;
+    saved = errno;
+    fd = open(resolved, O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+        /* Worth a line: it means another user owns the file, which is the
+         * normal state on a phone where root's atcmd ran first, and it is
+         * the fingerprint of the bug above if it ever comes back. */
+        nd_log(ND_LOG_MODEM, "%s belongs to another user (%s); locking it read-only.", resolved,
+               strerror(saved));
+        return fd;
+    }
+    if (errno == ENOENT || errno == EACCES)
+        errno = saved; /* the create attempt is the more informative failure */
+    if (why != NULL)
+        (void)nd_snprintf(why, why_sz, "%s: %s", resolved, strerror(errno));
+    return -1;
+}
+
+void nd_modem__lock_reopen(nd_modem *m)
+{
+    double now;
+    char why[ND_MODEM_WHY_MAX];
+    int fd;
+
+    if (m == NULL || m->lock_fd >= 0)
+        return;
+    now = nd_modem__now();
+    if (now < m->next_lock_try)
+        return;
+    m->next_lock_try = now + ND_MODEM_LOCK_RETRY_S;
+
+    fd = open_lock_file(why, sizeof why);
+    if (fd >= 0) {
+        m->lock_fd = fd;
+        m->lock_why[0] = '\0';
+        return;
+    }
+    /* Printed on CHANGE only, like probe_note(): this is retried every couple
+     * of seconds for the life of the phone and one line per attempt would
+     * bury the boot log. */
+    if (strcmp(m->lock_why, why) != 0) {
+        (void)nd_strlcpy(m->lock_why, why, sizeof m->lock_why);
+        nd_log_err(ND_LOG_MODEM, "cannot open the AT port lock: %s", why);
+    }
 }
 
 nd_err nd_modem__create(nd_modem **out)
@@ -1986,8 +2319,12 @@ nd_err nd_modem__create(nd_modem **out)
     m->pcm_rate = pcm_rate_setting();
     port_from_settings(m->configured_port, sizeof m->configured_port);
     m->allow_calls = calls_enabled_setting();
-    m->boot_deadline = nd_modem__now() + boot_grace_setting();
-    m->lock_fd = open_lock_file();
+    m->boot_grace = boot_grace_setting();
+    m->boot_deadline = nd_modem__now() + m->boot_grace;
+    m->late_grace_deadline = nd_modem__now() + ND_MODEM_LATE_GRACE_MAX_S;
+    m->lock_fd = open_lock_file(m->lock_why, sizeof m->lock_why);
+    if (m->lock_fd < 0)
+        nd_log_err(ND_LOG_MODEM, "cannot open the AT port lock: %s", m->lock_why);
 
     *out = m;
     return ND_OK;
@@ -2031,6 +2368,13 @@ nd_err nd_modem_open(nd_modem **out)
              * announcement, if it comes to that, is nd_modem__poll_sim()'s. */
             nd_log(ND_LOG_MODEM, "No modem has answered yet; probing every %ds for up to %.0fs.",
                    (int)ND_MODEM_BOOT_PROBE_S, grace);
+        } else if (saw_radio(m)) {
+            /* Candidates exist and none of them worked. announce_unreachable()
+             * has already put the reason on the console and armed the notice;
+             * saying "Simulation Mode" as well would be the lie this release
+             * exists to stop. sim_announced is set so poll_sim() does not say
+             * it later either. */
+            m->sim_announced = true;
         } else {
             nd_log(ND_LOG_MODEM, "HARDWARE NOT FOUND: Running in Simulation Mode.");
             m->sim_announced = true;
@@ -2336,16 +2680,17 @@ nd_modem_link nd_modem_link_state(nd_modem *m)
 {
     bool hw;
     bool bad;
+    bool radio;
+    bool booting;
 
     /* A core with no ModemService is not a core with a broken one. */
     if (m == NULL)
         return ND_MODEM_LINK_SIM;
 
-    bool booting;
-
     lock_state(m);
     hw = m->hardware;
     bad = m->faulted;
+    radio = m->saw_candidates;
     booting = nd_modem__now() < m->boot_deadline;
     unlock_state(m);
 
@@ -2353,7 +2698,38 @@ nd_modem_link nd_modem_link_state(nd_modem *m)
         return ND_MODEM_LINK_LIVE;
     if (bad)
         return ND_MODEM_LINK_FAULT;
-    return booting ? ND_MODEM_LINK_PROBING : ND_MODEM_LINK_SIM;
+    if (booting)
+        return ND_MODEM_LINK_PROBING;
+    /* THE LINE THIS WHOLE ENUM EXISTS FOR. `radio` is "the last probe found
+     * at least one candidate AT port", i.e. the kernel says there is a
+     * serial device in this phone that could be the modem. Getting here with
+     * it true means every one of those ports failed -- permissions, EBUSY, a
+     * held lock, no OK inside a second -- and reporting that as Simulation
+     * is a phone telling its owner that a broken radio is fine. */
+    return radio ? ND_MODEM_LINK_UNREACHABLE : ND_MODEM_LINK_SIM;
+}
+
+/* The simulate-or-refuse policy, as a table, because it is the decision and
+ * not the plumbing that was wrong. See nd_modem.h above nd_modem_dial(). */
+bool nd_modem__may_simulate(nd_modem_link link, bool has_radio)
+{
+    switch (link) {
+    case ND_MODEM_LINK_LIVE:
+        /* A live modem places real calls. The one exception --
+         * system.modem.allow_calls=OFF -- is a development switch and is
+         * handled at the call site, where the log line already says so. */
+        return false;
+    case ND_MODEM_LINK_SIM:
+    case ND_MODEM_LINK_PROBING:
+        /* Simulation is honest only on a device with no radio in it. During
+         * the boot grace on a phone whose ports HAVE appeared, "not yet" is
+         * the truthful answer to a dial, not a two-second fake connect. */
+        return !has_radio;
+    case ND_MODEM_LINK_FAULT:
+    case ND_MODEM_LINK_UNREACHABLE:
+    default:
+        return false;
+    }
 }
 
 const char *nd_modem_take_pending_fault(nd_modem *m)
@@ -2391,12 +2767,21 @@ int32_t nd_modem_signal_level(nd_modem *m)
 
     if (!hw) {
         int32_t sim;
+        nd_modem_link link = nd_modem_link_state(m);
 
         /* A FAULTED modem has no signal, and says so with an empty meter
          * rather than with the full one the layout's sim_val would draw. This
          * is checked before the hook so that a stale /tmp/neodct_sim_csq
-         * cannot paint bars onto a broken phone. */
-        if (nd_modem_link_state(m) == ND_MODEM_LINK_FAULT)
+         * cannot paint bars onto a broken phone.
+         *
+         * UNREACHABLE is the same answer for the same reason, and it is the
+         * one that was actually being got wrong on the phone: with the
+         * carrier line reading "Simulation", the fall-through at the bottom
+         * of this function drew FOUR FULL BARS next to it whenever
+         * /proc/net/route had a default route -- which S45modem's data call
+         * puts there. A full meter on a phone whose radio the UI cannot open
+         * is worse than no meter at all. */
+        if (link == ND_MODEM_LINK_FAULT || link == ND_MODEM_LINK_UNREACHABLE)
             return 0;
 
         /* Read outside the state lock: one open/read/close per rendered
@@ -2408,7 +2793,7 @@ int32_t nd_modem_signal_level(nd_modem *m)
         /* Still waiting for the modem to come up: an empty meter, which is
          * what a phone whose radio is booting shows. After the hook, so a
          * developer's csq file works from the first second on QEMU. */
-        if (nd_modem_link_state(m) == ND_MODEM_LINK_PROBING)
+        if (link == ND_MODEM_LINK_PROBING)
             return 0;
 
         /* NO HOOK, NO HARDWARE: SIMULATION. This used to return -1, which the
@@ -2456,13 +2841,34 @@ const char *nd_modem_operator_display(nd_modem *m)
 
     if (!hw) {
         char text[32];
+        nd_modem_link link = nd_modem_link_state(m);
 
         /* A faulted modem gets NO carrier name at all -- not the operator,
          * not "Simulation", and not the "No Service" placeholder either. The
          * home screen drops the line entirely (nd_ui_render_home), because a
          * broken radio has nothing truthful to put there. */
-        if (nd_modem_link_state(m) == ND_MODEM_LINK_FAULT)
+        if (link == ND_MODEM_LINK_FAULT)
             return NULL;
+
+        /* An UNREACHABLE modem gets a NAME rather than a blank, and the
+         * difference from FAULT is deliberate. FAULT is a radio that was
+         * working a moment ago, so the empty line plus the modal reads as
+         * "something just broke". UNREACHABLE is the steady state of a phone
+         * that has never managed to open its own modem, and it is reached
+         * through code paths -- a udev group that arrived late, a lock file
+         * owned by root -- where the owner may never see a modal at all.
+         * Naming it in the carrier slot is the only thing on the home screen
+         * that can tell them apart from a phone in a tunnel.
+         *
+         * Checked BEFORE the /tmp/neodct_sim_operator hook for the same
+         * reason the meter is: a leftover hook file must not be able to
+         * paint a carrier name onto a radio nothing can reach. */
+        if (link == ND_MODEM_LINK_UNREACHABLE) {
+            lock_state(m);
+            (void)nd_strlcpy(m->op_display, ND_MODEM_UNREACHABLE_CARRIER, sizeof m->op_display);
+            unlock_state(m);
+            return m->op_display;
+        }
 
         if (nd_modem__sim_read_text(ND_MODEM_SIM_OPS, text, sizeof text)) {
             py_strip(text);
@@ -2476,7 +2882,7 @@ const char *nd_modem_operator_display(nd_modem *m)
 
         /* Still waiting for the modem: nothing, and the layout keeps its own
          * "No Service" -- which for once is the truth. */
-        if (nd_modem_link_state(m) == ND_MODEM_LINK_PROBING)
+        if (link == ND_MODEM_LINK_PROBING)
             return NULL;
 
         /* The hook is unset or blank, so this is plain Simulation Mode and it

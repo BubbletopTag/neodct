@@ -349,21 +349,98 @@ bool nd_svc_halt_which(const char *name, char *out, size_t out_sz);
  * one. */
 bool nd_svc_set_clock(time_t when);
 
-/* neodct-sdcard format, performed by the core, on WHICHEVER CARD THE CORE
- * ITSELF CAN SEE -- see above for why there is no device parameter.
+/* ------------------------------------------------------------------ *
+ * Formatting a card: a JOB, not a call
+ * ------------------------------------------------------------------ *
+ *
+ * ============ WHY THERE ARE THREE OF THESE ============
+ *
+ * There was one, and it blocked until the format finished. On QEMU that is
+ * under a second, because the "card" is a file on the developer's disk. On the
+ * phone it is a partition table, two mkfs runs, a BLKRRPART and a sync(2) on a
+ * class-4 SD card -- tens of seconds to minutes -- and for the whole of it:
+ *
+ *   the core's serving thread was inside the wait,
+ *   the BROKER (a serial, one-request-at-a-time server) was inside the wait,
+ *   and the core's broker round-trip mutex was held by both.
+ *
+ * The core's UI thread takes that mutex on every turn of the loop that SCANS
+ * THE I2C KEY MATRIX. The matrix has no kernel queue behind it, so a key
+ * pressed while nobody is scanning is not delayed, it is LOST. The owner's
+ * report was "trying to format the sdcard froze the system", and it was
+ * literally true: no keys, no repaint, no cancel, no way back until the format
+ * ended by itself.
+ *
+ * So: START the job, POLL it, CANCEL it. Every verb answers in microseconds
+ * and nothing waits for anything. The screen that asked owns the waiting, and
+ * can spend it drawing a progress bar and offering a way out.
+ *
+ * ============ WHAT A SCREEN DOES WITH THEM ============
+ *
+ *     if (!nd_svc_format_start()) { "Formatting failed." ; return; }
+ *     for (;;) {
+ *         double secs = 0.0;
+ *         nd_svc_format_state st = nd_svc_format_poll(&secs);
+ *
+ *         if (st == ND_SVC_FORMAT_DONE_OK)   { ...; break; }
+ *         if (st != ND_SVC_FORMAT_RUNNING)   { "Formatting failed."; break; }
+ *         draw a bar from secs / ND_SVC_FORMAT_WAIT_S, pump one key;
+ *         if (the key was CLEAR) { (void)nd_svc_format_cancel(); break; }
+ *     }
+ *
+ * A poll every ND_SVC_FORMAT_POLL_S is plenty: mkfs reports no progress of its
+ * own, so `secs` is the only thing that moves and a bar drawn from it is an
+ * honest "how long this usually takes", not a measurement.
+ */
+
+/* Where the job is. */
+typedef enum {
+    ND_SVC_FORMAT_IDLE = 0,     /* nothing running and no verdict waiting */
+    ND_SVC_FORMAT_RUNNING = 1,  /* the helper is still going              */
+    ND_SVC_FORMAT_DONE_OK = 2,  /* it finished and the card was formatted */
+    ND_SVC_FORMAT_DONE_FAIL = 3 /* it failed, was stopped, or wedged      */
+} nd_svc_format_state;
+
+/* How often a caller should poll. Below what anybody perceives, far above the
+ * cost of the round trip. */
+#define ND_SVC_FORMAT_POLL_S 0.2
+
+/* Start one, on WHICHEVER CARD THE CORE ITSELF CAN SEE -- see above for why
+ * there is no device parameter.
+ *
+ * false is "no format is running", and it covers a card that is absent, one
+ * that is not removable, and a helper that could not be started. True while
+ * one is already running: a second Format press must not lay a second mke2fs
+ * over the first, so it joins the one in progress instead. */
+bool nd_svc_format_start(void);
+
+/* One non-blocking look. `elapsed_s` (may be NULL) receives how long the job
+ * has been running, or how long the finished one took.
+ *
+ * A DONE verdict is handed out ONCE and the job then reads IDLE. A verdict
+ * that latched would outlive the screen that asked for it and be shown to the
+ * next one -- which, on a phone where the format outlives the app that started
+ * it, is a thing that would actually happen. */
+nd_svc_format_state nd_svc_format_poll(double *elapsed_s);
+
+/* Stop it: SIGTERM, then SIGKILL, both through the broker, which is the only
+ * process that can signal a root helper it forked. True when nothing is
+ * running afterwards, which is also the answer when nothing was.
+ *
+ * The card is left in whatever state the mkfs had reached, which is why this
+ * is a deliberate act by the owner and not something a screen does on its way
+ * out. spec-app-services.md 10.3. */
+bool nd_svc_format_cancel(void);
+
+/* Start it and wait, in slices, for a caller that has nothing to draw.
  *
  * false is "the card was not formatted", and it covers a card that is absent,
  * one that is not removable, a helper that is missing, and a helper that ran
- * and failed. Settings drew one sentence for the last of those already and
- * now draws it for all four.
- *
- * It blocks for as long as the format takes, which is the same thing the app
- * did when it ran the helper itself. What is no longer true is that the app
- * can KILL the helper: it used to hold the pid and cancel it from
- * app_shutdown(), and now the core holds it. That is a change for the better
- * on its own terms -- an mkfs interrupted by an incoming call leaves a card
- * that mounts nowhere -- but it is a change, and spec-app-services.md 10.3 is
- * where the argument is. */
+ * and failed. The waiting happens in THIS process now, so the core, the broker
+ * and the UI thread are free the whole time -- but this call still ties up the
+ * caller, so a screen with a progress bar to draw wants the three verbs above
+ * instead. Aborts and cancels the job if nd_app_should_exit() goes true, which
+ * is the incoming-call teardown in nd_app.h. */
 bool nd_svc_format_card(void);
 
 /* neodct-sdcard layout, performed by the core: restate the ownership and
@@ -433,19 +510,57 @@ void nd_svc_halt_simulate(const nd_svc_halt_sim *sim);
  *      into every test binary, so a test cannot forget to.
  *   3. NEODCT_ROOT is set -> refused. `make test` sets it for every binary
  *      and every app they launch, and nothing on the phone ever does.
- *   4. Otherwise only ROOT may. On the phone the core runs as ndusr and asks
- *      the broker, which is root and does the spawning; the direct path in
- *      svc_halt() is for a root core with no broker. A non-root process
- *      asking for a real halt is a test or a bug, and on a desktop it is the
- *      person at the keyboard, whom logind will happily oblige.
+ *   4. Otherwise only ROOT may. A non-root process asking to SPAWN a real
+ *      halt is a test or a bug, and on a desktop it is the person at the
+ *      keyboard, whom logind will happily oblige.
  *
  * Refusing surfaces as "this image has no halt binary", which is already the
- * one failure an app is told about; the log line names the rule. */
+ * one failure an app is told about; the log line names the rule.
+ *
+ * ============ AND THE QUESTION THIS TABLE IS NOT ============
+ *
+ * "May I spawn a halt HERE" is not "may this phone be switched off". Rule 4
+ * was written as though it were, and every real phone lost its power button
+ * for it:
+ *
+ *   Power (ndusr) -> SVC_OP_POWEROFF -> the CORE's serving thread, which since
+ *   0.5.0b is also ndusr -> halt_resolve() -> rule 4 -> refused, before the
+ *   broker was ever asked. nd_broker_halt() sits behind `if (halt.pending)`,
+ *   which a refusal never sets, so the one process that still has CAP_SYS_BOOT
+ *   never heard about it. The panel said "Power off failed." on every boot of
+ *   every phone, and the serial log blamed the image for having no poweroff.
+ *
+ * The core is not the process that spawns the halt any more, so the gate does
+ * not belong where the core decides. It belongs where the spawn happens, which
+ * is the broker -- and the broker is root, so rule 4 passes there honestly.
+ *
+ * The core therefore asks a SECOND question, below: may I hand this to the
+ * broker? Its rows are the same rows in the same order, with "there is a
+ * broker to ask" in place of "this process is root". The interlock is not
+ * weakened by it: rows 2 and 3 still refuse, so a disarmed test binary and
+ * anything under NEODCT_ROOT cannot delegate a real halt either -- and the
+ * broker, forked from that same test binary, has inherited the same latch and
+ * would refuse a second time. What the test suite gives up is only the ability
+ * to say "nothing was RESOLVED"; what it keeps is "nothing was SPAWNED", which
+ * is the property the two workstation shutdowns were about. */
 bool nd_svc_halt_allowed(void);
 
 /* The rule itself, every input a parameter, so a test can cover the whole
- * table without being root or on a phone. */
+ * table without being root or on a phone.
+ *
+ * READ IT AS: may THIS process fork and exec a real poweroff. That is a
+ * narrower question than "may the phone be halted" -- see above. */
 bool nd_svc_halt_allowed_for(bool sim_installed, bool disarmed, bool in_test_root, bool is_root);
+
+/* The delegation question: may this process ask the root broker to halt on its
+ * behalf? True on a phone, whose core is ndusr and whose broker is root.
+ *
+ * `have_broker` is nd_broker_default() != NULL, which nd-core sets only after
+ * a successful drop -- so on a root core with no broker this is false and the
+ * spawn table above answers instead, exactly as it always did. */
+bool nd_svc_halt_delegate_allowed(void);
+bool nd_svc_halt_delegate_allowed_for(bool sim_installed, bool disarmed, bool in_test_root,
+                                      bool have_broker);
 
 /* Rule 2. Sticky: once called, this process never resolves a real halt.
  * Production never calls it; the test harness does, before main(). */
@@ -532,10 +647,87 @@ bool nd_svc_client_active(void);
  */
 typedef struct nd_svc_server nd_svc_server;
 
+/* ------------------------------------------------------------------ *
+ * WHICH VERBS A PARTICULAR SOCKET CARRIES
+ * ------------------------------------------------------------------ *
+ *
+ * ============ WHY THERE IS A MASK AT ALL ============
+ *
+ * The socket used to be all-or-nothing, and an untrusted app got nothing:
+ * nd_proc_launch_app() called nd_svc_server_open() only when the app was
+ * trusted, so an app the owner installed from a card had no channel and
+ * every nd_svc_* call in it answered "not present". It could not read the
+ * battery. It could not read the clock. It could not tell whether the phone
+ * had signal. Those are three things a wallpaper clock or a game pause
+ * screen wants and none of them costs the owner anything.
+ *
+ * All-or-nothing was right while the only untrusted thing was the browser,
+ * where the socket is a straight line from a web page to a root thread that
+ * will send an SMS. It stopped being right when an installed app became
+ * untrusted too, because it answered a question nobody had asked: an
+ * installed app does not need SEND_SMS, and refusing SEND_SMS is not a
+ * reason to refuse BATTERY.
+ *
+ * ============ AND WHY IT DOES NOT WEAKEN "VALIDATE THE RECORD" ============
+ *
+ * spec-app-services.md 5 is blunt that this wire has no peer credential
+ * check: no SO_PEERCRED, no SCM_CREDENTIALS, nothing. So nothing a SENDER
+ * says about itself can be believed, and a mask asserted in the request would
+ * be worthless.
+ *
+ * This mask is not in the request. It is bound to the SOCKET at creation, by
+ * the core, before the fork -- so it is exactly as unforgeable as the
+ * socket's existence already is, which is the property the withholding
+ * relied on in the first place. A child cannot widen it, and neither can
+ * anything the child execs, because there is nothing on the wire to widen.
+ *
+ * The refusal happens BEFORE dispatch, not inside each verb, so a verb added
+ * later is refused to untrusted callers until somebody deliberately adds its
+ * bit here.
+ *
+ * ============ WHAT IS DELIBERATELY NOT IN THE UNTRUSTED SET ============
+ *
+ * The bit numbers are the wire op numbers, which live in nd_svc.c because
+ * they are the wire and not the API; nd_svc.c carries a _Static_assert that
+ * these two constants still name the operations this comment says they do.
+ *
+ *   SEND_SMS            costs the owner money, and is the verb the whole
+ *                       withholding was written for.
+ *   REBOOT, POWEROFF    turn the phone off. An app the owner installed from
+ *                       a card must not be able to end a call that way.
+ *   SET_CLOCK           the clock gates every TLS "not valid before" check
+ *                       and the update system's signature check.
+ *   LAYOUT_CARD,        they rewrite the owner's storage. FORMAT_START
+ *   FORMAT_*            erases it.
+ *   BATTERY_QUICKSTART  it looks like a read and it is not: it WRITES to the
+ *                       fuel gauge, telling it to re-learn the cell from
+ *                       scratch. An app that called it in a loop would leave
+ *                       the owner with a battery meter that lies.
+ *
+ * What is left is the pair that only ever reads: the modem snapshot (signal
+ * bars, registration, whether a call is up) and the battery snapshot. */
+#define ND_SVC_OPS_ALL 0xFFFFFFFFu
+
+/* SVC_OP_MODEM_STATUS (2) and SVC_OP_BATTERY (3). */
+#define ND_SVC_OPS_UNTRUSTED ((1u << 2) | (1u << 3))
+
 /* socketpair(AF_UNIX, SOCK_SEQPACKET). Both ends are O_CLOEXEC; the child's
  * has its flag cleared by the descriptor plan, exactly as the key channel
- * and the crash pipe do. Owned by the caller. */
-nd_err nd_svc_server_open(nd_svc_server **out);
+ * and the crash pipe do. Owned by the caller.
+ *
+ * `allowed_ops` is the mask above. Anything outside it is answered
+ * SVC_ST_NO_SERVICE before it is dispatched -- the same answer a core with
+ * no modem gives, so an app needs no new branch and draws what it already
+ * drew when the service was absent. */
+nd_err nd_svc_server_open(nd_svc_server **out, uint32_t allowed_ops);
+
+/* The mask test on its own, exposed for the same reason nd_broker.h exposes
+ * its two policy decisions: what a test can reach is what gets tested, and a
+ * test that has to stand up a server, fork a child and drive a socket to ask
+ * "is POWEROFF in the untrusted set" can only cover the cases the host
+ * happens to support. `op` is a wire op number; anything at or above 32 has
+ * no bit and is refused. */
+bool nd_svc__op_allowed(uint32_t allowed_ops, uint32_t op);
 
 /* The descriptor to hand the child, or -1. */
 int nd_svc_server_child_fd(const nd_svc_server *s);

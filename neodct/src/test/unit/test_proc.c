@@ -1258,6 +1258,321 @@ static void t_the_stock_name_alone_grants_nothing(void)
     CHECK(nd_proc_app_needs_root(&eng, true));
 }
 
+/* ------------------------------------------------------------------ *
+ * The key device the core makes for an app that asks for one
+ * ------------------------------------------------------------------ *
+ *
+ * These are the DECISIONS, which is all a host test can reach: creating the
+ * device needs /dev/uinput, and the harness sandbox deliberately has none
+ * (test_harness.c asserts that). What broke on the phone was never the ioctl
+ * sequence -- it was who was allowed to run it, and what the manifest was
+ * asked. So the manifest parse and the map table are pinned here, and the
+ * permission itself is nd-selftest's job on a real boot.
+ */
+
+static bool write_manifest(const char *dir, const char *json)
+{
+    char path[ND_PATH_MAX];
+    char resolved[ND_PATH_MAX];
+    FILE *f;
+
+    if (nd_mkdir_p(dir, 0755u) != ND_OK)
+        return false;
+    if (nd_snprintf(path, sizeof path, "%s/manifest.json", dir) != ND_OK)
+        return false;
+    if (nd_path_resolve(resolved, sizeof resolved, path) != ND_OK)
+        return false;
+    f = fopen(resolved, "wb");
+    if (f == NULL)
+        return false;
+    (void)fputs(json, f);
+    (void)fclose(f);
+    return true;
+}
+
+static void t_keydev_map_names(void)
+{
+    /* Absent is not an error, it is the default: an app that says
+     * useKeypadDevice and nothing else wants the phone's own keys. */
+    CHECK_INT(nd_app_keydev_from_name(NULL), ND_APP_KEYDEV_RAW);
+    CHECK_INT(nd_app_keydev_from_name(""), ND_APP_KEYDEV_RAW);
+    CHECK_INT(nd_app_keydev_from_name("raw"), ND_APP_KEYDEV_RAW);
+    CHECK_INT(nd_app_keydev_from_name("browser"), ND_APP_KEYDEV_BROWSER);
+    CHECK_INT(nd_app_keydev_from_name("shell"), ND_APP_KEYDEV_SHELL);
+
+    /* NONE from the table means "that is not a map name", which the caller
+     * turns into raw-with-a-log-line. Case matters, and so does spelling: a
+     * silent near-miss would be a browser that came up with no cursor. */
+    CHECK_INT(nd_app_keydev_from_name("Browser"), ND_APP_KEYDEV_NONE);
+    CHECK_INT(nd_app_keydev_from_name("browsers"), ND_APP_KEYDEV_NONE);
+    CHECK_INT(nd_app_keydev_from_name("none"), ND_APP_KEYDEV_NONE);
+}
+
+static void t_keydev_manifest(void)
+{
+    const char *base = "/NeoDCT/User/testapps/KeyDev";
+    char dir[ND_PATH_MAX];
+
+#define KD_CASE(sub, json, want)                                                 \
+    do {                                                                         \
+        CHECK(nd_snprintf(dir, sizeof dir, "%s/" sub, base) == ND_OK);           \
+        CHECK(write_manifest(dir, json));                                        \
+        CHECK_INT(nd_app_manifest_key_device(dir), (want));                      \
+    } while (0)
+
+    /* ABSENT MEANS NO, the opposite of useWallpaper. A key device is a real
+     * evdev node in a global namespace that every other program on the phone
+     * can also open, so an app that never mentioned it must not get one --
+     * two programs reading the same keys is worse than none. Every manifest
+     * written before this key existed lands here. */
+    KD_CASE("Silent", "{\"name\": \"Silent\", \"id\": \"113\"}\n", ND_APP_KEYDEV_NONE);
+    KD_CASE("Off", "{\"name\": \"Off\", \"useKeypadDevice\": false}\n", ND_APP_KEYDEV_NONE);
+
+    /* Asking with no map is asking for the phone's own sixteen keys. */
+    KD_CASE("Raw", "{\"name\": \"Raw\", \"useKeypadDevice\": true}\n", ND_APP_KEYDEV_RAW);
+    KD_CASE("Explicit",
+            "{\"name\": \"E\", \"useKeypadDevice\": true, \"keypadDeviceMap\": \"raw\"}\n",
+            ND_APP_KEYDEV_RAW);
+    KD_CASE("Browser",
+            "{\"name\": \"B\", \"useKeypadDevice\": true, "
+            "\"keypadDeviceMap\": \"browser\"}\n",
+            ND_APP_KEYDEV_BROWSER);
+    KD_CASE("Shell",
+            "{\"name\": \"S\", \"useKeypadDevice\": true, \"keypadDeviceMap\": \"shell\"}\n",
+            ND_APP_KEYDEV_SHELL);
+
+    /* A TYPO MUST NOT TAKE THE KEYPAD AWAY. The app asked for a device and
+     * gets one; only the translation is lost, and the log names the word. */
+    KD_CASE("Typo",
+            "{\"name\": \"T\", \"useKeypadDevice\": true, \"keypadDeviceMap\": \"brwser\"}\n",
+            ND_APP_KEYDEV_RAW);
+    /* A non-boolean where the boolean goes is not an app asking. */
+    KD_CASE("NotABool", "{\"name\": \"N\", \"useKeypadDevice\": \"yes\"}\n",
+            ND_APP_KEYDEV_NONE);
+    KD_CASE("NotAnObject", "[1, 2, 3]\n", ND_APP_KEYDEV_NONE);
+    KD_CASE("Garbage", "{ this is not json\n", ND_APP_KEYDEV_NONE);
+#undef KD_CASE
+
+    /* No manifest at all, a directory that is not there, and the CORE's own
+     * "" -- the core is the process that MAKES the device, so it can never be
+     * one that asks for one. */
+    CHECK(nd_mkdir_p("/NeoDCT/User/testapps/KeyDev/Empty", 0755u) == ND_OK);
+    CHECK_INT(nd_app_manifest_key_device("/NeoDCT/User/testapps/KeyDev/Empty"),
+              ND_APP_KEYDEV_NONE);
+    CHECK_INT(nd_app_manifest_key_device("/NeoDCT/User/testapps/KeyDev/Missing"),
+              ND_APP_KEYDEV_NONE);
+    CHECK_INT(nd_app_manifest_key_device(""), ND_APP_KEYDEV_NONE);
+    CHECK_INT(nd_app_manifest_key_device(NULL), ND_APP_KEYDEV_NONE);
+}
+
+/* THE SHIPPED BROWSER ASKS, AND ASKS FOR THE BROWSER MAP.
+ *
+ * The manifest is the only thing that connects "netsurf needs a keyboard" to
+ * "the core makes one", and it is a JSON file in the overlay that no compiler
+ * checks. Read the real one. */
+static void t_the_browser_asks_for_a_key_device(void)
+{
+    CHECK_INT(nd_app_manifest_key_device(ND_PATH_APPS_DIR "/Browser"), ND_APP_KEYDEV_BROWSER);
+
+    /* And an ordinary app does not, because it reads the pipe like everything
+     * else and a second key source would double every press. */
+    CHECK_INT(nd_app_manifest_key_device(ND_PATH_APPS_DIR "/PhoneBook"), ND_APP_KEYDEV_NONE);
+    CHECK_INT(nd_app_manifest_key_device(ND_PATH_APPS_DIR "/Settings"), ND_APP_KEYDEV_NONE);
+}
+
+/* ============ "NOBODY'S CHILD" IS NOT "EXITED CLEANLY" ============
+ *
+ * collect() used to answer ECHILD by synthesising exited=true, status=0. That
+ * is the line that told nd_svc a root mke2fs it had failed to signal had
+ * finished cleanly, while the mke2fs went on writing the owner's card under
+ * "Formatting failed." Since the core dropped to ndusr, waiting on a pid it
+ * did not fork is the ordinary case rather than a bug, so the answer has to
+ * be one a caller can act on.
+ *
+ * getppid() is used deliberately: it is a real, live pid that this process
+ * provably did not fork, so the branch is reached for the right reason rather
+ * than because the pid does not exist. NOTHING IS SIGNALLED -- this asserts
+ * about nd_proc_wait() and never about nd_proc_terminate(), which would send
+ * SIGTERM to the test runner. */
+static void t_waiting_on_somebody_elses_child_is_not_success(void)
+{
+    nd_proc_status st;
+
+    memset(&st, 0xAA, sizeof st);
+    CHECK_INT(nd_proc_wait(getppid(), 0.0, &st), ND_ERR_NOTFOUND);
+    CHECK(!st.exited);
+
+    /* And a timeout cannot change whose child it is, so it must not spend
+     * one: this returns immediately even though a full second was offered. */
+    memset(&st, 0xAA, sizeof st);
+    {
+        struct timespec a;
+        struct timespec b;
+        double spent;
+
+        (void)clock_gettime(CLOCK_MONOTONIC, &a);
+        CHECK_INT(nd_proc_wait(getppid(), 1.0, &st), ND_ERR_NOTFOUND);
+        (void)clock_gettime(CLOCK_MONOTONIC, &b);
+        spent = (double)(b.tv_sec - a.tv_sec) + (double)(b.tv_nsec - a.tv_nsec) / 1e9;
+        CHECK(spent < 0.5);
+    }
+}
+
+/* ============ THE EXIT-122 CLASS, ASKED IN THE PARENT ============
+ *
+ * The headline bug of 0.5.9a. A child asked to become a user by a process
+ * that already IS that user died at exit 122 before its execve, because
+ * setgroups() needs CAP_SETGID even to set the list it already has -- and
+ * fork() having succeeded meant nd_proc_spawn() had ALREADY reported success.
+ * Every DTMF tone, the SMS chirp, the calendar alert and the incoming-call
+ * ringtone died that way for eight releases, several a second while dialling,
+ * with nothing in the log.
+ *
+ * Both halves are checked here, and the SECOND is the one that matters more:
+ * the refusal is easy to get right and useless on its own. What fixes the
+ * phone is that asking to become the user you already are is a NO-OP and the
+ * child runs.
+ *
+ * Skipped as root, where the kernel would allow the drop and there is nothing
+ * to refuse. A SKIP is not a PASS; the suite runs unprivileged, which is the
+ * configuration the phone is in. */
+static void t_a_drop_this_process_cannot_make_is_refused_here(void)
+{
+    static const char *const TRUE_ARGV[] = {"/bin/true", NULL};
+    nd_proc_spec spec;
+    nd_proc_status st;
+    pid_t pid = -1;
+
+    if (geteuid() == 0) {
+        fprintf(stderr, "test_proc: running as root; skipping the drop guard\n");
+        return;
+    }
+
+    /* Somebody else. There is no privilege to become them with, so the answer
+     * is a refusal the CALLER can see -- not a corpse the caller is told was
+     * a successful spawn. */
+    memset(&spec, 0, sizeof spec);
+    spec.argv = TRUE_ARGV;
+    spec.owner = ND_OWNER_TONE;
+    spec.run_as.valid = true;
+    spec.run_as.uid = geteuid() + 1u;
+    spec.run_as.gid = getegid();
+    pid = -1;
+    CHECK_INT(nd_proc_spawn("/bin/true", &spec, &pid), ND_ERR_PERM);
+    /* And nothing was forked: a refusal that still left a child would be the
+     * same silent failure wearing a different error code. */
+    CHECK(pid == -1);
+
+    /* Ourselves. This is the case the phone is actually in -- an ndusr core
+     * asking for an ndusr tone -- and it must RUN, exit 0, and never reach
+     * 122. */
+    spec.run_as.uid = geteuid();
+    spec.run_as.gid = getegid();
+    pid = -1;
+    CHECK_INT(nd_proc_spawn("/bin/true", &spec, &pid), ND_OK);
+    CHECK(pid > 0);
+    CHECK_INT(nd_proc_wait(pid, 5.0, &st), ND_OK);
+    CHECK(st.exited);
+    CHECK_INT(st.exit_status, 0);
+}
+
+/* The drain has to be safe to call from anywhere and at any time, including
+ * before the reaper exists and with nothing to say. It logs; it must never
+ * be the reason a caller stops. */
+static void t_the_reaper_report_is_always_safe_to_call(void)
+{
+    nd_proc_reap_report();
+    nd_proc_reap_report();
+    CHECK(true);
+}
+
+/* THE STOCK WALLPAPER ART IS NOT THE OWNER'S DATA.
+ *
+ * /NeoDCT/System/wallpapers was in the untrusted hide list and is not any
+ * more: it is read-only decoration on the dm-verity'd squashfs, identical on
+ * every phone, and emptying it made every installed app draw its chrome on
+ * black while the rest of the phone drew it on the wallpaper. The owner's own
+ * pictures are a different directory -- 0750 ndusr:ndusr on the card -- and
+ * are kept out by the mode bits, needing no entry here.
+ *
+ * The seven that remain are checked by name so that "tidying" one out is a
+ * test failure rather than a silent widening. */
+static void t_the_hide_list_covers_data_and_not_decoration(void)
+{
+    static const char *const HIDE[] = ND_PROC_UNTRUSTED_HIDE_PATHS;
+    static const char *const MUST[] = {
+        "/NeoDCT/System/engineering", "/NeoDCT/System/keys",    "/NeoDCT/System/tones",
+        "/NeoDCT/User/db",           "/NeoDCT/User/.remote",    "/NeoDCT/User/.ndsys",
+        "/NeoDCT/User/.seedrng",
+    };
+    size_t i;
+    size_t n = 0u;
+
+    for (i = 0u; HIDE[i] != NULL; i++) {
+        CHECK(strcmp(HIDE[i], "/NeoDCT/System/wallpapers") != 0);
+        n++;
+    }
+    CHECK_INT((int)n, (int)ND_ARRAY_LEN(MUST));
+
+    for (i = 0u; i < ND_ARRAY_LEN(MUST); i++) {
+        size_t k;
+        bool found = false;
+
+        for (k = 0u; HIDE[k] != NULL; k++) {
+            if (strcmp(HIDE[k], MUST[i]) == 0)
+                found = true;
+        }
+        CHECK(found);
+    }
+}
+
+/* manifest.json's "wantsPerformance".
+ *
+ * ABSENT MEANS FALSE, which is the opposite of useWallpaper and the same
+ * direction as the key device: this one costs battery, so an app that never
+ * mentioned it must not get the CPU. Every manifest written before the key
+ * existed therefore lands on false, which is what the phone did yesterday. */
+static void t_wants_performance_manifest(void)
+{
+    const char *base = "/NeoDCT/User/testapps/Perf";
+    char dir[ND_PATH_MAX];
+
+#define WP_CASE(sub, json, want)                                       \
+    do {                                                               \
+        CHECK(nd_snprintf(dir, sizeof dir, "%s/" sub, base) == ND_OK); \
+        CHECK(write_manifest(dir, json));                              \
+        CHECK(nd_proc_app_wants_performance(dir) == (want));           \
+    } while (0)
+
+    WP_CASE("Silent", "{\"name\": \"Silent\", \"id\": \"113\"}\n", false);
+    WP_CASE("Off", "{\"name\": \"Off\", \"wantsPerformance\": false}\n", false);
+    WP_CASE("On", "{\"name\": \"On\", \"wantsPerformance\": true}\n", true);
+
+    /* A string is not a boolean. nd_json keeps the two types apart precisely
+     * so "true" cannot buy what true buys -- the same rule the update
+     * manifest applies to "image_blocks": true. */
+    WP_CASE("NotABool", "{\"name\": \"N\", \"wantsPerformance\": \"true\"}\n", false);
+    WP_CASE("NotAnObject", "[1, 2, 3]\n", false);
+    WP_CASE("Garbage", "{ this is not json\n", false);
+#undef WP_CASE
+
+    /* No manifest, no directory, and the CORE's own "" -- the core is the
+     * process that GRANTS the ceiling, so it can never be one that asks. */
+    CHECK(nd_mkdir_p("/NeoDCT/User/testapps/Perf/Empty", 0755u) == ND_OK);
+    CHECK(!nd_proc_app_wants_performance("/NeoDCT/User/testapps/Perf/Empty"));
+    CHECK(!nd_proc_app_wants_performance("/NeoDCT/User/testapps/Perf/Missing"));
+    CHECK(!nd_proc_app_wants_performance(""));
+    CHECK(!nd_proc_app_wants_performance(NULL));
+
+    /* And no app the image ships asks for it today. The key exists for apps
+     * the owner installs -- an emulator is the case it was written for -- and
+     * a stock app that quietly acquired it would be a battery regression
+     * nobody had agreed to. */
+    CHECK(!nd_proc_app_wants_performance(ND_PATH_APPS_DIR "/PhoneBook"));
+    CHECK(!nd_proc_app_wants_performance(ND_PATH_APPS_DIR "/Browser"));
+    CHECK(!nd_proc_app_wants_performance(ND_PATH_APPS_DIR "/Koki"));
+}
+
 int main(void)
 {
     /* This test stands in for nd-core, so it has to do what nd-core does at
@@ -1280,6 +1595,10 @@ int main(void)
     t_a_lookalike_directory_gets_nothing();
     t_no_app_is_the_confined_answer();
     t_the_stock_name_alone_grants_nothing();
+    t_keydev_map_names();
+    t_waiting_on_somebody_elses_child_is_not_success();
+    t_the_hide_list_covers_data_and_not_decoration();
+    t_the_reaper_report_is_always_safe_to_call();
 
     if (!stage_root()) {
         fprintf(stderr, "test_proc: cannot stage a root (step %d); skipping\n", g_stage_step);
@@ -1298,6 +1617,10 @@ int main(void)
     test_clean_exit_draws_nothing();
     test_the_core_survived_and_the_stub_app_runs();
     test_crash_log_rotates();
+    t_keydev_manifest();
+    t_the_browser_asks_for_a_key_device();
+    t_wants_performance_manifest();
+    t_a_drop_this_process_cannot_make_is_refused_here();
 
     drop_stage();
     printf("test_proc: %d checks, %d failures\n", g_checks, g_failures);

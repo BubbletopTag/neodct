@@ -573,6 +573,175 @@ static void test_the_sysfs_name_is_read_when_the_ioctl_cannot_be(void)
     CHECK_STR(name, "NeoDCT Matrix Keypad");
 }
 
+/* ------------------------------------------------------------------ *
+ * Bringing the keypad up, and the decisions behind it
+ * ------------------------------------------------------------------ */
+
+/* A keymap the loader will accept, on the bus and with the driver the caller
+ * names. Written by hand rather than through nd_keymap_save(), because a
+ * fixture built with the code under test cannot catch that code being wrong. */
+static void write_keymap(const char *driver, int bus)
+{
+    char json[512];
+
+    CHECK(nd_snprintf(json, sizeof json,
+                      "{\n"
+                      "  \"col_pins\": [4, 5, 6, 7],\n"
+                      "  \"driver\": \"%s\",\n"
+                      "  \"format\": \"neodct.keymap.v3.matrix.i2c\",\n"
+                      "  \"i2c_addr\": 32,\n"
+                      "  \"i2c_bus\": %d,\n"
+                      "  \"keys\": {\n"
+                      "    \"navikey\": {\"col\": 0, \"row\": 0},\n"
+                      "    \"num_1\": {\"col\": 1, \"row\": 0}\n"
+                      "  },\n"
+                      "  \"row_pins\": [0, 1, 2, 3]\n"
+                      "}\n",
+                      driver, bus) == ND_OK);
+    pt_write_text(ND_PATH_KEYMAP, json);
+}
+
+static void test_transient_errnos_are_the_ones_a_cold_boot_makes(void)
+{
+    /* THE POLICY THIS WHOLE GROUP OF BUGS TURNS ON. Every one of these is
+     * something a Luckfox produces in the first two seconds of userspace and
+     * stops producing shortly afterwards, and every one of them used to be a
+     * permanent "this phone has no keypad" shown to the owner of a working
+     * phone. */
+    CHECK(nd_input_errno_is_transient(EACCES));    /* udev has not applied the group */
+    CHECK(nd_input_errno_is_transient(EPERM));     /* the same, other spelling       */
+    CHECK(nd_input_errno_is_transient(ENOENT));    /* i2c-dev registering late       */
+    CHECK(nd_input_errno_is_transient(ENODEV));
+    CHECK(nd_input_errno_is_transient(ENXIO));     /* nobody answered -- yet         */
+    CHECK(nd_input_errno_is_transient(EREMOTEIO)); /* a NAK on a rising rail         */
+    CHECK(nd_input_errno_is_transient(EAGAIN));    /* rk3x arbitration               */
+    CHECK(nd_input_errno_is_transient(EBUSY));
+    CHECK(nd_input_errno_is_transient(EIO));
+    CHECK(nd_input_errno_is_transient(ETIMEDOUT));
+    CHECK(nd_input_errno_is_transient(EINTR));
+
+    /* And these are not: they say the REQUEST was wrong, and a request that
+     * is wrong now is wrong in thirty seconds. Retrying them is thirty log
+     * lines and thirty seconds spent proving something already known. */
+    CHECK(!nd_input_errno_is_transient(EBADF));
+    CHECK(!nd_input_errno_is_transient(ENOTTY));
+    CHECK(!nd_input_errno_is_transient(EINVAL));
+    CHECK(!nd_input_errno_is_transient(0));
+}
+
+static void test_a_keymap_that_cannot_be_right_is_never_retried(void)
+{
+    /* validate_pins() rejecting a file is not a race and cannot become one. */
+    CHECK_INT(nd_input_classify_open_failure(ND_ERR_INVAL, EACCES), ND_INPUT_FAIL_PERMANENT);
+    CHECK_INT(nd_input_classify_open_failure(ND_ERR_TOOLONG, 0), ND_INPUT_FAIL_PERMANENT);
+
+    /* Everything else is judged on the errno underneath it. */
+    CHECK_INT(nd_input_classify_open_failure(ND_ERR_IO, EACCES), ND_INPUT_FAIL_TRANSIENT);
+    CHECK_INT(nd_input_classify_open_failure(ND_ERR_HARDWARE, EREMOTEIO), ND_INPUT_FAIL_TRANSIENT);
+    CHECK_INT(nd_input_classify_open_failure(ND_ERR_IO, ENOTTY), ND_INPUT_FAIL_PERMANENT);
+
+    CHECK_INT(nd_input_classify_open_failure(ND_OK, 0), ND_INPUT_FAIL_NONE);
+}
+
+static void test_a_backend_can_be_recovered_without_reading_a_key(void)
+{
+    nd_input *in = NULL;
+
+    /* ============ THE HEADLINE BUG, IN ONE CASE ============
+     *
+     * 0.5.7b added a retry for the boot race and put its only call site
+     * inside nd_input_read_event(). A core with NO backend never reaches its
+     * read loop -- core_run() decides what to draw first, and on a Luckfox
+     * there is no spare evdev keyboard to make that decision come out right
+     * -- so the recovery written for this exact race could not execute even
+     * once on the only hardware that needed it. Three releases of fixes did
+     * not fix the keypad error screen for precisely this reason.
+     *
+     * The device appearing between the open and the retry below is the race,
+     * played out in the order the phone plays it. Nothing here reads a key. */
+    CHECK_INT(nd_input_open(&in), ND_OK);
+    CHECK(in != NULL);
+    CHECK(!nd_input_has_backend(in));
+    CHECK(nd_input_no_backend_reason(in)[0] != '\0');
+
+    make_dev_file("/dev/input/event0");
+
+    CHECK(nd_input_retry_backend(in));
+    CHECK(nd_input_has_backend(in));
+    /* And the phone stops telling the owner it has no keys. */
+    CHECK_STR(nd_input_no_backend_reason(in), "");
+
+    nd_input_close(in);
+}
+
+static void test_retrying_a_phone_that_really_has_nothing_is_still_false(void)
+{
+    nd_input *in = NULL;
+
+    CHECK_INT(nd_input_open(&in), ND_OK);
+    CHECK(!nd_input_retry_backend(in));
+    CHECK(!nd_input_has_backend(in));
+    /* Never NULL, and never empty while there is no backend: this string is
+     * what the core puts on the panel. */
+    CHECK(nd_input_no_backend_reason(in)[0] != '\0');
+    nd_input_close(in);
+}
+
+static void test_an_i2c_bus_that_has_not_appeared_says_so_and_not_that_it_is_absent(void)
+{
+    nd_input *in = NULL;
+
+    /* Wording, and it matters: a node that has not registered yet is a "not
+     * yet", and the message must not read as a verdict. The bus number is
+     * named because the first thing anybody does with this message is go and
+     * look at that node. */
+    write_keymap("pcf8575-i2c", 9);
+    CHECK_INT(nd_input_open(&in), ND_OK);
+    CHECK(!nd_input_has_backend(in));
+    CHECK(strstr(nd_input_no_backend_reason(in), "/dev/i2c-9") != NULL);
+    nd_input_close(in);
+}
+
+static void test_a_failed_open_names_the_syscall_and_the_errno(void)
+{
+    nd_input *in = NULL;
+    const char *why;
+
+    /* THE MESSAGE THIS REPLACES: "The keypad on /dev/i2c-3 did not open (a
+     * permission or wiring problem)", printed for all five distinct causes --
+     * two of which are neither permission nor wiring, and the two it does
+     * name having completely different repairs.
+     *
+     * A regular file standing in for the node opens perfectly and then fails
+     * the I2C_SLAVE ioctl, which is exactly the shape of a bus that is not
+     * the bus the keymap thinks it is. */
+    write_keymap("pcf8575-i2c", 9);
+    pt_write_text("/dev/i2c-9", "");
+    CHECK_INT(nd_input_open(&in), ND_OK);
+    CHECK(!nd_input_has_backend(in));
+    why = nd_input_no_backend_reason(in);
+    CHECK(strstr(why, "/dev/i2c-9") != NULL);
+    CHECK(strstr(why, "I2C_SLAVE") != NULL);
+    nd_input_close(in);
+}
+
+static void test_an_unsupported_driver_is_named_in_the_reason(void)
+{
+    nd_input *in = NULL;
+
+    /* The one genuinely permanent verdict in the whole open path: no amount
+     * of waiting turns a keymap that names another driver into one that names
+     * this one. The owner is told which driver, because the only repair is to
+     * re-run the wizard. */
+    write_keymap("gpiozero-matrix", 3);
+    CHECK_INT(nd_input_open(&in), ND_OK);
+    CHECK(!nd_input_has_backend(in));
+    CHECK(strstr(nd_input_no_backend_reason(in), "gpiozero-matrix") != NULL);
+    /* Retrying it changes nothing and must not pretend otherwise. */
+    CHECK(!nd_input_retry_backend(in));
+    nd_input_close(in);
+}
+
 int main(void)
 {
     RUN(test_a_press_and_a_release_both_arrive);
@@ -598,5 +767,12 @@ int main(void)
     RUN(test_opening_a_missing_device_fails_cleanly);
     RUN(test_a_device_name_that_cannot_be_read_is_empty);
     RUN(test_the_sysfs_name_is_read_when_the_ioctl_cannot_be);
+    RUN(test_transient_errnos_are_the_ones_a_cold_boot_makes);
+    RUN(test_a_keymap_that_cannot_be_right_is_never_retried);
+    RUN(test_a_backend_can_be_recovered_without_reading_a_key);
+    RUN(test_retrying_a_phone_that_really_has_nothing_is_still_false);
+    RUN(test_an_i2c_bus_that_has_not_appeared_says_so_and_not_that_it_is_absent);
+    RUN(test_a_failed_open_names_the_syscall_and_the_errno);
+    RUN(test_an_unsupported_driver_is_named_in_the_reason);
     return pt_report("test_input");
 }

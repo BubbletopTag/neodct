@@ -57,9 +57,14 @@ extern "C" {
 #define ND_BROWSER_HOME_ENV "NEODCT_BROWSER_URL"
 #define ND_BROWSER_TAG  "Browser"
 
-/* CONSOLE in main.py. The browser's stderr goes to the serial console so
- * memory pressure can be watched from the host. */
-#define ND_BROWSER_CONSOLE "/dev/console"
+/* libnsfb's own "use exactly this evdev node" override (libnsfb
+ * src/surface/linux.c). Nothing in this tree set it before, so netsurf always
+ * scanned /dev/input/event0..31 and took the first eight EV_KEY devices --
+ * once, at init, with no rescan and no retry. On the phone that scan races
+ * udev applying group `input` to the node the core has just made; on a dev
+ * box it also means netsurf is reading the developer's real keyboard. Naming
+ * the node closes both. */
+#define ND_BROWSER_NSFB_DEV_ENV "NSFB_INPUT_DEV"
 
 /* The browser's HOME. Not ND_ROOT-resolved: it is handed to another program,
  * not opened by us.
@@ -185,9 +190,34 @@ bool nd_browser_is_mem_line(const char *line);
  * The space belongs to the body, not to the painted tag. */
 size_t nd_browser_tagged(char *out, size_t out_sz, const char *body, int code);
 
-/* _log_console(text): open the console, write text + "\r\n", close. CRLF, not
- * LF -- a serial terminal with no ONLCR needs the carriage return. Every
- * error is swallowed, exactly as the Python's bare except does. */
+/* _log_console(text): write text + "\r\n" to THIS PROCESS'S STDERR. CRLF, not
+ * LF -- a serial terminal with no ONLCR needs the carriage return. Every error
+ * is swallowed, exactly as the Python's bare except does.
+ *
+ * ============ IT IS NOT open("/dev/console") ANY MORE ============
+ *
+ * The Python opened CONSOLE = "/dev/console" per call, and the port carried
+ * that over along with an ND_BROWSER_CONSOLE macro naming the path. It could
+ * never have worked: /dev/console is created by devtmpfs root:root 0600 and
+ * nothing raises it -- eudev's stock rules match ptmx, tty, tty[0-9]*, vcs*
+ * and ttyA-Z*, none of which is KERNEL=="console", and this tree's
+ * 61-neodct-devices.rules does not name it either -- while the app is
+ * ndusr_ut. So the open failed on every boot, the descriptor stayed -1, and
+ * -1 means "read and discard" to the pump: netsurf's ENTIRE stderr was thrown
+ * away. Every fetch error, every certificate complaint, the neodct-mem lines,
+ * neodct-play's exit status, the dmesg tail after an abnormal exit. A browser
+ * that this launcher exists to make diagnosable produced no evidence at all
+ * on any 0.5.x phone.
+ *
+ * The fix is deliberately NOT a udev rule. A group the untrusted set holds
+ * with write access to /dev/console is a compromised renderer able to scribble
+ * over the serial console somebody is using to diagnose the phone. fd 2 needs
+ * no permission because this process already has it: nd-apprun inherited it
+ * from the core, which inherited it from nd-crashguard.sh, which appends it to
+ * /NeoDCT/User/logs/core.log -- the file an owner with no serial cable can
+ * read, and where every other subsystem already reports. The macro is gone
+ * with the open() that used it; the tests stage a file and point fd 2 at it,
+ * which is what the phone really does. */
 void nd_browser_log_console(const char *text);
 
 /* ------------------------------------------------------------------ *
@@ -231,14 +261,16 @@ bool nd_browser_cpu_percent_at(nd_browser_cpu *c, double now, double *out);
  * entirely when /dev/console would not open, which left exactly the full pipe
  * its own comment warns about; see BR-4 in OPEN-QUESTIONS.md.
  *
- * `input` and `bridge` may both be NULL. When they are not, keypad presses
- * arriving on the inherited channel are read in the same poll and handed to
- * the bridge, which types them into the uinput keyboard netsurf reads. That
- * is the one structural difference from the Python, where the bridge owned a
- * thread and scanned the i2c expander itself -- an app process no longer
- * touches the bus. See BR-2. */
-void nd_browser_pump(int stderr_fd, int console_fd, nd_browser_cpu *cpu, nd_input *input,
-                     nd_t9_bridge *bridge);
+ * `input` may be NULL. When it is not, keypad presses arriving on the
+ * inherited channel are read in the same poll and DISCARDED -- the channel is
+ * a pipe the core is writing into and a browsing session is long enough to
+ * fill it, so it has to be drained by somebody.
+ *
+ * It used to hand them to an nd_t9_bridge, which typed them into a uinput
+ * keyboard this app had created. That is gone: the device is the core's now
+ * (nd_proc.h, THE KEY DEVICE) because an ndusr_ut process may not open
+ * /dev/uinput, and netsurf reads the node the core made instead. */
+void nd_browser_pump(int stderr_fd, int console_fd, nd_browser_cpu *cpu, nd_input *input);
 
 /* ------------------------------------------------------------------ *
  * _drain_input and _dump_dmesg_tail

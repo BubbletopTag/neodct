@@ -24,7 +24,9 @@
  * ============ THE PREVIEW PLAYS THROUGH mpv, AND WHY ============
  *
  * The Python spawns `nice -n -10 mpv --no-video --audio-buffer=4 --quiet
- * <path>` per preview. nd_notify.h -- the module that owns the sound card --
+ * <path>` per preview (the nice is dropped here -- tones.h explains why it
+ * turned a preview into silence once apps stopped running as root).
+ * nd_notify.h -- the module that owns the sound card --
  * exposes exactly two ways to make a noise: nd_notify_play_tone(), which
  * spawns `aplay` and therefore handles WAV only, and nd_notify_start_ring(),
  * which streams whatever `system.audio.ringtone` names and cannot be pointed
@@ -106,8 +108,9 @@ const char *const nd_tones_menu[ND_TONES_MENU_ITEMS] = {"Ringing Options", "Ring
 
 const char *const nd_tones_ringing_options[ND_TONES_RINGING_ITEMS] = {"Ring", "Vibrate"};
 
-const char *const nd_tones_mpv_cmd[ND_TONES_MPV_ARGC] = {
-    "nice", "-n", "-10", "mpv", "--no-video", "--audio-buffer=4", "--quiet"};
+/* No `nice -n -10` in front of it any more; tones.h says why at length. */
+const char *const nd_tones_mpv_cmd[ND_TONES_MPV_ARGC] = {"mpv", "--no-video", "--audio-buffer=4",
+                                                         "--quiet"};
 
 /* ------------------------------------------------------------------ *
  * ASCII case folding
@@ -199,6 +202,10 @@ const char *nd_tones_display_name(const char *filename, char *out, size_t out_sz
  * argument, and the SIGTERM teardown contract requires it to be able to kill
  * whatever this app spawned. -1 means nothing is playing. */
 static pid_t g_preview_pid = -1;
+
+/* Whether the once-per-session "did the player actually start" measurement has
+ * been made. See the end of nd_tones_preview_play(). */
+static bool g_preview_probed;
 
 pid_t nd_tones_preview_pid(void)
 {
@@ -300,6 +307,36 @@ void nd_tones_preview_play(const char *path)
     }
     (void)close(devnull);
     g_preview_pid = pid;
+
+    /* Did the player survive its own spawn?
+     *
+     * nd_proc_spawn() returns ND_OK the moment fork(2) succeeds -- its header
+     * says so, and says the child reports an execve failure by exiting 127 --
+     * so up to here "playing" means nothing stronger than "forked". With the
+     * child's stderr on /dev/null that made a dead preview and a live one
+     * literally indistinguishable, which is why `nice -n -10` could kill every
+     * preview on the phone without leaving a mark. Asked once per app session;
+     * ND_TONES_PREVIEW_PROBE says why once is enough. */
+    if (pid > 0 && !g_preview_probed) {
+        nd_proc_status st;
+
+        g_preview_probed = true;
+        if (nd_proc_wait(pid, ND_TONES_PREVIEW_PROBE, &st) == ND_OK) {
+            if (st.exited)
+                nd_log(ND_LOG_TONES, "Failed to play %s: %s exited %d%s", path, exe,
+                       st.exit_status,
+                       (st.exit_status >= 120 && st.exit_status <= 127)
+                           ? " without ever reaching execve"
+                           : "");
+            else
+                nd_log(ND_LOG_TONES, "Failed to play %s: %s was killed by signal %d", path, exe,
+                       st.signo);
+            /* Reaped by the probe, so the number must not be kept: preview_stop
+             * would otherwise SIGTERM a pid the kernel may since have handed to
+             * somebody else. */
+            g_preview_pid = -1;
+        }
+    }
 }
 
 void nd_tones_preview_stop(void)

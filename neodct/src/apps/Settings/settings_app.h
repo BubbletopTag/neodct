@@ -89,6 +89,19 @@ extern "C" {
  * with its second sentence missing. */
 extern const char *const nd_setapp_sdcard_legacy;
 extern const char *const nd_setapp_sdcard_legacy_help;
+
+/* And the pair for a card that was made on somebody else's computer --
+ * ND_CARD_FOREIGN. Same five-line budget, same reason it is a named constant
+ * rather than a literal: it is a dialog, and a dialog that overflows is
+ * clipped with a glyph this font cannot draw.
+ *
+ * Kept separate from the legacy pair even though both end at the same offer,
+ * because the two are not the same fault and the remedies differ. A legacy
+ * card WORKS for music and updates and only fails at apps; a foreign card
+ * cannot be read at all here, and the owner has a second remedy the legacy
+ * one does not -- copy the files across on the computer that owns them. */
+extern const char *const nd_setapp_sdcard_foreign;
+extern const char *const nd_setapp_sdcard_foreign_help;
 /* SUPPORTED_WALLPAPERS. A real two-element tuple here, unlike the Tones
  * app's `(".mp3")`, which is a string (OPEN-QUESTIONS.md TN-2). */
 /* .gif joined the two the Python shipped when animated wallpapers landed. It
@@ -155,6 +168,10 @@ extern const char *const nd_setapp_install_replace;
 /* What an install screen says about a card that cannot hold apps: the
  * legacy FAT card. Points at the Memory card row, which offers the reformat. */
 extern const char *const nd_setapp_install_legacy;
+
+/* And for the card that belongs to another computer: not "set it up first",
+ * which is an instruction that cannot be followed. */
+extern const char *const nd_setapp_install_foreign;
 
 /* ------------------------------------------------------------------ *
  * The BT Audio screen

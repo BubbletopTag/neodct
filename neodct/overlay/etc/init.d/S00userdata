@@ -132,6 +132,44 @@ apply_layout() {
         chown ndusr:ndusr "$USER_DIR/$name" 2>/dev/null
         chmod 0640 "$USER_DIR/$name" 2>/dev/null
     done
+
+    # ============ THE TWO SUBTREES WHOSE CONTENTS HAVE AN OWNER ============
+    #
+    # Everything above sets the mode and owner of a DIRECTORY and stops there,
+    # because a blanket chmod would take the 0600 ssh keys with it. Two
+    # subtrees need their contents said out loud anyway, and both were wrong on
+    # a phone that had been running for a while.
+    #
+    #   browser/  belongs to ndusr_ut. The one-time migration below hands the
+    #             whole partition to ndusr:ndusr, contents included, and this
+    #             pass then restored only the DIRECTORY -- so on a phone
+    #             upgraded from an image predating the users table the cookie
+    #             jar, the history and the cache became ndusr:ndusr 0640 and
+    #             uid 1001 could neither read them nor write them again. The
+    #             directory is group-writable, so netsurf makes replacements
+    #             and the profile is merely lost rather than the browser being
+    #             broken -- which is exactly why nobody noticed. The migration
+    #             now prunes this directory; this is the repair for a phone
+    #             that already took it.
+    #
+    #   .remote/  belongs to ndusr and is written by ROOT. nd_main.c starts the
+    #             remote shell at step 3, before the drop at step 4b, so the
+    #             host key, sshd.pid and remote.log are created root:root 0600
+    #             under run_neodct.sh's umask 0027. The RemoteShell APP is
+    #             ndusr, and its later open() of remote.log is then EACCES --
+    #             the app reports the shell as ON and cannot write a line about
+    #             what happened to it. Nothing in NEODCT_USER_FILES covers a
+    #             subdirectory's contents, and the recursive migration runs
+    #             once, on the first boot, long before any of these exist.
+    #
+    # chown only. The modes inside both are deliberate (0600 on a private key)
+    # and are not this script's to restate.
+    if [ -d "$USER_DIR/browser" ]; then
+        chown -R ndusr_ut:ndusr_ut "$USER_DIR/browser/." 2>/dev/null
+        chown ndusr:ndusr_ut "$USER_DIR/browser" 2>/dev/null
+    fi
+    [ -d "$USER_DIR/.remote" ] && \
+        chown -R ndusr:ndusr "$USER_DIR/.remote" 2>/dev/null
 }
 
 case "$1" in
@@ -143,7 +181,7 @@ case "$1" in
     # db     sqlite databases (phonebook, sms, call log)
     # logs   crash.log from run_neodct.sh, update.log from the applier
     # .ndsys pending/installed update records shared with the initramfs
-    # sdcard mountpoint for a removable card (S06sdcard mounts onto it)
+    # sdcard mountpoint for a removable card (S12sdcard mounts onto it)
     # tones/wallpapers user-added media, alongside the stock ones in System
     # .seedrng is where /var/lib/seedrng points: the image is read-only, and
     # seedrng needs somewhere persistent or entropy is reseeded from nothing
@@ -175,11 +213,18 @@ case "$1" in
     #
     # -xdev rather than chown -R: a card mounted at sdcard/ is a FAT
     # filesystem with no ownership to set and possibly gigabytes of it to
-    # walk. At boot S06sdcard has not run yet so there is nothing there, but
+    # walk. At boot S12sdcard has not run yet so there is nothing there, but
     # this script is also something a developer runs by hand.
+    #
+    # browser/ is PRUNED out of it, and that is not tidiness. Its contents
+    # belong to ndusr_ut, the sweep would hand them to ndusr, and apply_layout
+    # afterwards restores only the directory -- so the sweep's one job on that
+    # subtree is to break it. See apply_layout for the repair pass that fixes a
+    # phone which already took the old sweep.
     if ! neodct_owned_already; then
         echo "[userdata] taking ownership of $USER_DIR for ndusr" >&2
-        find "$USER_DIR" -xdev -exec chown ndusr:ndusr {} + 2>/dev/null
+        find "$USER_DIR" -xdev -path "$USER_DIR/browser" -prune -o \
+            -exec chown ndusr:ndusr {} + 2>/dev/null
     fi
     apply_layout
     ;;

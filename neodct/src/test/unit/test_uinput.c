@@ -19,6 +19,7 @@
 
 #include "nd_keycodes.h"
 #include "nd_keypad.h"
+#include "nd_t9.h"
 
 #include "platform_test.h"
 
@@ -421,21 +422,98 @@ static void test_the_browser_starts_as_a_dpad(void)
     fake_kbd_close(&fk);
 }
 
-static void test_every_other_key_is_inert_while_scrolling(void)
+static void test_the_corners_of_the_pad_are_the_diagonals(void)
 {
     fake_kbd fk;
     nd_t9_bridge *b;
     ev_native recs[32];
 
-    /* Typing a letter by accident while scrolling is worse than the press
-     * doing nothing. */
+    /* 1, 3, 7 and 9 did nothing at all for three releases -- with 0 and *,
+     * six of this phone's sixteen keys dead in the app the owner reported
+     * the keypad broken in. Read the nine digits as the 3x3 grid they are
+     * printed on and the corners ARE the diagonals; 2/4/6/8 were already its
+     * edges and 5 its centre.
+     *
+     * Each arrives as the two arrows it is made of, VERTICAL FIRST, because
+     * netsurf moves its pointer once per press and clamps each axis on its
+     * own -- a diagonal that arrived as one event would lose an axis at a
+     * page edge. */
     fake_kbd_open(&fk);
     b = nd_t9_bridge_new_for_test(ND_BRIDGE_BROWSER, &fk.kbd);
     CHECK(b != NULL);
 
-    nd_t9_bridge_handle_code(b, 4);  /* keypad 3: no arrow, no letter */
-    nd_t9_bridge_handle_code(b, 11); /* keypad 0                      */
-    nd_t9_bridge_handle_code(b, 42); /* star                          */
+    nd_t9_bridge_handle_code(b, ND_KEY_1);
+    CHECK_INT(drain(&fk, recs, 32u), 8);
+    check_rec(&recs[0], EV_KEY_T, 103u, 1, "1 is up");
+    check_rec(&recs[4], EV_KEY_T, 105u, 1, "1 is then left");
+
+    nd_t9_bridge_handle_code(b, ND_KEY_3);
+    CHECK_INT(drain(&fk, recs, 32u), 8);
+    check_rec(&recs[0], EV_KEY_T, 103u, 1, "3 is up");
+    check_rec(&recs[4], EV_KEY_T, 106u, 1, "3 is then right");
+
+    nd_t9_bridge_handle_code(b, ND_KEY_7);
+    CHECK_INT(drain(&fk, recs, 32u), 8);
+    check_rec(&recs[0], EV_KEY_T, 108u, 1, "7 is down");
+    check_rec(&recs[4], EV_KEY_T, 105u, 1, "7 is then left");
+
+    nd_t9_bridge_handle_code(b, ND_KEY_9);
+    CHECK_INT(drain(&fk, recs, 32u), 8);
+    check_rec(&recs[0], EV_KEY_T, 108u, 1, "9 is down");
+    check_rec(&recs[4], EV_KEY_T, 106u, 1, "9 is then right");
+
+    nd_t9_bridge_free_for_test(b);
+    fake_kbd_close(&fk);
+}
+
+static void test_star_and_zero_are_the_page_keys(void)
+{
+    fake_kbd fk;
+    nd_t9_bridge *b;
+    ev_native recs[32];
+
+    /* The cursor steps six pixels and only scrolls once it is pinned against
+     * an edge, so a screenful of a web page is about thirty presses of 8 and
+     * there is no key that does it in one. These two are that key, and they
+     * are sent as the real KEY_PAGEUP/KEY_PAGEDOWN rather than as a burst of
+     * arrows: thirty synthesised arrows would cost netsurf thirty pointer
+     * warps and redraws on a single core and would read as a hang.
+     *
+     * The keycodes are the contract in nd_t9.h, checked against ITS names
+     * rather than against literals repeated here, because the whole point of
+     * the contract is that one place says what the number is. */
+    fake_kbd_open(&fk);
+    b = nd_t9_bridge_new_for_test(ND_BRIDGE_BROWSER, &fk.kbd);
+    CHECK(b != NULL);
+
+    nd_t9_bridge_handle_code(b, ND_KEY_STAR);
+    CHECK_INT(drain(&fk, recs, 32u), 4);
+    check_rec(&recs[0], EV_KEY_T, ND_T9_BROWSER_KEY_PAGE_UP, 1, "star is page up");
+
+    nd_t9_bridge_handle_code(b, ND_KEY_0);
+    CHECK_INT(drain(&fk, recs, 32u), 4);
+    check_rec(&recs[0], EV_KEY_T, ND_T9_BROWSER_KEY_PAGE_DOWN, 1, "0 is page down");
+
+    nd_t9_bridge_free_for_test(b);
+    fake_kbd_close(&fk);
+}
+
+static void test_a_key_the_phone_does_not_have_is_still_inert(void)
+{
+    fake_kbd fk;
+    nd_t9_bridge *b;
+    ev_native recs[32];
+
+    /* Every one of the sixteen keys now means something in cursor mode, so
+     * what is left to be inert is what a dev QWERTY produces and the phone
+     * cannot: typing a letter by accident while scrolling is worse than the
+     * press doing nothing. */
+    fake_kbd_open(&fk);
+    b = nd_t9_bridge_new_for_test(ND_BRIDGE_BROWSER, &fk.kbd);
+    CHECK(b != NULL);
+
+    nd_t9_bridge_handle_code(b, 30); /* KEY_A */
+    nd_t9_bridge_handle_code(b, 57); /* KEY_SPACE */
     CHECK_INT(drain(&fk, recs, 32u), 0);
 
     /* Enter, clear and the real arrows still pass through. */
@@ -469,7 +547,11 @@ static void test_hash_walks_nav_abc_upper_123_and_back(void)
     CHECK_STR(nd_t9_bridge_mode_label(b), "123");
     nd_t9_bridge_handle_code(b, ND_KEY_HASH);
     CHECK_STR(nd_t9_bridge_mode_label(b), "nav");
-    CHECK_INT(drain(&fk, recs, 32u), 0);
+
+    /* Four changes, four announcements, and nothing else on the wire. This
+     * used to check that a mode change sent NOTHING, which was true and was
+     * the bug: the label existed and the owner could not see it. */
+    CHECK_INT(drain(&fk, recs, 32u), 16);
 
     /* In abc the number pad types instead of scrolling. */
     nd_t9_bridge_handle_code(b, ND_KEY_HASH);
@@ -479,6 +561,78 @@ static void test_hash_walks_nav_abc_upper_123_and_back(void)
 
     nd_t9_bridge_free_for_test(b);
     fake_kbd_close(&fk);
+}
+
+static void test_the_mode_is_announced_as_a_keycode(void)
+{
+    fake_kbd fk;
+    nd_t9_bridge *b;
+    ev_native recs[32];
+
+    /* THE MODE HAS TO CROSS THE UINPUT DEVICE, because netsurf owns the panel
+     * for the whole session and the core cannot paint over it. One keycode
+     * per mode, not a single "it advanced" pulse: a pulse makes the far side
+     * keep its own copy of the cycle, and that copy is wrong for the rest of
+     * the session the first time it misses one -- which it does whenever the
+     * owner presses # during the seconds netsurf spends starting up, since
+     * the bridge is already running by then.
+     *
+     * So each of these restates the whole truth, and the test walks the cycle
+     * twice to prove the second lap says the same thing as the first. */
+    fake_kbd_open(&fk);
+    b = nd_t9_bridge_new_for_test(ND_BRIDGE_BROWSER, &fk.kbd);
+    CHECK(b != NULL);
+
+    nd_t9_bridge_handle_code(b, ND_KEY_HASH);
+    CHECK_INT(drain(&fk, recs, 32u), 4);
+    check_rec(&recs[0], EV_KEY_T, ND_T9_BROWSER_KEY_MODE_ABC, 1, "abc");
+
+    nd_t9_bridge_handle_code(b, ND_KEY_HASH);
+    CHECK_INT(drain(&fk, recs, 32u), 4);
+    check_rec(&recs[0], EV_KEY_T, ND_T9_BROWSER_KEY_MODE_UPPER, 1, "ABC");
+
+    nd_t9_bridge_handle_code(b, ND_KEY_HASH);
+    CHECK_INT(drain(&fk, recs, 32u), 4);
+    check_rec(&recs[0], EV_KEY_T, ND_T9_BROWSER_KEY_MODE_123, 1, "123");
+
+    nd_t9_bridge_handle_code(b, ND_KEY_HASH);
+    CHECK_INT(drain(&fk, recs, 32u), 4);
+    check_rec(&recs[0], EV_KEY_T, ND_T9_BROWSER_KEY_MODE_NAV, 1, "back to nav");
+
+    nd_t9_bridge_handle_code(b, ND_KEY_HASH);
+    CHECK_INT(drain(&fk, recs, 32u), 4);
+    check_rec(&recs[0], EV_KEY_T, ND_T9_BROWSER_KEY_MODE_ABC, 1, "abc again");
+
+    nd_t9_bridge_free_for_test(b);
+    fake_kbd_close(&fk);
+}
+
+/* Every signalling keycode has to be DECLARED before the kernel will carry
+ * it: an undeclared code is dropped inside evdev with no error on the
+ * descriptor and nothing in dmesg, which is a key that passes every test on
+ * this host -- where the keyboard is a pipe -- and does nothing on the phone.
+ * The pipe cannot catch that, so what is checked here is the table itself. */
+static void test_the_signalling_codes_are_inside_libnsfbs_range(void)
+{
+    /* libnsfb's evdev table (src/surface/linux_evdev.c) maps codes 1..111 and
+     * answers NSFB_KEY_UNKNOWN for anything above, and its linux surface drops
+     * an UNKNOWN before netsurf ever sees the event. A contract keycode above
+     * 111 is therefore unreachable however free it looks here. */
+    CHECK(ND_T9_BROWSER_KEY_PAGE_UP <= 111u);
+    CHECK(ND_T9_BROWSER_KEY_PAGE_DOWN <= 111u);
+    CHECK(ND_T9_BROWSER_KEY_MODE_NAV <= 111u);
+    CHECK(ND_T9_BROWSER_KEY_MODE_ABC <= 111u);
+    CHECK(ND_T9_BROWSER_KEY_MODE_UPPER <= 111u);
+    CHECK(ND_T9_BROWSER_KEY_MODE_123 <= 111u);
+
+    /* And none of them may collide with a key the bridge already sends, or
+     * the far side cannot tell a mode change from a keystroke. */
+    CHECK(ND_T9_BROWSER_KEY_PAGE_UP != ND_KEY_UP);
+    CHECK(ND_T9_BROWSER_KEY_PAGE_DOWN != ND_KEY_DOWN);
+    CHECK(ND_T9_BROWSER_KEY_MODE_NAV != ND_KEY_ENTER);
+    CHECK(ND_T9_BROWSER_KEY_MODE_ABC != ND_KEY_CLEAR);
+    CHECK(ND_T9_BROWSER_KEY_MODE_UPPER != ND_KEY_LEFT);
+    CHECK(ND_T9_BROWSER_KEY_MODE_123 != ND_KEY_RIGHT);
 }
 
 static void test_a_bridge_without_a_matrix_is_a_no_op(void)
@@ -506,8 +660,12 @@ int main(void)
     RUN(test_star_commits_a_pending_letter_first);
     RUN(test_star_still_types_a_star_in_numeric_mode);
     RUN(test_the_browser_starts_as_a_dpad);
-    RUN(test_every_other_key_is_inert_while_scrolling);
+    RUN(test_the_corners_of_the_pad_are_the_diagonals);
+    RUN(test_star_and_zero_are_the_page_keys);
+    RUN(test_a_key_the_phone_does_not_have_is_still_inert);
     RUN(test_hash_walks_nav_abc_upper_123_and_back);
+    RUN(test_the_mode_is_announced_as_a_keycode);
+    RUN(test_the_signalling_codes_are_inside_libnsfbs_range);
     RUN(test_a_bridge_without_a_matrix_is_a_no_op);
     return pt_report("test_uinput");
 }

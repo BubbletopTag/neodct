@@ -28,24 +28,46 @@
  * saying which of them happened, because the same risk table asks for that
  * and a log line moves no pixel. The screen behaviour is the Python's.
  *
- * ============ THE T9 BRIDGE HAS NO THREAD HERE ============
+ * ============ THIS APP NO LONGER MAKES A KEYBOARD ============
  *
- * In Python the app ran inside the core, so the bridge could own a daemon
- * thread and scan the i2c expander directly. Apps are separate processes now
- * and none of them touches the bus -- the core reads the keypad and forwards
- * presses and releases down an inherited pipe. So the bridge is driven from
- * this app's own poll loop, on the descriptor the core writes to, with no
- * thread anywhere. That also keeps CODING-STANDARDS.md 1.1 satisfied for
- * free: the fork() that starts /bin/sh happens in a single-threaded process.
- * The bridge OBJECT and every keycode decision inside it are still
- * lib/nd_t9_bridge.c's. Identical to what the Browser does; OPEN-QUESTIONS.md
- * BR-2 and BR-3 are the record for both.
+ * In Python the app ran inside the core, so it could own a daemon thread,
+ * scan the i2c expander directly and open /dev/uinput itself. Every part of
+ * that has moved. The core reads the keypad and forwards presses and releases
+ * down an inherited pipe, and the core -- which is the only process on this
+ * phone allowed to inject keys -- creates the virtual keyboard, drives the
+ * shell bridge over it and publishes the node it made. This app asks for one
+ * with two lines of manifest.json:
+ *
+ *     "useKeypadDevice": true, "keypadDeviceMap": "shell"
+ *
+ * and that is the whole of its side. The map is the same nd_t9_bridge kind
+ * this file used to build by hand -- multi-tap letters and * as Tab -- so
+ * nothing about what the keys DO has changed.
+ *
+ * ============ WHY REMOVE CODE THAT WORKED ============
+ *
+ * The hand-rolled version was not broken. LinuxShell is an engineering app
+ * and nd_proc_app_needs_root() runs it as root, so its nd_uinput_open()
+ * succeeded, and it is the ONLY app on the phone for which that was still
+ * true. That is the reason to take it out rather than a reason to keep it:
+ * it was the last copy of the thing this release exists to delete, it would
+ * have gone silently keyless the day engineering apps stop being root, and
+ * the failure would have looked like the i2c keypad rather than like this.
+ * There is now one path to a virtual keyboard on this phone and one process
+ * that may take it. See nd_proc.h, THE KEY DEVICE.
+ *
+ * Nothing here reads the node the core made: /bin/sh takes its input from the
+ * tty, and the kernel's own console keyboard handler binds the new device to
+ * the VT the moment it appears. nd_app_key_evdev() is consulted only to know
+ * whether that happened, which is what decides whether the T9 hint below is
+ * true enough to print.
  *
  * ============ THE finally: BLOCK IS THE IMPORTANT PART ============
  *
- * `finally:` runs the teardown -- stop the bridge, hide the cursor, switch
- * back to the UI VT, settle -- whether the shell exited normally or the
- * `with open(...)` raised. C has no unwinding, so it is a labelled tail every
+ * `finally:` runs the teardown -- hide the cursor, switch back to the UI VT,
+ * settle -- whether the shell exited normally or the `with open(...)` raised.
+ * (The Python stopped its bridge there too; there is no longer one here to
+ * stop.) C has no unwinding, so it is a labelled tail every
  * path falls into, and the SIGTERM path falls into it too: if the phone rings
  * while the shell has the screen, the wait loop notices, kills the shell and
  * goes through the SAME teardown, so the incoming-call screen is drawn on the
@@ -70,11 +92,9 @@
 
 #include "nd_app.h"
 #include "nd_input.h"
-#include "nd_keypad.h"
 #include "nd_log.h"
 #include "nd_paths.h"
 #include "nd_proc.h"
-#include "nd_t9.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
@@ -368,8 +388,16 @@ const char **nd_linuxshell_build_envp(void)
 }
 
 /* ------------------------------------------------------------------ *
- * _start_t9_bridge()
- * ------------------------------------------------------------------ */
+ * _start_t9_bridge()'s two questions, which are not the same question
+ * ------------------------------------------------------------------ *
+ *
+ * The Python asked one -- "is there a matrix keypad? then build a bridge" --
+ * because the answer and the act were both its own. They are two processes
+ * apart now. What the HARDWARE is, this app can still work out for itself;
+ * whether a keyboard was actually made for it is the core's answer and only
+ * the core's, and a phone can say yes to the first and no to the second.
+ * That gap is worth a log line rather than silence, which is what app_run()
+ * does with the pair. */
 
 bool nd_linuxshell_needs_key_bridge(const nd_ui *ui)
 {
@@ -393,45 +421,41 @@ bool nd_linuxshell_needs_key_bridge(const nd_ui *ui)
     return nd_app_keypad_is_matrix();
 }
 
-/* start_shell_bridge(ui): NULL on QEMU or a dev build, and NULL when uinput
- * is unavailable. "the shell still works, just without on-device typing" --
- * which is the whole of the Python's bare `except: return None`. */
-static nd_t9_bridge *start_t9_bridge(const nd_ui *ui, nd_uinput_kbd *kbd, bool *have_kbd)
+/* Is on-device typing actually going to work in the session about to start?
+ *
+ * The core answers, and only the core can: it is the process that decided
+ * whether this phone's keypad is the i2c matrix, tried to create the virtual
+ * keyboard, and waited for udev to make its node readable. A non-NULL node is
+ * that whole sequence having succeeded.
+ *
+ * "the shell still works, just without on-device typing" -- the Python's own
+ * comment on the bare `except: return None` this replaces. A false answer is
+ * not an error and does not stop the shell: an engineer with a serial cable
+ * has a keyboard already, and that is who the missing case is usually. */
+static bool t9_typing_available(void)
 {
-    nd_t9_bridge *bridge;
-
-    *have_kbd = false;
-    if (!nd_linuxshell_needs_key_bridge(ui))
-        return NULL;
-    if (nd_uinput_open(kbd, NULL, NULL) != ND_OK)
-        return NULL; /* nd_uinput_open has already logged the reason */
-    *have_kbd = true;
-
-    /* The SHELL bridge, not the browser one: multi-tap letters and the six
-     * passthrough keys, no cursor mode. Built with no input source and no
-     * thread of its own -- this app's poll loop is the source. */
-    bridge = nd_t9_bridge_new_for_test(ND_BRIDGE_SHELL, kbd);
-    if (bridge == NULL) {
-        nd_uinput_close(kbd);
-        *have_kbd = false;
-    }
-    return bridge;
+    return nd_app_key_evdev() != NULL;
 }
 
 /* ------------------------------------------------------------------ *
  * p.wait()
  * ------------------------------------------------------------------ */
 
-/* Hand whatever the core has queued to the bridge, so the console sees it as
- * keyboard input. With no bridge the presses are still consumed: the channel
- * is a pipe with a finite buffer at the far end of which the core is writing,
- * and a shell session is long enough to fill it.
+/* Empty the core's key channel and throw the presses away.
+ *
+ * DRAINING IS THE WHOLE JOB NOW, and it is not optional. The channel is a
+ * pipe with a finite buffer that the core writes to for as long as this app
+ * holds the screen; a shell session is easily long enough to fill it, and a
+ * full pipe blocks the core's own loop. This used to hand each press to a
+ * bridge on the way past. The bridge is the core's, so the presses have
+ * already reached the console by the time they arrive here, and reading them
+ * again is only how the pipe stays empty.
  *
  * read_EVENT, not read_key: nd_input_read_key(in, 0.0) returns ND_KEY_NONE as
  * soon as it consumes a RELEASE, so a loop that stops at the first NONE stops
  * after the first press of every pair. The Python's i2c scanner reported no
  * releases at all; this channel reports both. */
-static int pump_keys(nd_input *input, nd_t9_bridge *bridge)
+static int pump_keys(nd_input *input)
 {
     int i;
 
@@ -442,8 +466,6 @@ static int pump_keys(nd_input *input, nd_t9_bridge *bridge)
 
         if (!nd_input_read_event(input, 0.0, &ev))
             break;
-        if (ev.pressed && bridge != NULL)
-            nd_t9_bridge_handle_code(bridge, ev.code);
     }
     return i;
 }
@@ -458,8 +480,9 @@ static void nap_ms(long ms)
 }
 
 /* p.wait(), plus the two things a separate process has to do that the Python
- * did not: feed the bridge while the shell runs, and notice SIGTERM. */
-static void wait_for_shell(pid_t pid, nd_input *input, nd_t9_bridge *bridge)
+ * did not: keep the core's key channel drained while the shell runs, and
+ * notice SIGTERM. */
+static void wait_for_shell(pid_t pid, nd_input *input)
 {
     int input_fd = (input != NULL) ? nd_input_fd(input) : -1;
 
@@ -503,7 +526,7 @@ static void wait_for_shell(pid_t pid, nd_input *input, nd_t9_bridge *bridge)
              * Stop polling the descriptor rather than spinning on it for the
              * rest of the session -- POLLHUP is level-triggered and would
              * otherwise make this loop the busiest thing on the phone. */
-            if (pump_keys(input, bridge) == 0 && (pfd.revents & (POLLHUP | POLLERR)) != 0)
+            if (pump_keys(input) == 0 && (pfd.revents & (POLLHUP | POLLERR)) != 0)
                 input_fd = -1;
         }
     }
@@ -533,18 +556,18 @@ int app_run(nd_ui *ui)
     const char *chvt_argv[3];
     const char *sh_argv[3];
     const char **envp = NULL;
-    nd_uinput_kbd kbd = {-1, false};
-    nd_t9_bridge *bridge = NULL;
     nd_proc_spec spec;
     int32_t shell_vt = ND_LINUXSHELL_DEFAULT_SHELL_VT;
     int32_t ui_vt = ND_LINUXSHELL_DEFAULT_UI_VT;
-    bool have_kbd = false;
     int tty_fd = -1;
     pid_t pid = -1;
 
     /* A NULL ui is survivable here and is NOT the error it is in every app
-     * that draws: run(ui) touches ui exactly once, to ask whether there is a
-     * matrix keypad, and the answer for "no context at all" is no. */
+     * that draws: run(ui) reads one field of it, ui->input, and asks one
+     * question that does not look at it at all -- whether this phone's keypad
+     * is the matrix, which the core answered in the environment. "No context
+     * at all" is a shell with no key channel to drain, which is exactly what
+     * the poll loop does with a NULL input. */
 
     /* The two int() calls, BEFORE the chvt lookup, as the Python has them --
      * so a bad NEODCT_SHELL_VT crashes on an image with no chvt too. See
@@ -594,11 +617,22 @@ int app_run(nd_ui *ui)
     nd_linuxshell_write_tty(tty_shell, nd_linuxshell_cursor_on);
     nd_linuxshell_write_tty(tty_shell, nd_linuxshell_hint);
 
-    /* On keypad hardware, type into the console via T9. Only alive while the
-     * shell runs. */
-    bridge = start_t9_bridge(ui, &kbd, &have_kbd);
-    if (bridge != NULL)
+    /* On keypad hardware the core is already typing into this console via T9;
+     * say so, so the owner knows the pad is live and what it does. */
+    if (t9_typing_available()) {
         nd_linuxshell_write_tty(tty_shell, nd_linuxshell_t9_hint);
+    } else if (nd_linuxshell_needs_key_bridge(ui)) {
+        /* The one case worth a word: a phone whose only input IS the keypad,
+         * with no key device from the core. The console is about to accept
+         * nothing at all, and the hint would be a lie. Not fatal -- a serial
+         * cable is still a keyboard, and that is who is usually here -- and
+         * the core has already logged which of the manifest, /dev/uinput or
+         * the udev grant was the reason. */
+        nd_log_err(LS_LOG_TAG,
+                   "no key device: this phone's keypad cannot reach the console, so only a "
+                   "serial or USB keyboard will type at this shell. See " ND_ENV_KEY_EVDEV
+                   " and nd_proc.h.");
+    }
 
     /* try: with open(tty_shell, "r+b", buffering=0) as t: ... except: pass */
     if (nd_path_resolve(resolved_tty, sizeof resolved_tty, tty_shell) == ND_OK)
@@ -631,7 +665,7 @@ int app_run(nd_ui *ui)
             nd_log_err(LS_LOG_TAG, "cannot start %s", ND_LINUXSHELL_SH);
         } else {
             g_sh_pid = (sig_atomic_t)pid;
-            wait_for_shell(pid, (ui != NULL) ? ui->input : NULL, bridge);
+            wait_for_shell(pid, (ui != NULL) ? ui->input : NULL);
             g_sh_pid = 0;
         }
         (void)close(tty_fd);
@@ -640,12 +674,11 @@ int app_run(nd_ui *ui)
 
     /* ---- finally: ------------------------------------------------ */
 
-    /* Tear the virtual keyboard down before the UI resumes reading the
-     * keypad, so nothing double-consumes presses. */
-    if (bridge != NULL)
-        nd_t9_bridge_free_for_test(bridge);
-    if (have_kbd)
-        nd_uinput_close(&kbd);
+    /* No keyboard to tear down: the core created it, the core destroys it
+     * when this process exits, and it does so before the UI resumes reading
+     * the keypad. That ordering is nd_proc.c's keydev_close(), and it matters
+     * for the same reason it did when the teardown was here -- a bridge that
+     * outlived its app would still be reading the pad nobody is feeding. */
 
     /* Hide the cursor again: the cmdline carries vt.global_cursor_default=0
      * and the UI expects it back the way it found it. */

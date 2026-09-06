@@ -958,6 +958,141 @@ done:
 }
 
 /* ------------------------------------------------------------------ *
+ * The root-phase bring-up of an already configured keypad
+ * ------------------------------------------------------------------ */
+
+/* Wait for /dev/i2c-<bus> to exist, silently. Returns how long it took, or a
+ * negative number if it never appeared.
+ *
+ * Silent because this is the common case taking no time at all: on a phone
+ * whose i2c-dev is already registered the first nd_path_exists() succeeds and
+ * nothing should be said about it. The one line that matters -- "it took N
+ * seconds" -- is printed by the caller, and only when N is not zero. */
+static double wait_for_bus_node(const char *dev, double budget_s)
+{
+    double started = monotonic_now();
+    double waited;
+
+    for (;;) {
+        if (nd_path_exists(dev))
+            return monotonic_now() - started;
+        waited = monotonic_now() - started;
+        if (waited >= budget_s)
+            return -1.0;
+        nap(ND_KPSETUP_ROOT_POLL_S);
+    }
+}
+
+int nd_kpsetup_open_keypad_as_root(nd_kpsetup_bringup *out)
+{
+    nd_kpsetup_bringup r;
+    nd_keymap km;
+    nd_pcf8575 chip;
+    char dev[ND_KPSETUP_LINE_MAX];
+    nd_err rc = ND_ERR_IO;
+    int attempt;
+
+    memset(&r, 0, sizeof r);
+    r.fd = -1;
+    r.bus = -1;
+    r.addr = -1;
+
+    /* No keymap is not this function's problem -- it is the wizard's, and the
+     * wizard has already run by the time nd_main.c calls this. Silence, so a
+     * QEMU boot and a first boot say nothing. */
+    if (!nd_path_exists(ND_PATH_KEYMAP))
+        goto finish;
+
+    if (nd_keymap_load(ND_PATH_KEYMAP, &km) != ND_OK) {
+        /* nd_keymap_load() has logged the specific error. Recorded here so
+         * the caller can put it in front of the owner rather than leaving
+         * "the keypad map exists but could not be read" as the UI's guess. */
+        (void)nd_strlcpy(r.why, "keymap.json is present but could not be read", sizeof r.why);
+        goto finish;
+    }
+    if (strcmp(km.driver, nd_kpsetup_driver) != 0) {
+        (void)nd_snprintf(r.why, sizeof r.why, "keymap names the %s driver, not %s", km.driver,
+                          nd_kpsetup_driver);
+        goto finish;
+    }
+
+    r.bus = km.i2c_bus;
+    r.addr = km.i2c_addr;
+    if (bus_dev_path(dev, sizeof dev, km.i2c_bus) != ND_OK) {
+        (void)nd_strlcpy(r.why, "the keymap's bus number does not fit a device path", sizeof r.why);
+        goto finish;
+    }
+
+    r.waited_s = wait_for_bus_node(dev, ND_KPSETUP_ROOT_WAIT_S);
+    if (r.waited_s < 0.0) {
+        r.waited_s = ND_KPSETUP_ROOT_WAIT_S;
+        (void)nd_snprintf(r.why, sizeof r.why, "%s never appeared", dev);
+        nd_log_err(ND_LOG_SETUP, "keypad bring-up: %s did not appear in %.0fs", dev,
+                   ND_KPSETUP_ROOT_WAIT_S);
+        goto finish;
+    }
+
+    /* The open itself. As root this can only really fail if the node is not a
+     * node, so three attempts is generosity rather than a race budget -- but
+     * the gap is there because a node that appeared microseconds ago can
+     * still be mid-registration. */
+    for (attempt = 0; attempt < ND_KPSETUP_ROOT_OPEN_TRIES; attempt++) {
+        if (attempt > 0)
+            nap(ND_KPSETUP_ROOT_OPEN_GAP_S);
+        rc = nd_pcf8575_open(&chip, km.i2c_bus, km.i2c_addr);
+        if (rc == ND_OK)
+            break;
+        if (!nd_input_errno_is_transient(chip.last_errno))
+            break;
+    }
+    if (rc != ND_OK) {
+        (void)nd_snprintf(r.why, sizeof r.why, "%s: %s", dev, strerror(chip.last_errno));
+        goto finish;
+    }
+
+    /* ============ AND NOW MAKE THE EXPANDER PROVE IT IS THERE ============
+     *
+     * open() and ioctl(I2C_SLAVE) are both local operations: they succeed
+     * against an empty bus. The first thing that actually touches the wires
+     * is this write, and nd_pcf8575_write16() retries it internally for the
+     * rail-rise case (see PROBE_TRIES in nd_matrix.c for the reasoning; the
+     * same reasoning applies here and the loop below is the same shape). So
+     * by the time this returns, the phone knows whether it has a keypad --
+     * BEFORE it gives away the privilege it would need to find out. */
+    for (attempt = 0; attempt < ND_KPSETUP_ROOT_OPEN_TRIES; attempt++) {
+        if (attempt > 0)
+            nap(ND_KPSETUP_ROOT_OPEN_GAP_S);
+        if (nd_pcf8575_write16(&chip, 0xFFFFu) == ND_OK) {
+            r.answered = true;
+            break;
+        }
+    }
+
+    /* The descriptor is kept either way. An expander that has not answered
+     * yet is the case the retries in nd_input exist for, and they can only
+     * run if there is a privileged descriptor left for them to run on. */
+    r.fd = nd_pcf8575_detach(&chip);
+    if (!r.answered)
+        (void)nd_snprintf(r.why, sizeof r.why, "no answer from 0x%02X on %s: %s",
+                          (unsigned)km.i2c_addr, dev, strerror(chip.last_errno));
+
+finish:
+    if (r.fd >= 0 && r.answered)
+        nd_log(ND_LOG_SETUP,
+               "keypad bring-up: /dev/i2c-%d fd %d open and 0x%02X answering, as uid %ld "
+               "(waited %.2fs)",
+               r.bus, r.fd, (unsigned)r.addr, (long)geteuid(), r.waited_s);
+    else if (r.fd >= 0)
+        nd_log_err(ND_LOG_SETUP, "keypad bring-up: bus open but %s", r.why);
+    else if (r.why[0] != '\0')
+        nd_log_err(ND_LOG_SETUP, "keypad bring-up: no keypad descriptor (%s)", r.why);
+
+    if (out != NULL)
+        *out = r;
+    return r.fd;
+}
+
+/* ------------------------------------------------------------------ *
  * maybe_run_first_time_setup
  * ------------------------------------------------------------------ */
 
@@ -982,7 +1117,16 @@ bool nd_kpsetup_maybe_run(nd_fb *fb, bool restart)
 
     gate = nd_kpsetup_gate_check(bus);
     if (gate == ND_KPSETUP_GATE_HAVE_KEYMAP) {
-        nd_log(ND_LOG_SETUP, "Keymap already present (%s); skipping setup.", ND_PATH_KEYMAP);
+        /* And this is the branch every working phone takes -- which for three
+         * releases meant that the privileged phase of the boot, the one whose
+         * whole justification is that it can open the keypad's bus, opened
+         * nothing at all. Enrolling is not the only thing that needs root
+         * here; OPENING is. nd_kpsetup_open_keypad_as_root() is the other
+         * half and nd_main.c calls it immediately after this. */
+        nd_log(ND_LOG_SETUP,
+               "Keymap already present (%s); skipping enrolment (the bus is still opened as "
+               "root, see the keypad bring-up).",
+               ND_PATH_KEYMAP);
         return false;
     }
     /* QEMU and dev boxes: no bus, no keypad, stay quiet. */

@@ -30,8 +30,8 @@
  *
  * ============ AND "NO MODEM" IS NOT "A BROKEN MODEM" ============
  *
- * There are THREE link states, not two, and the third one is why this header
- * grew a section. See nd_modem_link.
+ * There are FOUR link states, not two, and the two that are not "yes" and
+ * "no" are why this header grew a section. See nd_modem_link.
  */
 
 #ifndef ND_MODEM_H_INCLUDED
@@ -77,6 +77,31 @@ extern "C" {
 #define ND_MODEM_BOOT_GRACE_DEFAULT_S 30.0
 #define ND_MODEM_BOOT_PROBE_S         2.0
 
+/* THE CEILING ON A GRACE THAT KEEPS BEING EXTENDED.
+ *
+ * The grace above is measured from the moment ModemService starts, and that
+ * turned out to be the wrong clock. On the phone the UI is up about two
+ * seconds after power-on, while a SIM7600 needs several seconds just to
+ * enumerate on the USB bus and /dev/ttyUSB* does not get its `dialout` group
+ * until udev has replayed the coldplug. So the thirty seconds were being
+ * spent waiting for a bus that had not settled, and the verdict -- announced
+ * out loud, in the carrier line -- was reached before the radio had finished
+ * starting.
+ *
+ * The rule now is that the grace does not run while there is NOTHING TO
+ * PROBE: every probe that finds no candidate AT port at all, and the first
+ * probe that finds one, push the deadline out by a fresh grace. A phone whose
+ * modem appears at t+25s therefore still gets its full window to answer AT
+ * from the moment it appears, instead of two seconds of it.
+ *
+ * That could obviously run for ever, so it is capped here, measured from the
+ * start of the service. Sixty seconds is chosen against S45modem, which
+ * allows MODEM_PORT_WAIT_S=30 for the node alone; past this the phone stops
+ * waiting and says what it has found. The cap is not applied at all when the
+ * grace is 0 -- QEMU and the tests ask for no grace and must keep getting
+ * exactly none. */
+#define ND_MODEM_LATE_GRACE_MAX_S 60.0
+
 /* How long a LIVE modem may go without a single successful AT transaction
  * before the service stops believing in it.
  *
@@ -102,6 +127,16 @@ extern "C" {
 #define ND_MODEM_SIM_CARRIER       "Simulation"
 #define ND_MODEM_SIM_BARS_ONLINE   4
 #define ND_MODEM_SIM_BARS_OFFLINE  1
+
+/* And what a modem that IS there but cannot be talked to puts there instead.
+ *
+ * "Simulation" was the answer to both questions until 0.5.8b, and on a phone
+ * with a SIM7600 in it that is a lie told next to a full signal meter -- see
+ * ND_MODEM_LINK_UNREACHABLE. This string is deliberately not an operator
+ * name and not "No Service": a phone in a tunnel says No Service, and this
+ * phone is not in a tunnel, its radio is unreachable. Eleven characters, one
+ * more than "Simulation", so it fits the same slot in the home layout. */
+#define ND_MODEM_UNREACHABLE_CARRIER "Modem ERROR"
 #define ND_MODEM_SIM_ROUTE_TTL_S   2.0
 #define ND_CLCC_POLL_S             2.0
 #define ND_AUDIO_RESTART_HOLDOFF_S 3.0
@@ -187,11 +222,31 @@ typedef struct {
 typedef struct nd_modem nd_modem;
 
 /* Starts the reader thread. Never fails in a way the caller can act on --
- * with no hardware it runs in simulation mode, driven by the /tmp/neodct_sim_*
- * files, which is how the whole UI is testable on a desktop. */
+ * with no hardware AT ALL it runs in simulation mode, driven by the
+ * /tmp/neodct_sim_* files, which is how the whole UI is testable on a
+ * desktop. A modem that is present and cannot be opened is NOT that; it is
+ * ND_MODEM_LINK_UNREACHABLE and it says so. */
 nd_err nd_modem_open(nd_modem **out);
 void nd_modem_close(nd_modem *m);
 
+/* ============ WHEN A CALL OR A TEXT IS ALLOWED TO BE PRETEND ============
+ *
+ * dial() fakes a connect after two seconds and send_sms() reports success
+ * without transmitting anything whenever there is no modem, and that is the
+ * feature that makes the whole UI drivable on a desktop with no radio.
+ *
+ * It is also, on a phone, the worst possible failure: the owner watches a
+ * call timer run for a call that was never placed, or sees a text marked
+ * sent that nobody will ever receive. It used to be gated on "am I talking
+ * to a modem right now", which is false for every kind of probe failure --
+ * see ND_MODEM_LINK_UNREACHABLE.
+ *
+ * The gate is now the LINK STATE, and it is simulation only when this
+ * device genuinely has no radio: ND_MODEM_LINK_SIM, or ND_MODEM_LINK_PROBING
+ * with no candidate AT port seen yet. UNREACHABLE and FAULT both refuse, and
+ * send_sms() puts the probe's reason in `detail` so the failure names itself
+ * on screen. (A LIVE modem with system.modem.allow_calls=OFF still
+ * simulates: that is a deliberate development switch, not a failure.) */
 bool nd_modem_dial(nd_modem *m, const char *number);
 bool nd_modem_answer(nd_modem *m);
 bool nd_modem_hangup(nd_modem *m);
@@ -290,7 +345,7 @@ const char *nd_modem_caller_id(nd_modem *m); /* NULL when none */
 bool nd_modem_has_hardware(nd_modem *m);
 
 /* ------------------------------------------------------------------ *
- * The link: three states, because two was a lie
+ * The link: four states, because two was a lie and three was not enough
  * ------------------------------------------------------------------ *
  *
  * nd_modem_has_hardware() answers "am I talking to a modem right now", and
@@ -322,13 +377,52 @@ bool nd_modem_has_hardware(nd_modem *m);
  *                         phone whose radio is still coming up looks like.
  *                         Appended after FAULT so no existing value moves.
  *
+ *   ND_MODEM_LINK_UNREACHABLE
+ *                         The kernel enumerated at least one candidate AT
+ *                         port and NOT ONE of them could be talked to, with
+ *                         the boot grace already spent. There is a radio in
+ *                         this phone; the service cannot reach it.
+ *
  * A NULL modem is ND_MODEM_LINK_SIM: a core with no ModemService is not a
- * core with a broken one. */
+ * core with a broken one.
+ *
+ * ============ WHY UNREACHABLE HAD TO EXIST ============
+ *
+ * SIM was being returned for both "there is no radio" and "there is a radio
+ * and every way of opening it failed", because the only thing that could
+ * produce FAULT was nd_modem__drop_hardware(), and that is reachable only
+ * from a port we had ALREADY ADOPTED. Every way a probe can fail on a phone
+ * that has a modem -- /dev/ttyUSB2 still root:root 0600 because the udev
+ * coldplug has not replayed it, S45modem holding the AT-port flock, a
+ * SIM7600 whose firmware has not finished booting and does not answer AT
+ * inside a second -- left `faulted` false and landed in SIM.
+ *
+ * That is the single most misleading thing this service could say. It puts
+ * the word "Simulation" in the carrier line, and because Simulation Mode
+ * draws its meter from /proc/net/route, it puts FOUR FULL BARS beside it on
+ * a phone whose radio the UI cannot open at all. It also, silently, turns
+ * dial() into a fake two-second connect and send_sms() into a success that
+ * transmits nothing -- see nd_modem_dial() and nd_modem_send_sms(). A phone
+ * lying to its owner about a call it never placed is worse than a phone that
+ * plainly says it is broken.
+ *
+ * So: SIM is now reserved for the case where /sys/class/tty enumerated no
+ * candidate at all, which is the only case in which it is true. Anything
+ * else is UNREACHABLE, which renders as an EMPTY meter and the carrier line
+ * ND_MODEM_UNREACHABLE_CARRIER, raises the one-shot notice through
+ * nd_modem_take_pending_fault() carrying the probe's own reason, and refuses
+ * to fake calls and texts.
+ *
+ * Appended after PROBING, so no existing value moves and a UI that has never
+ * heard of it simply does not match its FAULT check. That is deliberate: the
+ * two readouts below already say the right thing for this state on their
+ * own, so a status bar needs no change at all to stop lying. */
 typedef enum {
     ND_MODEM_LINK_SIM = 0,
     ND_MODEM_LINK_LIVE,
     ND_MODEM_LINK_FAULT,
-    ND_MODEM_LINK_PROBING
+    ND_MODEM_LINK_PROBING,
+    ND_MODEM_LINK_UNREACHABLE
 } nd_modem_link;
 
 nd_modem_link nd_modem_link_state(nd_modem *m);

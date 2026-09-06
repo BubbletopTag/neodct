@@ -2,7 +2,8 @@
 #
 # atcmd -- send one AT command to the SIM7600 and print the reply.
 #
-# Usage:  /NeoDCT/System/engineering/tools/atcmd [-p PORT] [-t SECONDS] "AT+CSQ"
+# Usage:  /NeoDCT/System/engineering/tools/atcmd [-p PORT] [-t SECONDS]
+#                                                [-w LOCK-SECONDS] "AT+CSQ"
 #         MODEM_PORT=/dev/ttyUSB3 atcmd AT
 #
 # Pure BusyBox (ash + stty + read -t). Serializes port access with the
@@ -11,16 +12,25 @@
 #
 # Exit codes: 0 reply ended in OK/CONNECT, 1 bad usage/port, 2 timeout,
 #             3 port busy, 4 modem returned an error/no-carrier final code.
+#
+# Exit 3 is not a failure of the modem and callers that count strikes must
+# not spend one on it -- see the loops in S45modem, which learned this the
+# expensive way.
 
 PORT="${MODEM_PORT:-/dev/ttyUSB2}"
 TIMEOUT=6
+# How long to wait for the LOCK. A different question from how long to wait
+# for the MODEM, and it used to share an answer with it -- see below.
+LOCK_WAIT="${MODEM_LOCK_WAIT_S:-20}"
 LOCK=/tmp/neodct-modem.lock
 
-while getopts "p:t:" opt; do
+while getopts "p:t:w:" opt; do
     case "$opt" in
         p) PORT="$OPTARG" ;;
         t) TIMEOUT="$OPTARG" ;;
-        *) echo "usage: atcmd [-p PORT] [-t SECONDS] \"AT...\"" >&2; exit 1 ;;
+        w) LOCK_WAIT="$OPTARG" ;;
+        *) echo "usage: atcmd [-p PORT] [-t SECONDS] [-w LOCK-SECONDS] \"AT...\"" >&2
+           exit 1 ;;
     esac
 done
 shift $((OPTIND - 1))
@@ -29,13 +39,45 @@ CMD="${1:-AT}"
 [ -c "$PORT" ] || { echo "atcmd: $PORT is not a character device (modem not enumerated?)" >&2; exit 1; }
 
 # One writer/reader at a time across atcmd, S45modem and ModemService.
-exec 9>>"$LOCK" 2>/dev/null
+#
+# ============ THE LOCK'S PATIENCE IS NOT THE MODEM'S ============
+#
+# The wait below counted to $TIMEOUT, the AT command's own deadline, so a
+# command that is deliberately impatient with the RADIO was just as impatient
+# with the other software on the phone. `atcmd -t 3 AT` is exactly that: the
+# boot handshake in S45modem, three seconds because a modem that is there
+# answers at once. It also gave up on the lock after three seconds -- and the
+# lock is routinely held by nd_modem_poll() taking its CSQ, CEREG and COPS
+# readings, which is the UI doing its job and says nothing about the radio.
+# S45modem then counted the exit 3 as "the modem is not answering", and five
+# of those kill its worker for the rest of the boot.
+#
+# The two are separate questions. How long may I wait to be ALLOWED TO SPEAK
+# is about the processes sharing this port, and can afford to be generous:
+# nd_modem_poll() takes the lock for one command and yields it between them,
+# so the port is never occupied for long. How long do I wait for a REPLY is
+# about the radio, and short is often right.
+#
+# `timeout N flock -x 9` would say this better than polling does, and cannot
+# be used: there is no timeout applet in this image (CONFIG_TIMEOUT is off)
+# and busybox flock takes -sxun and nothing else -- no -w. So the wait is a
+# poll on its own budget, five times a second, which costs a fork per fifth
+# of a second only while somebody else really is talking to the modem.
+#
+# No 2>/dev/null on the redirection. A lock file that cannot be opened is the
+# difference between one writer on the tty and two, and it used to fail in
+# silence; busybox ash prints the reason and exits 1, which is this program's
+# "bad usage/port" and the right answer.
+exec 9>>"$LOCK"
 if command -v flock >/dev/null 2>&1; then
     tries=0
     until flock -x -n 9; do
         tries=$((tries + 1))
-        [ "$tries" -ge "$TIMEOUT" ] && { echo "atcmd: modem port busy (lock held)" >&2; exit 3; }
-        sleep 1
+        if [ "$tries" -ge $((LOCK_WAIT * 5)) ]; then
+            echo "atcmd: modem port busy (lock held for ${LOCK_WAIT}s)" >&2
+            exit 3
+        fi
+        sleep 0.2
     done
 fi
 

@@ -89,8 +89,28 @@ package says "This package is not for this phone" rather than failing in
 
 The install directory is derived from the manifest's `"name"` by keeping
 letters, digits, `_` and `-` and dropping everything else, so "Phone Book"
-installs as `PhoneBook`. The `"id"` orders the app in the menu exactly as it
-does for a stock app.
+installs as `PhoneBook`.
+
+### The `"id"`, and the band it belongs in
+
+The `"id"` orders the app in the menu exactly as it does for a stock app --
+and **an installed app's id should be between 100 and 899**.
+
+Stock apps use 1-99 (they run 1-12 today) and the 9xx block is reserved for
+the two that must sort last, MusicPlayer at 970 and Power at 971. Everything
+installed from a card goes between them.
+
+This matters because the menu sort is *stable*: two apps that claim the same
+id keep the order the directory happened to return them in, which on ext4 is
+install order and is nothing an owner can see or predict. The first two `.nap`
+packages ever made both claimed 13 -- the next number after Update's 12 --
+because both authors counted the same way, and there was nothing to count
+against.
+
+An id outside the band still installs, and so does one that collides. Neither
+is worth refusing an app over. Both are written to the log, naming the other
+app, and the install screen can say so before it writes anything
+(`nd_nap_id_conflict()` in `neodct/src/include/nd_nap.h`).
 
 ## What is refused
 
@@ -151,6 +171,111 @@ where the browser puts a download. A card in the old FAT format cannot hold
 apps and the screen says so and points at **Memory card**, which offers the
 reformat.
 
+## Giving keys to a program that is not an `app.so`
+
+An `app.so` reads the keypad through `nd_input_read_key()` and needs nothing
+here: the core hands it an inherited pipe and every press and release arrives
+on it.
+
+**A real binary your app starts cannot read that pipe.** It is a private
+protocol -- no `/dev/input` path, no `ioctl`, no `EVIOCGBIT` -- so an
+emulator, a viewer, a player or anything else written to read a keyboard will
+not see a single key from it. Those programs scan `/dev/input` instead, and on
+the phone `/dev/input` is **empty**: the keypad is a PCF8575 matrix on i2c
+that the core scans in software, and a matrix is not an input device.
+
+So ask for one, in `manifest.json`:
+
+```json
+{
+    "name": "PlayStation",
+    "id": "113",
+    "useKeypadDevice": true
+}
+```
+
+The core then creates a synthetic keyboard *before* it starts your app, waits
+until the node it produced is actually readable, and puts its path in your
+environment:
+
+```c
+const char *node = nd_app_key_evdev();   /* "/dev/input/event3", or NULL */
+```
+
+Pass that to whatever you are starting, however it wants it -- an argument, an
+environment variable of its own, a config line. `neodct-play` (the media
+player wrapper) reads `NEODCT_KEY_EVDEV` itself, so a video plays with working
+keys if you simply let your child inherit your environment.
+
+`NULL` means the core made no device. That is **normal** on a development
+board, where a real keyboard already exists and the program will find it by
+itself; a second synthetic device there would make every press arrive twice.
+It also means "something went wrong", and in that case the core has already
+written the reason to the log.
+
+### What arrives on the node
+
+By default, the sixteen keys the phone has, as themselves, press and release:
+
+| key | evdev code |
+| --- | --- |
+| NaviKey | `KEY_ENTER` (28) |
+| C | `KEY_BACKSPACE` (14) |
+| Up / Down | `KEY_UP` (103) / `KEY_DOWN` (108) |
+| 1-9, 0 | `KEY_1`..`KEY_9`, `KEY_0` (2-11) |
+| `*` | `KEY_LEFTSHIFT` (42) |
+| `#` | `KEY_BACKSLASH` (43) |
+
+NeoDCT keycodes *are* Linux keycodes, so nothing is translated and nothing is
+lost. There is no Left or Right key on this phone and the node does not invent
+one; if your program needs a d-pad, map 2/4/6/8 yourself -- that is your
+control scheme to choose, and the reason the default is raw.
+
+If your program expects a **keyboard** rather than a keypad, add a map and the
+core will translate on the way through:
+
+```json
+{ "useKeypadDevice": true, "keypadDeviceMap": "browser" }
+```
+
+| map | what the node carries |
+| --- | --- |
+| `raw` (default) | the sixteen keys above, unchanged |
+| `browser` | 2/4/5/6/8 as a d-pad, and `#` cycles the rest of the pad through abc / ABC / 123 so text can be typed. What the web browser uses. |
+| `shell` | multi-tap letters everywhere, `*` as Tab. For a terminal. |
+
+An unrecognised map name is treated as `raw`, with a line in the log naming
+the word that was not understood.
+
+### Why the core makes it and not you
+
+Your app runs as `ndusr_ut`, and `ndusr_ut` may **read** input devices and may
+never **create** one. That is deliberate and it is not going to change: this
+phone has no compositor, the app on screen owns the whole panel, and a process
+that could both draw the interface and synthesise keypresses into it could
+drive the real phone underneath -- dial a number, send a message, accept a
+prompt the owner never saw.
+
+Reading is safe and writing is not, so the two were split: the core, which is
+already reading every key and already decides what they mean, owns the write
+end; your app is handed a path it can only read. If you find code that opens
+`/dev/uinput` from inside an app, it is from before this existed and it has
+not worked since 0.5.0b.
+
+## What an installed app does not get
+
+Worth knowing before you design around something that is not there:
+
+- **no service socket.** Every `nd_svc_*` call answers "not present": no
+  battery reading, no modem status, no clock set, no SMS. See
+  `docs/HOW-IT-WORKS.md` section 7 for why.
+- **no view of** `/NeoDCT/System/engineering`, `/NeoDCT/System/keys`,
+  `/NeoDCT/System/tones`, `/NeoDCT/System/wallpapers`, `/NeoDCT/User/db`,
+  `/NeoDCT/User/.remote`, `/NeoDCT/User/.ndsys`, `/NeoDCT/User/.seedrng` or
+  `/NeoDCT/User/browser`. They are not unreadable, they are *empty*: a
+  read-only mode-0000 tmpfs is mounted over each one.
+- **one writable directory**, its own `data/`, which the phone creates.
+
 ## Building an app.so for the phone without building Buildroot
 
 `neodct/contrib/Bible/src/tools/build-bible-cross.sh` shows the fast path: a
@@ -162,7 +287,12 @@ freetype, libpng, sqlite or libcrypto needs the real Buildroot toolchain.
 
 ## The first package
 
-`neodct/packages/Bible-luckfox-armv7.nap` is the Bible app
-(`neodct/contrib/Bible`), built for the Luckfox only. It is 1.8 MB, most of
-which is the World English Bible in the app's own per-chapter zlib pack. Copy
-it onto a card, put the card in the phone, and install it from Settings.
+`neodct/packages/Bible-lf.nap` is the Bible app (`neodct/contrib/Bible`),
+built for the Luckfox only; `neodct/packages/Bible-qemu-aarch64.nap` is the
+same app for the development image. Each is about 1.8 MB, most of which is the
+World English Bible in the app's own per-chapter zlib pack. Copy one onto a
+card, put the card in the phone, and install it from Settings.
+
+(The Luckfox package was called `Bible-luckfox-armv7.nap` until it was renamed
+to match the sibling PlayStation repo's `-lf` convention. If a script of yours
+still names the old path, that is why it cannot find it.)

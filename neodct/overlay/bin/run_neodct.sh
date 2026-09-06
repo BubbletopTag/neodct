@@ -89,6 +89,30 @@ mkdir -p /NeoDCT/User/logs 2>/dev/null || CORE_LOG=/tmp/core.log
 # Engineering mode is deliberately NOT accepted here, even though it gates
 # LinuxShell and raw AT: it lives in settings.prop on the writable partition,
 # so an attacker who can drop env.sh can set it in the same breath.
+#
+# ============ AND HOW TO TURN IT ON, ON A PHONE ============
+#
+# The gate is right and the problem was that neither source was reachable on
+# hardware. run_qemu.sh puts neodct.devenv=1 on -append BY DEFAULT, so every
+# override works in the emulator; the phone's U-Boot bootargs carry ubi.mtd,
+# neodct.sys, neodct.user, neodct.verity and neodct.rectty and nothing else,
+# and no image had ever contained /etc/neodct-devenv. So NEODCT_NO_DROP --
+# which nd_main.c offers as the way to keep the old root behaviour "for a
+# developer bisecting something" -- was available on every target except the
+# one that breaks.
+#
+# Two ways in now, and both of them cost a rootfs the phone must accept:
+#
+#   NEODCT_DEVENV_IMAGE=1 make    builds the marker into /etc, via
+#                                 neodct/scripts/post-build-devenv-marker.sh.
+#                                 The marker is inside the verity-covered
+#                                 squashfs, so this reaches a phone already in
+#                                 the field as an .ndsw and nothing else.
+#   the U-Boot environment        add neodct.devenv=1 to bootargs from the
+#                                 serial console. No reflash, and no way to do
+#                                 it from the running system either.
+#
+# Neither is reachable from /NeoDCT/User, which is the property that matters.
 NEODCT_DEVENV=""
 if [ -e /etc/neodct-devenv ]; then
   NEODCT_DEVENV="rootfs marker"

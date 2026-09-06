@@ -136,6 +136,27 @@ static nd_props *load_version(void)
     return nd_props_parse_settings(g_version_path);
 }
 
+/* The RESOLVED directory settings.prop lives in, which is what both guards
+ * below actually ask their question about: nd_props_write_atomic() writes a
+ * temp file beside the target and renames it, so every property of the write
+ * -- who will own the result, and whether it can be created at all -- is a
+ * property of the directory rather than of the file. */
+static bool settings_dir(char *out, size_t out_sz)
+{
+    char resolved[ND_PATH_MAX];
+    const char *slash;
+    size_t dir_len;
+
+    if (nd_path_resolve(resolved, sizeof resolved, g_settings_path) != ND_OK)
+        return false;
+    slash = strrchr(resolved, '/');
+    if (slash == NULL || slash == resolved)
+        return false;
+    dir_len = (size_t)(slash - resolved);
+    resolved[dir_len] = '\0';
+    return nd_strlcpy(out, resolved, out_sz) < out_sz;
+}
+
 /* ============ WHY ROOT DOES NOT WRITE THIS FILE ============
  *
  * nd-core is root for about a second at boot -- from exec until it becomes
@@ -169,28 +190,68 @@ static nd_props *load_version(void)
  */
 static bool root_would_orphan_the_file(void)
 {
-    char resolved[ND_PATH_MAX];
+    char dir[ND_PATH_MAX];
     struct stat st;
-    const char *slash;
-    size_t dir_len;
 
     if (geteuid() != 0)
         return false;
 
-    /* The directory the file lives in, resolved the same way the file is. */
-    if (nd_path_resolve(resolved, sizeof resolved, g_settings_path) != ND_OK)
+    if (!settings_dir(dir, sizeof dir))
         return false;
-    slash = strrchr(resolved, '/');
-    if (slash == NULL || slash == resolved)
-        return false;
-    dir_len = (size_t)(slash - resolved);
-    resolved[dir_len] = '\0';
 
-    if (stat(resolved, &st) != 0)
+    if (stat(dir, &st) != 0)
         return false;
     /* Somebody else owns it, and that somebody is who nd-core is about to
      * become. Leave the file to them. */
     return st.st_uid != 0u;
+}
+
+/* ============ WHY THE WRITE IS ASKED FOR PERMISSION FIRST ============
+ *
+ * R-24 (top of this file) makes the rewrite fire on EVERY read, and every
+ * process on the phone reads a setting -- including every untrusted app, which
+ * runs as ndusr_ut and cannot create a file in /NeoDCT/User at all. So each
+ * such app printed two lines on its way up: the "Failed to read" from
+ * load_settings(), and then a "Failed to write" from a rewrite that never had
+ * any chance of landing. The second says nothing the first did not, and it
+ * says it about an operation the process was never supposed to perform.
+ *
+ * Two lines per app launch is not a cosmetic problem here. core.log is what
+ * the owner reads to debug everything else, it lives on an 8 MiB partition,
+ * and a browser session that starts a helper per page turns this into the
+ * bulk of the file.
+ *
+ * access(2) rather than "try it and see", because trying it IS the log line.
+ * W_OK|X_OK for the reason nd_storage_card_is_writable() asks for both: a
+ * directory that cannot be entered cannot be written into either. It answers
+ * for the REAL uid, which for every process here is the effective one, and it
+ * is advisory -- the partition can go read-only between the question and the
+ * write, and then the write fails and IS logged, which is right.
+ *
+ * ============ A DIRECTORY THAT IS NOT THERE IS NOT A REFUSAL ============
+ *
+ * nd_props_write_atomic() mkdir -p's the directory itself before writing into
+ * it, so "it does not exist" is a case that SUCCEEDS today and has to keep
+ * succeeding. A guard that treated a missing directory as unwritable would
+ * quietly stop every preference on a phone whose user partition is empty from
+ * ever being saved -- the exact fault this file already carries one long
+ * comment about, reintroduced by the fix for its log spam.
+ *
+ * So the question is narrower than "can I write here": it is "is there a
+ * directory here that I am not allowed to write to". Only that answers yes. */
+static bool settings_dir_blocks_the_write(void)
+{
+    char dir[ND_PATH_MAX];
+    struct stat st;
+
+    if (!settings_dir(dir, sizeof dir))
+        return false;
+    /* stat() and access() on the RESOLVED path, never nd_path_is_dir(): the
+     * string is already through nd_path_resolve() and putting it through again
+     * would prepend a test root that is already in it. */
+    if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode))
+        return false;
+    return access(dir, W_OK | X_OK) != 0;
 }
 
 /* save_settings(): drop every system.os.* key, then write atomically. All
@@ -198,13 +259,21 @@ static bool root_would_orphan_the_file(void)
  * phone booting, it just means preferences do not stick. */
 static void save_settings(const nd_props *settings)
 {
-    nd_props *out = nd_props_new();
+    nd_props *out;
     size_t i;
     nd_err rc;
 
+    /* Both refusals come BEFORE the allocation. They used to come after it,
+     * and the orphan guard's `return` then dropped a whole nd_props on the
+     * floor every time root declined to write -- once per setting read, on
+     * every boot of a phone with a fresh user partition. */
     if (root_would_orphan_the_file())
         return;
+    if (settings_dir_blocks_the_write())
+        return;
 
+    /* owned here; freed on every path out of this function */
+    out = nd_props_new();
     if (out == NULL)
         return;
 

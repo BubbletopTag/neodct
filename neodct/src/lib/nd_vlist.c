@@ -288,9 +288,8 @@ void nd_levelsel_init(nd_levelsel *s, nd_ui *ui, int32_t current, int32_t count,
     if (s == NULL)
         return;
 
-    /* Python builds range(1, count + 1) with no ceiling; nine is every caller
-     * the tree has and CODING-STANDARDS.md section 1.5 will not have an array
-     * sized by an argument. A larger count is clamped, not refused. */
+    /* The backlight has ten steps; Games requests nine. Keep the storage
+     * bounded rather than sizing a stack array from the caller's count. */
     n = nd_clamp32(count, 0, ND_LEVELSEL_MAX);
     s->count = n;
 

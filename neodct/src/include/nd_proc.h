@@ -41,6 +41,7 @@
 #include <sys/types.h>
 
 #include "nd_crash.h"
+#include "nd_input.h"
 #include "nd_priv.h"
 #include "nd_types.h"
 #include "nd_ui.h"
@@ -170,6 +171,37 @@ nd_err nd_proc_spawn(const char *path, const nd_proc_spec *spec, pid_t *pid_out)
  * anything is spawned. */
 nd_err nd_proc_reaper_start(void);
 void nd_proc_reaper_stop(void);
+
+/* ============ AND MAKE IT SAY WHAT IT REAPED ============
+ *
+ * A child that fails between fork() and execve() has no voice but its exit
+ * status, so every failure on that path is an _exit() of a RESERVED code:
+ *
+ *     121  prctl(PR_SET_NO_NEW_PRIVS) refused
+ *     122  setgroups() refused -- it needs CAP_SETGID
+ *     123  setgid() refused, or the MS_PRIVATE remount failed
+ *     124  setuid() refused, or a hide mount failed
+ *     125  the drop did not read back: a PARTIAL drop
+ *     126  dup2() of an inherited descriptor failed
+ *     127  execve() failed
+ *
+ * Nothing can legitimately exit with one of those: aplay, mpv, netsurf and
+ * nd-apprun exit with their own small numbers or die on a signal. So a status
+ * in that range is always one of our own corpses, and always worth printing.
+ *
+ * Three of the four owner kinds are never waited for -- a tone is fire and
+ * forget -- so their statuses sit in the reaper's ring until it wraps and
+ * nobody ever looks. That is how every DTMF tone on the phone came to die at
+ * exit 122, several a second while dialling, with an empty log. The reaper
+ * itself cannot say so: it is a signal handler and nd_log() formats,
+ * allocates and writes to a FILE*.
+ *
+ * This is the drain. It is cheap (sixteen slots, and each is reported once),
+ * it is safe to call from anywhere ordinary, and nd_proc_spawn() already
+ * calls it on every spawn -- so a core that never calls it still gets the
+ * message as soon as it starts anything else. Calling it from the core's own
+ * idle loop makes the report prompt on a phone that has stopped spawning. */
+void nd_proc_reap_report(void);
 
 /* What waitpid told us. */
 typedef struct {
@@ -319,13 +351,34 @@ bool nd_proc_app_is_untrusted(const nd_app_entry *app);
  *
  * These are the things ndusr_ut has no business reading even though the DAC
  * bits alone might let it: the engineering apps, the release signing keys,
- * the owner's tones and wallpapers, the databases, the SSH keys, the update
- * records and the RNG seed. */
+ * the owner's tones, the databases, the SSH keys, the update records and the
+ * RNG seed.
+ *
+ * ============ AND ONE THAT USED TO BE HERE AND IS NOT ============
+ *
+ * /NeoDCT/System/wallpapers was in this list and has been taken out. It is
+ * the STOCK wallpaper art: read-only decoration baked into the dm-verity'd
+ * squashfs, shipped identically on every phone, and therefore not the owner's
+ * data in any sense -- an attacker who can read it learns which build is
+ * running, which the version string on the settings screen already says.
+ *
+ * Masking it cost something real. Every installed app runs as ndusr_ut, so
+ * with the directory emptied an app drew its chrome on black while the rest
+ * of the phone drew it on the owner's wallpaper -- the app looked broken, and
+ * looked broken in a way whose cause was three files away from anything the
+ * author could see.
+ *
+ * The owner's OWN wallpapers are a different directory and stay exactly as
+ * they are: the card's wallpapers/ is 0750 ndusr:ndusr, so ndusr_ut cannot
+ * read it and needs no entry here to be kept out. What the app is given
+ * instead is the RESOLVED PATH of the wallpaper actually in use, in its
+ * environment -- see app_env() -- which lets it draw the stock art it can
+ * read and fail gracefully on the art it cannot. */
 #define ND_PROC_UNTRUSTED_HIDE_PATHS                                                 \
     {                                                                                \
         "/NeoDCT/System/engineering", "/NeoDCT/System/keys", "/NeoDCT/System/tones", \
-            "/NeoDCT/System/wallpapers", "/NeoDCT/User/db", "/NeoDCT/User/.remote",  \
-            "/NeoDCT/User/.ndsys", "/NeoDCT/User/.seedrng", NULL                     \
+            "/NeoDCT/User/db", "/NeoDCT/User/.remote", "/NeoDCT/User/.ndsys",        \
+            "/NeoDCT/User/.seedrng", NULL                                            \
     }
 
 /* ============ AND ONE MORE, FOR APPS THE OWNER INSTALLED ============
@@ -347,6 +400,219 @@ bool nd_proc_app_is_untrusted(const nd_app_entry *app);
  * untrusted" and this entry becomes unnecessary. Until then it costs one
  * tmpfs mount and closes the leak that actually exists. */
 #define ND_PROC_INSTALLED_HIDE_EXTRA "/NeoDCT/User/browser"
+
+/* ------------------------------------------------------------------ *
+ * THE KEY DEVICE: how a program that is not an app.so gets the keypad
+ * ------------------------------------------------------------------ *
+ *
+ * ============ THE PROBLEM THIS SOLVES ============
+ *
+ * An app.so reads keys from ND_ENV_KEYPAD_FD, a pipe the core pumps. That is
+ * a PRIVATE PROTOCOL: it answers no ioctl, it appears under no /dev/input
+ * path and it has no EVIOCGBIT, so netsurf-fb, mpv and any emulator core --
+ * every program written to read a keyboard rather than to be a NeoDCT app --
+ * cannot consume it. Those programs scan /dev/input instead, and on the
+ * Luckfox /dev/input is EMPTY: the keypad is a PCF8575 matrix on i2c that the
+ * core scans in userspace, and a matrix is not an input device.
+ *
+ * The only thing in the tree that ever made an evdev node for them was
+ * nd_uinput_open() called from inside apps/Browser -- and that stopped
+ * working the day the browser became ndusr_ut, because 61-neodct-devices.rules
+ * grants /dev/uinput to group ndusr and ndusr_ut is deliberately not in it.
+ * The browser has had no keys on hardware ever since, mpv has had none either
+ * (it finds its keypad by looking for the browser's bridge BY NAME), and
+ * every installed app that wraps a real binary would hit the same wall.
+ *
+ * ============ WHERE THE DEVICE LIVES NOW, AND WHY THERE ============
+ *
+ * The CORE creates it, before it spawns the app that asked for one. That is
+ * what the udev rule's own comment has always said the design was -- "The
+ * core is what opens /dev/uinput" -- and the core is the process that is
+ * already reading every key, so it has nothing new to be told.
+ *
+ * The child is handed the RESULTING /dev/input/eventN path in
+ * ND_ENV_KEY_EVDEV, and nothing else. That node is group `input` mode 0660
+ * from eudev's stock rule, and ndusr_ut is already in group input because
+ * that is how it RECEIVES keys today. So an untrusted program can read its
+ * keys and still cannot open /dev/uinput, still cannot create a device of its
+ * own, and still cannot inject a keystroke into anything. The boundary the
+ * audit drew is exactly where it was; only the plumbing moved.
+ *
+ * DO NOT "simplify" this by passing the uinput WRITE descriptor down in
+ * spec.fds. It looks like one less moving part and it is the whole hole: a
+ * process holding that descriptor can synthesise any keypress on a phone with
+ * no compositor, i.e. it can drive the real UI underneath it. The write end
+ * stays in the core, which already decides what keys mean.
+ *
+ * ============ WHAT IT CARRIES ============
+ *
+ * By default (ND_APP_KEYDEV_RAW) it carries the sixteen keys the phone has --
+ * NaviKey, C, Up, Down, 0-9, * and # -- as themselves, press and release,
+ * because NeoDCT keycodes ARE Linux keycodes (nd_keycodes.h). An app that
+ * wants them translated into a QWERTY-shaped stream says so in its manifest
+ * and the core applies one of nd_t9_bridge's maps on the way through; see
+ * nd_app_manifest_key_device().
+ *
+ * ============ THREE HELPERS THAT ARE NOT IN nd_input.h ============
+ *
+ * nd_input.h is another work package's contract and is frozen; these exist
+ * solely for the process boundary THIS header describes, which is the same
+ * argument nd_app.h makes for declaring nd_fb_adopt_fd(). They are
+ * implemented in lib/nd_uinput.c beside the rest of the uinput code.
+ */
+
+/* One half of a keystroke on a uinput device: EV_KEY <code> <1|0> followed by
+ * SYN_REPORT. Unlike nd_uinput_send_key() this does NOT synthesise the other
+ * half, so held keys stay held on the far side. */
+nd_err nd_uinput_send_raw(nd_uinput_kbd *k, uint16_t code, bool pressed);
+
+/* "/dev/input/eventN" for the device `k` created, via UI_GET_SYSNAME. Only
+ * meaningful for a descriptor that owns a device (nd_uinput_open, not
+ * nd_uinput_attach). ND_ERR_NOTFOUND when the kernel has not published one. */
+nd_err nd_uinput_event_node(const nd_uinput_kbd *k, char *out, size_t out_sz);
+
+/* Poll until `node` can be opened for reading, or `timeout_s` elapses. True
+ * means a child spawned now will find it; false means udev has not applied
+ * the group yet and the caller should say so rather than carry on. */
+bool nd_uinput_wait_readable(const char *node, double timeout_s);
+
+/* ------------------------------------------------------------------ *
+ * THE PRESENTATION SUBSET: how an installed app sees the phone's look
+ * ------------------------------------------------------------------ *
+ *
+ * ============ THE PROBLEM ============
+ *
+ * settings.prop is 0640 ndusr:ndusr. Every app the owner installed runs as
+ * ndusr_ut, so the read fails with EACCES and nd_settings_get() hands back
+ * the DEFAULT for every key -- silently, because a default is a perfectly
+ * good answer and nothing distinguishes it from a real one. The app then
+ * draws with framework defaults: no wallpaper, chrome as though
+ * wpeverywhere were off, and a dim factor nobody chose. It looks broken, and
+ * it looks broken three files away from anything its author can see.
+ *
+ * ============ WHY THE FILE IS NOT WIDENED ============
+ *
+ * Because of one key in it. system.ui.engineering_mode gates the engineering
+ * apps -- LinuxShell, raw AT, RemoteShell -- and nd_proc_app_needs_root()
+ * reads it. It is already the weakest gate on the phone (AGENTS.md: "it
+ * lives in settings.prop, on the partition the attacker just wrote to"), and
+ * making the file readable by the untrusted user would hand a compromised
+ * browser the answer to "is the root path open right now" for free.
+ * neodct/tests/test_sdcard_layout.py asserts the mode, deliberately.
+ *
+ * ============ SO THE CORE PROJECTS THE THREE THAT ARE LOOK ============
+ *
+ * Exactly the same shape as ND_ENV_KEYPAD_MATRIX above: the core knows, the
+ * app cannot ask, so the core says. Set for EVERY app and not only the
+ * untrusted ones, because one code path that always runs is worth more than
+ * two that agree today.
+ *
+ * The values are the settings' own strings, VERBATIM and unparsed -- "ON",
+ * "0.75", a path -- so the app applies nd_setting_is_enabled() and strtod()
+ * exactly as the core would and no parsing policy is duplicated on two sides
+ * of a fork.
+ *
+ * WHAT THIS DOES NOT HAND OVER: the wallpaper VARIABLE is a path, not a
+ * picture. The stock art under /NeoDCT/System/wallpapers is world-readable
+ * decoration on the squashfs and the app can open it; a picture the owner put
+ * on the card lives in a 0750 ndusr:ndusr directory and the app still cannot,
+ * which is right. Knowing the name of a file it cannot read tells it how to
+ * fail -- draw the plain chrome -- instead of leaving it to guess.
+ *
+ * ND_ENV_UI_WALLPAPER is always set: "NONE" when the owner has no wallpaper,
+ * so that ABSENT unambiguously means "no core told me" and a hand-run
+ * nd-apprun still falls back to reading the file for itself. */
+#define ND_ENV_UI_WALLPAPER     "NEODCT_UI_WALLPAPER"
+#define ND_ENV_UI_WP_EVERYWHERE "NEODCT_UI_WPEVERYWHERE"
+#define ND_ENV_UI_WP_DIM        "NEODCT_UI_WPDIM"
+
+/* How long the core waits for the node before giving up on it. Two seconds:
+ * long enough to cover a coldplug still running on a loaded single core,
+ * short enough that a phone whose udev is genuinely broken still opens the
+ * app -- keyless, and saying so -- rather than appearing to hang. */
+#define ND_PROC_KEYDEV_WAIT_S 2.0
+
+/* ------------------------------------------------------------------ *
+ * manifest.json's "wantsPerformance" -- a way for an app to ASK for the CPU
+ * ------------------------------------------------------------------ *
+ *
+ * ============ THE GRANT THAT IS CORRECT AND THE GAP BESIDE IT ============
+ *
+ * 61-neodct-devices.rules gives scaling_min_freq, scaling_max_freq and
+ * scaling_governor to GROUP=ndusr, and that is right: the core drops the
+ * ceiling on the home screen and needs to be able to put it back.
+ *
+ * Widening it to ndusr_ut would be wrong, and obviously so. Every app the
+ * owner installs runs as ndusr_ut; a game that pinned the clock to 1.2 GHz
+ * for as long as it was open -- or worse, one that pinned it and exited
+ * without putting it back, which nd_cpufreq.h warns is exactly what pinning
+ * does -- would flatten a phone battery in an afternoon, and the owner would
+ * have no way to tell which app did it.
+ *
+ * So the permission stays where it is. What was missing was any way to ASK.
+ * The owner wants a PlayStation emulator to be playable, and an emulator on a
+ * 1103 needs the top operating point; today it has no route to say so and no
+ * route to be given it.
+ *
+ * ============ THE APP ASKS; THE CORE DECIDES AND CLAMPS ============
+ *
+ * One boolean in the app's own manifest.json, in the style of useWallpaper:
+ *
+ *     { "name": "PSX", "id": "42", "wantsPerformance": true }
+ *
+ * ABSENT MEANS FALSE, the opposite direction from useWallpaper and for the
+ * same reason a key device is: this costs battery, so an app that has not
+ * said anything must not get it.
+ *
+ * It is a REQUEST and not a setting. What the core does with it is bounded
+ * three ways, and none of the three is the app's to change:
+ *
+ *   THE CEILING ONLY. scaling_max_freq is raised; scaling_min_freq is left
+ *   exactly where it was. That is the difference between "you may go fast"
+ *   and "you must go fast" -- the governor still idles the chip down between
+ *   frames, and a paused emulator costs what a paused emulator should.
+ *   nd_cpufreq_set() deliberately does NOT do this: it pins both ends,
+ *   because Sleepy wants a held frequency to measure. This wants the
+ *   opposite.
+ *
+ *   THE TOP OF THE KERNEL'S OWN TABLE and nothing else. There is no number in
+ *   the manifest and there is not going to be one; the app cannot name a
+ *   frequency, only ask for the highest the kernel is already offering.
+ *
+ *   FOR THE DURATION OF THE APP. The old ceiling is restored when the launch
+ *   returns, on every path including a crash, a SIGTERM from an incoming call
+ *   and a refused spawn. An app cannot leave the phone fast, which is the
+ *   failure mode that would actually cost the owner a battery.
+ *
+ * A kernel with no cpufreq (QEMU, every time) makes all of this a no-op that
+ * logs nothing, because "this machine does not scale its CPU" is not a
+ * failure of the app. */
+#define ND_APP_KEY_WANTS_PERFORMANCE "wantsPerformance"
+
+/* Does the manifest in `app_dir` ask? Pure, and public for the reason
+ * nd_app_manifest_use_wallpaper() is: the POLICY has to be testable without
+ * forking anything, because the launcher's own behaviour cannot be -- a test
+ * cannot make a host kernel offer a second operating point. */
+bool nd_proc_app_wants_performance(const char *app_dir);
+
+/* ============ THE ESCAPE HATCH ============
+ *
+ * How long ND_KEY_CLEAR has to be held, while an app owns the screen, before
+ * the core takes the screen back by terminating it.
+ *
+ * There is otherwise NO key sequence that ends an app which has stopped
+ * responding to keys. The core's launch loop only forwards presses and
+ * inspects none of them, so a full-screen program that is not reading its
+ * channel -- the keyless browser above, an emulator wedged on a bad disc --
+ * leaves the phone with nothing to press. The only ways out were an incoming
+ * call and the battery.
+ *
+ * Three seconds and not two, which is the difference between a safety net and
+ * a bug: C is "back" everywhere in this OS, C does not auto-repeat
+ * (nd_input.c arms repeat for the four arrows only), and nothing in the tree
+ * gives a long C press a meaning of its own. Three seconds cannot be reached
+ * by anybody who meant to go back. */
+#define ND_PROC_APP_ABORT_HOLD_S 3.0
 
 /* 1. open the key channel and the crash pipe
  * 2. spawn nd-apprun with the app's directory, the entry point and its

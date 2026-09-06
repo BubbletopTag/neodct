@@ -25,10 +25,15 @@
 
 /* The two root rows, in the order they are drawn. */
 #define SLEEPY_ROOT_ITEMS 2
+#define SLEEPY_DISPLAY_ITEMS 2
+
+/* Zero is reserved for the timed blank, so the picker always leaves a way
+ * to see the menu. These ten steps map onto the backlight's native range. */
+#define SLEEPY_BRIGHTNESS_LEVELS 10
 
 extern const char *const nd_sleepy_title;
 extern const char *const nd_sleepy_root_items[SLEEPY_ROOT_ITEMS];
-extern const char *const nd_sleepy_blank_item;
+extern const char *const nd_sleepy_display_items[SLEEPY_DISPLAY_ITEMS];
 
 extern const char *const nd_sleepy_no_cpufreq;
 extern const char *const nd_sleepy_no_backlight;

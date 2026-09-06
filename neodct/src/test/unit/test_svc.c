@@ -561,7 +561,7 @@ static void test_loopback_over_a_live_server(core_fixture *fx)
 
     memset(&app, 0, sizeof app);
 
-    CHECK_INT(nd_svc_server_open(&s), ND_OK);
+    CHECK_INT(nd_svc_server_open(&s, ND_SVC_OPS_ALL), ND_OK);
     if (s == NULL)
         return;
     child_fd = dup(nd_svc_server_child_fd(s));
@@ -664,7 +664,7 @@ static void test_garbage_does_not_take_the_core_down(core_fixture *fx)
     struct pollfd pfd;
     int child_fd;
 
-    CHECK_INT(nd_svc_server_open(&s), ND_OK);
+    CHECK_INT(nd_svc_server_open(&s, ND_SVC_OPS_ALL), ND_OK);
     if (s == NULL)
         return;
     child_fd = dup(nd_svc_server_child_fd(s));
@@ -925,7 +925,7 @@ static void test_hardware_true_survives_the_wire(void)
     }
 
     memset(&app, 0, sizeof app);
-    CHECK_INT(nd_svc_server_open(&s), ND_OK);
+    CHECK_INT(nd_svc_server_open(&s, ND_SVC_OPS_ALL), ND_OK);
     if (s == NULL) {
         core_free(&hw);
         okmodem_stop(&fake);
@@ -1258,7 +1258,7 @@ static void test_a_halt_over_the_wire(core_fixture *fx)
     sim.poweroff = g_stub_poweroff_tab;
     sim.n = 1u;
 
-    CHECK_INT(nd_svc_server_open(&s), ND_OK);
+    CHECK_INT(nd_svc_server_open(&s, ND_SVC_OPS_ALL), ND_OK);
     if (s == NULL) {
         halt_fake_free(&fake);
         return;
@@ -1337,7 +1337,7 @@ static void test_a_halt_with_nothing_to_spawn(core_fixture *fx)
     sim.reboot = NOHALT;
     sim.n = 3u;
 
-    CHECK_INT(nd_svc_server_open(&s), ND_OK);
+    CHECK_INT(nd_svc_server_open(&s, ND_SVC_OPS_ALL), ND_OK);
     if (s == NULL) {
         halt_fake_free(&fake);
         return;
@@ -1400,7 +1400,7 @@ static void test_the_clock_over_the_wire(core_fixture *fx)
     int child_fd;
 
     memset(&app, 0, sizeof app);
-    CHECK_INT(nd_svc_server_open(&s), ND_OK);
+    CHECK_INT(nd_svc_server_open(&s, ND_SVC_OPS_ALL), ND_OK);
     if (s == NULL)
         return;
     child_fd = dup(nd_svc_server_child_fd(s));
@@ -1522,7 +1522,7 @@ static void test_a_format_over_the_wire(core_fixture *fx)
 
     nd_storage_set_paths(FMT_MOUNT, FMT_STATE);
 
-    CHECK_INT(nd_svc_server_open(&s), ND_OK);
+    CHECK_INT(nd_svc_server_open(&s, ND_SVC_OPS_ALL), ND_OK);
     if (s == NULL) {
         (void)pthread_mutex_destroy(&fake.mu);
         nd_storage_set_paths(NULL, NULL);
@@ -1606,6 +1606,125 @@ static void test_a_format_over_the_wire(core_fixture *fx)
     nd_storage_set_paths(NULL, NULL);
 }
 
+/* ---- 5d''. the format is a JOB, not a call ---- */
+
+/* ============ THE FREEZE THIS SHAPE EXISTS TO PREVENT ============
+ *
+ * SVC_OP_FORMAT_CARD used to mean "format the card and answer when you are
+ * done". The core answered it from its serving thread, so for up to four
+ * minutes that thread was inside a wait, the BROKER -- a serial,
+ * one-request-at-a-time server -- was inside the same wait, and the core's
+ * broker round-trip mutex was held by both. The UI thread takes that mutex on
+ * every turn of the pump loop that scans the i2c key matrix, and the matrix has
+ * no kernel queue, so every key pressed during a format was lost rather than
+ * delayed. Nothing repainted and nothing could cancel. The owner reported it as
+ * "trying to format the sdcard froze the system".
+ *
+ * Nothing about that was visible to this suite or to QEMU: the simulation
+ * short-circuits the spawn, and a mkfs on a host-backed image file finishes in
+ * under a second. What CAN be pinned here is the shape that replaced it --
+ * three verbs that each answer at once, and a verdict that is handed out
+ * exactly once. Those are decisions; the four minutes was never one.
+ */
+static void test_the_format_is_a_job(core_fixture *fx)
+{
+    nd_svc_format_sim sim;
+    format_fake fake;
+    nd_svc_server *s = NULL;
+    double secs = -1.0;
+    int child_fd;
+
+    memset(&fake, 0, sizeof fake);
+    (void)pthread_mutex_init(&fake.mu, NULL);
+    memset(&sim, 0, sizeof sim);
+    sim.run = format_fake_run;
+    sim.user = &fake;
+
+    nd_storage_set_paths(FMT_MOUNT, FMT_STATE);
+
+    CHECK_INT(nd_svc_server_open(&s, ND_SVC_OPS_ALL), ND_OK);
+    if (s == NULL) {
+        (void)pthread_mutex_destroy(&fake.mu);
+        nd_storage_set_paths(NULL, NULL);
+        return;
+    }
+    child_fd = dup(nd_svc_server_child_fd(s));
+    CHECK(child_fd >= 0);
+    if (child_fd < 0) {
+        nd_svc_server_free(s);
+        (void)pthread_mutex_destroy(&fake.mu);
+        nd_storage_set_paths(NULL, NULL);
+        return;
+    }
+    CHECK(client_from_fd(child_fd));
+    nd_svc_format_simulate(&sim);
+    CHECK_INT(nd_svc_server_start(s, &fx->ui), ND_OK);
+
+    /* Nothing is running, so there is nothing to report and nothing to stop.
+     * A screen that polls before it starts must not be told a job is going. */
+    CHECK_INT((int)nd_svc_format_poll(&secs), (int)ND_SVC_FORMAT_IDLE);
+    CHECK(nd_svc_format_cancel());
+
+    /* A card that is not there is refused by START -- before anything is
+     * spawned, which the call count is the proof of. The old verb could only
+     * say so after the fact. */
+    write_card_state("nocard", "/dev/vdc", "vfat");
+    CHECK(!nd_svc_format_start());
+    CHECK_INT(format_fake_calls(&fake), 0);
+    CHECK_INT((int)nd_svc_format_poll(NULL), (int)ND_SVC_FORMAT_IDLE);
+
+    /* A real card. The simulation replaces the spawn-and-wait, so the job is
+     * already finished when START answers -- which is exactly what a very fast
+     * card looks like, and is why POLL has to be able to report a verdict on
+     * its first call rather than only after a RUNNING. */
+    write_card_state("mounted", "/dev/vdc1", "vfat");
+    fake.result = 0;
+    CHECK(nd_svc_format_start());
+    CHECK_INT(format_fake_calls(&fake), 1);
+    secs = -1.0;
+    CHECK_INT((int)nd_svc_format_poll(&secs), (int)ND_SVC_FORMAT_DONE_OK);
+    CHECK(secs >= 0.0);
+
+    /* ============ AND THE VERDICT IS HANDED OUT ONCE ============
+     *
+     * A latched DONE would outlive the screen that asked for it. That is not a
+     * theoretical worry here: the helper is the broker's child and keeps
+     * running when the app that started it is torn down, so the NEXT launch of
+     * Settings polls the same core. If the verdict were sticky, that launch
+     * would open on "the card was formatted" for a format somebody else asked
+     * for, before it had done anything at all. */
+    CHECK_INT((int)nd_svc_format_poll(NULL), (int)ND_SVC_FORMAT_IDLE);
+
+    /* A helper that ran and failed reports DONE_FAIL, once, the same way. */
+    (void)pthread_mutex_lock(&fake.mu);
+    fake.result = 1;
+    (void)pthread_mutex_unlock(&fake.mu);
+    CHECK(nd_svc_format_start());
+    CHECK_INT(format_fake_calls(&fake), 2);
+    CHECK_INT((int)nd_svc_format_poll(NULL), (int)ND_SVC_FORMAT_DONE_FAIL);
+    CHECK_INT((int)nd_svc_format_poll(NULL), (int)ND_SVC_FORMAT_IDLE);
+
+    /* Cancelling forgets an uncollected verdict rather than saving it for the
+     * next screen. */
+    (void)pthread_mutex_lock(&fake.mu);
+    fake.result = 0;
+    (void)pthread_mutex_unlock(&fake.mu);
+    CHECK(nd_svc_format_start());
+    CHECK(nd_svc_format_cancel());
+    CHECK_INT((int)nd_svc_format_poll(NULL), (int)ND_SVC_FORMAT_IDLE);
+
+    /* The channel survived all of it: every refusal above is a failed
+     * operation, not a protocol error. */
+    CHECK(nd_svc_client_active());
+
+    nd_svc_client_close();
+    nd_svc_server_stop(s);
+    nd_svc_format_simulate(NULL);
+    (void)close(child_fd);
+    (void)pthread_mutex_destroy(&fake.mu);
+    nd_storage_set_paths(NULL, NULL);
+}
+
 /* ---- 5d'. restating the layout, with the helper injected out ---- */
 
 typedef struct {
@@ -1656,7 +1775,7 @@ static void test_a_layout_over_the_wire(core_fixture *fx)
 
     nd_storage_set_paths(FMT_MOUNT, FMT_STATE);
 
-    CHECK_INT(nd_svc_server_open(&s), ND_OK);
+    CHECK_INT(nd_svc_server_open(&s, ND_SVC_OPS_ALL), ND_OK);
     if (s == NULL) {
         (void)pthread_mutex_destroy(&fake.mu);
         nd_storage_set_paths(NULL, NULL);
@@ -1736,7 +1855,7 @@ static void test_an_untrusted_uid_is_still_served(core_fixture *fx)
         return;
     }
 
-    CHECK_INT(nd_svc_server_open(&s), ND_OK);
+    CHECK_INT(nd_svc_server_open(&s, ND_SVC_OPS_ALL), ND_OK);
     if (s == NULL)
         return;
     child_fd = dup(nd_svc_server_child_fd(s));
@@ -1961,10 +2080,28 @@ static void test_a_test_process_cannot_power_off_the_machine(void)
  * covered by a process that is none of those things. In order of precedence:
  * a simulation always wins (that is how the halt path is covered at all); a
  * disarmed process never halts, whatever else is true; a test root never
- * halts, even as root; and after that only root may -- on the phone the real
- * halt is the broker's to spawn, and a non-root process asking for one is a
- * test or a bug. The 2026-09-04 shutdown came through a binary run by hand
- * with no NEODCT_ROOT: the last two rows are what would have stopped it. */
+ * halts, even as root; and after that only root may. The 2026-09-04 shutdown
+ * came through a binary run by hand with no NEODCT_ROOT: the last two rows are
+ * what would have stopped it.
+ *
+ * ============ READ ROW FOUR CAREFULLY ============
+ *
+ * `CHECK(!nd_svc_halt_allowed_for(false, false, false, false))` is the phone's
+ * own configuration: no simulation, not disarmed, no NEODCT_ROOT, not root.
+ * This assertion is CORRECT and stays -- but for a whole release it was also
+ * the reason no phone could be switched off, because the code asked this table
+ * the wrong question.
+ *
+ * The table answers "may THIS process fork and exec a poweroff". halt_resolve()
+ * asked it as though it answered "may this phone be halted", inside a core that
+ * had dropped to ndusr and whose entire job was to hand the halt to the root
+ * broker. So the answer was no, `halt.pending` was never set, and the
+ * nd_broker_halt() call behind it was unreachable. The panel said "Power off
+ * failed." and the log blamed the image for having no poweroff binary.
+ *
+ * The lesson is in the second table below, not in this one: a test that pins a
+ * predicate pins what the predicate MEANS, and it cannot see a caller asking it
+ * a different question. */
 static void test_the_halt_rule_table(void)
 {
     /* sim, disarmed, test root, root */
@@ -1974,6 +2111,41 @@ static void test_the_halt_rule_table(void)
     CHECK(!nd_svc_halt_allowed_for(false, false, true, true));
     CHECK(!nd_svc_halt_allowed_for(false, false, false, false));
     CHECK(nd_svc_halt_allowed_for(false, false, false, true));
+}
+
+/* ------------------------------------------------------------------ *
+ * The question the table above is not
+ * ------------------------------------------------------------------ *
+ *
+ * May this process DELEGATE the halt to the root broker? Same four rows in the
+ * same order, with "there is a broker to ask" where the other has "this process
+ * is root".
+ *
+ * The row that matters is the last one: a phone (no sim, not disarmed, no
+ * NEODCT_ROOT, broker present) may halt. That is the row that did not exist and
+ * whose absence is the "Power off failed." on every real device.
+ *
+ * The interlock is intact, and rows 2 and 3 are why. `make test` sets
+ * NEODCT_ROOT for every binary and nd_testguard.c disarms every one of them
+ * from a constructor, so a test cannot delegate a real halt even if it builds a
+ * broker -- and the broker it built, forked from the same process, inherited
+ * the same latch and would refuse a second time. A simulation still wins,
+ * because with the spawn injected out there is no real halt to refuse.
+ */
+static void test_the_halt_delegation_table(void)
+{
+    /* sim, disarmed, test root, broker */
+    CHECK(!nd_svc_halt_delegate_allowed_for(false, false, false, false));
+    CHECK(!nd_svc_halt_delegate_allowed_for(true, false, false, false));
+    CHECK(nd_svc_halt_delegate_allowed_for(false, false, false, true)); /* the phone */
+    CHECK(!nd_svc_halt_delegate_allowed_for(false, true, false, true)); /* a test binary */
+    CHECK(!nd_svc_halt_delegate_allowed_for(false, false, true, true)); /* under make test */
+    CHECK(nd_svc_halt_delegate_allowed_for(true, true, true, true));    /* a simulated halt */
+
+    /* And the live predicate, in this process: disarmed and under NEODCT_ROOT,
+     * with no broker. Every input says no. */
+    nd_svc_halt_simulate(NULL);
+    CHECK(!nd_svc_halt_delegate_allowed());
 }
 
 /* A test that installs a fake still gets the whole path, because that is how
@@ -1992,6 +2164,136 @@ static void test_the_interlock_leaves_simulated_halts_alone(void)
     CHECK(nd_svc_halt_allowed());
     nd_svc_halt_simulate(NULL);
     CHECK(!nd_svc_halt_allowed());
+}
+
+/* ============ WHICH VERBS A SOCKET CARRIES ============
+ *
+ * The socket used to be all-or-nothing and an untrusted app got nothing at
+ * all. That was right while the browser was the only untrusted thing on the
+ * phone; it stopped being right when an app the owner installed became
+ * untrusted too, because it answered a question nobody had asked -- an
+ * installed app does not need SEND_SMS, and "no SEND_SMS" is not a reason for
+ * "no BATTERY". An installed app could not read the battery, the clock or the
+ * signal bars, and drew as though the phone had none of them.
+ *
+ * THE OP NUMBERS ARE SPELLED OUT HERE ON PURPOSE. They are the wire, so they
+ * live in nd_svc.c and are not public; writing them again in the test means a
+ * renumbering has to be agreed to in two places, and nd_svc.c's own
+ * _Static_assert is the third. */
+static void test_the_untrusted_mask_is_the_read_only_pair(void)
+{
+    enum {
+        OP_SEND_SMS = 1,
+        OP_MODEM_STATUS = 2,
+        OP_BATTERY = 3,
+        OP_BATTERY_QUICKSTART = 4,
+        OP_REBOOT = 5,
+        OP_POWEROFF = 6,
+        OP_SET_CLOCK = 7,
+        OP_FORMAT_CARD_RETIRED = 8,
+        OP_LAYOUT_CARD = 9,
+        OP_FORMAT_START = 10,
+        OP_FORMAT_POLL = 11,
+        OP_FORMAT_CANCEL = 12
+    };
+
+    /* The two that only ever read. */
+    CHECK(nd_svc__op_allowed(ND_SVC_OPS_UNTRUSTED, OP_MODEM_STATUS));
+    CHECK(nd_svc__op_allowed(ND_SVC_OPS_UNTRUSTED, OP_BATTERY));
+
+    /* And everything that costs the owner money, data or the phone. Each is
+     * named rather than looped, so that adding a verb to the untrusted set is
+     * a line somebody has to delete from here. */
+    CHECK(!nd_svc__op_allowed(ND_SVC_OPS_UNTRUSTED, OP_SEND_SMS));
+    CHECK(!nd_svc__op_allowed(ND_SVC_OPS_UNTRUSTED, OP_REBOOT));
+    CHECK(!nd_svc__op_allowed(ND_SVC_OPS_UNTRUSTED, OP_POWEROFF));
+    CHECK(!nd_svc__op_allowed(ND_SVC_OPS_UNTRUSTED, OP_SET_CLOCK));
+    CHECK(!nd_svc__op_allowed(ND_SVC_OPS_UNTRUSTED, OP_LAYOUT_CARD));
+    CHECK(!nd_svc__op_allowed(ND_SVC_OPS_UNTRUSTED, OP_FORMAT_START));
+    CHECK(!nd_svc__op_allowed(ND_SVC_OPS_UNTRUSTED, OP_FORMAT_POLL));
+    CHECK(!nd_svc__op_allowed(ND_SVC_OPS_UNTRUSTED, OP_FORMAT_CANCEL));
+    CHECK(!nd_svc__op_allowed(ND_SVC_OPS_UNTRUSTED, OP_FORMAT_CARD_RETIRED));
+
+    /* BATTERY_QUICKSTART is the one that looks like a read and is not: it
+     * WRITES to the fuel gauge, telling it to re-learn the cell. An app that
+     * called it in a loop would leave the owner with a meter that lies. */
+    CHECK(!nd_svc__op_allowed(ND_SVC_OPS_UNTRUSTED, OP_BATTERY_QUICKSTART));
+
+    /* The core's own socket carries everything, which is what keeps every
+     * stock app working exactly as it did. */
+    CHECK(nd_svc__op_allowed(ND_SVC_OPS_ALL, OP_SEND_SMS));
+    CHECK(nd_svc__op_allowed(ND_SVC_OPS_ALL, OP_POWEROFF));
+    CHECK(nd_svc__op_allowed(ND_SVC_OPS_ALL, OP_FORMAT_CANCEL));
+
+    /* Op 0 is not an operation, and a mask is 32 bits: an op at or above 32
+     * has no bit to test and shifting by it would be undefined. Nothing sends
+     * one -- valid_request() refuses every op this build does not serve --
+     * but this runs BEFORE that and must not depend on it. */
+    CHECK(!nd_svc__op_allowed(ND_SVC_OPS_UNTRUSTED, 0u));
+    CHECK(!nd_svc__op_allowed(ND_SVC_OPS_ALL, 32u));
+    CHECK(!nd_svc__op_allowed(ND_SVC_OPS_ALL, 0xFFFFFFFFu));
+}
+
+/* The same claim, over a live socket, because a mask that is right and never
+ * consulted is worth nothing.
+ *
+ * NOTHING IS FAKED HERE and nothing needs to be. The refusal happens before
+ * dispatch, so the halt path is never entered -- which is exactly the
+ * property being asserted, and the reason this case can ask for a poweroff at
+ * all. If the mask were broken the halt simulator would still be absent, so
+ * the assertion is also the safety: a failure is a refusal that did not
+ * happen, and nd_testguard has disarmed the real one underneath.
+ *
+ * SVC_ST_NO_SERVICE and not a transport error is what the app sees, so
+ * nd_svc_modem_present() answering true while nd_svc_send_sms() answers false
+ * is the shape a caller has always coped with -- the same one a core with a
+ * modem and no SIM produces. */
+static void test_an_untrusted_socket_carries_only_reads(core_fixture *fx)
+{
+    nd_svc_server *s = NULL;
+    nd_ui app; /* an APP's context: the handles are NULL, as nd_app.h says */
+    nd_modem_status st;
+    nd_svc_battery b;
+    char detail[ND_MODEM_DETAIL_MAX];
+    int child_fd;
+
+    memset(&app, 0, sizeof app);
+
+    CHECK_INT(nd_svc_server_open(&s, ND_SVC_OPS_UNTRUSTED), ND_OK);
+    if (s == NULL)
+        return;
+    child_fd = dup(nd_svc_server_child_fd(s));
+    CHECK(child_fd >= 0);
+    if (child_fd < 0) {
+        nd_svc_server_free(s);
+        return;
+    }
+    CHECK(client_from_fd(child_fd));
+    CHECK_INT(nd_svc_server_start(s, &fx->ui), ND_OK);
+
+    /* The two it is allowed: a real answer from the core's own handles. */
+    CHECK(nd_svc_modem_present(&app));
+    memset(&st, 0, sizeof st);
+    CHECK(nd_svc_modem_status(&app, &st));
+    CHECK(nd_svc_battery_present(&app));
+    CHECK(nd_svc_battery_read(&app, &b));
+
+    /* And the rest. Each would have worked on this same socket a moment ago
+     * if it had been opened with ND_SVC_OPS_ALL -- test_loopback_over_a_live
+     * _server proves the SMS one does -- so a false here is the mask and not
+     * a missing service. */
+    detail[0] = '\0';
+    CHECK(!nd_svc_send_sms(&app, "0871234567", "over the wire", detail, sizeof detail));
+    CHECK(!nd_svc_battery_quickstart(&app));
+    CHECK(!nd_svc_reboot());
+    CHECK(!nd_svc_poweroff());
+    CHECK(!nd_svc_set_clock((time_t)1893456000)); /* 2030, comfortably in range */
+    CHECK(!nd_svc_format_card());
+    CHECK(!nd_svc_layout_card());
+
+    nd_svc_client_close();
+    nd_svc_server_stop(s);
+    (void)close(child_fd);
 }
 
 /* ------------------------------------------------------------------ *
@@ -2058,14 +2360,18 @@ int main(void)
     test_the_halt_tables_are_the_pythons();
     test_a_test_process_cannot_power_off_the_machine();
     test_the_halt_rule_table();
+    test_the_halt_delegation_table();
     test_the_interlock_leaves_simulated_halts_alone();
     test_the_halt_lookup_is_execvps();
     test_a_halt_over_the_wire(&fx);
     test_a_halt_with_nothing_to_spawn(&fx);
     test_the_clock_over_the_wire(&fx);
     test_a_format_over_the_wire(&fx);
+    test_the_format_is_a_job(&fx);
     test_a_layout_over_the_wire(&fx);
     test_an_untrusted_uid_is_still_served(&fx);
+    test_the_untrusted_mask_is_the_read_only_pair();
+    test_an_untrusted_socket_carries_only_reads(&fx);
     test_an_app_with_no_socket_is_not_the_core();
 
     /* SvcApp asks for a poweroff, and the launcher's own server thread is

@@ -166,6 +166,60 @@ static void test_a_legacy_fat_card_is_its_own_state(void)
     CHECK(card.removable == true);
 }
 
+/* ============ A CARD FROM SOMEBODY ELSE'S COMPUTER ============
+ *
+ * ext4, mounted, healthy, full of files -- and every one of them owned by a
+ * uid this phone does not have. neodct-sdcard mounts an ext card deliberately
+ * WITHOUT uid=/gid=, so the ownership on the card is the ownership the phone
+ * honours, and a card mkfs.ext4 left as root:root is one this process can read
+ * nothing out of.
+ *
+ * It is its own state for the same reason `legacy` is: the remedy differs in
+ * KIND. NEEDS_SETUP is five mkdirs and keeps everything; this needs either a
+ * chown on the computer that owns it or a reformat here, and the reformat
+ * erases the card. Before it had a state, the phone offered "Set up", watched
+ * the mkdirs fail, and reported "It may be locked or damaged" -- which is
+ * neither.
+ */
+static void test_a_card_from_another_computer_is_its_own_state(void)
+{
+    nd_card card;
+
+    use_scratch_paths();
+    /* All five folders present, which is the point: the folders are not what
+     * is wrong with it and having them does not make it READY. */
+    insert("foreign", "ext4", "backup", FOLDERS, 5u);
+
+    nd_storage_card(&card);
+    CHECK_INT(card.state, ND_CARD_FOREIGN);
+    CHECK(nd_storage_is_ready() == false);
+    /* Everything the dialog and the format offer need survives the branch. */
+    CHECK_STR(card.device, "/dev/vdc");
+    CHECK_STR(card.fstype, "ext4");
+    CHECK_STR(card.label, "backup");
+    CHECK(card.removable == true);
+    /* No arrival partition on a card the phone did not lay out, and the
+     * caller's answer to that must be to refuse rather than fall back. */
+    CHECK_STR(card.untrusted, "");
+}
+
+/* The media gate says no, and it is the one state where that needs saying out
+ * loud: this is a mounted card with the owner's files on it, unlike every
+ * other false answer, and it still cannot be read. A media app handed a path
+ * into it would show an empty list and no reason for it. */
+static void test_a_foreign_card_hands_out_no_media(void)
+{
+    char path[ND_PATH_MAX];
+    char found[2][ND_STORAGE_PATH_MAX];
+
+    use_scratch_paths();
+    insert("foreign", "ext4", "backup", FOLDERS, 5u);
+
+    CHECK(nd_storage_media_available() == false);
+    CHECK(nd_storage_folder("music", path, sizeof path) == false);
+    CHECK_INT(nd_storage_find_updates(found, 2u), 0);
+}
+
 static void test_a_legacy_card_has_nowhere_for_a_download(void)
 {
     nd_card card;
@@ -181,6 +235,184 @@ static void test_a_legacy_card_has_nowhere_for_a_download(void)
      * which is 8 MiB on the phone and holds the databases. */
     CHECK_STR(card.untrusted, "");
     CHECK(!nd_storage_untrusted_dir(path, sizeof path));
+}
+
+/* ============ THE CARD THE OWNER ACTUALLY HAS ============
+ *
+ * This is the regression that read, from the owner's side, as "it now refuses
+ * to recognize an sdcard at all". Their card is a card 0.4.x formatted, so it
+ * is FAT32 with the NeoDCT folders on it -- exactly the card the state above
+ * describes -- and across 0.5.0b every one of these came back empty: no music,
+ * no ringtones, no wallpapers, no update offered.
+ *
+ * Nothing was wrong with the card and nothing was wrong with the classification
+ * either: `legacy` is the truthful word for it. What was wrong is that
+ * nd_storage_folder() asked nd_storage_is_ready(), which is READY and nothing
+ * else, so the ownership question stood in for the readability question in
+ * every media path on the phone. Opening a .mp3 does not care who owns it.
+ *
+ * The test is the four folders, one per app that lost its content, because the
+ * shape of the bug was that they all went at once through one predicate.
+ */
+static void test_a_legacy_card_still_hands_out_its_media(void)
+{
+    char out[ND_PATH_MAX];
+
+    use_scratch_paths();
+    insert("legacy", "vfat", "NEODCT", FOLDERS, 5u);
+
+    CHECK(nd_storage_media_available() == true);
+    /* And it is still not READY: an app installed onto a FAT card could not be
+     * confined, which is the one thing that genuinely does not work here. */
+    CHECK(nd_storage_is_ready() == false);
+
+    CHECK(nd_storage_folder("music", out, sizeof out) == true);
+    CHECK_STR(out, MOUNT "/music");
+    CHECK(nd_storage_folder("tones", out, sizeof out) == true);
+    CHECK_STR(out, MOUNT "/tones");
+    CHECK(nd_storage_folder("wallpapers", out, sizeof out) == true);
+    CHECK_STR(out, MOUNT "/wallpapers");
+    CHECK(nd_storage_folder("update", out, sizeof out) == true);
+    CHECK_STR(out, MOUNT "/update");
+}
+
+/* An .ndsw is a file. Installing one off a FAT card is what 0.4.x did. */
+static void test_a_legacy_card_still_offers_its_updates(void)
+{
+    char found[8][ND_STORAGE_PATH_MAX];
+    char dirs[4][ND_STORAGE_PATH_MAX];
+
+    use_scratch_paths();
+    insert("legacy", "vfat", "NEODCT", FOLDERS, 5u);
+    pt_write_text(MOUNT "/update/UPDATE.ndsw", "zip");
+    pt_mkdir("/system-tones");
+
+    CHECK_INT(nd_storage_find_updates(found, 8u), 1);
+    CHECK_STR(found[0], MOUNT "/update/UPDATE.ndsw");
+
+    /* And the media directories, which is the same predicate one call up. */
+    CHECK_INT(nd_storage_media_dirs("tones", "/system-tones", dirs, 4u), 2);
+    CHECK_STR(dirs[0], "/system-tones");
+    CHECK_STR(dirs[1], MOUNT "/tones");
+}
+
+/* The other side of the widening, and the reason it is a second predicate
+ * rather than a looser is_ready(). A card that mounted but has none of the
+ * folders has nothing to hand out: nd_storage_folder() would be naming a
+ * directory that does not exist, and every caller would have to stat it
+ * again. UNFORMATTED and ABSENT have no filesystem at all. */
+static void test_only_a_readable_card_counts_as_media(void)
+{
+    static const char *const dcim[1] = {"DCIM"};
+
+    use_scratch_paths();
+    insert_default(dcim, 1u);
+    CHECK(nd_storage_media_available() == false);
+
+    pt_new_case();
+    use_scratch_paths();
+    insert("unmountable", "", "", NULL, 0u);
+    CHECK(nd_storage_media_available() == false);
+
+    pt_new_case();
+    use_scratch_paths();
+    CHECK(nd_storage_media_available() == false);
+}
+
+/* ============ "NO CARD" AND "I CANNOT READ THE ANSWER" ============
+ *
+ * A state file written by root with a umask of 0027 is 0640 root:root, and the
+ * core that reads it has been ndusr since 0.5.0b. nd_props_parse_lenient()
+ * cannot report that -- it returns an empty map for every failure it can have
+ * -- so the phone said "No memory card." about a card it had just formatted,
+ * and went on saying it until the next boot, because /run is a tmpfs.
+ *
+ * The mode is fixed at the writer. What is asserted here is that the reader
+ * can tell the difference at all, because the next thing to publish that file
+ * from an unexpected context will make the same mistake and the phone should
+ * say so rather than blame an empty slot.
+ *
+ * Skipped as root, which ignores the mode bits: there is no way to ask the
+ * question then. That is the same limit test_settings.c runs into and it is
+ * worth knowing about -- a suite running as root cannot see a permission bug
+ * of any kind.
+ */
+static void test_a_state_file_that_cannot_be_read_is_not_an_absent_card(void)
+{
+    char resolved[ND_PATH_MAX];
+    nd_card card;
+
+    if (geteuid() == 0u)
+        return; /* the question cannot be asked; see above */
+
+    use_scratch_paths();
+    insert_default(FOLDERS, 5u);
+    CHECK_INT(nd_path_resolve(resolved, sizeof resolved, STATE), ND_OK);
+    CHECK_INT(chmod(resolved, 0u), 0);
+
+    nd_storage_card(&card);
+    CHECK_INT(card.state, ND_CARD_UNKNOWN);
+    /* Nothing is claimed about a card nothing can be read about -- in
+     * particular there is no device for a format to be pointed at. */
+    CHECK_STR(card.device, "");
+    CHECK_STR(card.untrusted, "");
+    /* And every "may I use the card" question still says no, exactly as it
+     * did when this was ABSENT. The change is what the phone can SAY, not
+     * what it will do. */
+    CHECK(nd_storage_is_ready() == false);
+    CHECK(nd_storage_media_available() == false);
+
+    /* Left readable so the case root can be torn down. */
+    CHECK_INT(chmod(resolved, 0600u), 0);
+}
+
+/* And the case that must NOT become UNKNOWN: there is genuinely no card, so
+ * there is genuinely no state file. Every phone with an empty slot is here on
+ * every boot, and calling that a fault would put a permanent error on the
+ * memory-card screen of a phone with nothing wrong with it. */
+static void test_a_missing_state_file_is_still_an_absent_card(void)
+{
+    nd_card card;
+
+    use_scratch_paths();
+    nd_storage_card(&card);
+    CHECK_INT(card.state, ND_CARD_ABSENT);
+}
+
+/* ============ "LOCKED OR DAMAGED" WAS NEITHER ============
+ *
+ * A card formatted on a PC mounts, reports NEEDS_SETUP, and its root directory
+ * is root:root 0755 as mkfs.ext4 left it -- an ext mount carries real numeric
+ * ownership and is deliberately given no uid=/gid=. The ndusr core cannot
+ * write a byte to it, so "Set up" fails, and the sentence the owner got was
+ * "Could not write to the card. It may be locked or damaged."
+ *
+ * This is the predicate that tells the two apart. It answers for THIS process,
+ * which is the only useful answer: the same card is writable to root and not
+ * to ndusr, and which of those the phone is has changed under this code once
+ * already. */
+static void test_the_writability_probe_answers_for_this_process(void)
+{
+    char resolved[ND_PATH_MAX];
+
+    use_scratch_paths();
+    /* No mount point at all: nothing to write into. */
+    CHECK(nd_storage_card_is_writable() == false);
+
+    insert_default(FOLDERS, 5u);
+    CHECK(nd_storage_card_is_writable() == true);
+
+    if (geteuid() == 0u)
+        return; /* root writes into a 0555 directory; see the case above */
+
+    CHECK_INT(nd_path_resolve(resolved, sizeof resolved, MOUNT), ND_OK);
+    CHECK_INT(chmod(resolved, 0555u), 0);
+    CHECK(nd_storage_card_is_writable() == false);
+    /* Traversable but not writable is the exact shape a foreign card arrives
+     * in, so the folders cannot be made either -- which is what the screen
+     * above this now says out loud. */
+    CHECK(nd_storage_setup_folders() == false);
+    CHECK_INT(chmod(resolved, 0755u), 0);
 }
 
 /* The QEMU convenience path: a host folder, no label, no formatting. */
@@ -495,6 +727,14 @@ int main(void)
     RUN(test_the_other_spelling_means_the_same_thing);
     RUN(test_a_legacy_fat_card_is_its_own_state);
     RUN(test_a_legacy_card_has_nowhere_for_a_download);
+    RUN(test_a_card_from_another_computer_is_its_own_state);
+    RUN(test_a_foreign_card_hands_out_no_media);
+    RUN(test_a_legacy_card_still_hands_out_its_media);
+    RUN(test_a_legacy_card_still_offers_its_updates);
+    RUN(test_only_a_readable_card_counts_as_media);
+    RUN(test_a_state_file_that_cannot_be_read_is_not_an_absent_card);
+    RUN(test_a_missing_state_file_is_still_an_absent_card);
+    RUN(test_the_writability_probe_answers_for_this_process);
     RUN(test_a_virtiofs_share_counts_as_a_ready_card);
     RUN(test_removable_is_computed_before_the_absent_branch);
     RUN(test_folders_are_only_offered_once_the_card_is_ready);

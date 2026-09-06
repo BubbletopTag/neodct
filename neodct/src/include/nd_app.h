@@ -133,6 +133,10 @@ extern "C" {
  * the manifests and JSON keys are not C identifiers. */
 #define ND_APP_KEY_USE_WALLPAPER "useWallpaper"
 
+/* manifest.json's two key-device keys. See nd_app_manifest_key_device(). */
+#define ND_APP_KEY_USE_KEYPAD_DEVICE "useKeypadDevice"
+#define ND_APP_KEY_KEYPAD_DEVICE_MAP "keypadDeviceMap"
+
 #define ND_APP_SYM_RUN          "app_run"
 #define ND_APP_SYM_SHUTDOWN     "app_shutdown"
 #define ND_APP_SYM_OPEN_MESSAGE "app_open_message"
@@ -143,6 +147,13 @@ extern "C" {
 #define ND_ENV_CRASH_FD   "NEODCT_CRASH_FD"
 #define ND_ENV_FB_FD      "NEODCT_FB_FD"
 #define ND_ENV_SERVICE_FD "NEODCT_SERVICE_FD"
+
+/* The /dev/input/eventN node the core made for THIS launch, when the app's
+ * manifest asked for one. Not a descriptor: a path, because the program that
+ * needs it is usually not this process -- it is the binary this app is about
+ * to exec, which opens it by name. Absent means there is no such device, and
+ * that is normal on a phone with a real keyboard. See nd_app_key_evdev(). */
+#define ND_ENV_KEY_EVDEV "NEODCT_KEY_EVDEV"
 
 /* "1" when the core's keypad is the i2c matrix, absent otherwise. NOT a
  * descriptor -- it is the one FACT about the keypad an app cannot work out
@@ -232,6 +243,72 @@ const char *nd_app_dir(void);
  * The flag reaches library code as ui->app_use_wallpaper, set once by
  * nd_ui_init_app() and read by nothing else. */
 bool nd_app_manifest_use_wallpaper(const char *app_dir);
+
+/* ============ manifest.json's "useKeypadDevice" ============
+ *
+ * THIS IS HOW A PROGRAM THAT IS NOT AN app.so GETS THE KEYPAD, and it is the
+ * only supported way. Read nd_proc.h's "THE KEY DEVICE" block for the whole
+ * argument; the short version:
+ *
+ *   - an app.so reads keys from the pipe in NEODCT_KEYPAD_FD, and always has;
+ *   - a real ELF binary an app STARTS -- netsurf-fb, mpv, an emulator, a
+ *     viewer -- cannot read that pipe. It scans /dev/input, and on the phone
+ *     /dev/input is empty because the keypad is an i2c matrix;
+ *   - so an app that wraps such a binary asks for a device, and the core --
+ *     which is the only process allowed to inject keys -- makes one and puts
+ *     its /dev/input/eventN path in ND_ENV_KEY_EVDEV for the app to pass on.
+ *
+ *     { "name": "PlayStation", "id": "113", "useKeypadDevice": true }
+ *
+ * ABSENT MEANS FALSE, the opposite direction from useWallpaper, and for the
+ * opposite reason: a wallpaper is decoration and costs an app nothing, while
+ * a key device is a real evdev node in a global namespace that every other
+ * program on the phone can also see. An app that does not need one must not
+ * get one, or two programs end up reading the same keys.
+ *
+ * "keypadDeviceMap" chooses what the device carries. It is optional and only
+ * consulted when useKeypadDevice is true:
+ *
+ *   "raw"      (the default) the sixteen keys the phone HAS, as themselves,
+ *              press and release: NaviKey (KEY_ENTER), C (KEY_BACKSPACE), Up,
+ *              Down, 0-9 on the number row, * (KEY_LEFTSHIFT) and #
+ *              (KEY_BACKSLASH). NeoDCT keycodes are Linux keycodes, so
+ *              nothing is translated and nothing is lost.
+ *   "browser"  nd_t9_bridge's browser map: 2/4/5/6/8 stand in for a d-pad
+ *              (the phone has no Left or Right key at all), and # cycles the
+ *              rest of the pad through abc / ABC / 123 so a URL can be typed.
+ *              For a program that expects a QWERTY keyboard and a cursor.
+ *   "shell"    nd_t9_bridge's shell map: multi-tap letters everywhere and *
+ *              as Tab. For a program that expects a terminal.
+ *
+ * The MAP is the app's choice and the INJECTION is the core's job, and that
+ * split is the point: an app says what its binary expects to read, and never
+ * gets a descriptor it could type into the real UI with.
+ *
+ * An unknown map string is "raw" with a log line -- refusing to start an app
+ * over a typo in a preference would be worse than giving it the keys
+ * untranslated. */
+typedef enum {
+    ND_APP_KEYDEV_NONE = 0, /* the manifest did not ask for one */
+    ND_APP_KEYDEV_RAW,
+    ND_APP_KEYDEV_BROWSER,
+    ND_APP_KEYDEV_SHELL
+} nd_app_keydev;
+
+/* What `app_dir`/manifest.json asks for. ND_APP_KEYDEV_NONE for a missing,
+ * unparseable or silent manifest, and for the core's own "". */
+nd_app_keydev nd_app_manifest_key_device(const char *app_dir);
+
+/* The map names as they are spelled in a manifest, and the parse, exposed so
+ * a test can pin the table rather than a copy of it. `text` may be NULL. */
+nd_app_keydev nd_app_keydev_from_name(const char *text);
+
+/* The evdev node the core made for this app, or NULL when it made none --
+ * because the manifest did not ask, or because this phone has a real keyboard
+ * and needs no synthetic one. Pass it to the binary you are starting; do not
+ * scan /dev/input for it yourself, because on a phone with two bridges up
+ * there is more than one answer and only this one is yours. */
+const char *nd_app_key_evdev(void);
 
 /* "<app dir>/<name>", the correct way to open an asset that ships with the
  * app. Honours ND_ROOT like everything else. */

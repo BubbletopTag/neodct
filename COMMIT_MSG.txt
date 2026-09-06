@@ -3029,3 +3029,103 @@ what happened.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_016gPhyhm5QBEn3NLPBBoTHd
+
+================================================================================
+
+0.5.9a: the hardware the drop forgot
+
+0.5.0b stopped the phone running as root. That was right, and it was
+tested -- on the emulator, where every device node exists at time zero,
+already carries the group that makes it reachable, and never goes away.
+A phone is not that. Its keypad expander powers up, its modem enumerates
+over USB seconds later, its card is detected when the controller gets
+round to it, and devtmpfs creates every one of those nodes root:root
+0600 with the group arriving afterwards, asynchronously, from udev.
+
+So on hardware the dropped core lost a race it never lost on a desk.
+And then -- this is the part that let it run for nine releases -- it
+said nothing. Every failure in this release degraded silently into a
+mode that looks like working hardware: a modem that could not be opened
+became "Simulation" with four full signal bars, a battery that could not
+be read became a fixed 3.85 V, a card that could not be published became
+no card, a tone child that died before execve became a spawn that
+returned true. Nine symptoms, one shape.
+
+What the owner saw, and what it actually was:
+
+  no DTMF, no SMS chirp, no ringtone at all
+      nd_notify's spawn asked its child to become ndusr from a core that
+      already IS ndusr. setgroups() needs CAP_SETGID unconditionally, so
+      the child _exit(122)'d before execve and fork() having succeeded
+      was reported as success. The phone logged "Ringing" and made no
+      sound. Fixed at the call site, and closed as a class in
+      nd_proc_spawn(): an unprivileged caller asking for an impossible
+      drop is now refused in the parent with a log line, and the reaper
+      reports any exit in nd_proc's reserved 120..127 range instead of
+      discarding it.
+
+  "Power off failed." / "Reboot failed."
+      nd_svc_halt_allowed_for()'s last rule is `return is_root`, and
+      halt_resolve() applied it inside the dropped core, upstream of the
+      branch that delegates to the root broker -- so nd_broker_halt()
+      was unreachable in every shipped build and had no test. The gate
+      now asks the question that matters, "will THIS process spawn the
+      halt", and the test interlock keeps both of its arms.
+
+  the keypad dead in the browser, and in mpv
+      apps/Browser opened /dev/uinput itself. It runs as ndusr_ut; the
+      rule grants uinput to ndusr, deliberately, because uinput is key
+      INJECTION and this phone has no compositor. EACCES, no bridge, and
+      no key left that could even quit netsurf. The bridge moved into
+      the core, which is ndusr and may open it, and the child is handed
+      an event node it can only read -- so the boundary is unchanged and
+      only the plumbing moved. It now carries all sixteen keys rather
+      than four arrows, any app can ask for one from its manifest, and
+      holding C for three seconds closes whatever is on the screen.
+
+  "Simulation" on a phone with a modem in it
+      Any probe failure rendered as Simulation, and while mis-reported
+      that way dial() faked a connected call and send_sms() reported
+      success without sending. The phone lied to its owner about a call
+      it never placed. Simulation now means absence, a fault says so
+      with an empty meter, and neither fakes anything.
+
+  the keypad error screen on a good phone
+      The verdict was taken once, in the first fraction of a second,
+      with no retry -- and udevadm settle waits for the QUEUE, not the
+      device, returning success instantly when the queue is empty. The
+      early coldplug now covers tty, sound, misc, rtc, backlight, cpu
+      and block as well, and verifies the node's actual group rather
+      than the queue's depth.
+
+  formatting the card froze the phone; then the card vanished
+      The format wait was taken under the broker's round-trip mutex on a
+      broker that serves one request at a time, so the UI stopped
+      scanning keys and repainting for the whole four minutes -- and the
+      escape hatch could not fire, because the helper is a root child
+      and kill() from the ndusr core is EPERM, which nd_proc_terminate()
+      then reported as success. The format is asynchronous with progress
+      and cancel now, the broker has a narrowly-pinned kill verb, and
+      the state file is no longer published root:root 0640 by a broker
+      that inherited umask 0027.
+
+Also: the battery stops inventing 3.85 V, backlight and Bluetooth audio
+and Remote Shell have the privileges they lost, installed apps can read
+the battery and the clock and see the wallpaper, and nd-selftest asks
+the questions that actually went wrong instead of certifying six device
+nodes -- it had been passing a phone whose browser could not take a
+keypress.
+
+Four golden frames are re-cut. They were stale before this work: Fetch
+was added in 0.5.2b, which moved the app-selector notch, and the frames
+were never re-cut. Verified by rendering from a clean HEAD worktree --
+all 48 frames are byte-identical between HEAD and this tree, so nothing
+here moved a pixel.
+
+The 0.5 series is relabelled alpha, in the changelog here and on the
+tags. It was never beta quality and saying so was the smaller error.
+
+Tests are written but UNRUN: this workstation does not run the C suite.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df

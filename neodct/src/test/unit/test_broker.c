@@ -11,10 +11,13 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <signal.h>
+
 #include "nd_broker.h"
 #include "nd_paths.h"
 #include "nd_priv.h"
 #include "nd_proc.h"
+#include "nd_svc.h"
 
 #include "platform_test.h"
 
@@ -203,7 +206,7 @@ static void test_a_root_child_does_not_get_the_callers_environment(void)
     in[0] = "LD_PRELOAD=" ND_PATH_USER_APPS_DIR "/x/evil.so";
     in[1] = "PATH=" ND_PATH_USER_APPS_DIR "/x/bin";
     in[2] = "NEODCT_ROOT=" ND_PATH_USER_APPS_DIR "/x";
-    in[3] = "NEODCT_FB_FD=7";      /* legitimate: a descriptor just remapped */
+    in[3] = "NEODCT_FB_FD=7"; /* legitimate: a descriptor just remapped */
     in[4] = "LD_AUDIT=/tmp/a.so";
     in[5] = "NEODCT_FB_FD_EVIL=1"; /* a prefix of a kept name is not that name */
     in[6] = "NEODCT_SERVICE_FD";   /* a kept name with no '=' is not an entry */
@@ -443,6 +446,234 @@ static void test_an_oversized_request_is_refused_not_trimmed(void)
     nd_broker_stop(b);
 }
 
+/* ------------------------------------------------------------------ *
+ * KILL: the verb the phone needed and did not have
+ * ------------------------------------------------------------------ *
+ *
+ * The core cannot signal the helpers it starts. `neodct-sdcard format` is
+ * spawned UNDROPPED, so it is root and it is the BROKER's child; the core is
+ * ndusr and is nobody's parent to it. The 240-second escape hatch called
+ * kill(2) from uid 1000 against uid 0, got EPERM -- which nd_proc_terminate
+ * only logs -- and then waitpid()ed a process it had never forked, got ECHILD,
+ * and nd_proc.c read ECHILD as "exited cleanly". So it reported success, sent
+ * no SIGKILL, reaped nothing, and a root mke2fs went on writing the card while
+ * the screen said "Formatting failed."
+ *
+ * The verb that fixes it is a root process taking a pid off an untrusted
+ * socket, so its two pins are the whole of what makes it safe, and both are
+ * asserted here rather than reasoned about.
+ */
+
+/* Something that runs long enough to still be alive on the next line. Skipped
+ * rather than failed if the host has no sleep(1), for the same reason the
+ * spawn cases skip without /bin/true: that would be testing the host. */
+static const char *sleep_path(void)
+{
+    static const char *const CANDIDATES[] = {"/bin/sleep", "/usr/bin/sleep", NULL};
+    size_t i;
+
+    for (i = 0u; CANDIDATES[i] != NULL; i++) {
+        if (access(CANDIDATES[i], X_OK) == 0)
+            return CANDIDATES[i];
+    }
+    return NULL;
+}
+
+/* Pin one: the signal. A signal number arriving off this socket is otherwise a
+ * way to send SIGSTOP to init -- and a STOPped root mkfs still holding the card
+ * open is worse than one that is merely still running. Two literals, not a
+ * range, so the next number somebody puts on the wire is refused by default. */
+static void test_the_kill_verb_takes_two_signals_and_no_others(void)
+{
+    CHECK(nd_broker__kill_signo_allowed(SIGTERM));
+    CHECK(nd_broker__kill_signo_allowed(SIGKILL));
+    CHECK(!nd_broker__kill_signo_allowed(SIGSTOP));
+    CHECK(!nd_broker__kill_signo_allowed(SIGINT));
+    CHECK(!nd_broker__kill_signo_allowed(SIGHUP));
+    CHECK(!nd_broker__kill_signo_allowed(0));  /* the "does it exist" probe */
+    CHECK(!nd_broker__kill_signo_allowed(-1)); /* and the whole process group */
+}
+
+/* Pin two: the pid. The broker signals only a process it forked itself and has
+ * not yet reaped, which is a fact it owns rather than a policy it applies.
+ *
+ * getpid() is the sharpest case available: it is a live process, it is not the
+ * broker's child, and it is THIS TEST. A broker that took the caller's word for
+ * it would kill the thing asking. */
+static void test_the_broker_will_not_signal_a_pid_it_did_not_start(void)
+{
+    nd_broker *b = nd_broker_start();
+
+    CHECK(b != NULL);
+    if (b == NULL)
+        return;
+
+    CHECK(!nd_broker_kill(b, getpid(), SIGTERM));
+    CHECK(!nd_broker_kill(b, 1, SIGKILL)); /* init */
+    CHECK(!nd_broker_kill(b, -1, SIGTERM));
+    CHECK(!nd_broker_kill(b, 0, SIGTERM));
+
+    /* Still usable afterwards: a refused request must not desynchronise the
+     * socket, or one bad ask takes every later one with it. */
+    CHECK(nd_broker_ok(b));
+    nd_broker_stop(b);
+}
+
+/* And the whole escape hatch, end to end: start something long, fail to wait
+ * for it, stop it, reap it.
+ *
+ * This also pins the OTHER half of the format fix. nd_broker_wait() is given a
+ * short deadline against a child that will outlive it, and it has to come back
+ * -- on this side, having polled -- rather than parking the broker inside a
+ * blocking waitpid. That is what the 240-second format wait used to do, and
+ * while it did it the broker served nobody: no app launch, no halt, no clock,
+ * and the core's round-trip mutex was held for the duration, which is the mutex
+ * the UI thread needs on every turn of the loop that scans the key matrix. */
+static void test_the_broker_stops_a_child_it_started(void)
+{
+    nd_broker *b;
+    const char *path = sleep_path();
+    const char *argv[3];
+    nd_proc_spec spec;
+    nd_proc_status st;
+    pid_t pid = -1;
+    pid_t second = -1;
+    const char *tp = true_path();
+
+    if (path == NULL || tp == NULL) {
+        printf("test_broker: no sleep(1); skipping\n");
+        return;
+    }
+    b = nd_broker_start();
+    CHECK(b != NULL);
+    if (b == NULL)
+        return;
+
+    argv[0] = path;
+    argv[1] = "30";
+    argv[2] = NULL;
+    spec_for(&spec, argv);
+    CHECK_INT((int)nd_broker_spawn(b, path, &spec, ND_PRIV_USER, &pid), (int)ND_OK);
+    CHECK(pid > 0);
+    if (pid <= 0) {
+        nd_broker_stop(b);
+        return;
+    }
+
+    /* A bounded wait against a child that is going nowhere. It must TIME OUT
+     * and return, which it can only do because the waiting happens here. */
+    memset(&st, 0, sizeof st);
+    CHECK_INT((int)nd_broker_wait(b, pid, 0.3, &st), (int)ND_ERR_TIMEOUT);
+
+    /* And the broker was never stuck: it answers a completely different
+     * request while the long-lived child is still running. Under the old
+     * blocking REQ_WAIT this could not have been reached at all. */
+    {
+        const char *ok_argv[2];
+        nd_proc_spec ok_spec;
+
+        ok_argv[0] = tp;
+        ok_argv[1] = NULL;
+        spec_for(&ok_spec, ok_argv);
+        CHECK_INT((int)nd_broker_spawn(b, tp, &ok_spec, ND_PRIV_USER, &second), (int)ND_OK);
+        CHECK(second > 0);
+        memset(&st, 0, sizeof st);
+        while (nd_broker_wait(b, second, 5.0, &st) == ND_ERR_TIMEOUT)
+            ;
+        CHECK(st.exited);
+    }
+
+    /* Now stop the sleeper. Both halves go through the broker because both are
+     * syscalls the core no longer has: the signal, and the reap. */
+    CHECK(nd_broker_kill(b, pid, SIGTERM));
+    memset(&st, 0, sizeof st);
+    while (nd_broker_wait(b, pid, 5.0, &st) == ND_ERR_TIMEOUT)
+        ;
+    CHECK(st.signalled);
+    CHECK_INT(st.signo, SIGTERM);
+
+    /* Reaped, so the pid is one the kernel may hand to somebody else now --
+     * and the broker stops agreeing to signal it. A table that kept reaped
+     * pids would be the one way this verb could become a weapon. */
+    CHECK(!nd_broker_kill(b, pid, SIGKILL));
+
+    nd_broker_stop(b);
+}
+
+/* ------------------------------------------------------------------ *
+ * HALT: the verb that had never once run
+ * ------------------------------------------------------------------ *
+ *
+ * nd_broker_halt() shipped with zero coverage on either side and was, in every
+ * configuration a phone could be in, unreachable: the core's own halt gate
+ * refused before the delegation branch behind it could be entered. So the
+ * CAP_SYS_BOOT half of the whole design had never executed, and the fix for
+ * "Power off failed." could have been undone by anybody without a test
+ * noticing.
+ *
+ * The simulation is installed BEFORE nd_broker_start() so that the fork carries
+ * it into the broker child: the spawn hook is what makes this safe to run on a
+ * developer's machine, and it is checked in the child, which is the process
+ * that would otherwise be exec'ing /sbin/poweroff. What the parent can see is
+ * the reply, and that is the assertion -- ND_OK means the request crossed the
+ * socket, passed the interlock inside the broker, resolved a binary and reached
+ * halt_perform(). */
+static void halt_hook(bool reboot, const char *exe, void *user)
+{
+    /* Step 5, replaced. It runs in the BROKER CHILD, so it has nothing to
+     * report back to and nothing to assert on; its whole job is to exist, so
+     * that halt_perform() cannot reach a real fork and exec. */
+    (void)reboot;
+    (void)exe;
+    (void)user;
+}
+
+static void test_a_halt_crosses_the_socket(void)
+{
+    nd_broker *b;
+    nd_svc_halt_sim sim;
+    const char *path = true_path();
+    static const char *argv0[2];
+    static const char *const *const TAB[1] = {argv0};
+
+    if (path == NULL) {
+        printf("test_broker: no /bin/true; skipping\n");
+        return;
+    }
+    argv0[0] = path;
+    argv0[1] = NULL;
+
+    /* Candidate tables of one entry each, pointing at something that certainly
+     * exists, so the case does not depend on the host having /sbin/poweroff --
+     * a container usually does not. Nothing is run either way: sim.spawn
+     * replaces step 5 and only step 5. */
+    memset(&sim, 0, sizeof sim);
+    sim.spawn = halt_hook;
+    sim.poweroff = TAB;
+    sim.reboot = TAB;
+    sim.n = 1u;
+    nd_svc_halt_simulate(&sim);
+
+    b = nd_broker_start();
+    CHECK(b != NULL);
+    if (b == NULL) {
+        nd_svc_halt_simulate(NULL);
+        return;
+    }
+
+    /* BOTH guards, deliberately. The tables mean nothing resolves to a real
+     * poweroff, and the hook means step 5 is not a fork at all. Either alone
+     * would do; this suite has switched a developer's machine off twice, and
+     * the second time was a binary run by hand, so the case that reaches
+     * furthest into the halt path is the one that gets two of them. */
+    CHECK(nd_broker_halt(b, false));
+    CHECK(nd_broker_halt(b, true));
+    CHECK(nd_broker_ok(b));
+
+    nd_broker_stop(b);
+    nd_svc_halt_simulate(NULL);
+}
+
 int main(void)
 {
     RUN(test_the_broker_refuses_to_spawn_as_root);
@@ -453,5 +684,9 @@ int main(void)
     RUN(test_a_user_that_does_not_resolve_is_not_a_way_to_stay_root);
     RUN(test_the_broker_spawns_and_reaps);
     RUN(test_an_oversized_request_is_refused_not_trimmed);
+    RUN(test_the_kill_verb_takes_two_signals_and_no_others);
+    RUN(test_the_broker_will_not_signal_a_pid_it_did_not_start);
+    RUN(test_the_broker_stops_a_child_it_started);
+    RUN(test_a_halt_crosses_the_socket);
     return pt_report("test_broker");
 }

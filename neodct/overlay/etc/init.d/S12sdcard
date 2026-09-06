@@ -1,0 +1,37 @@
+#!/bin/sh
+# Mount a card that was already in the slot at boot. Insertions after this
+# are handled by the udev rule (60-neodct-sdcard.rules); this covers the
+# common case of the card never having been taken out.
+#
+# ============ WHY THIS IS S12 AND NOT S06 ============
+#
+# It ran at S06, which is BEFORE S10udevd, and that was wrong twice.
+#
+# 1. The udev rule is the recovery path. mmc detection is asynchronous: the
+#    controller scans in a workqueue and a card that is a little slow to answer
+#    registers after rcS has walked past. When that happens the boot scan finds
+#    nothing, and the only thing that can still mount the card is
+#    60-neodct-sdcard.rules firing on the kernel's `add` -- which needs udevd to
+#    be running to receive it. At S06 it was not, so the event went nowhere and
+#    the card stayed unmounted until the owner pulled it out and put it back.
+#
+# 2. The block subsystem's coldplug is S10udevd's now (COLDPLUG_SUBSYSTEMS), so
+#    by the time this runs the partition nodes have been replayed and blkid has
+#    something to read.
+#
+# It is still boot-critical, and rcS says why: wallpapers and ringtones can
+# live on the card, so a late mount means a first home frame with the wallpaper
+# missing. Running it 6 slots later costs nothing -- S10udevd is between them
+# and the card scan is a mount, not a scan of the whole bus.
+case "$1" in
+  start|"")
+    /NeoDCT/System/hw/neodct-sdcard scan
+    ;;
+  stop)
+    # No device argument: this is the deliberate teardown, so it means "the
+    # card that is mounted", whatever it is. The udev rule passes the device
+    # that went away instead -- see do_remove().
+    /NeoDCT/System/hw/neodct-sdcard remove
+    ;;
+esac
+exit 0

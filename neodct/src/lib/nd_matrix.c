@@ -92,9 +92,33 @@ static nd_err validate_pins(const uint8_t *row_pins, size_t n_rows, const uint8_
     return ND_OK;
 }
 
+/* How many times construction's release word is offered to a chip that does
+ * not answer, and how long it waits between offers. Half a second in total.
+ *
+ * ============ WHY THE FIRST WRITE GETS RETRIES AND A SCAN DOES NOT ============
+ *
+ * This write is a PROBE, not a scan. It is the first transaction of the boot
+ * and it happens while the expander's supply rail may still be rising, while
+ * the rk3x controller may still be losing arbitration to the fuel gauge being
+ * read on the same bus a few milliseconds earlier, and while the i2c core may
+ * still be returning -EAGAIN from a bus it has only just registered. Every
+ * one of those clears by itself in tens of milliseconds -- and every one of
+ * them used to be a permanent "the keypad did not open" for the whole boot,
+ * because this single two-byte transfer was the entire verdict.
+ *
+ * A scan is different: by then the bus has answered at least once, so a
+ * failure means something changed, and absorbing it silently is what hid a
+ * dead bus for a whole session. That one is counted, not retried -- see
+ * ND_MATRIX_DEAD_SCANS. */
+#define PROBE_TRIES    10
+#define PROBE_RETRY_US 50000L
+
 static nd_err scanner_finish_init(nd_matrix_scanner *s, const uint8_t *row_pins, size_t n_rows,
                                   const uint8_t *col_pins, size_t n_cols)
 {
+    nd_err rc = ND_ERR_IO;
+    int try_no;
+
     memcpy(s->row_pins, row_pins, n_rows);
     memcpy(s->col_pins, col_pins, n_cols);
     s->n_rows = n_rows;
@@ -105,7 +129,24 @@ static nd_err scanner_finish_init(nd_matrix_scanner *s, const uint8_t *row_pins,
 
     /* Construction releases every pin, so a restart mid-scan cannot leave a
      * row driven low against a pressed key. */
-    return nd_pcf8575_write16(&s->chip, 0xFFFFu);
+    for (try_no = 0; try_no < PROBE_TRIES; try_no++) {
+        if (try_no > 0)
+            sleep_us(PROBE_RETRY_US);
+        rc = nd_pcf8575_write16(&s->chip, 0xFFFFu);
+        if (rc == ND_OK) {
+            if (try_no > 0)
+                nd_log(ND_LOG_INPUT, "expander at 0x%02X answered on attempt %d",
+                       (unsigned)s->chip.addr, try_no + 1);
+            return ND_OK;
+        }
+        /* A descriptor that is not a bus at all -- a closed chip, a test's
+         * broken pipe -- will never answer, and ten attempts spread over half
+         * a second would only delay the truth. Only the errnos a cold bus
+         * actually produces are worth waiting on. */
+        if (!nd_input_errno_is_transient(s->chip.last_errno))
+            break;
+    }
+    return rc;
 }
 
 nd_err nd_matrix_scanner_init(nd_matrix_scanner *s, const uint8_t *row_pins, size_t n_rows,
@@ -143,6 +184,25 @@ nd_err nd_matrix_scanner_init_fd(nd_matrix_scanner *s, const uint8_t *row_pins, 
 
     memset(s, 0, sizeof *s);
     rc = nd_pcf8575_attach(&s->chip, fd);
+    if (rc != ND_OK)
+        return rc;
+
+    return scanner_finish_init(s, row_pins, n_rows, col_pins, n_cols);
+}
+
+nd_err nd_matrix_scanner_adopt(nd_matrix_scanner *s, const uint8_t *row_pins, size_t n_rows,
+                               const uint8_t *col_pins, size_t n_cols, int fd, int bus, int addr)
+{
+    nd_err rc;
+
+    if (s == NULL)
+        return ND_ERR_INVAL;
+    rc = validate_pins(row_pins, n_rows, col_pins, n_cols);
+    if (rc != ND_OK)
+        return rc;
+
+    memset(s, 0, sizeof *s);
+    rc = nd_pcf8575_adopt(&s->chip, fd, bus, addr);
     if (rc != ND_OK)
         return rc;
 
@@ -320,11 +380,36 @@ nd_err nd_matrix_input_open_fd(nd_matrix_input *in, const nd_keymap *cfg, int fd
         return ND_ERR_INVAL;
 
     memset(in, 0, sizeof *in);
-    rc = nd_matrix_scanner_init_fd(&in->scanner, cfg->row_pins, cfg->n_rows, cfg->col_pins,
-                                   cfg->n_cols, fd);
+    /* adopt() rather than init_fd(): the keymap already says which bus and
+     * which address this descriptor is, and a log line that names
+     * "/dev/i2c-3 (0x20)" instead of "<attached>" is the difference between a
+     * serial log somebody can act on and one they cannot. The two differ in
+     * nothing else. */
+    rc = nd_matrix_scanner_adopt(&in->scanner, cfg->row_pins, cfg->n_rows, cfg->col_pins,
+                                 cfg->n_cols, fd, cfg->i2c_bus, cfg->i2c_addr);
     if (rc != ND_OK)
         return rc;
     return matrix_input_finish(in, cfg);
+}
+
+bool nd_matrix_input_bus_dead(const nd_matrix_input *in)
+{
+    return in != NULL && in->scan_errors >= (uint32_t)ND_MATRIX_DEAD_SCANS;
+}
+
+int nd_matrix_input_last_errno(const nd_matrix_input *in)
+{
+    return (in != NULL) ? in->scanner.chip.last_errno : 0;
+}
+
+nd_pcf8575_stage nd_matrix_input_last_stage(const nd_matrix_input *in)
+{
+    return (in != NULL) ? in->scanner.chip.last_stage : ND_PCF_STAGE_NONE;
+}
+
+const char *nd_matrix_input_dev(const nd_matrix_input *in)
+{
+    return (in != NULL) ? in->scanner.chip.dev_path : "";
 }
 
 void nd_matrix_input_close(nd_matrix_input *in)
@@ -343,8 +428,27 @@ static int32_t matrix_poll(nd_matrix_input *in)
     bool found = false;
     int32_t code;
 
-    if (nd_matrix_scan_once(&in->scanner, &pos, &found) != ND_OK)
+    if (nd_matrix_scan_once(&in->scanner, &pos, &found) != ND_OK) {
+        /* ============ A SCAN ERROR IS NOT "NO KEY" ============
+         *
+         * It used to be: this branch returned ND_KEY_NONE and threw the error
+         * away. A bus that died after opening -- a loose ribbon, an expander
+         * browning out, the i2c controller wedging -- therefore looked
+         * exactly like a phone nobody was typing on. have_matrix stayed true,
+         * so nd_input's reopen path refused to run (it only fires when there
+         * is NO matrix), nd_input_has_backend() went on answering yes, and
+         * the core never drew a thing. The phone was dead to every key and
+         * said nothing about it, on the screen or in the log, for the rest of
+         * the session.
+         *
+         * So the failures are counted here, and the count is what the caller
+         * asks about. nd_pcf8575 has already logged the first one of the
+         * burst with the errno; there is nothing to add per scan. */
+        if (in->scan_errors < (uint32_t)ND_MATRIX_DEAD_SCANS)
+            in->scan_errors++;
         return ND_KEY_NONE;
+    }
+    in->scan_errors = 0u;
     if (!found)
         return ND_KEY_NONE;
 

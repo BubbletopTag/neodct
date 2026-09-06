@@ -43,8 +43,10 @@
  *  9. get_metadata()'s defaults, and that a tagged file overrides them.
  *
  * 10. Playback really spawns and really stops, driven against stub `aplay`
- *     and `nice` binaries on $PATH -- so no sound card, no mpv, and nothing
- *     is played. The claims are that a child appears, that the fallback
+ *     and `mpv` binaries on $PATH -- so no sound card, no real mpv, and
+ *     nothing is played. $PATH holds those two and nothing else, which is
+ *     itself the claim that each backend execs its player rather than a
+ *     wrapper. The other claims are that a child appears, that the fallback
  *     ladder sends ONE unsupported track to mpv without moving the session
  *     off the in-process path, that pause and resume reach the child, and
  *     that app_shutdown() releases the sound card. That last one is the
@@ -211,6 +213,38 @@ static char g_bindir[ND_PATH_MAX];
  * 1. The strings
  * ------------------------------------------------------------------ */
 
+/* ============ THE SHAPE OF MPV_CMD, NOT ITS SPELLING ============
+ *
+ * Checking the argv element by element is not enough on its own, and this
+ * test is the proof: `nice -n -10 mpv ...` passed an element-by-element
+ * check of its own spelling for a whole release while every .flac and .ogg
+ * on the card "finished" instantly. What was wrong with that argv was
+ * structural. argv[0] was a WRAPPER, so the program the kernel exec'd was
+ * not the player, and busybox nice dies on setpriority rather than degrading
+ * -- and an ndusr app has no CAP_SYS_NICE and no RLIMIT_NICE headroom, so it
+ * always died.
+ *
+ * So this pins the shape: the exec target is the player itself, and is none
+ * of the wrappers a future edit might reach for to influence scheduling or
+ * identity. Every name below needs a privilege this phone grants no app, so
+ * putting one in front of mpv makes the spawn dead on the handset -- and it
+ * can be dead there while working perfectly on a developer's desktop, where
+ * a negative nice level is often allowed and sudo exists at all. */
+static void check_exec_target_is_the_player(const char *argv0)
+{
+    static const char *const wrappers[] = {"nice",    "renice", "chrt", "ionice",
+                                           "setpriv", "sudo",   "su",   "doas"};
+    size_t i;
+
+    CHECK_STR(argv0, "mpv", "MPV_CMD[0] is the program that actually gets exec'd");
+    for (i = 0u; i < sizeof wrappers / sizeof wrappers[0]; i++) {
+        char what[96];
+
+        (void)nd_snprintf(what, sizeof what, "MPV_CMD[0] is not the wrapper `%s`", wrappers[i]);
+        CHECK(strcmp(argv0, wrappers[i]) != 0, what);
+    }
+}
+
 static void test_strings(void)
 {
     CHECK_STR(*api.no_card_message, "No SD card.\nMusic is played from a card.",
@@ -227,13 +261,15 @@ static void test_strings(void)
               "set a blank card up for you from Settings.",
               "NO_CARD_HELP");
 
-    CHECK_STR(api.mpv_cmd[0], "nice", "MPV_CMD[0]");
-    CHECK_STR(api.mpv_cmd[1], "-n", "MPV_CMD[1]");
-    CHECK_STR(api.mpv_cmd[2], "-10", "MPV_CMD[2] -- the nice level is negative on purpose");
-    CHECK_STR(api.mpv_cmd[3], "mpv", "MPV_CMD[3]");
-    CHECK_STR(api.mpv_cmd[4], "--no-video", "MPV_CMD[4]");
-    CHECK_STR(api.mpv_cmd[5], "--audio-buffer=4", "MPV_CMD[5]");
-    CHECK_STR(api.mpv_cmd[6], "--quiet", "MPV_CMD[6]");
+    /* The Python's MPV_CMD minus its `nice -n -10`; music.h says at length
+     * why the nice had to go. Four elements, so anything that reads a fifth
+     * is reading off the end of the array. */
+    CHECK_INT(ND_MUSIC_MPV_ARGC, 4, "MPV_CMD is four elements long");
+    CHECK_STR(api.mpv_cmd[0], "mpv", "MPV_CMD[0]");
+    CHECK_STR(api.mpv_cmd[1], "--no-video", "MPV_CMD[1]");
+    CHECK_STR(api.mpv_cmd[2], "--audio-buffer=4", "MPV_CMD[2]");
+    CHECK_STR(api.mpv_cmd[3], "--quiet", "MPV_CMD[3]");
+    check_exec_target_is_the_player(api.mpv_cmd[0]);
 
     /* manifest.json says 970, and the track list says 4 anyway. */
     CHECK_INT(ND_MUSIC_APP_ID, 970, "the manifest's id");
@@ -1436,7 +1472,7 @@ static void test_duration(void)
  * ------------------------------------------------------------------ */
 
 /* Stub players on $PATH, so nothing needs a sound card and nothing is played.
- * `aplay` is what the in-process path feeds; `nice` is MPV_CMD's argv[0] and
+ * `aplay` is what the in-process path feeds; `mpv` is MPV_CMD's argv[0] and
  * therefore the only program the mpv path has to find. Both block, so a
  * started child stays started until it is stopped. */
 /* A stub that RECORDS its argv before sleeping, so a test can assert on what
@@ -1455,24 +1491,6 @@ static bool make_recording_stub(const char *name, const char *logfile)
     (void)fprintf(f, "#!/bin/sh\nfor a in \"$@\"; do printf '%%s\\n' \"$a\"; done > '%s'\n"
                      "exec sleep 30\n",
                   logfile);
-    (void)fclose(f);
-    return chmod(path, 0755) == 0;
-}
-
-/* `nice -n -10 mpv ...` means the process that is actually exec'd is NICE,
- * and the plain sleeping stub above never reaches mpv at all. This one does
- * what nice does: drop its own two arguments and exec the rest. */
-static bool make_passthrough_stub(const char *name)
-{
-    char path[ND_PATH_MAX];
-    FILE *f;
-
-    if (nd_snprintf(path, sizeof path, "%s/%s", g_bindir, name) != ND_OK)
-        return false;
-    f = fopen(path, "w");
-    if (f == NULL)
-        return false;
-    (void)fputs("#!/bin/sh\nshift 2\nexec \"$@\"\n", f);
     (void)fclose(f);
     return chmod(path, 0755) == 0;
 }
@@ -1523,7 +1541,7 @@ static void test_playback(void)
     double pos = -1.0;
 
     (void)nd_strlcpy(keep, (saved != NULL) ? saved : "", sizeof keep);
-    if (!make_stub("aplay") || !make_stub("nice")) {
+    if (!make_stub("aplay") || !make_stub("mpv")) {
         CHECK(false, "stub players");
         return;
     }
@@ -1818,7 +1836,10 @@ static void test_mpv_gets_the_volume(void)
         CHECK(false, "log path");
         return;
     }
-    if (!make_recording_stub("mpv", logfile) || !make_passthrough_stub("nice")) {
+    /* The recording stub IS the exec target now, so what it writes is mpv's
+     * own argv rather than what survived a wrapper. Nothing else is on $PATH
+     * for the spawn to reach. */
+    if (!make_recording_stub("mpv", logfile)) {
         CHECK(false, "recording stub");
         return;
     }

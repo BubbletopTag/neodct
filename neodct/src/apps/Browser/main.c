@@ -58,6 +58,7 @@
 #include "nd_keycodes.h"
 #include "nd_keypad.h"
 #include "nd_log.h"
+#include "nd_media.h"
 #include "nd_paths.h"
 #include "nd_priv.h"
 #include "nd_proc.h"
@@ -65,6 +66,7 @@
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
+#include "nd_widgets.h"
 
 #include "browser.h"
 
@@ -366,28 +368,18 @@ size_t nd_browser_tagged(char *out, size_t out_sz, const char *body, int code)
 
 void nd_browser_log_console(const char *text)
 {
-    char path[ND_PATH_MAX];
-    int fd;
-
     if (text == NULL)
         return;
-    if (nd_path_resolve(path, sizeof path, ND_BROWSER_CONSOLE) != ND_OK)
-        return;
 
-    /* Opened and closed per call, unbuffered, as the Python's
-     * `with open(CONSOLE, "wb", buffering=0)` does. O_APPEND rather than that
-     * call's O_CREAT|O_TRUNC: on a character device the two are the same
-     * syscall, and O_APPEND is the only spelling that also behaves when a host
-     * test points ND_ROOT at a directory where "the console" is a file. BR-9.
-     * Every failure is swallowed -- a phone with no console must still
-     * browse. */
-    fd = open(path, O_WRONLY | O_APPEND | O_CLOEXEC);
-    if (fd < 0)
-        return;
-    /* Every failure is swallowed, as the Python's bare except does. */
-    if (write_all(fd, text, strlen(text)))
-        (void)write_all(fd, "\r\n", 2u);
-    (void)close(fd);
+    /* fd 2, not the open("/dev/console") the Python did and the port copied.
+     * browser.h has the whole argument -- the node this app can never open,
+     * the year of discarded stderr it cost, and why the answer is not a udev
+     * rule.
+     *
+     * Every failure is still swallowed, as the Python's bare except did: a
+     * phone whose log has gone must still browse. */
+    if (write_all(STDERR_FILENO, text, strlen(text)))
+        (void)write_all(STDERR_FILENO, "\r\n", 2u);
 }
 
 /* ------------------------------------------------------------------ *
@@ -579,10 +571,26 @@ static void emit_line(int console_fd, nd_browser_cpu *cpu, const char *raw, size
     (void)write_all(console_fd, "\r\n", 2u);
 }
 
-/* Hand whatever the core has queued to the bridge, so netsurf sees it as
- * keyboard input. With no bridge the presses are still consumed: the channel
- * is a pipe with a finite buffer at the far end of which the core is writing,
- * and a browsing session is long enough to fill it.
+/* Drain whatever the core has queued on the inherited key channel.
+ *
+ * ============ IT USED TO TYPE THEM INTO A uinput KEYBOARD ============
+ *
+ * This launcher owned the bridge: it opened /dev/uinput, built an
+ * nd_t9_bridge over it, and typed every press into it so netsurf saw a
+ * keyboard. That stopped working the day the core started running this app as
+ * ndusr_ut, because /dev/uinput is granted to group ndusr and ndusr_ut is
+ * deliberately not in it -- and it must stay that way, since a process that
+ * can inject keys on a phone with no compositor can drive the real UI. The
+ * open returned EACCES, there was no else branch, and the browser has read
+ * and discarded every keypress on hardware ever since.
+ *
+ * The device now belongs to the core, which is allowed to make one, and this
+ * app is handed only the /dev/input/eventN path to pass on. See nd_proc.h's
+ * THE KEY DEVICE.
+ *
+ * THE DRAIN IS STILL NECESSARY and is now the whole job: the channel is a
+ * pipe with a finite buffer that the core is writing into, and a browsing
+ * session is long enough to fill it.
  *
  * read_EVENT, not read_key. nd_input_read_key(in, 0.0) returns ND_KEY_NONE as
  * soon as it consumes a RELEASE, because its zero deadline has already passed
@@ -590,7 +598,7 @@ static void emit_line(int console_fd, nd_browser_cpu *cpu, const char *raw, size
  * press of every press/release pair. The Python could use read_key here
  * because the i2c scanner it read reported no releases at all; the channel
  * this reads reports both. */
-static int pump_keys(nd_input *input, nd_t9_bridge *bridge)
+static int pump_keys(nd_input *input)
 {
     int i;
 
@@ -601,14 +609,11 @@ static int pump_keys(nd_input *input, nd_t9_bridge *bridge)
 
         if (!nd_input_read_event(input, 0.0, &ev))
             break;
-        if (ev.pressed && bridge != NULL)
-            nd_t9_bridge_handle_code(bridge, ev.code);
     }
     return i;
 }
 
-void nd_browser_pump(int stderr_fd, int console_fd, nd_browser_cpu *cpu, nd_input *input,
-                     nd_t9_bridge *bridge)
+void nd_browser_pump(int stderr_fd, int console_fd, nd_browser_cpu *cpu, nd_input *input)
 {
     char line[ND_BROWSER_LINE_MAX];
     size_t len = 0u;
@@ -651,7 +656,7 @@ void nd_browser_pump(int stderr_fd, int console_fd, nd_browser_cpu *cpu, nd_inpu
              * Stop polling the descriptor rather than spinning on it for the
              * rest of the browsing session -- POLLHUP is level-triggered and
              * would otherwise make this loop the busiest thing on the phone. */
-            if (pump_keys(input, bridge) == 0 && (pfd[1].revents & (POLLHUP | POLLERR)) != 0)
+            if (pump_keys(input) == 0 && (pfd[1].revents & (POLLHUP | POLLERR)) != 0)
                 input_fd = -1;
         }
 
@@ -955,16 +960,58 @@ bool nd_browser_needs_key_bridge(const nd_ui *ui)
  * run(ui)
  * ------------------------------------------------------------------ */
 
-/* Python's env.copy() plus env.setdefault("HOME", "/NeoDCT/User").
- * owned by the caller; free with free() -- the strings themselves are
- * environ's and a literal, and neither is ours to release. */
-static const char **build_envp(void)
+/* Python's env.copy() plus env.setdefault("HOME", "/NeoDCT/User"), plus the
+ * two names the two programs downstream of us look the key device up under.
+ *
+ * ============ WHY THE SAME PATH THREE TIMES ============
+ *
+ * The core publishes one fact -- NEODCT_KEY_EVDEV, "the evdev node I made for
+ * you" -- and two independent programs have to be told it in their own
+ * vocabulary, neither of which we get to change:
+ *
+ *   NSFB_INPUT_DEV       libnsfb honours it (src/surface/linux.c) and opens
+ *                        exactly that node instead of scanning
+ *                        /dev/input/event0..31. Worth setting even when the
+ *                        scan would have worked: netsurf takes every EV_KEY
+ *                        device it finds, up to eight, so on a machine with a
+ *                        real keyboard the scan is also how a browser ends up
+ *                        reading the developer's keystrokes. Naming the node
+ *                        removes both problems at once.
+ *   NEODCT_KEYPAD_DEVICE nd_media.h's override, the highest-priority input to
+ *                        nd_media_discover_keypad(). neodct-play is exec'd BY
+ *                        netsurf when a <video> is clicked and inherits this
+ *                        environment, so mpv gets keys without netsurf
+ *                        knowing anything about it. Without it neodct-play
+ *                        falls back to scanning /dev/input for a device
+ *                        called "neodct-t9-keypad" -- which is how mpv came
+ *                        to have no keys at all on hardware, because the
+ *                        device with that name was the browser's own bridge
+ *                        and it had stopped being creatable.
+ *
+ * Neither is set when the core made no device, which is the normal case on a
+ * machine with a real keyboard: an empty NSFB_INPUT_DEV would stop netsurf
+ * finding the keyboard it can see perfectly well.
+ *
+ * owned by the caller; free with free() -- the strings are environ's, this
+ * function's statics and two caller-owned buffers, and none is ours to
+ * release. */
+static const char **build_envp(char *nsfb_entry, size_t nsfb_sz, char *media_entry, size_t media_sz)
 {
     static const char home_entry[] = "HOME=" ND_BROWSER_HOME_DIR;
+    const char *node = nd_app_key_evdev();
     const char **envp;
     size_t n = 0u;
     size_t i;
     bool have_home = false;
+
+    nsfb_entry[0] = '\0';
+    media_entry[0] = '\0';
+    if (node != NULL) {
+        if (nd_snprintf(nsfb_entry, nsfb_sz, "%s=%s", ND_BROWSER_NSFB_DEV_ENV, node) != ND_OK)
+            nsfb_entry[0] = '\0';
+        if (nd_snprintf(media_entry, media_sz, "%s=%s", ND_MEDIA_KEYPAD_DEVICE_ENV, node) != ND_OK)
+            media_entry[0] = '\0';
+    }
 
     for (i = 0u; environ[i] != NULL; i++) {
         n++;
@@ -972,13 +1019,27 @@ static const char **build_envp(void)
             have_home = true;
     }
 
-    envp = calloc(n + 2u, sizeof *envp);
+    envp = calloc(n + 4u, sizeof *envp);
     if (envp == NULL)
         return NULL;
-    for (i = 0u; i < n; i++)
-        envp[i] = environ[i];
+    n = 0u;
+    for (i = 0u; environ[i] != NULL; i++) {
+        /* Drop any inherited copy of the two we are about to set, so a stale
+         * node path from an earlier launch cannot reach netsurf. */
+        if (nsfb_entry[0] != '\0' &&
+            strncmp(environ[i], ND_BROWSER_NSFB_DEV_ENV "=", sizeof ND_BROWSER_NSFB_DEV_ENV) == 0)
+            continue;
+        if (media_entry[0] != '\0' && strncmp(environ[i], ND_MEDIA_KEYPAD_DEVICE_ENV "=",
+                                              sizeof ND_MEDIA_KEYPAD_DEVICE_ENV) == 0)
+            continue;
+        envp[n++] = environ[i];
+    }
     if (!have_home)
         envp[n++] = home_entry;
+    if (nsfb_entry[0] != '\0')
+        envp[n++] = nsfb_entry;
+    if (media_entry[0] != '\0')
+        envp[n++] = media_entry;
     envp[n] = NULL;
     return envp;
 }
@@ -994,15 +1055,13 @@ static void log_tagged(const char *body, int code)
 int app_run(nd_ui *ui)
 {
     char bin[ND_PATH_MAX];
-    char console_path[ND_PATH_MAX];
+    char nsfb_env[ND_PATH_MAX + 32];
+    char media_env[ND_PATH_MAX + 32];
     const char *argv[3];
     const char **envp = NULL;
     nd_proc_spec spec;
     nd_proc_status st;
     nd_browser_cpu cpu;
-    nd_uinput_kbd kbd;
-    nd_t9_bridge *bridge = NULL;
-    bool have_kbd = false;
     pid_t pid = -1;
     int pipefd[2] = {-1, -1};
     int devnull = -1;
@@ -1017,30 +1076,44 @@ int app_run(nd_ui *ui)
     if (nd_path_resolve(bin, sizeof bin, ND_BROWSER_BIN) != ND_OK)
         return 0;
 
-    /* The bridge goes up BEFORE netsurf starts, so the uinput device exists by
-     * the time netsurf enumerates /dev/input. */
-    if (nd_browser_needs_key_bridge(ui)) {
-        if (nd_uinput_open(&kbd, NULL, NULL) == ND_OK) {
-            have_kbd = true;
-            /* The browser bridge, not the shell one: netsurf needs arrows to
-             * scroll and follow links, the keypad has no Left or Right key at
-             * all, so 2/4/6/8 stand in for the d-pad and # reaches text entry
-             * for a URL. Built without a thread and without an input source of
-             * its own -- this launcher's poll loop is the source. */
-            bridge = nd_t9_bridge_new_for_test(ND_BRIDGE_BROWSER, &kbd);
-            if (bridge == NULL) {
-                nd_uinput_close(&kbd);
-                have_kbd = false;
-            }
-        }
+    /* ============ REFUSE, DO NOT DEGRADE ============
+     *
+     * On a phone whose only input is the i2c matrix there is nothing in
+     * /dev/input for netsurf to read, so without the core's key device it
+     * comes up with no keyboard at all: no scrolling, no link, no URL, and --
+     * because every one of netsurf's own quit paths is reached through the
+     * keys it does not have -- no way out either. That is not a browser with
+     * a limitation, it is a full-screen program the owner cannot dismiss, and
+     * for the whole of 0.5.x it looked exactly like a hung phone.
+     *
+     * So say so and go back to the menu. This is the same judgement the core
+     * makes when it cannot confine an untrusted app (nd_proc.c): a thing that
+     * cannot be started correctly is not started.
+     *
+     * The core has already logged WHY at error level -- the manifest, the
+     * uinput permission or the udev grant -- so this only has to be the
+     * sentence a person reads. */
+    if (nd_browser_needs_key_bridge(ui) && nd_app_key_evdev() == NULL) {
+        nd_msgdialog d;
+
+        nd_log_err(ND_LOG_BROWSER,
+                   "refusing to start netsurf: this phone's keypad is the i2c matrix and no key "
+                   "device was made for this app, so the browser would ignore every key and "
+                   "could not be closed. See " ND_ENV_KEY_EVDEV " and nd_proc.h.");
+        nd_msgdialog_init(&d, ui,
+                          "The keypad could not be\nconnected to the browser,\nso it would not "
+                          "answer\nany key.\n\nThe log says why.");
+        nd_msgdialog_set_title(&d, "Browser");
+        (void)nd_msgdialog_show(&d);
+        return 0;
     }
 
-    envp = build_envp();
+    envp = build_envp(nsfb_env, sizeof nsfb_env, media_env, sizeof media_env);
     if (envp == NULL)
         goto done;
 
-    if (nd_path_resolve(console_path, sizeof console_path, ND_BROWSER_CONSOLE) == ND_OK)
-        console_fd = open(console_path, O_WRONLY | O_APPEND | O_CLOEXEC);
+    /* fd 2, not an open() of /dev/console -- see nd_browser_log_console(). */
+    console_fd = STDERR_FILENO;
 
     if (pipe2(pipefd, O_CLOEXEC) != 0) {
         nd_log_err(ND_LOG_BROWSER, "pipe2: %s", strerror(errno));
@@ -1145,7 +1218,7 @@ int app_run(nd_ui *ui)
     log_tagged(body, ND_BROWSER_COLOUR_PLAIN);
 
     nd_browser_cpu_init(&cpu, pid);
-    nd_browser_pump(pipefd[0], console_fd, &cpu, ui != NULL ? ui->input : NULL, bridge);
+    nd_browser_pump(pipefd[0], console_fd, &cpu, ui != NULL ? ui->input : NULL);
     (void)close(pipefd[0]);
     pipefd[0] = -1;
 
@@ -1173,16 +1246,9 @@ done:
         (void)close(pipefd[1]);
     if (devnull >= 0)
         (void)close(devnull);
-    if (console_fd >= 0)
-        (void)close(console_fd);
+    /* console_fd is fd 2 and is NOT closed: it is this process's stderr, and
+     * the rest of libneodct logs through it after we return. */
     free((void *)(uintptr_t)(const void *)envp);
-
-    /* Tear the virtual keyboard down before the UI resumes reading the keypad,
-     * so nothing double-consumes presses. */
-    if (bridge != NULL)
-        nd_t9_bridge_free_for_test(bridge);
-    if (have_kbd)
-        nd_uinput_close(&kbd);
 
     nd_browser_drain_input(ui);
 

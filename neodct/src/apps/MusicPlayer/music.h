@@ -72,10 +72,27 @@ extern "C" {
 #define ND_MUSIC_WALK_MAX 64
 #define ND_MUSIC_TEXT_MAX ND_ID3_TEXT_MAX
 
-/* NO_CARD_HELP and MPV_CMD, verbatim. */
+/* NO_CARD_HELP verbatim, and MPV_CMD minus one thing.
+ *
+ * ============ THE PYTHON'S `nice -n -10` IS NOT HERE ============
+ *
+ * The Python's argv was `nice -n -10 mpv ...`, ported verbatim, and it worked
+ * for as long as apps ran as root. Since 27cf79bf an app is ndusr, and a
+ * negative nice needs CAP_SYS_NICE or RLIMIT_NICE headroom that nothing on
+ * this phone grants -- the kernel default is 0.
+ *
+ * GNU coreutils' nice would warn and run the program anyway. The phone ships
+ * BUSYBOX nice, which calls bb_perror_msg_and_die and never reaches its exec,
+ * so the process actually spawned -- nice, not mpv -- exited 1 every time.
+ * With the child's stdout and stderr on /dev/null and a successful fork
+ * treated as playback, the visible result was that .flac and .ogg tracks
+ * simply did not play and nothing said why.
+ *
+ * mpv is the exec target now. The stutter the nice was meant to prevent is
+ * cosmetic; silence is not. */
 extern const char *const nd_music_no_card_help;
 extern const char *const nd_music_no_card_message;
-#define ND_MUSIC_MPV_ARGC 7
+#define ND_MUSIC_MPV_ARGC 4
 extern const char *const nd_music_mpv_cmd[ND_MUSIC_MPV_ARGC];
 
 /* The three defaults get_metadata() starts from. */

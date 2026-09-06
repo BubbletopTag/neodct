@@ -318,9 +318,9 @@ static void snake_menu(nd_ui *ui)
                 (int32_t)nd_games_setting_int(ND_SET_GAMES_SNAKE_LEVEL, ND_GAMES_DEFAULT_LEVEL);
             int32_t picked;
 
-            /* LevelSelector(ui, current=current, app_id=6): count 9 and
-             * title "Level" are the widget's own defaults. */
-            nd_levelsel_init(&picker, ui, current, ND_LEVELSEL_MAX, "Level", ND_GAMES_APP_ID);
+            /* Snake has nine speeds even when the shared selector can hold
+             * more levels for another app. */
+            nd_levelsel_init(&picker, ui, current, 9, "Level", ND_GAMES_APP_ID);
             picked = nd_levelsel_show(&picker);
             if (picked >= 0) /* `if picked is not None` */
                 (void)nd_games_setting_set(ND_SET_GAMES_SNAKE_LEVEL, picked);

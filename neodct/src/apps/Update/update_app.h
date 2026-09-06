@@ -304,6 +304,15 @@ extern const char *const nd_update_msg_no_release_notes;
 extern const char *const nd_update_msg_cannot_write_prefix;
 extern const char *const nd_update_msg_cannot_stage_prefix;
 
+/* NOT IN THE PYTHON either, and for the same kind of reason as the one below.
+ * _reboot() used to discard nd_svc_reboot()'s return, because in the Python
+ * false could only mean "this image has no reboot binary" -- nothing an owner
+ * could do anything about. It now also means the core refused or did not
+ * answer, and the phone is left in a state that IS actionable: the pending
+ * record is already written and synced, so the update installs at the next
+ * boot by any means. This is that sentence. */
+extern const char *const nd_update_msg_no_restart;
+
 /* NOT IN THE PYTHON. The one string this port had to add: it is what the
  * install path says when service.c reports ND_UPDSVC_UNAVAILABLE. The Python
  * has no such branch because in Python the package reader is always there.
@@ -379,7 +388,8 @@ bool nd_update_check_online(nd_ui *ui, char *out, size_t out_sz);
  * ------------------------------------------------------------------ */
 
 /* _reboot(ui): ask the CORE to restart the phone (nd_svc_reboot()), then sit
- * still for thirty seconds.
+ * still for thirty seconds -- or, when the restart did not start, draw
+ * nd_update_msg_no_restart and return at once.
  *
  * The candidate list this used to walk -- `reboot`, `/sbin/reboot`,
  * `busybox reboot` -- and the sync that preceded it are in lib/nd_svc.c now,

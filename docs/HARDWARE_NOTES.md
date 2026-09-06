@@ -31,7 +31,8 @@ Backups are written alongside as `*.bak-neodct-<date>`.
 In the root node:
 
 ```dts
-backlight: backlight {
+/* No label: this standalone backlight has no kernel display consumer. */
+backlight {
     compatible = "pwm-backlight";
     pwms = <&pwm9 0 25000 0>;
     brightness-levels = <0 1 2 4 8 16 32 48 64 80 100>;
@@ -54,6 +55,31 @@ and at the end, beside the other PWM overrides:
 driver looks for, and what the `pwm9` node in `rv1106.dtsi` declares.
 PWM9_M1 shares pin 11 with UART4_TX_M1, which this board file already
 disables, so nothing collides.
+
+The absence of a `backlight:` label matters on this SDK. Its DT compiler uses
+`-@`, which gives labelled nodes a phandle even when nothing references them.
+Linux 5.10's `pwm_backlight_initial_power_state()` treats a phandle as evidence
+that a display driver will turn the backlight on. NeoDCT's panel daemon runs
+in userspace, so that handoff never happens. The observed result was
+`bl_power=4`, `brightness=10`, `max_brightness=10`: the requested brightness
+was full, but the kernel kept the backlight powered down and Sleepy's
+brightness writes did not change that state.
+
+For an SDK with the old labelled node, apply
+[`0001-backlight-standalone.patch`](../neodct/patches/luckfox/0001-backlight-standalone.patch)
+from the SDK root, then rebuild and flash `boot.img` as below. The patch only
+removes the unused label and explains why; PWM9_M1 and the brightness table
+stay the same. It does not apply automatically during a NeoDCT rootfs build.
+
+On a running phone, LinuxShell can clear the power state without serial:
+
+```sh
+echo 0 > /sys/class/backlight/backlight/bl_power
+```
+
+Then retry Sleepy's blank/wake cycle. This runtime setting is lost at reboot;
+the DTB change fixes initialization. If blanking still fails after unblanking,
+check the PWM driver's zero-duty/disable behavior before changing the wiring.
 
 **2. `sysdrv/source/kernel/arch/arm/configs/luckfox_rv1106_linux_defconfig`**
 

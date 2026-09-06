@@ -224,6 +224,37 @@ nd_err nd_nap_install(const char *path, const char *apps_dir, const char *arch, 
  * there -- a directory with no manifest is a dead install, not an app. */
 bool nd_nap_is_installed(const char *apps_dir, const char *dir);
 
+/* ---- menu ids ---------------------------------------------------------- *
+ *
+ * ============ THE BAND, AND WHY THERE IS ONE ============
+ *
+ * nd_ui.c's rescan_apps() concatenates the stock, engineering and installed
+ * app lists and sorts them by the manifest's "id" with a STABLE insertion
+ * sort, so two apps that claim the same id keep readdir order -- which is
+ * inode order on ext4, i.e. install order, i.e. nothing an owner can see or
+ * predict. Nothing allocated ids, nothing checked them, and both .nap
+ * packages that exist today claim 13, because 13 was the next number after
+ * Update's 12 and both authors counted the same way.
+ *
+ * So the numbers are banded. Stock apps keep 1-99 (they run 1-12 today), the
+ * 9xx block stays reserved for the ones that must sort last (MusicPlayer 970,
+ * Power 971), and everything installed from a card belongs between these two.
+ * A package outside the band still installs -- refusing an app over its
+ * position in a menu would be absurd -- but it is logged, and Settings can
+ * say so before it writes anything.
+ *
+ * Documented for third-party authors in docs/NAP-PACKAGES.md. */
+#define ND_NAP_ID_MIN 100
+#define ND_NAP_ID_MAX 899
+
+/* True when some OTHER app already installed under `apps_dir` claims `id`.
+ * `skip_dir` (may be NULL) is the directory about to be replaced, so
+ * re-installing an app is never a collision with itself. When true and
+ * `out_name` is given, it receives that app's manifest "name" -- the words to
+ * put on the screen. Reads only manifests; writes nothing. */
+bool nd_nap_id_conflict(const char *apps_dir, int32_t id, const char *skip_dir, char *out_name,
+                        size_t out_sz);
+
 /* Write the manifest's icon file from the package to `dest` -- a path the
  * caller can write and the framebuffer image cache can read -- so the install
  * screen can show it before anything is unpacked. ND_OK when the icon was in
