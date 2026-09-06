@@ -189,6 +189,17 @@ bool nd_path_exists(const char *path);
 bool nd_path_is_dir(const char *path);
 bool nd_path_is_file(const char *path);
 
+/* Hands a file that ROOT has just created to the owner of the directory it
+ * sits in. nd_path.c has the reasoning; the short form is that nd-core is
+ * root for a moment at boot, /NeoDCT/User belongs to ndusr, and a file root
+ * leaves there under the 0027 umask is one ndusr can never read.
+ *
+ * A no-op that returns true when the caller is not root, or when the
+ * directory is root's own (an image with no ndusr). False only when the
+ * chown itself failed, or the file is not there to be given. ND_ROOT-
+ * resolved like everything else here. */
+bool nd_path_give_to_dir_owner(const char *path);
+
 #ifdef __cplusplus
 }
 #endif

@@ -364,6 +364,23 @@ nd_err nd_keymap_save(const nd_keymap *km, const char *path)
      * write here leaves a phone whose only input device does not work. */
     rc = nd_json_writer_save(w, path);
 
+    /* The first-boot wizard writes this as ROOT (core/nd_main.c, 4a-bis: the
+     * i2c probe needs it) into a /NeoDCT/User that belongs to ndusr, under a
+     * 0027 umask. Left as written, that is a root:root 0640 keymap that the
+     * UI cannot read once it has dropped privilege -- a phone that mapped
+     * every key and then came up dead to all of them, until the next boot's
+     * S00userdata happened to chown it. So the file goes to the directory's
+     * owner here, where it is created. A no-op for every other writer (the
+     * KeypadMapperI2C app, the tests) and on an image with no ndusr.
+     *
+     * Failing to hand it over is logged and NOT an error: the keymap is on
+     * disk and correct, and the wizard restarting the UI over it is still
+     * the best next step -- the log line is what a debugger needs. */
+    if (rc == ND_OK && !nd_path_give_to_dir_owner(path))
+        nd_log_err(ND_LOG_INPUT,
+                   "Keymap %s written, but could not be given to its directory's owner: %s",
+                   path, strerror(errno));
+
 done:
     nd_json_writer_free(w);
     return rc;

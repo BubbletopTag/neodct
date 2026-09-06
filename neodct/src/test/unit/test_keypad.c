@@ -32,13 +32,17 @@
  */
 
 #include <fcntl.h>
+#include <pwd.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "nd_keycodes.h"
 #include "nd_keypad.h"
+#include "nd_paths.h"
+#include "nd_priv.h"
 
 #include "platform_test.h"
 
@@ -698,6 +702,85 @@ static void test_a_saved_keymap_reads_back_identically(void)
 }
 
 /* ------------------------------------------------------------------ *
+ * WHO OWNS THE FILE
+ * ------------------------------------------------------------------ */
+
+/* The first-boot wizard runs as root (core/nd_main.c, 4a-bis: the i2c probe
+ * needs it) and writes this file into a /NeoDCT/User that S00userdata has
+ * already given to ndusr, under run_neodct.sh's 0027 umask. Left as written
+ * that is a root:root 0640 keymap the UI can never read once it has dropped
+ * privilege: a phone that mapped every key and then came up dead to all of
+ * them, on the alpha notice, with a keypad that had worked a second earlier.
+ * It healed on the next boot, when S00userdata chowned the file -- which is
+ * why a developer who reboots constantly never saw it.
+ *
+ * Same shape as test_settings' root case, and skipped for the same reason: a
+ * unit test runs as one user for its whole life, so "and then the process
+ * became somebody else" is a sentence only root can begin. What root CAN
+ * assert is the hand-over itself, on a real directory with a real owner. */
+static void test_root_hands_the_keymap_to_the_directory_owner(void)
+{
+    struct passwd *pw;
+    char resolved[ND_PATH_MAX];
+    struct stat st;
+    nd_keymap km;
+    char *slash;
+
+    if (geteuid() != 0u)
+        return; /* the question cannot be asked; see above */
+    pw = getpwnam(ND_PRIV_USER);
+    if (pw == NULL)
+        return; /* no ndusr on this host: nothing owns the directory but root */
+
+    /* The directory is made lazily by the scratch root, so something has to
+     * be written under it before there is anything to give away. */
+    pt_write_text("/User/.probe", "");
+    CHECK_INT(nd_path_resolve(resolved, sizeof resolved, "/User/keymap.json"), ND_OK);
+    slash = strrchr(resolved, '/');
+    CHECK(slash != NULL);
+    if (slash == NULL)
+        return;
+    *slash = '\0';
+    /* The directory belongs to the user nd-core is about to become, which is
+     * the whole of the condition being tested. */
+    CHECK_INT(chown(resolved, pw->pw_uid, pw->pw_gid), 0);
+    *slash = '/';
+
+    fill_keymap(&km);
+    CHECK_INT(nd_keymap_save(&km, "/User/keymap.json"), ND_OK);
+
+    /* Root wrote it; ndusr owns it. Without this the file is root's, and the
+     * restarted core's every read of it fails. */
+    CHECK_INT(stat(resolved, &st), 0);
+    CHECK_INT(st.st_uid, pw->pw_uid);
+    CHECK_INT(st.st_gid, pw->pw_gid);
+}
+
+/* And for every other writer -- the KeypadMapperI2C app running as ndusr,
+ * this test binary -- the hand-over is a no-op that reports success: the file
+ * is already its writer's, and there is nobody to give it to. */
+static void test_a_non_root_writer_keeps_its_own_keymap(void)
+{
+    char resolved[ND_PATH_MAX];
+    struct stat st;
+    nd_keymap km;
+
+    if (geteuid() == 0u)
+        return; /* the root case is above */
+
+    fill_keymap(&km);
+    CHECK_INT(nd_keymap_save(&km, "/User/keymap.json"), ND_OK);
+    CHECK(nd_path_give_to_dir_owner("/User/keymap.json"));
+
+    CHECK_INT(nd_path_resolve(resolved, sizeof resolved, "/User/keymap.json"), ND_OK);
+    CHECK_INT(stat(resolved, &st), 0);
+    CHECK_INT(st.st_uid, geteuid());
+
+    /* A file that is not there cannot be given, and says so. */
+    CHECK(nd_path_give_to_dir_owner("/User/nothing.json"));
+}
+
+/* ------------------------------------------------------------------ *
  * The keycode tables
  * ------------------------------------------------------------------ */
 
@@ -777,6 +860,8 @@ int main(void)
     RUN(test_the_i2c_address_accepts_three_spellings);
     RUN(test_absent_fields_take_the_python_defaults);
     RUN(test_a_saved_keymap_reads_back_identically);
+    RUN(test_root_hands_the_keymap_to_the_directory_owner);
+    RUN(test_a_non_root_writer_keeps_its_own_keymap);
     RUN(test_the_matrix_name_table_is_verbatim);
     RUN(test_the_three_character_tables);
     return pt_report("test_keypad");

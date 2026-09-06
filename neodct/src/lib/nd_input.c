@@ -382,9 +382,20 @@ static void try_open_matrix(nd_input *in)
     char i2c_dev[32];
 
     if (nd_keymap_load(ND_PATH_KEYMAP, &cfg) != ND_OK) {
-        (void)nd_strlcpy(in->no_backend,
-                         "No keypad map yet. First-boot keypad setup has not written one.",
-                         sizeof in->no_backend);
+        /* Two different phones. One has never run the wizard. The other ran
+         * it and cannot read what it wrote -- a root-owned keymap.json from a
+         * wizard that ran as root, or a corrupt file -- and for two releases
+         * both said "no keypad map yet", which sent the search to the i2c
+         * bus when the answer was in ls -l /NeoDCT/User. nd_keymap_load()
+         * has already logged the specific error. */
+        if (nd_path_exists(ND_PATH_KEYMAP))
+            (void)nd_strlcpy(in->no_backend,
+                             "The keypad map exists but could not be read (owner or contents).",
+                             sizeof in->no_backend);
+        else
+            (void)nd_strlcpy(in->no_backend,
+                             "No keypad map yet. First-boot keypad setup has not written one.",
+                             sizeof in->no_backend);
         return;
     }
 
@@ -521,6 +532,7 @@ nd_err nd_input_open(nd_input **out)
     /* owned by the caller; free with nd_input_close() */
     nd_input *in;
     char path[ND_PATH_MAX];
+    char matrix_reason[ND_INPUT_REASON_MAX];
 
     if (out == NULL)
         return ND_ERR_INVAL;
@@ -532,6 +544,8 @@ nd_err nd_input_open(nd_input **out)
     input_defaults(in);
 
     try_open_matrix(in);
+    /* Kept aside for the summary line below: the evdev open clears it. */
+    (void)nd_strlcpy(matrix_reason, in->no_backend, sizeof matrix_reason);
 
     /* Both backends can coexist: the evdev device is opened regardless, so a
      * developer with a USB keyboard plugged into a real phone can still type. */
@@ -567,14 +581,15 @@ nd_err nd_input_open(nd_input **out)
     /* One unambiguous line for the serial log. The evdev open above clears
      * no_backend the moment ANY /dev/input node opens -- a spurious event0
      * that is not the keypad included -- so the only record that the matrix
-     * lost the boot race is this: which backend actually won, by name. A
-     * hardware debugger reads "evdev ... (no matrix keypad opened)" and knows
-     * to look at /dev/i2c-3's group rather than at the keypad wiring. */
+     * did not come up is this: which backend actually won, by name, and the
+     * reason the matrix gave before it was cleared. A hardware debugger reads
+     * "evdev ... (no matrix keypad opened: ...)" and knows whether to look at
+     * /dev/i2c-3's group, at keymap.json's owner, or at the wiring. */
     if (in->have_matrix)
         nd_log(ND_LOG_INPUT, "Input backend selected: i2c keypad matrix.");
     else if (in->fd >= 0)
-        nd_log(ND_LOG_INPUT, "Input backend selected: evdev %s (no matrix keypad opened).",
-               in->path);
+        nd_log(ND_LOG_INPUT, "Input backend selected: evdev %s (no matrix keypad opened: %s)",
+               in->path, matrix_reason[0] != '\0' ? matrix_reason : "no reason recorded");
     else
         nd_log(ND_LOG_INPUT, "Input backend selected: NONE (%s).", in->no_backend);
 

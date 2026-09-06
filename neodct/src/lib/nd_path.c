@@ -22,6 +22,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 #include "nd_paths.h"
 
@@ -183,4 +184,67 @@ bool nd_path_is_file(const char *path)
     struct stat st;
 
     return stat_resolved(path, &st) && S_ISREG(st.st_mode);
+}
+
+/* ============ ROOT'S FILES IN SOMEBODY ELSE'S DIRECTORY ============
+ *
+ * nd-core is root from exec until core/nd_main.c step 4b, and in that window
+ * it can create files under /NeoDCT/User -- a partition S00userdata has
+ * already handed to ndusr, under run_neodct.sh's umask of 0027. The file
+ * comes out root:root 0640. The moment nd-core becomes ndusr it cannot read
+ * a file it wrote a second ago, and nothing fixes that until the NEXT boot,
+ * when S00userdata's ownership pass chowns it.
+ *
+ * nd_settings.c met this first, with settings.prop, and answered it by
+ * having root decline to write (root_would_orphan_the_file). That is the
+ * right answer when the write is optional. The first-boot keypad wizard's
+ * keymap is not optional -- writing it is the wizard's entire job, and it
+ * has to run as root to probe the bus -- so this is the other answer: write
+ * the file, then give it to whoever owns the directory, because that is who
+ * is going to need it.
+ *
+ * The condition is deliberately not `geteuid() == 0` alone. On an image
+ * built without the users table there is no ndusr, nd-core stays root for
+ * its whole life, the partition is root's, and root's file in root's
+ * directory is exactly right. The question asked is the same one
+ * nd_settings.c asks: does somebody other than me own the place this file
+ * is in? Only then is the file theirs. */
+bool nd_path_give_to_dir_owner(const char *path)
+{
+    char resolved[ND_PATH_MAX];
+    struct stat dir_st;
+    struct stat file_st;
+    char *slash;
+
+    if (path == NULL)
+        return false;
+    if (geteuid() != 0u)
+        return true; /* not root: the file is already its writer's */
+
+    if (nd_path_resolve(resolved, sizeof resolved, path) != ND_OK)
+        return false;
+    if (stat(resolved, &file_st) != 0)
+        return false;
+
+    /* The directory, resolved the same way the file was. A bare name lives in
+     * the working directory and says nothing about ownership; leave it. */
+    slash = strrchr(resolved, '/');
+    if (slash == NULL)
+        return true;
+    if (slash == resolved) {
+        if (stat("/", &dir_st) != 0)
+            return false;
+    } else {
+        *slash = '\0';
+        if (stat(resolved, &dir_st) != 0)
+            return false;
+        *slash = '/';
+    }
+
+    if (dir_st.st_uid == 0u)
+        return true; /* root's own directory: root's file is correct there */
+    if (file_st.st_uid == dir_st.st_uid && file_st.st_gid == dir_st.st_gid)
+        return true;
+
+    return chown(resolved, dir_st.st_uid, dir_st.st_gid) == 0;
 }
