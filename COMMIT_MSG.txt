@@ -2939,3 +2939,93 @@ password field no longer capitalises the first letter.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_016gPhyhm5QBEn3NLPBBoTHd
+
+================================================================================
+
+docs: the whole-device flash, written for someone whose phone will not boot
+
+A phone that will not boot cannot be fixed by any of the paths this repo
+documents. The .ndsw update on a memory card needs a system that runs. The
+per-partition recipes in HARDWARE_NOTES.md are development shortcuts and
+assume you already know what maskrom is, that system.ubi is flashed as
+rootfs.img, and which of build.sh's targets are needed and in what order.
+
+docs/FLASHING.md is the missing one: the full rkflash.sh update, spelled out
+from "unplug the cable" to "the first boot is slower than usual", including
+the parts that are only obvious in hindsight -- that the screen stays dark in
+maskrom mode and that this is correct, that a charge-only USB cable produces
+exactly the "No found any devices" symptom, and that build.sh's fixdep error
+means stale host tools in objs_kernel/scripts rather than anything wrong with
+the tree.
+
+It says plainly, twice, that this erases contacts, messages, settings and the
+Remote Shell keys. That is not a caveat to bury: it is the reason the SD-card
+update exists, and someone reaching for this document is reaching for it
+because the gentler path is not available.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PQmwEA4W9ccT3iACyAcvkE
+
+================================================================================
+
+input: the keymap the root wizard writes belongs to the user who has to read it
+
+0.5.6b moved the first-boot keypad wizard before the privilege drop so that
+its i2c probe runs as root, and that fixed the probe. It also meant the
+wizard WRITES as root: /NeoDCT/User/keymap.json, created under
+run_neodct.sh's 0027 umask, came out root:root 0640 in a directory that
+S00userdata had just given to ndusr. The wizard then exits for the
+supervisor to restart nd-core, the restarted core drops to ndusr,
+try_open_matrix() asks nd_keymap_load() for the file and gets EACCES --
+which it reported as "no keypad map yet". A spurious /dev/input/event0
+opens as evdev, clears the no-backend reason, the alpha notice comes up,
+and no key on the phone can dismiss it. Exactly the sequence the owner
+reported: the wizard works, the UI resets, the notice sticks.
+
+It is the settings.prop bug from nd_settings.c again, one file over --
+root creating something under /NeoDCT/User that the user it is about to
+become cannot read -- and it hid the same way: S00userdata chowns
+keymap.json at the NEXT boot, so a developer who reboots sees it work and
+a person switching on a new phone never gets that far. 0.5.7b's udev fix
+was for a race on /dev/i2c-3's group; that race is real and the fix
+stays, but it was not the thing killing this phone. The keymap's owner
+was.
+
+settings.prop's answer was for root to decline to write. The keymap
+cannot decline -- writing it is the wizard's whole job -- so this is the
+other answer: nd_path_give_to_dir_owner() hands a file root has just
+created to the owner of the directory it sits in, and nd_keymap_save()
+calls it. A no-op when the writer is not root (the KeypadMapperI2C app,
+every test) and when the directory is root's own (an image with no ndusr,
+where root writing root's file is right). It asks the same question
+root_would_orphan_the_file() asks, and answers it by giving rather than
+refusing.
+
+Two diagnostics, so this class cannot hide behind the bus again:
+
+  * try_open_matrix() now tells "the keypad map exists but could not be
+    read" apart from "there is no keypad map yet". They had one message
+    between them, and it sent the last two releases looking at i2c.
+
+  * The "Input backend selected: evdev ..." line carries the reason the
+    matrix gave, captured before the evdev open clears it. On this phone
+    it would have read "(no matrix keypad opened: The keypad map exists
+    but could not be read ...)" and pointed at the file, not the bus.
+
+The test follows test_settings' root case: it can only be asked as root,
+so it skips otherwise, and the non-root half asserts the no-op.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gPhyhm5QBEn3NLPBBoTHd
+
+================================================================================
+
+version: 0.5.8b
+
+The keypad after first-boot setup, for real this time: the map the root
+wizard writes is handed to ndusr so the restarted UI can read it, and the
+input log says "exists but unreadable" rather than "no map" when that is
+what happened.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gPhyhm5QBEn3NLPBBoTHd

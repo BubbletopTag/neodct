@@ -1,5 +1,15 @@
 # NeoDCT OS Changelog
 
+0.5.8b
+The keypad on a brand-new phone, one more time. First-boot setup mapped the
+keys and then the phone came up dead to them, stuck on the opening notice,
+and only a full power cycle brought them back. The setup was saving the key
+map as a file the running phone was not allowed to read, and the quick reset
+after setup does not fix that; the next boot does, which is why it kept
+slipping past. The map is now saved so the phone can read it straight away.
+And when a map is there but cannot be read, the phone says exactly that
+instead of reporting that there is no map at all.
+
 0.5.7b
 The keypad works after first-boot setup now. On a brand-new phone the setup
 would map the keys and then the phone came up dead to the keypad, stuck on
