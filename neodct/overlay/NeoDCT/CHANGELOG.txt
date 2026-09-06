@@ -1,5 +1,37 @@
 # NeoDCT OS Changelog
 
+0.5.10a
+Formatting a memory card works, and says the truth while it does.
+
+In 0.5.9a the phone drew a progress bar while it formatted, and the bar was
+a lie: it was drawn against the same four minutes after which the phone gave
+up and killed the format. So watching it fill was watching a countdown to a
+failure that was going to happen whatever the card did -- which is exactly
+what happened, on a card that simply needed longer than four minutes.
+
+It needed longer because the phone was writing out every one of the card's
+index tables by hand, which on a large card is minutes of work that the
+filesystem is perfectly happy to do quietly in the background afterwards. It
+now asks for that, and a format writes about a hundred and fifty times less
+than it did.
+
+Two numbers now do the job one was doing. How long a format is expected to
+take is worked out from the size of the card in the slot and drives the bar;
+how long the phone will wait before deciding something has gone wrong is a
+much larger number, also from the card's size, so a big card is not held to a
+small card's patience. Reaching the end of the bar now says "Still working"
+and keeps the clock running and the Clear key live, instead of being the
+moment the phone gives up. Only a format that actually finished ever fills
+the bar.
+
+If a format is stopped -- by you, or by the phone deciding it has taken far
+too long -- the card is now described as unformatted, which is what it is.
+Before, the phone went on saying the card was mounted and offering folders
+on a card whose index had just been rewritten. And a format that was stopped
+now says it was stopped, rather than that it failed: the difference matters,
+because one of them means the card was left half-written and needs another
+go.
+
 0.5.9a
 Everything 0.5.x broke on a real phone. In 0.5.0a the phone stopped running
 with full permissions, which was the right thing to do and was tested on the

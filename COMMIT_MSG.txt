@@ -3376,3 +3376,20 @@ It passes.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df
+
+================================================================================
+
+version: 0.5.10a
+
+os-release and the changelog agree on 0.5.10a: the format progress bar no
+longer doubles as the deadline that kills the format, mke2fs stops writing
+every inode table by hand, and both the estimate and the deadline come from
+the size of the card actually in the slot.
+
+The suite is green for the first time on this tree -- MAKE_TEST_EXIT=0, no
+FAIL lines -- and neodct/tools/test_format_flow.sh formats a card end to end
+under QEMU. Neither of those was true when 0.5.9a was tagged, which is how
+0.5.9a went out with twenty-five test regressions in it.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df
