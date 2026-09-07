@@ -633,6 +633,41 @@ int main(int argc, char **argv)
             nd_input_provide_keypad_fd(kfd, keypad.bus, keypad.addr);
     }
 
+    /* 4a-quater. THE BRIGHTNESS THE OWNER CHOSE, PUT BACK.
+     *
+     *     The panel comes up at the device tree's default-brightness-level on
+     *     every boot, so a level somebody deliberately picked lasted until
+     *     they next switched the phone off. Storing it was half a feature;
+     *     this is the other half, and it is four lines because the hard part
+     *     -- bl_power, the tier choice, the read-back -- is all in
+     *     nd_backlight.c.
+     *
+     *     BEFORE THE DROP, like the keypad above and for the same kind of
+     *     reason. 61-neodct-devices.rules hands ndusr the backlight's
+     *     `brightness` file and nothing else; bl_power is granted to nobody,
+     *     and nd_backlight_set_percent() needs both on a phone whose panel
+     *     booted powered down. As root it simply works, once, and the UI
+     *     never has to touch it again.
+     *
+     *     Silent when there is no backlight. QEMU has none, and a line about
+     *     it on every emulator boot would be noise about a panel that does
+     *     not exist. */
+    {
+        char stored[16];
+        int32_t percent;
+
+        (void)nd_settings_get_copy(ND_SET_UI_BRIGHTNESS, ND_SET_UI_BRIGHTNESS_DFLT, stored,
+                                   sizeof stored);
+        percent = (int32_t)strtol(stored, NULL, 10);
+        if (percent > 0 && percent < 100 && nd_backlight_available()) {
+            if (nd_backlight_on(percent))
+                nd_log(ND_LOG_CORE, "Backlight restored to %d%%", percent);
+            else
+                nd_log_err(ND_LOG_CORE, "Could not restore brightness to %d%%: %s", percent,
+                           nd_backlight_last_error());
+        }
+    }
+
     /* 4b. AND NOW STOP BEING ROOT.
      *
      *     What nd-core actually needed uid 0 for was measured rather than

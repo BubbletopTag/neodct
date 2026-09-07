@@ -157,13 +157,13 @@ static bool settings_dir(char *out, size_t out_sz)
     return nd_strlcpy(out, resolved, out_sz) < out_sz;
 }
 
-/* ============ WHY ROOT DOES NOT WRITE THIS FILE ============
+/* ============ WHY ROOT HANDS THIS FILE BACK ============
  *
  * nd-core is root for about a second at boot -- from exec until it becomes
  * ndusr (core/nd_main.c step 4b) -- and in that window it starts the clock
  * service and the remote shell, BOTH of which read a setting. Every read
  * rewrites the file, because `missing` in nd_settings_load() is always true
- * (R-24, and deliberate).
+ * (R-24, and deliberate). Engineering apps are root for their whole lives.
  *
  * So on a phone whose user partition is FRESH -- a new phone, or one whose
  * data was wiped -- root created /NeoDCT/User/settings.prop owned root:root
@@ -181,31 +181,16 @@ static bool settings_dir(char *out, size_t out_sz)
  * Found by booting the thing, not by reading it. The unit tests all run as one
  * user and cannot express "and then the process became somebody else".
  *
- * The condition is not a bare `geteuid() == 0`. An image built without the
- * users table has no ndusr, nd-core stays root for its whole life and the
- * partition is root's -- there, root writing this file is correct and the only
- * thing that will ever write it. So the question asked is the exact one that
- * matters: am I about to create a file that the user who owns this directory
- * will not be able to read?
+ * THE FIRST FIX WAS TO REFUSE THE WRITE, and refusing is half an answer. It
+ * stopped the unreadable file at the price of discarding every setting a root
+ * process ever set -- invisibly, because nd_settings_set() returns ND_OK from
+ * nd_props_set() whatever the writer then decides. That price came due as soon
+ * as an engineering app had a preference worth keeping.
+ *
+ * So root writes it and then gives it away, which is what the write site
+ * below does. See nd_path_give_to_dir_owner() and nd_keymap.c, where the
+ * root-written keymap needed exactly this repair for exactly this reason.
  */
-static bool root_would_orphan_the_file(void)
-{
-    char dir[ND_PATH_MAX];
-    struct stat st;
-
-    if (geteuid() != 0)
-        return false;
-
-    if (!settings_dir(dir, sizeof dir))
-        return false;
-
-    if (stat(dir, &st) != 0)
-        return false;
-    /* Somebody else owns it, and that somebody is who nd-core is about to
-     * become. Leave the file to them. */
-    return st.st_uid != 0u;
-}
-
 /* ============ WHY THE WRITE IS ASKED FOR PERMISSION FIRST ============
  *
  * R-24 (top of this file) makes the rewrite fire on EVERY read, and every
@@ -263,12 +248,10 @@ static void save_settings(const nd_props *settings)
     size_t i;
     nd_err rc;
 
-    /* Both refusals come BEFORE the allocation. They used to come after it,
-     * and the orphan guard's `return` then dropped a whole nd_props on the
-     * floor every time root declined to write -- once per setting read, on
-     * every boot of a phone with a fresh user partition. */
-    if (root_would_orphan_the_file())
-        return;
+    /* The refusal comes BEFORE the allocation. It used to come after it, and
+     * the `return` then dropped a whole nd_props on the floor every time the
+     * write was declined -- once per setting read, on every boot of a phone
+     * with a fresh user partition. */
     if (settings_dir_blocks_the_write())
         return;
 
@@ -287,8 +270,29 @@ static void save_settings(const nd_props *settings)
     }
 
     rc = nd_props_write_atomic(g_settings_path, out, true);
-    if (rc != ND_OK)
+    if (rc != ND_OK) {
         nd_log(SETTINGS_TAG, "Failed to write %s: %s", g_settings_path, nd_strerror(rc));
+        goto done;
+    }
+    /* ============ AND THEN HAND IT BACK, IF ROOT WROTE IT ============
+     *
+     * The block above this function has the history. The short version: the
+     * write used to be REFUSED when root would orphan the file, which meant
+     * every setting a root process set was silently discarded -- and
+     * nd_proc.c launches every engineering app as root, deliberately.
+     * Sleepy's brightness was written, dropped, and read back at the next boot
+     * as the default, with nothing on the console either time.
+     *
+     * The write is atomic, so root creates a NEW file by rename whatever the
+     * old one was owned by, and it is that new file which has to be given
+     * away. This is the same repair keymap.json needs for the same reason,
+     * and nd_path_give_to_dir_owner() is the same helper -- see nd_keymap.c
+     * and the 0.5.8b commit. It is a no-op when the directory is already
+     * root's, which is the image-without-a-users-table case the old guard
+     * went out of its way to allow. */
+    if (geteuid() == 0 && !nd_path_give_to_dir_owner(g_settings_path))
+        nd_log(SETTINGS_TAG, "Wrote %s as root and could not give it to the directory's owner",
+               g_settings_path);
 
 done:
     nd_props_free(out);

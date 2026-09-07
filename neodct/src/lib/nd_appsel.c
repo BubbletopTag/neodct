@@ -257,6 +257,11 @@ static int32_t appsel_loop(nd_appsel *s)
         /* Checked before anything else: with no apps, Down would take a
          * modulo by zero and Enter would index past the end. Only the two
          * ways out respond, and both mean "back". */
+        /* Before the empty-list guard as well as before the navigation, so a
+         * menu with nothing in it is not a screen the phone can ring on. */
+        if (key == ND_KEY_INCOMING_CALL)
+            return ND_APPSEL_RINGING;
+
         if (s->n_items == 0u) {
             if (key == ND_KEY_CLEAR || key == ND_KEY_ENTER)
                 return ND_WIDGET_BACK;

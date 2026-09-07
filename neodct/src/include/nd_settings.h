@@ -143,6 +143,28 @@ extern "C" {
 #define ND_SET_CLOCK_NTP      "system.clock.ntp_sync" /* "ON"      */
 #define ND_SET_CLOCK_NTP_DFLT "ON"
 
+/* HOW BRIGHT THE PANEL IS, as a percentage, written by Sleepy's Brightness
+ * picker and re-applied by the core at boot.
+ *
+ * It is system.ui rather than sleepy. because of who has to read it. The
+ * per-app namespace below is for state an app owns and reads back itself; a
+ * brightness is applied by the CORE, before an app exists, and Sleepy is only
+ * the screen that happens to set it today. Putting it under sleepy. would
+ * mean the core reaching into an app's namespace for a value the app is not
+ * even running to provide.
+ *
+ * NOT in DEFAULTS, for the reason the wallpaper keys give at length: a read
+ * of any key rewrites settings.prop against the whole table, and this one is
+ * read once at boot and written only when somebody moves the slider.
+ *
+ * 100 is the default and it is not merely "the brightest". A phone that has
+ * never had a brightness set must come up at whatever the device tree asked
+ * for, and a stored value only exists after somebody deliberately chose one.
+ * Anything unparseable falls back here too -- a settings file that has been
+ * hand-edited into nonsense must not be able to leave the screen dark. */
+#define ND_SET_UI_BRIGHTNESS      "system.ui.brightness" /* "100" */
+#define ND_SET_UI_BRIGHTNESS_DFLT "100"
+
 /* App-owned */
 #define ND_SET_CALLLOG_DUR_LAST      "calllog.duration.last"
 #define ND_SET_CALLLOG_DUR_RECEIVED  "calllog.duration.received"

@@ -910,10 +910,31 @@ static void rescan_apps(nd_ui *ui)
     ui->home_.n_apps = 0u;
     n = nd_ui_scan_apps(ND_PATH_APPS_DIR, ui->home_.apps, ND_APP_MAX);
     ui->home_.n_apps = n;
+    /* ONE TILE, not thirteen. See the block at ND_UI_ENG_TILE_ID in nd_ui.h
+     * for why it is synthesised here rather than scanned, and why the second
+     * selector it opens lives in the core.
+     *
+     * The pre-scan is not free and is worth its cost: an image built without
+     * the engineering overlay would otherwise show a tile whose selector says
+     * "No Apps", which reads as a broken phone rather than an absent feature.
+     * It walks the same directory the old code walked, into a buffer that is
+     * thrown away, so a menu open costs exactly what it used to. Nothing is
+     * cached: 64 entries is about 33 KB, held for the life of the core, for a
+     * menu opened once a month on a device with 64 MB. */
     if (nd_ui_engineering_mode(ui) && ui->home_.n_apps < ND_APP_MAX) {
-        n = nd_ui_scan_apps(ND_PATH_ENG_APPS_DIR, &ui->home_.apps[ui->home_.n_apps],
-                            ND_APP_MAX - ui->home_.n_apps);
-        ui->home_.n_apps += n;
+        nd_app_entry probe;
+
+        if (nd_ui_scan_apps(ND_PATH_ENG_APPS_DIR, &probe, 1u) > 0u) {
+            nd_app_entry *tile = &ui->home_.apps[ui->home_.n_apps];
+
+            memset(tile, 0, sizeof *tile);
+            (void)nd_strlcpy(tile->name, ND_UI_ENG_TILE_NAME, sizeof tile->name);
+            (void)nd_strlcpy(tile->icon, ND_PATH_ENG_TILE_ICON, sizeof tile->icon);
+            (void)nd_strlcpy(tile->path, ND_PATH_ENG_APPS_DIR, sizeof tile->path);
+            tile->id = ND_UI_ENG_TILE_ID;
+            tile->is_menu = true;
+            ui->home_.n_apps++;
+        }
     }
     /* Apps the owner installed. Scanned unconditionally -- NOT behind
      * engineering mode -- because this is meant to be an ordinary thing an
@@ -2638,13 +2659,93 @@ void nd_ui_render_home_dialing(nd_ui *ui)
  * Menu, app launch, and the per-frame dispatcher
  * ------------------------------------------------------------------ */
 
+/* Launch one entry from a selector. The two selectors below differ in what
+ * they list and in nothing else, so the launch is here once. */
+static void launch_from_menu(nd_ui *ui, const nd_app_entry *app, int32_t index)
+{
+    /* The Python prints the INDEX here, not the manifest id, despite the
+     * wording. Port the message as it is. */
+    nd_log(ND_LOG_OS, "Launching App ID: %d", index);
+    /* entry NULL means app_run(), nd_app.h's default entry point. The
+     * manifest's "exec" is not passed: with process-per-app the code
+     * always lives in ND_APP_SO_NAME beside the manifest, and every
+     * shipped manifest still says "main.py". See U-6 in
+     * OPEN-QUESTIONS.md. */
+    if (nd_proc_launch_app != NULL) {
+        /* ND_ERR_PERM is the ONE launch failure the owner has to be told
+         * about, because it means an untrusted app was refused rather
+         * than run with the core's privileges. Every other failure leaves
+         * the app not running, which is its own message; this one leaves
+         * the phone SAFER than it would otherwise be and looks identical
+         * from the outside. A screen that flashes and returns home is
+         * what hid the browser being broken once already. */
+        if (launch_app_watched(ui, app, NULL, NULL, NULL) == ND_ERR_PERM)
+            show_cannot_confine(ui, app->name);
+    } else {
+        nd_log_err(ND_LOG_OS, "App launcher not linked; ignoring %s", app->name);
+    }
+}
+
+/* The Engineering tile's selector: the same widget as the main menu, over
+ * ND_PATH_ENG_APPS_DIR, one level down and still inside the core.
+ *
+ * NOTHING PRIVILEGED MOVES. The apps are launched from here exactly as they
+ * were launched from the main menu -- nd_proc_launch_app(), the broker,
+ * argv[1] under the engineering directory, which is the single audited gate
+ * deciding what stays root. nd_proc_app_needs_root() re-reads the engineering
+ * setting at launch time, so a screen that outlived a mode change fails safe
+ * to ndusr rather than to root.
+ *
+ * Heap, not stack: ND_APP_MAX entries is about 31 KB and the core's frame is
+ * not the place for it. Freed BEFORE the launch, with the chosen entry copied
+ * out, so nothing is held for the lifetime of the app that runs next.
+ *
+ * Returns true when an app was launched, which is what tells the caller to
+ * unwind to the home screen rather than redraw the main menu. */
+static bool engineering_menu(nd_ui *ui)
+{
+    nd_app_entry *apps;
+    nd_app_entry chosen;
+    nd_appsel menu;
+    const char *saved;
+    size_t n;
+    int32_t choice;
+
+    apps = malloc(ND_APP_MAX * sizeof *apps);
+    if (apps == NULL) {
+        nd_log_err(ND_LOG_OS, "Engineering menu: out of memory");
+        return false;
+    }
+    /* Named for the same reason rescan_apps() names its walks: a manifest scan
+     * opens and parses a file per app and beats nothing while it does, so a
+     * phone that stops here must say which read it stopped on rather than
+     * blaming whatever label was last in force. */
+    saved = nd_ui_watch_begin("scanning the engineering apps");
+    n = nd_ui_scan_apps(ND_PATH_ENG_APPS_DIR, apps, ND_APP_MAX);
+    sort_apps_by_id(apps, n);
+    nd_ui_watch_end(saved);
+
+    nd_appsel_init(&menu, ui, ND_UI_ENG_TILE_NAME, apps, n, nd_ui_wallpaper(ui));
+    choice = nd_appsel_show(&menu);
+    if (choice == ND_APPSEL_RINGING) {
+        /* Unwind the whole way, not one level. Redrawing the main menu on a
+         * ringing phone is exactly what this return value exists to stop. */
+        free(apps);
+        return true;
+    }
+    if (choice == ND_WIDGET_BACK || (size_t)choice >= n) {
+        free(apps);
+        return false;
+    }
+    chosen = apps[choice];
+    free(apps);
+
+    launch_from_menu(ui, &chosen, choice);
+    return true;
+}
+
 void nd_ui_render_menu(nd_ui *ui)
 {
-    nd_appsel menu;
-    int32_t choice;
-    const nd_app_entry *apps;
-    size_t n_apps = 0u;
-
     if (ui == NULL)
         return;
     if (nd_appsel_init == NULL || nd_appsel_show == NULL) {
@@ -2653,31 +2754,36 @@ void nd_ui_render_menu(nd_ui *ui)
         return;
     }
 
-    apps = nd_ui_app_list(ui, &n_apps);
-    nd_appsel_init(&menu, ui, "Main Menu", apps, n_apps, nd_ui_wallpaper(ui));
-    choice = nd_appsel_show(&menu);
-    if (choice != ND_WIDGET_BACK && (size_t)choice < n_apps) {
-        /* The Python prints the INDEX here, not the manifest id, despite the
-         * wording. Port the message as it is. */
-        nd_log(ND_LOG_OS, "Launching App ID: %d", choice);
-        /* entry NULL means app_run(), nd_app.h's default entry point. The
-         * manifest's "exec" is not passed: with process-per-app the code
-         * always lives in ND_APP_SO_NAME beside the manifest, and every
-         * shipped manifest still says "main.py". See U-6 in
-         * OPEN-QUESTIONS.md. */
-        if (nd_proc_launch_app != NULL) {
-            /* ND_ERR_PERM is the ONE launch failure the owner has to be told
-             * about, because it means an untrusted app was refused rather
-             * than run with the core's privileges. Every other failure leaves
-             * the app not running, which is its own message; this one leaves
-             * the phone SAFER than it would otherwise be and looks identical
-             * from the outside. A screen that flashes and returns home is
-             * what hid the browser being broken once already. */
-            if (launch_app_watched(ui, &apps[choice], NULL, NULL, NULL) == ND_ERR_PERM)
-                show_cannot_confine(ui, apps[choice].name);
-        } else {
-            nd_log_err(ND_LOG_OS, "App launcher not linked; ignoring %s", apps[choice].name);
+    /* A loop now, because Back out of the Engineering selector returns to the
+     * main menu rather than to the home screen -- which is what Back means
+     * everywhere else in this OS, and what makes a submenu feel like one.
+     * Launching anything, from either level, still goes home.
+     *
+     * The list is re-fetched every turn on purpose: nd_ui_refresh_after_app()
+     * invalidates it after any app exits, and a menu redrawn from a stale
+     * pointer would be one freed array behind. */
+    for (;;) {
+        nd_appsel menu;
+        int32_t choice;
+        const nd_app_entry *apps;
+        size_t n_apps = 0u;
+
+        apps = nd_ui_app_list(ui, &n_apps);
+        nd_appsel_init(&menu, ui, "Main Menu", apps, n_apps, nd_ui_wallpaper(ui));
+        choice = nd_appsel_show(&menu);
+        if (choice == ND_WIDGET_BACK || (size_t)choice >= n_apps)
+            break;
+
+        if (apps[choice].is_menu) {
+            /* Not launchable, and the reason is structural: there is no
+             * app.so behind this entry. See ND_UI_ENG_TILE_ID in nd_ui.h. */
+            if (engineering_menu(ui))
+                break;
+            continue;
         }
+
+        launch_from_menu(ui, &apps[choice], choice);
+        break;
     }
     /* Always unwind, so one bad app or menu event cannot trap the core loop. */
     ui->state = ND_UI_STATE_HOME;

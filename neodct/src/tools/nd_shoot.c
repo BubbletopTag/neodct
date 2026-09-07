@@ -1251,6 +1251,46 @@ static bool hold_key_begin(key_script *ks, nd_ui *ui, const int32_t *keys, size_
 
 static size_t app_index_of(nd_ui *ui, const char *name);
 
+/* The directory an app was found in, by MANIFEST NAME.
+ *
+ * The flat registry first, and then the engineering directory -- which the
+ * registry no longer carries. The core shows one Engineering tile and scans
+ * that directory only when the tile is opened (nd_ui.c, engineering_menu()),
+ * so a tool that renders eng-lcdtest has to do the same scan the submenu does
+ * instead of expecting thirteen apps in a list that stopped holding them.
+ *
+ * Returns false rather than a sentinel index, because the index was never the
+ * thing the caller wanted: it immediately turned it back into a path. */
+static bool app_dir_of(nd_ui *ui, const char *name, char *out, size_t out_sz)
+{
+    size_t n = 0u;
+    const nd_app_entry *apps = nd_ui_app_list(ui, &n);
+    nd_app_entry *eng;
+    size_t i;
+    bool found = false;
+
+    for (i = 0u; i < n; i++) {
+        /* The Engineering tile carries the engineering DIRECTORY as its path
+         * and is not an app; matching it would hand back a directory with no
+         * app.so in it. */
+        if (!apps[i].is_menu && strcmp(apps[i].name, name) == 0)
+            return nd_strlcpy(out, apps[i].path, out_sz) < out_sz;
+    }
+
+    eng = malloc(ND_APP_MAX * sizeof *eng);
+    if (eng == NULL)
+        return false;
+    n = nd_ui_scan_apps(ND_PATH_ENG_APPS_DIR, eng, ND_APP_MAX);
+    for (i = 0u; i < n; i++) {
+        if (strcmp(eng[i].name, name) == 0) {
+            found = nd_strlcpy(out, eng[i].path, out_sz) < out_sz;
+            break;
+        }
+    }
+    free(eng);
+    return found;
+}
+
 /* uistub.run_app(ui, name, keys=...), by dlopen.
  *
  * `manifest_name` is the manifest's "name" field and NOT the directory name:
@@ -1285,19 +1325,18 @@ static void run_app_inproc(nd_capture *cap, nd_ui *ui, const char *manifest_name
                            size_t n_keys, int32_t hold_key, const char *entry_sym)
 {
     char so_path[ND_PATH_MAX];
+    char app_dir[ND_PATH_MAX];
     key_script ks;
     void *handle;
     int (*run)(nd_ui *);
     bool have_keys;
-    size_t idx = app_index_of(ui, manifest_name);
 
-    if (idx == (size_t)-1) {
+    if (!app_dir_of(ui, manifest_name, app_dir, sizeof app_dir)) {
         nd_log_err(ND_LOG_OS, "shoot: no app named '%s'", manifest_name);
         g_failed++;
         return;
     }
-    if (nd_path_join(so_path, sizeof so_path, nd_ui_app_list(ui, NULL)[idx].path, ND_APP_SO_NAME) !=
-        ND_OK) {
+    if (nd_path_join(so_path, sizeof so_path, app_dir, ND_APP_SO_NAME) != ND_OK) {
         g_failed++;
         return;
     }
@@ -1336,7 +1375,7 @@ static void run_app_inproc(nd_capture *cap, nd_ui *ui, const char *manifest_name
     {
         bool saved_wp = ui->app_use_wallpaper;
 
-        ui->app_use_wallpaper = nd_app_manifest_use_wallpaper(nd_ui_app_list(ui, NULL)[idx].path);
+        ui->app_use_wallpaper = nd_app_manifest_use_wallpaper(app_dir);
         nd_ui_invalidate_chrome(ui);
 
         nd_capture_set_budget(cap, frame_budget);

@@ -326,6 +326,26 @@ static const struct {
     {12, "Update", "/NeoDCT/System/apps/Update"},
     {970, "Music", "/NeoDCT/System/apps/MusicPlayer"},
     {971, "Power", "/NeoDCT/System/apps/Power"},
+    /* Synthesised by the core, not scanned: no manifest, no app.so, and an
+     * icon that lives with the selector's own resources rather than in an app
+     * directory. It opens the submenu the thirteen rows below moved into.
+     * See ND_UI_ENG_TILE_ID in nd_ui.h. */
+    {ND_UI_ENG_TILE_ID, ND_UI_ENG_TILE_NAME, ND_PATH_ENG_APPS_DIR},
+};
+
+/* The thirteen that used to sit in the table above, one level down.
+ *
+ * They are asserted just as hard as before -- every manifest still has to
+ * parse, keep its id, its name and its directory -- because "we moved them
+ * behind a tile" must not become "we stopped checking them". What changed is
+ * WHERE the list is read from: the core's flat registry no longer holds them,
+ * so the submenu's own scan is asked instead, which is exactly what
+ * engineering_menu() does on the phone. */
+static const struct {
+    int32_t id;
+    const char *name;
+    const char *path;
+} EXPECTED_ENG[] = {
     {999, "Linux Shell", "/NeoDCT/System/engineering/apps/LinuxShell"},
     {9001, "LCD Test", "/NeoDCT/System/engineering/apps/LCDTest"},
     {9002, "MicTest", "/NeoDCT/System/engineering/apps/MicTest"},
@@ -392,11 +412,18 @@ static size_t manifests_under(const char *sub)
     return count_manifests_in(dir);
 }
 
-/* Both of them, because engineering mode is on for this fixture and the
- * registry then walks both. */
+/* The stock directory, plus one for the Engineering tile when there is
+ * anything behind it.
+ *
+ * The registry used to walk both directories and concatenate them; it now
+ * synthesises a single tile in their place, and only when the engineering
+ * directory has something in it -- an image built without that overlay must
+ * not show a tile whose submenu says "No Apps". Counted from the overlay for
+ * the reason the block above gives: the next app to be added has to change
+ * both sides of the assertion at once. */
 static size_t shipped_manifest_count(void)
 {
-    return manifests_under("apps") + manifests_under("engineering/apps");
+    return manifests_under("apps") + (manifests_under("engineering/apps") > 0u ? 1u : 0u);
 }
 
 static const nd_app_entry *entry_with_id(nd_ui *ui, int32_t id)
@@ -452,11 +479,50 @@ static void test_registry(nd_ui *ui)
         CHECK_STR(got->path, EXPECTED[i].path, "the directory it was found in");
         /* Every shipped manifest omits "icon", so the default joins
          * "icon.png" onto the app's own directory. */
+        if (EXPECTED[i].id == ND_UI_ENG_TILE_ID) {
+            /* The one entry with no manifest behind it. Its icon is named
+             * outright and its exec is empty, because there is nothing to
+             * exec -- is_menu is what stops the launcher trying. */
+            CHECK_STR(got->icon, ND_PATH_ENG_TILE_ICON, "the tile's icon is the selector's own");
+            CHECK_STR(got->exec, "", "a menu tile execs nothing");
+            CHECK(got->is_menu, "and says so, so the launcher does not try");
+            continue;
+        }
         (void)nd_snprintf(icon, sizeof icon, "%s/icon.png", EXPECTED[i].path);
         CHECK_STR(got->icon, icon, "icon path defaults to <dir>/icon.png");
         /* U-6: the field is populated from the manifest and launches nothing.
          * Every one of them still says main.py. */
         CHECK_STR(got->exec, "main.py", "exec as the manifest spells it");
+        CHECK(!got->is_menu, "a scanned app is never a menu");
+    }
+}
+
+/* The submenu's own list: the same scan engineering_menu() does, asserted the
+ * same way test_registry() asserts the flat one. */
+static void test_engineering_submenu(void)
+{
+    nd_app_entry apps[ND_APP_MAX];
+    size_t n = nd_ui_scan_apps(ND_PATH_ENG_APPS_DIR, apps, ND_APP_MAX);
+    size_t i;
+
+    CHECK_INT(n, ND_ARRAY_LEN(EXPECTED_ENG), "every engineering manifest still loads");
+
+    for (i = 0u; i < ND_ARRAY_LEN(EXPECTED_ENG); i++) {
+        const nd_app_entry *got = NULL;
+        size_t j;
+
+        for (j = 0u; j < n; j++) {
+            if (apps[j].id == EXPECTED_ENG[i].id) {
+                got = &apps[j];
+                break;
+            }
+        }
+        CHECK(got != NULL, EXPECTED_ENG[i].name);
+        if (got == NULL)
+            continue;
+        CHECK_STR(got->name, EXPECTED_ENG[i].name, "the name the manifest gives");
+        CHECK_STR(got->path, EXPECTED_ENG[i].path, "the directory it was found in");
+        CHECK(!got->is_menu, "a scanned engineering app is not a menu");
     }
 }
 
@@ -920,6 +986,7 @@ int main(void)
     }
 
     test_engineering_off();
+    test_engineering_submenu();
 
     golden = load_golden_manifest();
     if (golden == NULL) {

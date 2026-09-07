@@ -165,6 +165,16 @@ static void write_rv1103_tree(void)
     pt_write_text(ND_CPUFREQ_GOVERNOR, "schedutil\n");
 }
 
+/* The two files that say what the silicon can do, as opposed to what the range
+ * has been narrowed to. Written separately from the tree above so the existing
+ * cases keep testing a kernel that does not publish them -- which is the
+ * fallback path nd_cpufreq_set_range() has to take. */
+static void write_cpuinfo_bounds(void)
+{
+    pt_write_text(ND_CPUFREQ_HW_MIN, "408000\n");
+    pt_write_text(ND_CPUFREQ_HW_MAX, "1200000\n");
+}
+
 static void test_read_table_finds_the_operating_points(void)
 {
     nd_cpufreq_table table;
@@ -314,6 +324,115 @@ static void test_set_refuses_a_frequency_that_is_not_one(void)
     CHECK_INT(nd_cpufreq_set(-408000), ND_ERR_INVAL);
 }
 
+/* ------------------------------------------------------------------ *
+ * The way back out
+ * ------------------------------------------------------------------ */
+
+/* The row Sleepy was missing. A pin writes one number to both ends; without
+ * this there is nothing that writes two, so the CPU screen was a door that
+ * shut behind whoever opened it. */
+static void test_set_range_opens_both_ends_to_the_hardware(void)
+{
+    char text[32];
+
+    write_rv1103_tree();
+    write_cpuinfo_bounds();
+    CHECK_INT(nd_cpufreq_set(816000), ND_OK);
+
+    CHECK_INT(nd_cpufreq_set_range(0, 0), ND_OK);
+    CHECK(pt_read_text(ND_CPUFREQ_MIN, text, sizeof text) != (size_t)-1);
+    CHECK_STR(text, "408000");
+    CHECK(pt_read_text(ND_CPUFREQ_MAX, text, sizeof text) != (size_t)-1);
+    CHECK_STR(text, "1200000");
+}
+
+/* No cpuinfo_* files: the ends of the OPP table are the same two numbers on
+ * this chip and a perfectly good answer on any chip whose table is complete. */
+static void test_set_range_falls_back_to_the_opp_table(void)
+{
+    char text[32];
+
+    write_rv1103_tree();
+    CHECK_INT(nd_cpufreq_set(1200000), ND_OK);
+
+    CHECK_INT(nd_cpufreq_set_range(0, 0), ND_OK);
+    CHECK(pt_read_text(ND_CPUFREQ_MIN, text, sizeof text) != (size_t)-1);
+    CHECK_STR(text, "408000");
+}
+
+/* Widening writes the ceiling FIRST, for the reason the header block gives:
+ * scaling_min_freq is clamped against the current max, so a min written while
+ * the range is still pinned low is silently thrown away. Pinned at 408 and
+ * asked to open up, a min-first implementation leaves min at 408 -- which
+ * looks right -- and this checks the case where it does not: pinned at 1200,
+ * opening down, min must still land. */
+static void test_set_range_widens_in_the_right_order(void)
+{
+    char text[32];
+
+    write_rv1103_tree();
+    write_cpuinfo_bounds();
+    CHECK_INT(nd_cpufreq_set(408000), ND_OK);
+    CHECK(pt_read_text(ND_CPUFREQ_MAX, text, sizeof text) != (size_t)-1);
+    CHECK_STR(text, "408000");
+
+    CHECK_INT(nd_cpufreq_set_range(0, 0), ND_OK);
+    CHECK(pt_read_text(ND_CPUFREQ_MAX, text, sizeof text) != (size_t)-1);
+    CHECK_STR(text, "1200000");
+    CHECK(pt_read_text(ND_CPUFREQ_MIN, text, sizeof text) != (size_t)-1);
+    CHECK_STR(text, "408000");
+}
+
+/* A band, not a point, which is the thing nd_cpufreq_set() cannot express. */
+static void test_set_range_can_narrow_to_a_band(void)
+{
+    char text[32];
+
+    write_rv1103_tree();
+
+    CHECK_INT(nd_cpufreq_set_range(600000, 1008000), ND_OK);
+    CHECK(pt_read_text(ND_CPUFREQ_MIN, text, sizeof text) != (size_t)-1);
+    CHECK_STR(text, "600000");
+    CHECK(pt_read_text(ND_CPUFREQ_MAX, text, sizeof text) != (size_t)-1);
+    CHECK_STR(text, "1008000");
+}
+
+static void test_set_range_says_notfound_without_cpufreq(void)
+{
+    CHECK_INT(nd_cpufreq_set_range(0, 0), ND_ERR_NOTFOUND);
+}
+
+/* What the "Auto" row highlights. Pinned is the state Sleepy leaves behind and
+ * the one it has to be able to show. */
+static void test_is_unpinned_only_when_both_ends_are_open(void)
+{
+    nd_cpufreq_state state;
+
+    write_rv1103_tree();
+    write_cpuinfo_bounds();
+
+    CHECK_INT(nd_cpufreq_read_state(&state), ND_OK);
+    CHECK(nd_cpufreq_is_unpinned(&state));
+
+    CHECK_INT(nd_cpufreq_set(816000), ND_OK);
+    CHECK_INT(nd_cpufreq_read_state(&state), ND_OK);
+    CHECK(!nd_cpufreq_is_unpinned(&state));
+}
+
+/* Unknown is not the same claim as open. A state whose bounds would not read
+ * comes back -1, and calling that unpinned would put the highlight on the
+ * Auto row of a phone nobody can say anything about. */
+static void test_is_unpinned_is_false_for_an_unreadable_state(void)
+{
+    nd_cpufreq_state state;
+
+    memset(&state, 0, sizeof state);
+    state.min_khz = -1;
+    state.max_khz = -1;
+    CHECK(!nd_cpufreq_is_unpinned(&state));
+    CHECK(!nd_cpufreq_is_unpinned(NULL));
+}
+
 int main(void)
 {
     RUN(test_parse_reads_the_rv1103_table);
@@ -335,5 +454,12 @@ int main(void)
     RUN(test_set_pins_both_ends_when_raising);
     RUN(test_set_reports_a_refused_write_and_finishes_the_pair);
     RUN(test_set_refuses_a_frequency_that_is_not_one);
+    RUN(test_set_range_opens_both_ends_to_the_hardware);
+    RUN(test_set_range_falls_back_to_the_opp_table);
+    RUN(test_set_range_widens_in_the_right_order);
+    RUN(test_set_range_can_narrow_to_a_band);
+    RUN(test_set_range_says_notfound_without_cpufreq);
+    RUN(test_is_unpinned_only_when_both_ends_are_open);
+    RUN(test_is_unpinned_is_false_for_an_unreadable_state);
     return pt_report("test_cpufreq");
 }

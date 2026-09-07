@@ -242,3 +242,67 @@ nd_err nd_cpufreq_set(int32_t khz)
     }
     return (a && b) ? ND_OK : ND_ERR_IO;
 }
+
+/* What the chip itself can do, for a bound the caller left open. cpuinfo_*
+ * first because it is the honest answer and survives a pin; the OPP table is
+ * the fallback for a kernel that does not publish those two, and it is a good
+ * one because nd_cpufreq_read_table() sorts ascending. */
+static int32_t hardware_bound(const char *path, bool want_max)
+{
+    nd_cpufreq_table table;
+    int32_t value = read_int_attr(path);
+
+    if (value > 0)
+        return value;
+    if (nd_cpufreq_read_table(&table) != ND_OK || table.n == 0u)
+        return -1;
+    return want_max ? table.khz[table.n - 1u] : table.khz[0];
+}
+
+nd_err nd_cpufreq_set_range(int32_t min_khz, int32_t max_khz)
+{
+    int32_t current_max;
+    bool a;
+    bool b;
+
+    if (min_khz <= 0)
+        min_khz = hardware_bound(ND_CPUFREQ_HW_MIN, false);
+    if (max_khz <= 0)
+        max_khz = hardware_bound(ND_CPUFREQ_HW_MAX, true);
+    if (min_khz <= 0 || max_khz <= 0)
+        return ND_ERR_NOTFOUND;
+    /* A caller that asks for a band the wrong way round means the narrow one;
+     * refusing would be correct too, but there is no way to express the
+     * request that is not a mistake, and clamping keeps the two files from
+     * ending up straddling. */
+    if (min_khz > max_khz)
+        min_khz = max_khz;
+
+    current_max = read_int_attr(ND_CPUFREQ_MAX);
+
+    /* The same rule as nd_cpufreq_set(), asked about the ceiling because the
+     * ceiling is the bound that has to move out of the way first when the
+     * range is widening. Both writes always happen; see the block above. */
+    if (nd_cpufreq_max_first(max_khz, current_max)) {
+        a = write_attr(ND_CPUFREQ_MAX, max_khz);
+        b = write_attr(ND_CPUFREQ_MIN, min_khz);
+    } else {
+        a = write_attr(ND_CPUFREQ_MIN, min_khz);
+        b = write_attr(ND_CPUFREQ_MAX, max_khz);
+    }
+    return (a && b) ? ND_OK : ND_ERR_IO;
+}
+
+bool nd_cpufreq_is_unpinned(const nd_cpufreq_state *state)
+{
+    int32_t low;
+    int32_t high;
+
+    if (state == NULL || state->min_khz <= 0 || state->max_khz <= 0)
+        return false;
+    low = hardware_bound(ND_CPUFREQ_HW_MIN, false);
+    high = hardware_bound(ND_CPUFREQ_HW_MAX, true);
+    if (low <= 0 || high <= 0)
+        return false;
+    return state->min_khz <= low && state->max_khz >= high;
+}

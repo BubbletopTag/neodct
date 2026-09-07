@@ -78,8 +78,33 @@ echo 0 > /sys/class/backlight/backlight/bl_power
 ```
 
 Then retry Sleepy's blank/wake cycle. This runtime setting is lost at reboot;
-the DTB change fixes initialization. If blanking still fails after unblanking,
-check the PWM driver's zero-duty/disable behavior before changing the wiring.
+the DTB change fixes initialization.
+
+**The software half of this is fixed too, and was the larger half.** Until it
+was, `nd_backlight_off()` wrote `brightness=0` and stopped -- the `bl_power`
+write added for the fault above was gated on `percent > 0`, so it ran only
+when turning the panel ON. On a phone in this state the blank was a silent
+no-op that reported success. `nd_backlight_set_percent()` now writes
+`bl_power` in both directions, reads every write back before believing it, and
+drives `gpio53` alongside the PWM -- the two share pin 11 and the IOMUX
+follows whichever one is enabled, so a phone whose PWM never came up is lit
+through the GPIO and has to be blanked through it.
+
+So a phone with an un-reflashed boot partition now dims and blanks correctly
+anyway. Reflashing is still the right fix: it is the difference between a
+panel that comes up lit by the PWM and one lit by a fallback.
+
+### Is this phone's boot partition current?
+
+One line in LinuxShell answers it:
+
+```sh
+cat /sys/class/backlight/backlight/bl_power
+```
+
+`0` means the de-labelled device tree is running. `4` means the boot partition
+predates it, whatever the rootfs says its version is -- `rkflash.sh boot`
+rewrites only that partition and is easy to skip.
 
 **2. `sysdrv/source/kernel/arch/arm/configs/luckfox_rv1106_linux_defconfig`**
 

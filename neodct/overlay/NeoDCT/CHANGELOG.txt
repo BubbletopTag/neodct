@@ -1,7 +1,39 @@
 # NeoDCT OS Changelog
 
 0.5.10a
-Formatting a memory card works, and says the truth while it does.
+The engineering apps are one app, the screen can be turned off, and
+formatting a memory card says the truth while it does.
+
+Thirteen of the twenty-seven things on the main menu were bench instruments.
+They are still all there, and they are now behind one tile called
+Engineering, which opens a menu of its own. Nothing about them changed except
+where they are: the same apps, the same permissions, one press further away.
+The tile appears only when Engineering Mode is on, exactly as the thirteen
+did.
+
+Turning the screen off now turns the screen off. It did not before, on any
+phone whose panel came up with its backlight powered down, and the way it
+failed is the reason it lasted: the phone wrote the brightness it wanted, the
+kernel accepted the number and did nothing with it, and every layer above
+reported success to the one above that. Sleepy sat for ten seconds in front
+of a screen that was still on. The missing write is made now, in both
+directions, and every one of them is read back before the phone believes it.
+
+Sleepy has the two rows it was missing. "Screen off" holds the panel dark
+until you press something, rather than for a fixed ten seconds. "Auto
+(unpinned)" on the CPU screen puts the speed range back the way it was --
+before, once you had pinned the CPU, the only thing the screen offered was
+another frequency to pin it to, and the obvious one to reach for pinned the
+phone at full speed until it was restarted.
+
+A brightness you choose is now remembered and put back at the next start.
+
+When something does go wrong with the screen, the phone says what the kernel
+said. It used to say "Not root, or the pin is taken" -- about itself, while
+running as root.
+
+A call that arrives while a menu is open is answered. The menu used to ignore
+it until somebody pressed Clear, on a phone that was ringing in their hand.
 
 In 0.5.9a the phone drew a progress bar while it formatted, and the bar was
 a lie: it was drawn against the same four minutes after which the phone gave

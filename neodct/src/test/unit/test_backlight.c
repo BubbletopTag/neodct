@@ -12,6 +12,7 @@
  */
 
 #include <string.h>
+#include <sys/stat.h>
 
 #include "nd_fb.h"
 #include "nd_paths.h"
@@ -49,6 +50,32 @@ static void given_a_pwm_panel(const char *dir, const char *brightness, const cha
     pt_write_text(path, brightness);
     (void)nd_snprintf(path, sizeof path, "%s/max_brightness", dir);
     pt_write_text(path, max);
+}
+
+/* The same, plus the file the whole of 0.5.9a and 0.5.10a turned on.
+ *
+ * A driver only publishes bl_power when the backlight class is built with it,
+ * so the pair above stays the fixture for "an older or simpler panel" and this
+ * is the one that matches the phone in docs/HARDWARE_NOTES.md. "4" is
+ * FB_BLANK_POWERDOWN: the state a phone boots into when its device tree gives
+ * the backlight node a phandle, which is a real configuration people are
+ * running and not a hypothetical. */
+static void given_a_pwm_panel_with_power(const char *dir, const char *brightness, const char *max,
+                                         const char *power)
+{
+    char path[256];
+
+    given_a_pwm_panel(dir, brightness, max);
+    (void)nd_snprintf(path, sizeof path, "%s/bl_power", dir);
+    pt_write_text(path, power);
+}
+
+static void check_file(const char *path, const char *want)
+{
+    char text[32];
+
+    CHECK(pt_read_text(path, text, sizeof text) != (size_t)-1);
+    CHECK_STR(text, want);
 }
 
 /* ------------------------------------------------------------------ *
@@ -308,6 +335,120 @@ static void test_with_no_hardware_writes_fail_and_reads_are_unknown(void)
     CHECK_INT(nd_backlight_get_percent(), -1);
 }
 
+/* ------------------------------------------------------------------ *
+ * bl_power -- the write that was missing on the way down
+ * ------------------------------------------------------------------ */
+
+/* THE REGRESSION TEST FOR THE BUG THIS FILE EXISTS BECAUSE OF.
+ *
+ * Blanking wrote brightness=0 and stopped. On a driver that is not already
+ * powered down, that happens to work; on the phone it does not, and either
+ * way it leaves the panel in a state the kernel is free to light again. The
+ * write that actually powers the backlight down was gated behind
+ * `percent > 0`, so it fired only when turning the panel ON -- the one
+ * direction that does not need to be told to blank. */
+static void test_blanking_powers_the_backlight_down(void)
+{
+    given_a_pwm_panel_with_power(BL_PANEL, "10\n", "10\n", "0\n");
+
+    CHECK(nd_backlight_off());
+    check_file(BL_PANEL "/brightness", "0");
+    check_file(BL_PANEL "/bl_power", "4");
+}
+
+/* And the other direction, which 0.5.9a did fix: a panel the kernel is
+ * holding down comes back up, at the level asked for rather than the level it
+ * was storing. Brightness is written FIRST so the unblank cannot flash the
+ * old value. */
+static void test_lighting_unblanks_a_powered_down_panel(void)
+{
+    given_a_pwm_panel_with_power(BL_PANEL, "10\n", "10\n", "4\n");
+
+    CHECK(nd_backlight_on(50));
+    check_file(BL_PANEL "/brightness", "5");
+    check_file(BL_PANEL "/bl_power", "0");
+}
+
+/* A powered-down backlight is at zero whatever brightness says it is storing.
+ * This is the exact state docs/HARDWARE_NOTES.md records -- bl_power 4,
+ * brightness 10 of 10 -- and reading 100 off it is what made Sleepy open its
+ * picker on Level 10 against a black screen, and capture 100 as the level to
+ * wake back to. */
+static void test_get_percent_reports_zero_when_powered_down(void)
+{
+    given_a_pwm_panel_with_power(BL_PANEL, "10\n", "10\n", "4\n");
+
+    CHECK_INT(nd_backlight_get_percent(), 0);
+}
+
+/* A panel with no bl_power node is not a failure and must not become one:
+ * plenty of drivers do not publish it, and every case above this section is
+ * built on one that does not. */
+static void test_a_panel_without_bl_power_still_works(void)
+{
+    given_a_pwm_panel(BL_PANEL, "255\n", "255\n");
+
+    CHECK(nd_backlight_off());
+    check_file(BL_PANEL "/brightness", "0");
+    CHECK(nd_backlight_on(100));
+    check_file(BL_PANEL "/brightness", "255");
+}
+
+/* The PWM tier drives gpio53 as well, because on this board they are the same
+ * pad and which one reaches the LED depends on a pinmux neither tier reads.
+ * Harmless when the PWM owns it; the only thing that works when it does not. */
+static void test_the_pwm_tier_also_drives_the_gpio_pin(void)
+{
+    given_a_gpio_pin("1\n");
+    given_a_pwm_panel_with_power(BL_PANEL, "10\n", "10\n", "0\n");
+
+    CHECK_INT(nd_backlight_mode(), ND_BL_PWM);
+    CHECK(nd_backlight_off());
+    check_file(GPIO_VALUE, "0");
+    CHECK(nd_backlight_on(100));
+    check_file(GPIO_VALUE, "1");
+}
+
+/* ------------------------------------------------------------------ *
+ * Saying why
+ * ------------------------------------------------------------------ */
+
+/* The reason is the kernel's to give. Sleepy used to supply its own -- "Not
+ * root, or the pin is taken" -- on an app that runs as root, and a day went
+ * into believing it. */
+static void test_last_error_is_empty_after_a_call_that_worked(void)
+{
+    given_a_pwm_panel(BL_PANEL, "0\n", "255\n");
+
+    CHECK(nd_backlight_set_percent(100));
+    CHECK_STR(nd_backlight_last_error(), "");
+}
+
+static void test_last_error_names_a_write_that_did_not_stick(void)
+{
+    /* max_brightness 0 makes every level clamp to 0, so a request for 100%
+     * writes 0 -- which the file then reads back as 0 when 0 was asked for,
+     * and succeeds. The honest way to get a rejected write here is a file the
+     * process cannot open. */
+    char path[ND_PATH_MAX];
+
+    given_a_pwm_panel(BL_PANEL, "0\n", "255\n");
+    CHECK(nd_path_resolve(path, sizeof path, BL_PANEL "/brightness") == ND_OK);
+    CHECK_INT(chmod(path, 0444), 0);
+
+    CHECK(!nd_backlight_set_percent(100));
+    CHECK_STR(nd_backlight_last_error(), "Permission denied");
+
+    /* Put it back, or the harness cannot clean the case root up. */
+    (void)chmod(path, 0644);
+}
+
+static void test_last_error_says_so_when_there_is_no_backlight(void)
+{
+    CHECK(!nd_backlight_set_percent(50));
+    CHECK_STR(nd_backlight_last_error(), "no backlight device");
+}
+
 int main(void)
 {
     RUN(test_mode_is_none_with_no_hardware);
@@ -328,5 +469,13 @@ int main(void)
     RUN(test_set_percent_clamps_out_of_range);
     RUN(test_set_percent_raises_a_dim_request_to_the_floor);
     RUN(test_with_no_hardware_writes_fail_and_reads_are_unknown);
+    RUN(test_blanking_powers_the_backlight_down);
+    RUN(test_lighting_unblanks_a_powered_down_panel);
+    RUN(test_get_percent_reports_zero_when_powered_down);
+    RUN(test_a_panel_without_bl_power_still_works);
+    RUN(test_the_pwm_tier_also_drives_the_gpio_pin);
+    RUN(test_last_error_is_empty_after_a_call_that_worked);
+    RUN(test_last_error_names_a_write_that_did_not_stick);
+    RUN(test_last_error_says_so_when_there_is_no_backlight);
     return pt_report("test_backlight");
 }

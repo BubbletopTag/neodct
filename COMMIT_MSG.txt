@@ -3393,3 +3393,145 @@ under QEMU. Neither of those was true when 0.5.9a was tagged, which is how
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df
+
+================================================================================
+
+engineering: one tile instead of thirteen, and a blank that actually blanks
+
+Two things, and they met in the same app.
+
+============ THE SCREEN WOULD NOT GO OFF ============
+
+Sleepy's BLANK! has never worked on the real phone. The reason it lasted is
+that it never failed: nd_backlight_off() wrote brightness=0 and stopped, the
+kernel stored a number it was not going to act on, write(2) returned success,
+the library returned true, the app set g_blanked and sat for ten seconds in
+front of a lit screen. Every layer reported success to the one above it.
+
+The write that powers a backlight down is bl_power. It was added in 0.5.9a
+for the other half of this fault -- a panel that boots POWERDOWN because its
+device tree gives the backlight node a phandle -- and it was gated on
+`percent > 0`, so it only ever ran when turning the panel ON, which is the one
+direction that does not need it. It is unconditional now, ND_BL_POWER_ON to
+light and ND_BL_POWER_OFF to blank, and every write is read back before it is
+called a success. `brightness` is what gets read back, deliberately, and not
+`actual_brightness`: the latter reports 0 for as long as the panel is blanked
+whatever level is stored, so verifying against it would call every correct
+write a failure on exactly the phone this code exists for.
+
+Underneath that, BL is one pad and two subsystems: pin 11 is both gpio53 and
+PWM9_M1, and the IOMUX follows whichever is enabled. On a phone whose PWM
+never came up, the screen is lit by S90display's gpio53 write while
+nd_backlight has already committed to the PWM tier and is writing to a driver
+connected to nothing. So the PWM tier now drives gpio53 alongside the PWM. It
+is one syscall, it moves nothing when the PWM owns the pad, and it is the only
+thing that works when it does not.
+
+And nd_backlight_get_percent() reads bl_power first, because a powered-down
+backlight is at zero whatever brightness says it is storing. Reading 100 off a
+dark panel is what made the Brightness picker open on Level 10 against a black
+screen and -- worse -- made blank() capture 100 as the level to wake back to.
+
+============ AND IT SAID THE WRONG THING ABOUT IT ============
+
+Worth its own section, because it cost more than the bug.
+
+The app named a cause instead of reporting one. "Not root, or the pin is
+taken", about a process nd_proc.c deliberately launches as root; "Check
+backlight permissions", for writes the kernel had refused for entirely
+different reasons. The privilege chain was traced end to end for this commit
+-- scan to needs_root to run_user to the broker's argv[1] gate to
+nd_priv_become on a zeroed id -- and it holds at every link. Both sentences
+were false and both sent people somewhere real to look for nothing.
+
+nd_backlight_last_error() carries the kernel's own word up, and every dialog
+in Sleepy repeats it. The log used to latch on a single bool, one line per
+process, so a blank that failed after any earlier write had already failed
+printed nothing at all -- console silence, read as "it worked". It now
+suppresses only an exact repeat.
+
+Sleepy also gains the two rows it was missing. "Screen off" holds the panel
+dark until a key, rather than for a fixed ten seconds. "Auto (unpinned)" on
+the CPU screen calls the new nd_cpufreq_set_range() and opens the range back
+up to cpuinfo_min_freq/cpuinfo_max_freq: before it, once you had pinned the
+CPU the screen offered nothing but another frequency to pin it to, and the
+obvious row to reach for pins the phone at full speed until it reboots, which
+is worse than whatever sent somebody looking. A chosen brightness is stored
+under system.ui.brightness and re-applied by the core at boot, before the
+privilege drop, because udev grants ndusr `brightness` and not `bl_power`.
+
+There was no test_sleepy.c at all, for four releases, in an app whose header
+said its labels were exported "so a test can name them". There is one now, and
+test_backlight.c gains the bl_power cases the 0.5.9a fix shipped without.
+
+============ TWENTY-SEVEN TILES, HALF OF THEM INSTRUMENTS ============
+
+The main menu concatenated System/apps and System/engineering/apps into one
+flat list. Fourteen apps an owner uses and thirteen bench instruments, in one
+alphabet of ids, all on the screen they see first.
+
+They are one tile now, id 972, sorted after Power so no existing app's menu
+index moves. It opens a second AppSelector over the engineering directory.
+
+THE TILE IS SYNTHESISED BY THE CORE AND THE SUBMENU RUNS IN THE CORE, and both
+halves of that are load-bearing rather than convenient. A real
+apps/Engineering/app.so that called nd_proc_launch_app() would compile and
+would look right on the emulator, and on the phone every engineering app
+launched through it would silently lose root: nd_broker_set_default() is
+called in core/nd_main.c and nowhere else, so nd_broker_default() is NULL in
+an app process and the launch falls through to an unprivileged spawn. It would
+also hand the grandchild NEODCT_KEYPAD_MATRIX=0 and no uinput key device,
+which would make LinuxShell -- the app this whole backlight investigation was
+run from -- undriveable. So nothing about the privilege moved: the same
+launcher, the same broker, the same argv[1] prefix gate, one level down.
+
+`is_menu` is the last field of nd_app_entry so that scan_apps()'s memset
+clears it and no manifest can ever claim to be a menu. The tile appears only
+when engineering mode is on, exactly as the thirteen did, and only when the
+directory has something in it -- an image built without that overlay must not
+show a tile whose submenu says "No Apps".
+
+Back out of the submenu returns to the main menu, which is what Back means
+everywhere else here, so nd_ui_render_menu() is a loop now.
+
+============ ONE THING FOUND ON THE WAY, FIXED HERE ============
+
+An incoming call arriving while any AppSelector was open was swallowed.
+ND_KEY_INCOMING_CALL fell into appsel's "every other key is ignored" branch,
+ring_tick() kept re-reporting it, and the call was not handled until somebody
+pressed Clear -- watching their phone ring in their hand. It is live on main
+today for the main menu, and a submenu would have made it two screens you can
+be stuck on. ND_APPSEL_RINGING unwinds the whole way rather than one level,
+because answering Back would redraw the main menu on a ringing phone.
+
+============ WHAT MOVED, AND WHAT DID NOT ============
+
+Seven of the nine menu-* golden frames were re-cut. Every difference is inside
+the scrollbar column, x 228..235: the notch step went from 99/26 to 99/14
+because the list is fifteen entries instead of twenty-seven. No icon, no
+title, no page number and no home-* frame moved, because the home screen draws
+ui_home.json and has never drawn tiles. test_appreg's notch assertion goes
+78 -> 117 and its registry count 27 -> 15; test_appsel's thirteen engineering
+rows moved into a second table asserted against the submenu's own scan, so
+"we moved them behind a tile" does not become "we stopped checking them".
+
+nd-shoot needed teaching: it renders eng-lcdtest and three others by looking a
+manifest name up in the core's registry, which no longer carries them, so it
+now falls back to the same directory scan the submenu does.
+
+The device tree needed nothing. The DTB inside output/image/boot.img was
+decompiled to check: the backlight node is there with no phandle and no
+__symbols__ entry, which is what makes pwm_backlight_initial_power_state()
+return FB_BLANK_UNBLANK. That fix is correct and shipped. What is not certain
+is whether the phone in question is running that boot partition --
+rkflash.sh boot rewrites only that one and is easy to skip -- so
+docs/HARDWARE_NOTES.md now records the one line that answers it:
+`cat /sys/class/backlight/backlight/bl_power`, where 4 means the boot
+partition predates the fix whatever the rootfs claims its version is. The
+software fixed here makes the phone dim and blank correctly either way.
+
+Suite green, MAKE_TEST_EXIT=0, 85 binaries. Neither the blank nor the tile has
+been seen on real hardware.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df

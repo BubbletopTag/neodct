@@ -25,11 +25,30 @@
 
 /* The two root rows, in the order they are drawn. */
 #define SLEEPY_ROOT_ITEMS 2
-#define SLEEPY_DISPLAY_ITEMS 2
+
+/* Three now. "Screen off" was appended rather than slotted in beside BLANK!,
+ * because the menu shortcut for a row is its position -- 9008-1 is the timed
+ * blank and has been since this app shipped, and moving it would break the
+ * one thing about an engineering app that people memorise. */
+#define SLEEPY_DISPLAY_ITEMS 3
 
 /* Zero is reserved for the timed blank, so the picker always leaves a way
  * to see the menu. These ten steps map onto the backlight's native range. */
 #define SLEEPY_BRIGHTNESS_LEVELS 10
+
+/* The row appended below the frequencies on the CPU screen.
+ *
+ * Without it the screen is a door that shuts behind you: nd_cpufreq_set()
+ * writes one number to both ends of the range, there is no row that widens it
+ * again, and the row somebody reaches for instead -- the top frequency -- is
+ * the worst of all of them, because it pins the phone at full speed until it
+ * is rebooted. */
+#define SLEEPY_CPU_AUTO_LABEL "Auto (unpinned)"
+
+/* How long a wake screen waits when it is not counting. Negative rather than
+ * zero: zero is a legitimate "blank for no time at all", and the two want to
+ * be distinguishable in a test. */
+#define SLEEPY_BLANK_UNTIL_KEY (-1.0)
 
 extern const char *const nd_sleepy_title;
 extern const char *const nd_sleepy_root_items[SLEEPY_ROOT_ITEMS];

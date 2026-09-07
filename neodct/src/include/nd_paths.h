@@ -101,6 +101,14 @@ extern "C" {
 #define ND_PATH_WARNING_ICON     "/NeoDCT/System/ui/resources/img/errorscreen/warning.png"
 #define ND_PATH_PLACEHOLDER_ICON "/NeoDCT/System/ui/resources/img/appselector/placeholder_icon.png"
 
+/* The Engineering tile's art. It sits with the selector's own resources and
+ * NOT under a System/apps/Engineering/ directory, because there is no such
+ * app: the tile is synthesised by the core and opens a second selector rather
+ * than launching anything. A directory with a manifest and no app.so would be
+ * a menu entry that nd-apprun fails to dlopen the moment something reached it
+ * by another route. */
+#define ND_PATH_ENG_TILE_ICON "/NeoDCT/System/ui/resources/img/appselector/engineering.png"
+
 #define ND_PATH_TONES_DIR "/NeoDCT/System/tones"
 #define ND_PATH_DTMF_DIR  "/NeoDCT/System/tones/dtmf"
 #define ND_PATH_SMS_TONE  "/NeoDCT/System/tones/sms.wav"

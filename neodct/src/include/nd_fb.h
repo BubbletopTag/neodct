@@ -155,6 +155,22 @@ nd_err nd_fb_pack_rgb565(const nd_image *src, uint8_t *out, size_t out_sz);
  * below this is raised to it rather than honoured. Zero still means off. */
 #define ND_BL_MIN_ON_PERCENT 5
 
+/* bl_power carries an FB_BLANK_* code and only the two ends of it matter
+ * here. The numbers are spelled out rather than included from <linux/fb.h>
+ * because they are the backlight class's ABI, not that header's business.
+ *
+ * A phone whose device tree gives the backlight node a phandle boots at
+ * POWERDOWN. pwm_backlight_initial_power_state() reads a phandle as a promise
+ * that some display driver will unblank the panel; NeoDCT drives its panel
+ * from userspace, so the promise is never kept. What that leaves is a screen
+ * lit by S90display's gpio53 write, a /sys/class/backlight that exists, and
+ * every write to `brightness` stored and ignored -- which is precisely the
+ * state docs/HARDWARE_NOTES.md records. Removing the label from the device
+ * tree fixes it at the root; writing this file is how a phone that has not
+ * had that boot partition flashed still dims and still blanks. */
+#define ND_BL_POWER_ON  0 /* FB_BLANK_UNBLANK */
+#define ND_BL_POWER_OFF 4 /* FB_BLANK_POWERDOWN */
+
 typedef enum { ND_BL_PWM = 0, ND_BL_GPIO, ND_BL_NONE } nd_bl_mode;
 
 /* Probing the GPIO tier EXPORTS the pin -- there is no way to ask whether a
@@ -166,6 +182,18 @@ bool nd_backlight_set_percent(int32_t percent);
 int32_t nd_backlight_get_percent(void); /* -1 when unreadable */
 bool nd_backlight_off(void);
 bool nd_backlight_on(int32_t percent);
+
+/* Why the last call in this process returned false or -1, as a short phrase
+ * fit to be shown on a 240 px panel -- "Permission denied", "No such file or
+ * directory", "the panel ignored it". "" after a call that succeeded.
+ *
+ * Sleepy used to name a cause instead of reporting one. It said "Not root, or
+ * the pin is taken" about an app that nd_proc.c launches as root, and "Check
+ * backlight permissions" for writes the kernel had refused for entirely
+ * different reasons. Both sent an engineer to the wrong place, and finding
+ * that out cost more than the whole feature. The kernel already knows the
+ * answer; this is the wire that carries it up. */
+const char *nd_backlight_last_error(void);
 
 #ifdef __cplusplus
 }

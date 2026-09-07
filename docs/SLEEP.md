@@ -31,15 +31,18 @@ this board.
 
 ## What exists today
 
-**`Sleepy`**, in the Engineering menu. Two rows, one for each primitive, and
-it does nothing else — it does not enter a sleep, schedule one, or own a
-timeout. It exists so that the thing built on top of these two has something
-known-good to stand on.
+**`Sleepy`**, in the Engineering menu. One row per primitive plus the two ways
+back out of them, and it does nothing else — it does not enter a sleep,
+schedule one, or own a timeout. It exists so that the thing built on top of
+these two has something known-good to stand on.
 
 | Row | What it does |
 | --- | --- |
 | CPU | Lists the kernel's operating points and pins the CPU to the one you pick, then reports what the phone says it is running at afterwards. |
+| CPU → `Auto (unpinned)` | Opens the range back up to the silicon's own limits, so the screen is not a door that shuts behind you. |
 | Display → `BLANK!` | Turns the panel off for ten seconds and turns it back on. |
+| Display → `Brightness` | Ten levels on the PWM tier. The level is remembered and re-applied at the next boot. |
+| Display → `Screen off` | The same blank, held until a key is pressed. |
 
 The decisions behind both live in `libneodct` where a test can reach them —
 `nd_cpufreq.h` and the backlight half of `nd_fb.h` — and the app is the key
@@ -121,6 +124,35 @@ Anything built on top of this inherits that obligation.
   but no Luckfox has run it. QEMU's kernel has no `CONFIG_CPU_FREQ` and no
   backlight, so on the emulator both screens correctly report that there is
   nothing there, which is the one thing the emulator *can* confirm.
+- **There is still no idle screen-off.** `Screen off` is a row somebody
+  presses, not a timeout. A real blanker belongs beside `battery_tick()` in
+  `nd_ui.c`, and needs the same call in `nd_proc.c`'s key pump or it will
+  blank the home screen and never blank inside an app — the core's UI thread
+  is not in `nd_ui_read_keypress()` while an app is running.
+
+## Why the blank did not blank
+
+Worth recording, because the symptom was silence rather than a failure.
+
+`nd_backlight_off()` wrote `brightness=0` and stopped. On a panel the kernel
+is already holding down — `bl_power=4`, which is what
+`pwm_backlight_initial_power_state()` leaves behind when the device tree gives
+the backlight node a phandle — that write is stored and never acted on. The
+`write(2)` succeeds, so every layer above it reported success: the library
+returned true, Sleepy set `g_blanked` and sat in its ten-second loop, and the
+screen stayed exactly as lit as it had been.
+
+The `bl_power` write that fixes it was added in 0.5.9a and gated on
+`percent > 0`, so it only ever ran when turning the panel **on** — the one
+direction that does not need it. It is unconditional now, `0` to light and
+`4` to blank, and every write is read back before it is called a success.
+
+Two things made it expensive to find. The app named a cause instead of
+reporting one, saying "Not root, or the pin is taken" about a process that
+`nd_proc.c` deliberately launches as root; and the library logged one line per
+process, so a blank that failed after any earlier write had already failed
+printed nothing at all. Both are fixed: the dialogs repeat
+`nd_backlight_last_error()`, and the log suppresses only exact repeats.
 
 ## Three faults that only showed up by looking at it
 

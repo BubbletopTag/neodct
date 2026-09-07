@@ -549,8 +549,10 @@ static void test_icon_geometry(nd_ui *ui)
             continue;
         }
         /* get_image() converts to RGBA unconditionally, which is what lets
-         * the paste composite through the icon's own alpha. Three of the
-         * twenty-seven icons are stored as palette PNGs (colour type 3). */
+         * the paste composite through the icon's own alpha. Some of the
+         * shipped icons are stored as palette PNGs (colour type 3), which is
+         * the case this assertion is really about -- the count of them moved
+         * when the engineering apps left this list and is not the point. */
         CHECK(full->fmt == ND_PIXFMT_RGBA8888, "the cache always hands back RGBA");
         fw = full->w;
         fh = full->h;
@@ -698,13 +700,17 @@ static void test_scrollbar_every_index(nd_capture *cap, nd_ui *ui)
          * every app added or removed moves it. 89 with twenty-two apps, 87
          * with the twenty-three MicTest made, 84 with the twenty-four
          * Bluetooth makes, 82 with the twenty-five Sleepy makes, 80 with the
-         * twenty-six Calendar makes, and 78 with the twenty-seven Fetch
-         * makes: 36 + 12 * 99/26 is 81.69 and the notch top is three rows
-         * above it, truncated.
+         * twenty-six Calendar makes, and 78 with the twenty-seven Fetch made.
+         *
+         * 117 now, and the jump is the point rather than a surprise: the
+         * thirteen engineering apps left the flat list for a submenu behind
+         * one Engineering tile, so the menu is FIFTEEN entries and the step
+         * grew from 99/26 to 99/14. 36 + 12 * 99/14 is 120.86 and the notch
+         * top is three rows above it, truncated.
          * Re-cut the menu-* frames whenever this number changes -- they are a
          * regression net for the screens that did NOT move, not a reason to
          * leave the app list alone. */
-        CHECK_INT(top, 78, "index 12 keeps the notch clear of both ends");
+        CHECK_INT(top, 117, "index 12 keeps the notch clear of both ends");
         CHECK(nd_image_get_px(frame, bar_x, track_bottom).r == 255u, "track reaches row 135");
         CHECK(nd_image_get_px(frame, bar_x + 1, track_bottom).r == 255u, "and column 233");
         CHECK(nd_image_get_px(frame, bar_x + 2, track_bottom).r == 0u, "but not column 234");
@@ -808,7 +814,10 @@ static void run_overlay_half(void)
     }
 
     CHECK(nd_ui_engineering_mode(&ui), "engineering mode came from settings.prop");
-    CHECK_INT(nd_ui_app_count(&ui), 27, "twenty-seven apps with engineering mode on");
+    /* Fourteen stock apps and the Engineering tile. NOT twenty-seven: the
+     * thirteen engineering apps are still installed and still launchable, one
+     * level down, behind that tile -- see ND_UI_ENG_TILE_ID in nd_ui.h. */
+    CHECK_INT(nd_ui_app_count(&ui), 15, "fifteen apps with engineering mode on");
     CHECK(nd_ui_wallpaper(&ui) == NULL, "no wallpaper configured, so the background is black");
 
     test_icon_geometry(&ui);

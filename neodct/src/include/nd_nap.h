@@ -228,9 +228,10 @@ bool nd_nap_is_installed(const char *apps_dir, const char *dir);
  *
  * ============ THE BAND, AND WHY THERE IS ONE ============
  *
- * nd_ui.c's rescan_apps() concatenates the stock, engineering and installed
- * app lists and sorts them by the manifest's "id" with a STABLE insertion
- * sort, so two apps that claim the same id keep readdir order -- which is
+ * nd_ui.c's rescan_apps() concatenates the stock list, the synthetic
+ * Engineering tile and the installed apps, and sorts them by the manifest's
+ * "id" with a STABLE insertion sort, so two apps that claim the same id keep
+ * readdir order -- which is
  * inode order on ext4, i.e. install order, i.e. nothing an owner can see or
  * predict. Nothing allocated ids, nothing checked them, and both .nap
  * packages that exist today claim 13, because 13 was the next number after
@@ -238,7 +239,9 @@ bool nd_nap_is_installed(const char *apps_dir, const char *dir);
  *
  * So the numbers are banded. Stock apps keep 1-99 (they run 1-12 today), the
  * 9xx block stays reserved for the ones that must sort last (MusicPlayer 970,
- * Power 971), and everything installed from a card belongs between these two.
+ * Power 971, and the Engineering tile 972 -- see ND_UI_ENG_TILE_ID in nd_ui.h,
+ * which is a menu the core synthesises rather than an app anybody installs),
+ * and everything installed from a card belongs between these two.
  * A package outside the band still installs -- refusing an app over its
  * position in a menu would be absurd -- but it is logged, and Settings can
  * say so before it writes anything.

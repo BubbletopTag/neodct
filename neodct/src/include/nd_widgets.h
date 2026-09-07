@@ -136,10 +136,24 @@ void nd_appsel_init(nd_appsel *s, nd_ui *ui, const char *title, const nd_app_ent
                     size_t n_items, const nd_image *background);
 void nd_appsel_draw(nd_appsel *s);
 
+/* The phone started ringing while a selector was open.
+ *
+ * Distinct from ND_WIDGET_BACK, and the difference is load-bearing now there
+ * are two selectors: Back means "the level above", and the Engineering
+ * submenu answering Back would redraw the main menu on a phone that is
+ * ringing. A call means get off this screen entirely.
+ *
+ * Before this existed, ND_KEY_INCOMING_CALL fell into appsel's "every other
+ * key is ignored" branch and the menu simply sat there. ring_tick() keeps
+ * re-reporting it, so the call was not handled until somebody pressed Clear
+ * -- on a phone whose owner was watching it ring. */
+#define ND_APPSEL_RINGING (-3)
+
 /* Flushes pending input (select with a 0.01 s timeout), draws, then loops.
  * Down/Up wrap with modulo; Enter returns the index; Clear returns
  * ND_WIDGET_BACK. With an EMPTY list only Clear and Enter respond, and both
- * return ND_WIDGET_BACK -- that guard is what stops the modulo by zero. */
+ * return ND_WIDGET_BACK -- that guard is what stops the modulo by zero.
+ * An incoming call returns ND_APPSEL_RINGING from either list, empty or not. */
 int32_t nd_appsel_show(nd_appsel *s);
 
 /* ================================================================== *

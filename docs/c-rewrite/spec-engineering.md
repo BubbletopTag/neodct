@@ -24,11 +24,21 @@ Linux command prompt on the phone's own screen.
 
 **How they are hidden.** There is a setting called `system.ui.engineering_mode`. It
 lives in the same settings file as the wallpaper choice, and out of the box it is
-**ON**. When it is on, the phone scans a second folder of apps
-(`/NeoDCT/System/engineering/apps`) as well as the normal one, and everything it finds
-gets added to the main menu. Turn the setting off in Settings → Engineering Mode and
-those apps disappear from the menu immediately — no reboot. It is a visibility switch,
-not a password. Anyone who can reach Settings can turn it back on.
+**ON**. Turn the setting off in Settings → Engineering Mode and the engineering apps
+disappear from the menu immediately — no reboot. It is a visibility switch, not a
+password. Anyone who can reach Settings can turn it back on.
+
+> **Changed since this survey was written.** The phone used to scan
+> `/NeoDCT/System/engineering/apps` alongside the normal folder and concatenate the two
+> into one flat menu — fourteen stock apps and thirteen engineering ones, twenty-seven
+> tiles. It now adds a single synthetic **Engineering** tile (id 972) in their place,
+> and that tile opens a second `AppSelector` over the engineering folder. The apps, the
+> ids, the icons and the privileges are all unchanged; only the number of presses is.
+> See the block at `ND_UI_ENG_TILE_ID` in `nd_ui.h` for why the tile is synthesised by
+> the core rather than shipped as an app, and why the second selector runs inside
+> `nd_ui_render_menu()` rather than inside an app of its own — an app cannot launch an
+> app with the privilege these need, because the broker is set on the core and only the
+> core.
 
 **Why they all have huge numbers.** Every app has an `id` in its `manifest.json` and the
 menu is sorted by that number. Normal apps use 1–12 (plus Music at 970 and Power at

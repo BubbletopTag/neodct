@@ -64,6 +64,13 @@ extern "C" {
 #define ND_CPUFREQ_MAX       ND_CPUFREQ_DIR "/scaling_max_freq"
 #define ND_CPUFREQ_GOVERNOR  ND_CPUFREQ_DIR "/scaling_governor"
 
+/* The two ends of what the SILICON offers, as opposed to what the range is
+ * currently narrowed to. scaling_min_freq read back after a pin reports the
+ * pin; cpuinfo_min_freq is the number that was true before anybody touched
+ * it, which is what "unpinned" has to mean. */
+#define ND_CPUFREQ_HW_MIN ND_CPUFREQ_DIR "/cpuinfo_min_freq"
+#define ND_CPUFREQ_HW_MAX ND_CPUFREQ_DIR "/cpuinfo_max_freq"
+
 /* The RV1103 OPP table is five entries (408, 600, 816, 1008, 1200 MHz). 16 is
  * slack for a chip with a denser table, and a fixed cap because
  * CODING-STANDARDS.md section 4 puts nothing sized by input on the stack. */
@@ -119,6 +126,29 @@ nd_err nd_cpufreq_read_state(nd_cpufreq_state *out);
  * cpufreq -- both of which the caller should say out loud rather than
  * retry. */
 nd_err nd_cpufreq_set(int32_t khz);
+
+/* Open the range back up, or narrow it to a band rather than to a point.
+ *
+ * nd_cpufreq_set() takes one number and writes it to both ends, which is the
+ * only way to hold a frequency -- and it is a door that shuts behind you. It
+ * cannot express "min 408, max 1200", so a menu built from it alone has no
+ * row that undoes itself, and the row an owner reaches for instead is the top
+ * frequency, which pins the phone at full speed forever. That is strictly
+ * worse for the battery than the state they were trying to get out of.
+ *
+ * Either bound may be <= 0, meaning "whatever the silicon says" -- read from
+ * cpuinfo_min_freq / cpuinfo_max_freq, falling back to the ends of
+ * nd_cpufreq_read_table() on a kernel that does not publish them. Same write
+ * ordering rule and the same both-writes-always-happen policy as
+ * nd_cpufreq_set(); see nd_cpufreq_max_first(). */
+nd_err nd_cpufreq_set_range(int32_t min_khz, int32_t max_khz);
+
+/* True when the range is not narrowed at all -- both ends sitting on the
+ * hardware's own limits. What Sleepy's "Auto" row highlights, and the
+ * question "is this phone pinned?" answered in one place rather than three.
+ * A state with either bound unreadable is not unpinned: unknown is not the
+ * same claim as open. */
+bool nd_cpufreq_is_unpinned(const nd_cpufreq_state *state);
 
 /* True when scaling_max_freq must be written BEFORE scaling_min_freq. See the
  * block at the top: the answer is "when the target is above the current max",

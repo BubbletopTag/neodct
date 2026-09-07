@@ -104,7 +104,33 @@ typedef enum {
 #define ND_APP_NAME_MAX 64
 #define ND_APP_PATH_MAX 192
 #define ND_APP_EXEC_MAX 64
-#define ND_APP_MAX      64 /* 24 with engineering mode on; 64 is slack */
+#define ND_APP_MAX      64 /* 15 with engineering mode on; 64 is slack */
+
+/* ============ THE ENGINEERING TILE ============
+ *
+ * The home menu used to be the stock apps and the engineering apps in one
+ * flat list -- fourteen and thirteen, twenty-seven tiles, of which half were
+ * bench instruments an owner has no use for. They are one tile now, and it
+ * opens a selector of its own over ND_PATH_ENG_APPS_DIR.
+ *
+ * The tile is SYNTHESISED BY THE CORE, not scanned. Three consequences worth
+ * stating because each of them is a thing that would otherwise be tried:
+ *
+ *   - It has no manifest and no app.so, so `is_menu` below is what tells the
+ *     launcher not to launch it. An entry that reached nd_proc_launch_app()
+ *     would fail to dlopen a file that does not exist.
+ *   - The second selector runs INSIDE THE CORE, in nd_ui_render_menu(), one
+ *     level down. It is not an app. An app cannot launch an app: the broker
+ *     is set on the core and only the core (nd_main.c), so an engineering app
+ *     started from inside another app would fall through to an unprivileged
+ *     spawn and quietly lose the root every one of them is written to need.
+ *   - It appears only when engineering mode is on, exactly as the thirteen
+ *     tiles it replaces did. The setting still means both things it meant.
+ *
+ * 972 puts it immediately after Power (971) and before the 9xx engineering
+ * block, so no stock app's menu index moves. */
+#define ND_UI_ENG_TILE_ID   972
+#define ND_UI_ENG_TILE_NAME "Engineering"
 
 /* One entry from a scanned manifest.json. Every field has a default, and the
  * defaults are what an app with a minimal manifest gets:
@@ -118,6 +144,10 @@ typedef struct {
     char path[ND_APP_PATH_MAX]; /* the app's directory, absolute */
     char exec[ND_APP_EXEC_MAX];
     int32_t id;
+    /* LAST, so that nd_ui_scan_apps()'s memset of the entry clears it and a
+     * scanned app can never come out of a manifest claiming to be a menu. Only
+     * the core sets this, in rescan_apps(). */
+    bool is_menu;
 } nd_app_entry;
 
 #define ND_DIAL_BUFFER_MAX 32
