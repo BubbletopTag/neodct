@@ -124,6 +124,13 @@ def test_a_ubiblock_system_device_is_written_with_ubiupdatevol(tmp_path):
     # result back through it, which is what the phone does too.
     volume = dev / "ubi0_0"
     volume.write_bytes(b"")
+    # The ubiblock node keeps the OLD contents throughout, which is the point:
+    # it is a read-only view with a page cache nothing invalidates, so a
+    # read-back through it hashes the previous system. On hardware that is a
+    # stale cache; here it is simply a different file, and either way an
+    # install that verified through it would refuse a write that was perfectly
+    # good. apply_pending reads back through ${UBI_VOL:-$SYS_DEV} for exactly
+    # this reason and recovery now does the same.
     device = dev / "ubiblock0_0"
     device.write_bytes(b"\x00" * len(image))
     tool, log = fake_ubiupdatevol(tmp_path)
@@ -138,11 +145,16 @@ def test_a_ubiblock_system_device_is_written_with_ubiupdatevol(tmp_path):
     assert str(volume) in args, "wrote to the wrong node: %r" % args
     assert "-s %d" % len(image) in args, "no explicit size: %r" % args
     assert volume.read_bytes()[:len(image)] == image
-    # The read-back is through the ubiblock node, which on hardware is the
-    # kernel's own view of the volume; here it is a separate file, so the
-    # install as a whole is expected to report the mismatch rather than
-    # succeed. What is asserted is the WRITE, which is what was broken.
-    assert result.returncode in (0, 1)
+
+    # And the install has to FINISH. Writing the volume and then failing the
+    # read-back would be worse than the dd it replaced: the flash is
+    # overwritten and installed.prop still describes the old image.
+    assert result.returncode == 0, result.stderr
+    installed = tmp_path / "state" / "installed.prop"
+    assert installed.exists(), "the write landed but nothing was recorded"
+    assert read_prop(installed, "sha256") == hashlib.sha256(image).hexdigest()
+    assert device.read_bytes() == b"\x00" * len(image), \
+        "the read-only ubiblock node was written after all"
 
 
 def test_wiping_the_system_truncates_a_ubi_volume_rather_than_dd_ing_it(tmp_path):

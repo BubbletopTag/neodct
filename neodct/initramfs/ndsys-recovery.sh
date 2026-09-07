@@ -571,9 +571,20 @@ recovery_install_package() {
     # Pass 3: read back what landed. The meter goes INSIDE hash_prefix's own
     # pipeline -- the function returns a 64-character hash, so metering its
     # output would report 64 bytes against 48 MB.
+    #
+    # THROUGH WHATEVER WAS WRITTEN, which for UBI is the volume character
+    # device and not the ubiblock disk. apply_pending has the same line and
+    # the same reason: the block device has a page cache nothing invalidated,
+    # the kernel's only reaction to a static volume being updated is
+    # ubiblock_resize(), and an image the same size as the old one produces no
+    # capacity change and no reason to drop anything -- so this would hash the
+    # PREVIOUS system and report a mismatch on a write that was perfectly
+    # good. Reading the character device is also the write in reverse, so the
+    # check is over the same bytes through the same path.
     RECOVERY_METER_TOTAL="$image_bytes"
-    if [ "$(hash_prefix "$device" "$image_bytes" recovery_verify_meter)" != "$want_sha" ]; then
-        log "recovery: read-back mismatch on $device"
+    if [ "$(hash_prefix "${UBI_VOL:-$device}" "$image_bytes" recovery_verify_meter)" \
+            != "$want_sha" ]; then
+        log "recovery: read-back mismatch on ${UBI_VOL:-$device}"
         return 1
     fi
 
