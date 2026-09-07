@@ -44,6 +44,7 @@
 #include <unistd.h>
 
 #include "nd_broker.h"
+#include "nd_bt.h"
 #include "nd_clock.h"
 #include "nd_log.h"
 #include "nd_paths.h"
@@ -60,7 +61,8 @@ typedef enum {
     REQ_HALT = 3,
     REQ_CLOCK = 4,
     /* Appended, so no number an existing build sends changes meaning. */
-    REQ_KILL = 5
+    REQ_KILL = 5,
+    REQ_BT_POWER = 6
 } nd_broker_op;
 
 typedef struct {
@@ -76,6 +78,7 @@ typedef struct {
     int32_t child_fd[ND_PROC_MAX_FDS];
     uint8_t no_new_privs;
     uint8_t new_session;
+    int32_t death_signal;
     uint8_t close_others;
     uint8_t private_mounts;
     uint32_t owner;
@@ -89,6 +92,11 @@ typedef struct {
     /* HALT / CLOCK */
     uint8_t reboot;
     int64_t when;
+    /* BT_POWER. Appended for the same reason the op number was: a field added
+     * in the middle would change where every later one lands, and the two ends
+     * of this socket are the same binary only by convention. */
+    uint32_t bt_dev;
+    uint8_t bt_up;
 } nd_broker_req;
 
 typedef struct {
@@ -478,6 +486,45 @@ bool nd_broker__root_exec_allowed(const char *path, const char *const *argv, uin
             return false;
     }
 
+    /* THE THREE BLUETOOTH DAEMONS, PINNED ARGUMENT FOR ARGUMENT.
+     *
+     * Each is started from exactly one place with exactly one fixed argv
+     * (lib/nd_btaudio.c), so the strictest possible condition is also the
+     * cheapest: the whole vector has to match. That matters more here than the
+     * path does -- dbus-daemon will read any config file it is handed with
+     * --config-file, and bluetoothd takes -f for the same, so an allowed path
+     * with a free argv would be a root shell in two arguments.
+     *
+     * The environment is filtered separately and for the same reason; see
+     * nd_broker__root_env_filter() and the block above it. */
+    {
+        static const char *const DBUS[] = {ND_BTAUDIO_DBUS, "--system", "--nofork", "--nopidfile",
+                                           NULL};
+        static const char *const BTD[] = {ND_BTAUDIO_BLUETOOTHD, "-n", NULL};
+        static const char *const BA[] = {ND_BTAUDIO_BLUEALSA, "-p", "a2dp-source", NULL};
+        const char *const *want = NULL;
+
+        if (strcmp(path, ND_BTAUDIO_DBUS) == 0)
+            want = DBUS;
+        else if (strcmp(path, ND_BTAUDIO_BLUETOOTHD) == 0)
+            want = BTD;
+        else if (strcmp(path, ND_BTAUDIO_BLUEALSA) == 0)
+            want = BA;
+
+        if (want != NULL) {
+            uint32_t k;
+
+            for (k = 0u; want[k] != NULL; k++) {
+                if (k >= n_argv || argv == NULL || argv[k] == NULL ||
+                    strcmp(argv[k], want[k]) != 0)
+                    return false;
+            }
+            /* And nothing appended after the vector we know. */
+            if (n_argv != k)
+                return false;
+        }
+    }
+
     /* The sdcard helper had NO argv condition, which made the whole of it
      * reachable: `add`, `remove`, `scan`, `format`, against any device, at any
      * mountpoint. The core asks for exactly one thing (nd_svc_format_card),
@@ -621,6 +668,9 @@ static void do_spawn(const nd_broker_req *req, int *fds, size_t n_fds, nd_broker
     spec.owner = (nd_proc_owner)req->owner;
     spec.no_new_privs = req->no_new_privs != 0u;
     spec.new_session = req->new_session != 0u;
+    /* Carried across, so an app spawned BY THE BROKER still dies with it --
+     * and the broker dies with the core. See death_signal in nd_proc.h. */
+    spec.death_signal = (int)req->death_signal;
     spec.close_others = req->close_others != 0u;
     spec.private_mounts = req->private_mounts != 0u;
     spec.hide_paths = (req->n_hide > 0u) ? hide : NULL;
@@ -816,6 +866,15 @@ static void broker_loop(int fd)
             /* The bounds check already ran on the core's side; this is the
              * syscall it could no longer make. */
             rep.err = clock_set_raw((time_t)req.when) ? (int32_t)ND_OK : (int32_t)ND_ERR_IO;
+        } else if (req.op == REQ_BT_POWER) {
+            close_all(fds, n_fds);
+            /* HCIDEVUP needs CAP_NET_ADMIN. _local() and not nd_bt_power(),
+             * which would ask a broker -- there is none in this process, but
+             * depending on that would make a loop one refactor away. The dev
+             * id is bounded by the ioctl itself: the kernel answers ENODEV for
+             * an hciN that does not exist, which is what the caller wants to
+             * hear anyway. */
+            rep.err = (int32_t)nd_bt_power_local((uint16_t)req.bt_dev, req.bt_up != 0u);
         } else {
             close_all(fds, n_fds);
             rep.err = ND_ERR_INVAL;
@@ -979,6 +1038,7 @@ nd_err nd_broker_spawn(nd_broker *b, const char *path, const nd_proc_spec *spec,
     req.owner = (uint32_t)spec->owner;
     req.no_new_privs = spec->no_new_privs ? 1u : 0u;
     req.new_session = spec->new_session ? 1u : 0u;
+    req.death_signal = (int32_t)spec->death_signal;
     req.close_others = spec->close_others ? 1u : 0u;
     req.private_mounts = spec->private_mounts ? 1u : 0u;
 
@@ -1119,6 +1179,21 @@ bool nd_broker_halt(nd_broker *b, bool reboot)
     memset(&req, 0, sizeof req);
     req.op = REQ_HALT;
     req.reboot = reboot ? 1u : 0u;
+    memset(&rep, 0, sizeof rep);
+    if (round_trip(b, &req, NULL, 0u, &rep) != ND_OK)
+        return false;
+    return rep.err == (int32_t)ND_OK;
+}
+
+bool nd_broker_bt_power(nd_broker *b, uint16_t dev_id, bool up)
+{
+    nd_broker_req req;
+    nd_broker_rep rep;
+
+    memset(&req, 0, sizeof req);
+    req.op = REQ_BT_POWER;
+    req.bt_dev = dev_id;
+    req.bt_up = up ? 1u : 0u;
     memset(&rep, 0, sizeof rep);
     if (round_trip(b, &req, NULL, 0u, &rep) != ND_OK)
         return false;

@@ -38,6 +38,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -596,6 +597,7 @@ nd_err nd_proc_spawn(const char *path, const nd_proc_spec *spec, pid_t *pid_out)
     bool close_others;
     bool no_new_privs;
     bool private_mounts;
+    int death_signal;
     nd_priv_id run_as;
     int fd_limit;
     /* Copied out of the spec before the fork, and filtered to what exists:
@@ -619,6 +621,7 @@ nd_err nd_proc_spawn(const char *path, const nd_proc_spec *spec, pid_t *pid_out)
 
     n_fds = spec->n_fds;
     close_others = spec->close_others;
+    death_signal = spec->death_signal;
     no_new_privs = spec->no_new_privs;
     private_mounts = spec->private_mounts;
     n_hide = 0u;
@@ -728,6 +731,15 @@ nd_err nd_proc_spawn(const char *path, const nd_proc_spec *spec, pid_t *pid_out)
          * child between fork and exec could usefully do about it. */
         if (spec->new_session)
             (void)setsid();
+
+        /* Right after setsid() and before anything that can fail: the window
+         * this closes is the one between fork and exec, and a parent that dies
+         * inside it would otherwise leave exactly the orphan this prevents.
+         * prctl() is async-signal-safe for this option -- it is one syscall
+         * with no allocation -- and its failure is not something a child
+         * between fork and exec could act on. */
+        if (death_signal != 0)
+            (void)prctl(PR_SET_PDEATHSIG, death_signal, 0, 0, 0);
 
         for (i = 0u; i < n_fds; i++) {
             if (child_fd[i] != our_fd[i]) {
@@ -1725,6 +1737,10 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
     spec.envp = envp;
     spec.owner = ND_OWNER_APP;
     spec.n_fds = 0u;
+    /* An app must not outlive the thing that launched it. See death_signal in
+     * nd_proc.h: an orphaned app holds the framebuffer and spins on a pipe
+     * that is at EOF forever, on the one core this phone has. */
+    spec.death_signal = SIGTERM;
 
     /* Become ndusr unless this app is one of the two exceptions in
      * nd_proc_app_needs_root().

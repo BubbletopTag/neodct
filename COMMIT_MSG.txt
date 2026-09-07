@@ -3610,3 +3610,98 @@ the phone has to be on mobile data to prove any of it.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df
+
+================================================================================
+
+0.5.12a: Bluetooth needed privilege nobody gave it back, and the menu waited on a card
+
+Two faults, both of them 0.5.x paying for the privilege drop, and both of them
+found on hardware rather than here.
+
+============ BLUETOOTH: THE TENTH ONE ============
+
+nd_bt.h has carried this sentence since it was written:
+
+    Needs CAP_NET_ADMIN, which an app has on the phone (everything runs as
+    root) and does not have on a developer's desktop
+
+It was true until 0.5.0a. Since then nd-core and every stock app are ndusr,
+so the parenthesis is exactly backwards and HCIDEVUP has been returning EPERM
+on the phone for eleven releases. This is the same shape as the nine faults
+0.5.9a cleaned up -- a capability quietly removed, and a failure path that
+degraded into silence.
+
+Three things needed privilege and none of them had it:
+
+  nd_bt_power()          HCIDEVUP/HCIDEVDOWN, i.e. the actual switch. It now
+                         crosses to the broker when there is one, exactly as
+                         the RTC write does (nd_clock.c) and for the same
+                         reason. nd_bt_power_local() is the ioctl without the
+                         detour, for the broker itself and for a root caller
+                         -- the engineering Bluetooth app still does it
+                         directly, which is why THAT app appeared to work
+                         while Settings did not.
+
+  dbus-daemon --system   Creates /run/dbus and drops to messagebus itself.
+  bluetoothd             CAP_NET_ADMIN, plus a system-bus name BlueZ's D-Bus
+                         policy grants to root.
+                         Both were nd_proc_spawn()ed from Settings, so both
+                         inherited ndusr. They now go through the broker with
+                         an empty user, i.e. "do not drop".
+
+ND_BROKER_ROOT_EXEC gains the three daemons, and they are pinned ARGUMENT FOR
+ARGUMENT rather than by path alone. That is not caution for its own sake:
+dbus-daemon --config-file and bluetoothd -f both read a file of the caller's
+choosing, so an allowed path with a free argv is a root shell in two
+arguments. Each is started from one place with one fixed vector, so requiring
+the whole vector to match costs nothing and closes it.
+
+And Settings THREW THE RESULT AWAY -- `(void)nd_bt_power(0u, true)`. From
+0.5.0a that call failed every single time and the screen returned to the menu
+with Bluetooth off and no message at all, which is why this needed a hardware
+report to find rather than a glance at a log. It now says the adapter would
+not start, and repeats the kernel's reason.
+
+NOT VERIFIED HERE, and it must not be claimed otherwise: this host has no
+adapter and the test sandbox has no Bluetooth sockets, so test_bt skips
+precisely the paths that changed. The reasoning is traced line by line; the
+phone is what will confirm it.
+
+============ THE MENU FROZE ON A CARD IT DID NOT NEED TO READ ============
+
+Reported as: a few seconds' hang on the system menu, sometimes a crash, and a
+phone that is worse afterwards.
+
+rescan_apps() walks three app directories and the third is on the SD CARD.
+nd_ui_refresh_after_app() clears apps_ready after EVERY app exit, so the first
+menu open after using anything re-walked all three. The walk discovered an
+absent or unusable card by letting opendir() fail -- which on a card that is
+present but FAILING means the mmc layer's retries first, in
+TASK_UNINTERRUPTIBLE, for seconds. Nothing is drawn in that window: the Menu
+keypress only sets ui->state, so the scan happens on the next loop turn with
+the HOME screen still on the panel. That is the freeze, and it is intermittent
+for the same reason the card is.
+
+The walk now asks nd_storage_media_available() first -- one small read of the
+card daemon's published state on tmpfs, no block device touched. MEDIA and not
+is_ready(): this is a read, and the ownership question ready() asks belongs to
+nd_proc_app_is_untrusted() later.
+
+============ AND WHY IT WAS WORSE AFTER A RESTART ============
+
+When nd-core dies, the app it was running is reparented to init and keeps
+going -- holding /dev/fb0, and blocked in a read on a pipe whose write end has
+closed, which returns EOF immediately and forever. It spins at 100% of the one
+core this phone has, for as long as the phone stays on, and the restarted UI
+then shares that core with it. A reboot fixed it and nothing else did.
+
+nd_proc_spec gains death_signal, set to SIGTERM for app launches only and
+carried across the broker wire so an app spawned BY the broker still dies with
+it -- and the broker dies with the core. It is deliberately NOT set for the
+Bluetooth daemons, which lib/nd_btaudio.c goes out of its way to let outlive
+the app that starts them.
+
+Suite green, MAKE_TEST_EXIT=0, 85 binaries.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df

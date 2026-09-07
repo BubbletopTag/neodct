@@ -18,6 +18,7 @@
 
 #include "nd_vclock.h"
 
+#include "nd_broker.h"
 #include "nd_btaudio.h"
 
 /* Write `text` to an ND_ROOT-resolved path, creating what it needs. */
@@ -276,8 +277,8 @@ nd_err nd_btaudio_route_to(const char *addr, int card)
  * The daemons, and running a command
  * ------------------------------------------------------------------ */
 
-#define BTAUDIO_DBUS       "/usr/bin/dbus-daemon"
-#define BTAUDIO_BLUETOOTHD "/usr/libexec/bluetooth/bluetoothd"
+#define BTAUDIO_DBUS       ND_BTAUDIO_DBUS
+#define BTAUDIO_BLUETOOTHD ND_BTAUDIO_BLUETOOTHD
 
 /* No shared sleep helper exists; nd_remoteshell.c rolls its own for the same
  * reason. These waits are for a daemon to finish coming up, not for a clock. */
@@ -327,9 +328,23 @@ static bool spawn_quiet(const char *path, const char *const *argv, pid_t *pid_ou
     spec.fds[1].our_fd = devnull;
     spec.n_fds = 2u;
 
-    if (nd_proc_spawn(path, &spec, &pid) != ND_OK) {
-        (void)close(devnull);
-        return false;
+    /* THROUGH THE BROKER, AS ROOT, WHEN THERE IS ONE.
+     *
+     * All three of these need privilege the core stopped having at 0.5.0a.
+     * nd_proc_spawn() forks from THIS process, so from Settings -- which is
+     * ndusr -- it produced a bluetoothd that could not touch the adapter and a
+     * dbus-daemon that could not open its socket. The empty user is "do not
+     * drop"; nd_broker__root_exec_allowed() is what decides whether that is
+     * granted, and it pins these three by path and by argv. */
+    {
+        nd_broker *b = nd_broker_default();
+        nd_err rc = (b != NULL) ? nd_broker_spawn(b, path, &spec, "", &pid)
+                                : nd_proc_spawn(path, &spec, &pid);
+
+        if (rc != ND_OK) {
+            (void)close(devnull);
+            return false;
+        }
     }
     (void)close(devnull);
     *pid_out = pid;

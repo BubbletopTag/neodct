@@ -163,10 +163,33 @@ nd_err nd_bt_list(nd_bt_adapter *out, size_t max, size_t *n_out);
 /* One controller by id. ND_ERR_NOTFOUND when there is no hciN. */
 nd_err nd_bt_info(uint16_t dev_id, nd_bt_adapter *out);
 
-/* HCIDEVUP / HCIDEVDOWN. Needs CAP_NET_ADMIN, which an app has on the phone
- * (everything runs as root) and does not have on a developer's desktop --
- * errno is EPERM there, and the app says so rather than pretending. */
+/* HCIDEVUP / HCIDEVDOWN.
+ *
+ * ============ THIS COMMENT USED TO SAY "everything runs as root" ============
+ *
+ * It did, until 0.5.0a, and that is why Bluetooth stopped working. The ioctl
+ * needs CAP_NET_ADMIN; nd-core and every stock app gave that up when the core
+ * dropped to ndusr (core/nd_main.c step 4b), so Settings' Bluetooth toggle
+ * has been returning EPERM on the phone ever since -- the same shape as the
+ * nine regressions 0.5.9a cleaned up, and one the emulator cannot show
+ * because it has no adapter to refuse.
+ *
+ * So the ioctl crosses to the broker when there is one, exactly as the RTC
+ * write does (nd_clock.c, and nd_broker.h's block on why the broker holds
+ * privilege the core no longer has). A caller that IS privileged -- the
+ * engineering Bluetooth app, which nd_proc launches as root, or a core with
+ * no broker -- still makes the ioctl itself.
+ *
+ * Returns ND_ERR_PERM when neither route is available, which is the honest
+ * answer on a developer's desktop. */
 nd_err nd_bt_power(uint16_t dev_id, bool up);
+
+/* The ioctl WITHOUT the broker detour.
+ *
+ * For the broker itself, which is the process that has the capability and
+ * must not ask anybody else to use it. Also the seam a root caller uses when
+ * it knows it is root. Every other caller wants nd_bt_power(). */
+nd_err nd_bt_power_local(uint16_t dev_id, bool up);
 
 /* A general inquiry: `units` * 1.28 seconds of scanning, then the cache
  * contents. BLOCKS for that whole time. `units` is clamped to 1..48.

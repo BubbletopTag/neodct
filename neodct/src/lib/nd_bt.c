@@ -48,6 +48,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "nd_broker.h"
 #include "nd_bt.h"
 #include "nd_log.h"
 #include "nd_types.h"
@@ -399,7 +400,7 @@ nd_err nd_bt_info(uint16_t dev_id, nd_bt_adapter *out)
     return rc;
 }
 
-nd_err nd_bt_power(uint16_t dev_id, bool up)
+nd_err nd_bt_power_local(uint16_t dev_id, bool up)
 {
     nd_err rc = ND_OK;
     int fd = bt_socket();
@@ -419,6 +420,19 @@ nd_err nd_bt_power(uint16_t dev_id, bool up)
     }
     (void)close(fd);
     return rc;
+}
+
+nd_err nd_bt_power(uint16_t dev_id, bool up)
+{
+    /* The broker when there is one. In the BROKER's own process there is not:
+     * nd_broker_set_default() is called by the core AFTER it forks the broker
+     * (core/nd_main.c), so the broker's copy is NULL and its call to
+     * nd_bt_power_local() below cannot loop back through here. */
+    nd_broker *b = nd_broker_default();
+
+    if (b != NULL)
+        return nd_broker_bt_power(b, dev_id, up) ? ND_OK : ND_ERR_PERM;
+    return nd_bt_power_local(dev_id, up);
 }
 
 nd_err nd_bt_inquiry(uint16_t dev_id, uint8_t units, nd_bt_device *out, size_t max, size_t *n_out)

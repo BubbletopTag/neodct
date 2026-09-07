@@ -70,6 +70,7 @@
 #include "nd_paths.h"
 #include "nd_proc.h"
 #include "nd_settings.h"
+#include "nd_storage.h"
 #include "nd_svc.h"
 #include "nd_text.h"
 #include "nd_types.h"
@@ -942,7 +943,24 @@ static void rescan_apps(nd_ui *ui)
      * nobody uses. What makes that safe is not a gate but the confinement:
      * everything here runs as ndusr_ut with a private mount namespace and no
      * service socket at all. See ND_PATH_USER_APPS_DIR. */
-    if (ui->home_.n_apps < ND_APP_MAX) {
+    /* ============ ASK THE CHEAP QUESTION FIRST ============
+     *
+     * This walk is on the SD CARD, and the comment at the top of this function
+     * already says what that costs: it is the longest thing the core does
+     * without touching the screen, and the reads are uninterruptible. What it
+     * did not say is that the walk happened whether or not there was a card to
+     * walk -- an absent, unmountable or foreign card was discovered by
+     * opendir() failing, which on a card that is present but FAILING means the
+     * mmc layer's retries first, in TASK_UNINTERRUPTIBLE, for seconds, with
+     * the home screen still on the panel because the menu has not drawn yet.
+     * That is the "it hangs for a few seconds on the system menu" an owner
+     * reported, and it is intermittent for the same reason the card is.
+     *
+     * nd_storage_media_available() answers from the card daemon's published
+     * state, not from the block device, so it costs one small read of a file
+     * on tmpfs. MEDIA and not is_ready(): this is a read, and the ownership
+     * question ready() asks is nd_proc_app_is_untrusted()'s to ask later. */
+    if (ui->home_.n_apps < ND_APP_MAX && nd_storage_media_available()) {
         n = nd_ui_scan_apps(ND_PATH_USER_APPS_DIR, &ui->home_.apps[ui->home_.n_apps],
                             ND_APP_MAX - ui->home_.n_apps);
         ui->home_.n_apps += n;

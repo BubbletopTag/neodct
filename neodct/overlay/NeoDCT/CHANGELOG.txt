@@ -1,5 +1,34 @@
 # NeoDCT OS Changelog
 
+0.5.12a
+Bluetooth switches on again, and the menu stops freezing.
+
+Bluetooth has not worked since 0.5.0a, and the reason is the same one behind
+the nine faults 0.5.9a fixed: the phone stopped running as the superuser, and
+three things that needed to be were never given another way to do their job.
+Switching the adapter on is an operation the kernel only allows to a
+privileged process; so is starting the two background services Bluetooth audio
+is built on. All three now ask the one small privileged helper the phone keeps
+for exactly this, the same way setting the clock does.
+
+It also said nothing at all while failing. The screen went back to the menu
+with Bluetooth still off. It now says that Bluetooth would not start, and what
+the kernel gave as the reason.
+
+The menu freeze is a different fault with a simpler cause. Opening the menu
+after using any app made the phone re-read every app it has, and one of the
+places it looks is the memory card. A card that is slow or failing can take
+seconds to answer, and nothing can interrupt it -- so the phone sat on the
+home screen, apparently dead, until the card replied. It now asks whether
+there is a readable card at all before going near it, which costs nothing and
+skips the whole problem when there is not one.
+
+And a phone that crashed once stayed slow until it was switched off and on.
+When the interface was restarted, whatever app had been open was left running,
+with nothing to talk to, using half of everything the phone has for as long as
+it stayed on. An app now stops when the thing that started it stops.
+
+
 0.5.11a
 The phone can reach the internet it actually has.
 

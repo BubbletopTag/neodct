@@ -88,6 +88,27 @@ typedef struct {
      * screen exists to catch. */
     bool new_session;
 
+    /* ============ DIE WITH THE PARENT ============
+     *
+     * SIGTERM (or any signal) delivered to this child when the process that
+     * forked it exits, via PR_SET_PDEATHSIG. Zero means the old behaviour:
+     * the child is reparented to init and lives on.
+     *
+     * An app is the case this exists for. When nd-core is killed -- by the
+     * crash guard, by the OOM killer, by a segfault -- the app it was running
+     * is reparented to PID 1 and keeps going. It is holding /dev/fb0 and it is
+     * sitting in a read on a pipe whose write end has closed, which returns
+     * EOF immediately and forever: the app spins at 100% of the one core this
+     * phone has, for as long as the phone is on. The restarted UI then shares
+     * that core with it, which is why a phone that has crashed once is slow
+     * afterwards in a way a reboot fixes and nothing else does.
+     *
+     * NOT set for the long-lived daemons. bluetoothd and its two companions
+     * are deliberately allowed to outlive the app that started them
+     * (lib/nd_btaudio.c), and their parent is the broker rather than the app,
+     * so they are already outside this. */
+    int death_signal;
+
     /* Close every descriptor above stderr in the child, after the fds[] above
      * are in place and before the execve. Off by default because an app is
      * MEANT to inherit what the core hands it -- the crash pipe and the

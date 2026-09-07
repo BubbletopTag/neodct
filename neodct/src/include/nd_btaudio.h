@@ -97,6 +97,16 @@ bool nd_btaudio_parse_connected(const char *text);
 
 #define ND_BTAUDIO_BLUEALSA "/usr/bin/bluealsa"
 
+/* The other two, public for one reason only: nd_broker.h's root-exec list has
+ * to name them. All three need privilege the core gave up at 0.5.0a --
+ * dbus-daemon --system creates /run/dbus and drops to messagebus itself,
+ * bluetoothd needs CAP_NET_ADMIN and a system-bus name that BlueZ's D-Bus
+ * policy grants to root, and bluealsa registers its own bus name beside it.
+ * Spawned as ndusr they either refuse to start or start and control nothing,
+ * which is what "Bluetooth will not turn on" looked like from the outside. */
+#define ND_BTAUDIO_DBUS       "/usr/bin/dbus-daemon"
+#define ND_BTAUDIO_BLUETOOTHD "/usr/libexec/bluetooth/bluetoothd"
+
 /* The command, and the buffer its numeric argument points into. An argv of
  * `const char *` cannot own a formatted number and a caller that formats it
  * into a local is a dangling pointer waiting to happen -- the same reason

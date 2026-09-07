@@ -477,10 +477,21 @@ static void show_bt_audio(nd_ui *ui)
                 (void)nd_infoscreen_show(ui, "No Bluetooth stack", NULL, "Back");
             } else {
                 nd_btaudio_cmd cmd;
+                nd_err power = nd_bt_power(0u, true);
 
-                (void)nd_bt_power(0u, true);
-                if (nd_btaudio_cmd_build(&cmd, "power", "on", 0) == ND_OK)
+                /* NOT discarded any more. This return was thrown away, and
+                 * from 0.5.0a it was a failure every time: the ioctl needs
+                 * CAP_NET_ADMIN and this app is ndusr. The screen went back to
+                 * the menu with Bluetooth still off and said nothing at all,
+                 * which is the whole reason it took a hardware report to find.
+                 * The adapter is the thing being switched on; if it did not
+                 * come up there is nothing further worth trying. */
+                if (power != ND_OK) {
+                    (void)nd_infoscreen_show(ui, "Bluetooth would not start",
+                                             nd_strerror(power), "Back");
+                } else if (nd_btaudio_cmd_build(&cmd, "power", "on", 0) == ND_OK) {
                     (void)nd_btaudio_run(&cmd, NULL, 0u);
+                }
             }
         } else if (enabled && choice == 0) {
             nd_btaudio_daemons_stop(bt_speaker_card());

@@ -52,6 +52,7 @@
 #include <sys/types.h>
 
 #include "nd_app.h"
+#include "nd_btaudio.h"
 #include "nd_paths.h"
 #include "nd_proc.h"
 #include "nd_types.h"
@@ -107,9 +108,10 @@ extern "C" {
  *                caller's.
  *
  * See root_exec_allowed(). */
-#define ND_BROKER_ROOT_EXEC                            \
-    {                                                  \
-        ND_PATH_SDCARD_HELPER, ND_PATH_ND_APPRUN, NULL \
+#define ND_BROKER_ROOT_EXEC                                              \
+    {                                                                    \
+        ND_PATH_SDCARD_HELPER, ND_PATH_ND_APPRUN, ND_BTAUDIO_DBUS,       \
+            ND_BTAUDIO_BLUETOOTHD, ND_BTAUDIO_BLUEALSA, NULL             \
     }
 
 /* ============ AND THE HOLE *THAT* LIST DID NOT CLOSE EITHER ============
@@ -277,6 +279,14 @@ bool nd_broker_kill(nd_broker *b, pid_t pid, int signo);
  * and does not have an opinion about the value. */
 bool nd_broker_halt(nd_broker *b, bool reboot);
 bool nd_broker_set_clock(nd_broker *b, int64_t when);
+
+/* HCIDEVUP / HCIDEVDOWN on hci<dev_id>, which needs CAP_NET_ADMIN.
+ *
+ * The same shape and the same reason as set_clock above: the DECISION stays in
+ * the caller and only the privileged operation crosses. Bluetooth stopped
+ * working for an owner at 0.5.0a because Settings runs as ndusr and the ioctl
+ * has needed a capability it no longer had ever since -- see nd_bt.h. */
+bool nd_broker_bt_power(nd_broker *b, uint16_t dev_id, bool up);
 
 /* The one nd-core forked, for the library code that cannot be handed it.
  * nd_proc, nd_svc and nd_clock all need the broker and none of them has a
