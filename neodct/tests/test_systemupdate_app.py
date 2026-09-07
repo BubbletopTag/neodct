@@ -10,6 +10,7 @@ The last test is the whole feature end to end: the app stages a package and
 the real busybox applier installs it.
 """
 
+import errno
 import json
 import os
 import subprocess
@@ -503,27 +504,43 @@ def test_the_backup_goes_in_its_own_dated_folder(env):
     assert folder.name[:2] == "20"
 
 
-def test_a_backup_that_cannot_be_written_does_not_stop_the_update(env):
+def _backup_cannot_be_written(monkeypatch):
+    """Make the copy onto the card fail, whoever is running the tests.
+
+    This was `(env.card / "backup_db").chmod(0o500)`, and a mode says nothing
+    to uid 0: the suite runs as root inside QEMU and on any developer box that
+    reached for sudo, and there the backup simply SUCCEEDED. One of the two
+    tests below then passed for the wrong reason -- it asserts the update goes
+    ahead, which it does either way -- and the other, which asserts the phone
+    admits the failure, failed outright. Refusing the copy itself is the same
+    scenario (a card that is full, write-protected or unwritable) and is the
+    same answer for every uid."""
+    def refuse(*_args, **_kwargs):
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(app.shutil, "copy2", refuse)
+
+
+def test_a_backup_that_cannot_be_written_does_not_stop_the_update(env, monkeypatch):
     """Userdata lives on its own partition and survives an update anyway,
     so a full card is no reason to refuse to install."""
     put_package(env)
-    (env.card / "backup_db").chmod(0o500)
-    try:
-        app.run(FakeUI())
-    finally:
-        (env.card / "backup_db").chmod(0o755)
+    _backup_cannot_be_written(monkeypatch)
+
+    app.run(FakeUI())
 
     assert staging.read_pending(env.state) is not None
     assert env.rebooted == [True]
+    # Belt and braces on the injection itself: a backup that quietly worked
+    # would make the two assertions above pass without testing anything.
+    assert not backups(env)
 
 
-def test_a_backup_that_failed_is_admitted_before_the_restart(env):
+def test_a_backup_that_failed_is_admitted_before_the_restart(env, monkeypatch):
     put_package(env)
-    (env.card / "backup_db").chmod(0o500)
-    try:
-        app.run(FakeUI())
-    finally:
-        (env.card / "backup_db").chmod(0o755)
+    _backup_cannot_be_written(monkeypatch)
+
+    app.run(FakeUI())
 
     assert "not backed up" in env.page_text().lower()
 
