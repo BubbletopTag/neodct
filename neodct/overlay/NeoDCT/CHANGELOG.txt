@@ -1,5 +1,31 @@
 # NeoDCT OS Changelog
 
+0.5.11a
+The phone can reach the internet it actually has.
+
+Mobile data on this network is IPv6. There is no IPv4 on it at all -- not a
+slower route, none -- and three things on the phone had been written as though
+there were.
+
+Setting the clock was one. The phone asked for the time over IPv4 only, so on
+mobile data it never got an answer and the clock never set. That is worse than
+a wrong clock: a phone that thinks it is 1970 rejects every secure connection
+it makes, and cannot check that an update is genuine. It now asks over
+whichever kind of address the network can carry.
+
+Fetch was the second, twice over. It was pointed at an address that only
+exists on IPv4, so on mobile data there was nowhere for it to connect; it now
+uses the same server's IPv6 address. And when it was given an IPv6 address by
+hand it built a malformed request out of it and failed anyway, because the
+punctuation in an IPv6 address means something else inside a web address
+unless it is bracketed. It brackets it.
+
+The third is on the server rather than the phone: the file server the setup
+script writes was listening on IPv4 only, so a phone on mobile data could not
+have reached it even with everything above fixed. It listens on IPv6 now, and
+still answers IPv4 for anything on the same network as it.
+
+
 0.5.10a
 The engineering apps are one app, the screen can be turned off, and
 formatting a memory card says the truth while it does.

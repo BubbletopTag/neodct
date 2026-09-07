@@ -164,8 +164,15 @@ say "writing $CONF"
 [ -f "$CONF" ] && [ ! -f "$CONF.before-neodct" ] && cp "$CONF" "$CONF.before-neodct"
 cat > "$CONF" <<EOF
 # Written by neodct/tools/ftp-server-setup.sh. See that script for why.
-listen=YES
-listen_ipv6=NO
+# IPv6, and IPv4 comes along for free. vsftpd cannot open both families from
+# one config -- listen and listen_ipv6 are mutually exclusive -- so the choice
+# is which single socket to bind, and on this phone it is not a close call:
+# the handset is on T-Mobile, whose mobile data is IPv6-only, so an IPv4-only
+# server is a server it cannot reach at all. An AF_INET6 socket without
+# v6only accepts IPv4-mapped connections too, so a laptop on the same LAN
+# still connects over IPv4.
+listen=NO
+listen_ipv6=YES
 anonymous_enable=NO
 local_enable=YES
 write_enable=$WRITE_ENABLE

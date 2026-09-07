@@ -428,6 +428,33 @@ static void test_build_url(void)
     CHECK(api.build_url("10.0.0.1", "my music/live sets", NULL, url, sizeof url) == ND_OK);
     CHECK_STR(url, "ftp://10.0.0.1/my%20music/live%20sets/");
 
+    /* ============ IPv6, WHICH IS THE ORDINARY CASE ON THIS PHONE ============
+     *
+     * T-Mobile's mobile data is IPv6-only, so the bearer the phone actually
+     * has cannot reach an IPv4 literal at all. A colon already means "port" in
+     * a URL authority, so the address has to be bracketed or curl reads
+     * "ftp://2606:4700::1111/" as host 2606 port 4700 and fails on the rest.
+     *
+     * The host is STORED bare and bracketed only here -- curl matches a netrc
+     * `machine` line against the unbracketed form, and the netrc is the whole
+     * reason this string is compared rather than escaped. */
+    CHECK(api.build_url("2606:4700::1111", "", NULL, url, sizeof url) == ND_OK);
+    CHECK_STR(url, "ftp://[2606:4700::1111]/");
+    CHECK(api.build_url("2606:4700::1111", "roms/psx", "Disc.bin", url, sizeof url) == ND_OK);
+    CHECK_STR(url, "ftp://[2606:4700::1111]/roms/psx/Disc.bin");
+    /* A link-local-looking literal and a fully written-out one both survive;
+     * the rule is "contains a colon", not a parse of the address. */
+    CHECK(api.build_url("2001:0db8:0000:0000:0000:0000:0000:0001", "", "a.bin", url,
+                        sizeof url) == ND_OK);
+    CHECK_STR(url, "ftp://[2001:0db8:0000:0000:0000:0000:0000:0001]/a.bin");
+    /* A hostname is never bracketed -- DNS64 hands back a AAAA for one of
+     * these and curl resolves it itself. */
+    CHECK(api.build_url("ftp.example.org", "", "a.bin", url, sizeof url) == ND_OK);
+    CHECK_STR(url, "ftp://ftp.example.org/a.bin");
+    /* Brackets in the STORED host are refused, so there is exactly one
+     * spelling of a host and it is the one the netrc will match. */
+    CHECK(api.build_url("[2606:4700::1111]", "", NULL, url, sizeof url) == ND_ERR_INVAL);
+
     /* Refusal is kept for the thing escaping cannot make safe. */
     CHECK(api.build_url("10.0.0.1", "../..", NULL, url, sizeof url) == ND_ERR_INVAL);
     CHECK(api.build_url("10.0.0.1", "a/../b", NULL, url, sizeof url) == ND_ERR_INVAL);

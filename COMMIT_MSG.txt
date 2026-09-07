@@ -3535,3 +3535,78 @@ been seen on real hardware.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df
+
+================================================================================
+
+0.5.11a: the internet the phone actually has is IPv6
+
+T-Mobile's mobile data is IPv6-only. Not IPv6-preferred -- there is no IPv4 on
+that bearer at all, and the carrier's way back to the v4 internet is NAT64,
+reached through DNS64, which synthesises a AAAA from an A record only when it
+is asked to resolve a NAME. docs/REMOTE_SHELL.md has said this since Remote
+Shell was written, and Remote Shell was built for it. Three other things were
+not.
+
+============ THE CLOCK, WHICH IS THE ONE THAT MATTERS ============
+
+nd_clock.c asked getaddrinfo for AF_INET and nothing else. On this bearer that
+does not mean "prefer IPv4", it means no address is ever returned and the
+clock never sets.
+
+That is not a cosmetic fault and nd_clock.h already says why: the boot floor
+exists because a phone that believes it is 1970 fails every TLS "not valid
+before" check it makes, and the update system's signature check is one of
+them. A phone that cannot set its clock is a phone that cannot safely update
+itself.
+
+The old comment was explicit that this was deliberate -- "the phone's data
+bearer being IPv6-only with NAT64 is a real risk ... it is NOT quietly fixed
+here, because fixing it changes which servers answer and that is a behaviour
+change the owner has to see". The owner has now seen it, on hardware, and
+asked. AF_UNSPEC. The rest of the function was already family-agnostic: the
+socket comes from res->ai_family and the datagram goes to res->ai_addr.
+
+============ FETCH, WRONG IN TWO SEPARATE WAYS ============
+
+Its default host was the droplet's IPv4 literal. A literal never reaches the
+resolver, so DNS64 has nothing to synthesise from and there is no NAT64 route
+to find -- the app worked on Wi-Fi and timed out on mobile data, which is
+exactly how it was reported. It is the same droplet's IPv6 address now.
+
+And it could not have used an IPv6 address given by hand either.
+fetch_build_url() interpolated the host straight into ftp://%s/, and a colon
+already means "port" in a URL authority -- curl reads ftp://2606:4700::1111/
+as host 2606, port 4700, and fails on the remainder. Literals are bracketed
+now, and ONLY for the URL: the host is stored bare because that is the form
+curl matches a netrc `machine` line against, and the netrc is the entire
+reason that string is compared rather than escaped. host_is_safe() therefore
+now REFUSES brackets, so a host has exactly one spelling and it is the one
+that logs in.
+
+The default is read with a call-site default and is not in the DEFAULTS table,
+so it was never persisted -- a phone that never had fetch.host set by hand
+picks the new address up on update rather than keeping the old one.
+
+============ AND THE SERVER, WHICH COULD NOT HAVE ANSWERED ============
+
+tools/ftp-server-setup.sh wrote listen=YES with listen_ipv6=NO, so the file
+server was IPv4-only and a phone on mobile data could not have reached it even
+with everything above fixed. vsftpd cannot bind both families from one config
+-- listen and listen_ipv6 are mutually exclusive -- so the choice is which
+single socket to open, and on this phone it is not close. An AF_INET6 socket
+without v6only accepts IPv4-mapped connections, so a laptop on the same LAN
+still connects over IPv4.
+
+============ WHAT WAS ALREADY RIGHT ============
+
+Checked rather than assumed, so nobody re-checks it: the modem already brings
+up an IPv6 PDP context first with IPV4V6 as the fallback (S45modem:44-45), no
+curl or ssh invocation anywhere passes -4, and the only AF_INET left in the
+tree is test_clock.c's own loopback NTP server, which is correct -- 127.0.0.1
+resolves to one family and the test still passes.
+
+Suite green, MAKE_TEST_EXIT=0, 85 binaries. Not yet exercised on the bearer:
+the phone has to be on mobile data to prove any of it.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df

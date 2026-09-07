@@ -243,7 +243,15 @@ static bool dir_is_safe(const char *dir)
 
 /* A host is not escaped -- it is compared against the netrc's `machine` line
  * and has to match byte for byte -- so it is checked instead. An IPv4 or IPv6
- * literal or a host name, and nothing that could end a URL authority early. */
+ * literal or a host name, and nothing that could end a URL authority early.
+ *
+ * BRACKETS ARE REFUSED, and that is the whole IPv6 story in one rule. The
+ * stored host is the BARE address -- "2606:4700::1111", never
+ * "[2606:4700::1111]" -- because that is the form curl matches a netrc
+ * `machine` line against, and the netrc is the only reason this string is not
+ * escaped in the first place. fetch_build_url() puts the brackets on for the
+ * URL and nothing else does; letting them into the setting as well would mean
+ * two spellings of one host, of which exactly one logs in. */
 static bool host_is_safe(const char *host)
 {
     size_t i;
@@ -254,10 +262,36 @@ static bool host_is_safe(const char *host)
         unsigned char c = (unsigned char)host[i];
 
         if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-              c == '.' || c == '-' || c == ':' || c == '[' || c == ']'))
+              c == '.' || c == '-' || c == ':'))
             return false;
     }
     return true;
+}
+
+/* An IPv6 literal, for the purpose of deciding whether a URL authority needs
+ * brackets. A colon is the whole test and it is enough: host_is_safe() has
+ * already refused everything that is not a hostname, an IPv4 literal or an
+ * IPv6 one, and a colon appears in none of the first two. No port is ever
+ * appended here -- the URL is always ftp:// on 21 -- so there is no second
+ * meaning for it to be confused with. */
+static bool host_is_ipv6_literal(const char *host)
+{
+    return strchr(host, ':') != NULL;
+}
+
+/* The host as it goes into a URL: bracketed when it is an IPv6 literal.
+ *
+ * RFC 3986 gives the authority its own grammar precisely because a colon
+ * already means "port" there, so ftp://2606:4700::1111/ is not a stricter
+ * spelling of anything -- curl reads 4700 as the port and fails on the rest.
+ * The phone is on T-Mobile, whose mobile data is IPv6 and has no IPv4 at all
+ * (docs/REMOTE_SHELL.md said so about the relay long before this app existed),
+ * so this is the ordinary case here rather than the exotic one. */
+static nd_err host_for_url(const char *host, char *out, size_t out_sz)
+{
+    if (host_is_ipv6_literal(host))
+        return nd_snprintf(out, out_sz, "[%s]", host);
+    return nd_snprintf(out, out_sz, "%s", host);
 }
 
 nd_err fetch_build_url(const char *host, const char *dir, const char *name, char *out,
@@ -265,11 +299,14 @@ nd_err fetch_build_url(const char *host, const char *dir, const char *name, char
 {
     char dir_esc[ND_FETCH_URL_MAX];
     char name_esc[ND_FETCH_NAME_MAX * 3u + 1u];
+    char host_url[ND_FETCH_HOST_MAX + 2u];
 
     if (host == NULL || dir == NULL || out == NULL)
         return ND_ERR_INVAL;
     if (!host_is_safe(host) || !dir_is_safe(dir))
         return ND_ERR_INVAL;
+    if (host_for_url(host, host_url, sizeof host_url) != ND_OK)
+        return ND_ERR_TOOLONG;
     if (name != NULL && !fetch_name_is_safe(name))
         return ND_ERR_INVAL;
     if (url_escape(dir, dir_esc, sizeof dir_esc, true) != ND_OK)
@@ -280,12 +317,12 @@ nd_err fetch_build_url(const char *host, const char *dir, const char *name, char
     if (name == NULL) {
         /* The trailing slash is what makes curl LIST rather than RETR. */
         if (dir_esc[0] == '\0')
-            return nd_snprintf(out, out_sz, "ftp://%s/", host);
-        return nd_snprintf(out, out_sz, "ftp://%s/%s/", host, dir_esc);
+            return nd_snprintf(out, out_sz, "ftp://%s/", host_url);
+        return nd_snprintf(out, out_sz, "ftp://%s/%s/", host_url, dir_esc);
     }
     if (dir_esc[0] == '\0')
-        return nd_snprintf(out, out_sz, "ftp://%s/%s", host, name_esc);
-    return nd_snprintf(out, out_sz, "ftp://%s/%s/%s", host, dir_esc, name_esc);
+        return nd_snprintf(out, out_sz, "ftp://%s/%s", host_url, name_esc);
+    return nd_snprintf(out, out_sz, "ftp://%s/%s/%s", host_url, dir_esc, name_esc);
 }
 
 /* ------------------------------------------------------------------ *

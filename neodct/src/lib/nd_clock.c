@@ -449,13 +449,28 @@ nd_err nd_clock_query(const char *server, int timeout_s, time_t *out)
 
     (void)nd_snprintf(port, sizeof port, "%d", ND_NTP_PORT);
 
-    /* AF_INET only, exactly as the Python's socket(AF_INET, SOCK_DGRAM). The
-     * phone's data bearer being IPv6-only with NAT64 is a real risk and is
-     * recorded in spec-core-services.md; it is NOT quietly fixed here, because
-     * fixing it changes which servers answer and that is a behaviour change
-     * the owner has to see. */
+    /* ============ AF_UNSPEC, AND WHY IT CHANGED ============
+     *
+     * This was AF_INET, "exactly as the Python's socket(AF_INET, SOCK_DGRAM)",
+     * with a note saying the phone's bearer being IPv6-only was a real risk
+     * that would not be quietly fixed because it changes which servers answer
+     * and the owner has to see that happen.
+     *
+     * The owner has now seen it. The phone runs on T-Mobile, whose mobile data
+     * is IPv6-only -- docs/REMOTE_SHELL.md has said so about the relay since
+     * that feature was written -- so AF_INET here does not mean "prefer IPv4",
+     * it means the clock never sets. And a clock that never sets is not a
+     * cosmetic fault on this phone: nd_clock.h's boot floor exists because a
+     * clock stuck in 1970 fails every TLS "not valid before" check and breaks
+     * the update system's signature check.
+     *
+     * AF_UNSPEC lets getaddrinfo answer with whatever the bearer can carry, in
+     * the order the resolver prefers -- which on an IPv6-only bearer with
+     * DNS64 is a synthesised AAAA, and on Wi-Fi or the emulator is still IPv4.
+     * The rest of this function was already family-agnostic: the socket comes
+     * from res->ai_family and the datagram goes to res->ai_addr/ai_addrlen. */
     memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_INET;
+    hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_DGRAM;
 
     if (getaddrinfo(server, port, &hints, &res) != 0 || res == NULL)

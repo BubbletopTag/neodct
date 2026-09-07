@@ -86,8 +86,24 @@ extern "C" {
 /* The droplet from [[remote-shell-vps]] -- the same box the phone already
  * dials for Remote Shell, so there is one server to keep alive rather than
  * two. Overridable without a rebuild through settings, because a fork of
- * this OS has no business talking to that address. */
-#define ND_FETCH_HOST_DEFAULT "67.205.190.49"
+ * this OS has no business talking to that address.
+ *
+ * ============ IPv6, BECAUSE THERE IS NO IPv4 TO FALL BACK ON ============
+ *
+ * This was the droplet's IPv4 address, and on the phone's own bearer that is
+ * not a slower route -- it is no route. T-Mobile's mobile data is IPv6-only
+ * (docs/REMOTE_SHELL.md has said so since Remote Shell was written), and the
+ * carrier's NAT64 is reached through DNS64, which synthesises a AAAA from an
+ * A record when it answers a NAME. A bare IPv4 LITERAL never goes near the
+ * resolver, so nothing synthesises anything and the connection has nowhere to
+ * go. Fetch worked on Wi-Fi and timed out on mobile data, which is exactly
+ * how it was reported.
+ *
+ * Stored BARE, with no brackets. ftp.c's fetch_build_url() adds them for the
+ * URL authority and nothing else does -- curl matches a netrc `machine` line
+ * against the unbracketed form, and host_is_safe() refuses brackets so there
+ * is only ever one spelling of this host. */
+#define ND_FETCH_HOST_DEFAULT "2604:a880:400:d1:0:4:db14:1001"
 /* NOT "neodct": that name is already the ssh relay account on the droplet, so
  * tools/ftp-server-setup.sh makes the FTP account "ndftp" instead. The two
  * defaults have to agree or every login is refused for a reason the screen
