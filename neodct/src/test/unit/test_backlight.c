@@ -429,8 +429,46 @@ static void test_last_error_names_a_write_that_did_not_stick(void)
     /* max_brightness 0 makes every level clamp to 0, so a request for 100%
      * writes 0 -- which the file then reads back as 0 when 0 was asked for,
      * and succeeds. The honest way to get a rejected write here is a file the
-     * process cannot open. */
+     * process cannot open.
+     *
+     * A DIRECTORY where `brightness` should be, and not chmod 0444. A mode
+     * says nothing to uid 0, and this suite runs as root in two of the three
+     * places it is ever run: inside QEMU (AGENTS.md says so) and under any
+     * `sudo make test`. There the write SUCCEEDED, the call returned true and
+     * the case failed on a host that was behaving perfectly -- the only
+     * failing test in 86 binaries, for a reason that had nothing to do with
+     * the backlight. EISDIR is refused for every uid there is.
+     *
+     * The property is unchanged and is the one the docstring above cares
+     * about: the phrase comes from the kernel via strerror, not from a guess
+     * this module made about why. The permission case is one line below. */
     char path[ND_PATH_MAX];
+
+    given_a_pwm_panel(BL_PANEL, "0\n", "255\n");
+    CHECK(nd_path_resolve(path, sizeof path, BL_PANEL "/brightness") == ND_OK);
+    CHECK_INT(unlink(path), 0);
+    pt_mkdir(BL_PANEL "/brightness");
+
+    CHECK(!nd_backlight_set_percent(100));
+    CHECK_STR(nd_backlight_last_error(), "Is a directory");
+}
+
+static void test_last_error_names_a_permission_the_kernel_refused(void)
+{
+    /* The case a phone actually hits: /sys owned by root and the UI running
+     * as ndusr. Root cannot be shown it -- the mode is not consulted for uid
+     * 0 -- so it says so rather than passing quietly, because a case that
+     * silently did not run is what the test above was for two releases. */
+    char path[ND_PATH_MAX];
+
+    if (geteuid() == 0u) {
+        fprintf(stderr,
+                "SKIP the permission a write was refused for: running as root, "
+                "which the file mode does not apply to -- see "
+                "test_last_error_names_a_write_that_did_not_stick for the "
+                "uid-independent half\n");
+        return;
+    }
 
     given_a_pwm_panel(BL_PANEL, "0\n", "255\n");
     CHECK(nd_path_resolve(path, sizeof path, BL_PANEL "/brightness") == ND_OK);
@@ -476,6 +514,7 @@ int main(void)
     RUN(test_the_pwm_tier_also_drives_the_gpio_pin);
     RUN(test_last_error_is_empty_after_a_call_that_worked);
     RUN(test_last_error_names_a_write_that_did_not_stick);
+    RUN(test_last_error_names_a_permission_the_kernel_refused);
     RUN(test_last_error_says_so_when_there_is_no_backlight);
     return pt_report("test_backlight");
 }

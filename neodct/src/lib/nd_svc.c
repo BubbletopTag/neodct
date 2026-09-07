@@ -1567,6 +1567,10 @@ struct nd_svc_server {
      * make the free-vs-detach handover below unprovable. */
     pthread_mutex_t mu;
     pthread_cond_t cv;
+    /* Which clock cv's deadlines are on. See nd_svc_server_open(): the board
+     * has no RTC and the clock service steps the wall clock minutes into
+     * every boot, so a REALTIME deadline is one a clock step can move. */
+    bool cv_monotonic;
     bool quit;      /* the stopper wants the thread to leave      */
     bool finished;  /* the thread has left its loop               */
     bool abandoned; /* the stopper gave up: the thread frees this */
@@ -1707,12 +1711,35 @@ nd_err nd_svc_server_open(nd_svc_server **out, uint32_t allowed_ops)
         free(s);
         return ND_ERR_IO;
     }
-    if (pthread_cond_init(&s->cv, NULL) != 0) {
-        (void)pthread_mutex_destroy(&s->mu);
-        (void)close(sv[0]);
-        (void)close(sv[1]);
-        free(s);
-        return ND_ERR_IO;
+    /* A CLOCK_MONOTONIC condition variable, if this libc will give one.
+     *
+     * The same reason nd_ui.c's watchdog asks for one, and the same board:
+     * the default base is CLOCK_REALTIME, this board has no RTC, and the
+     * clock service sets the wall clock from NTP a minute or so into every
+     * boot -- a jump of years is the normal case here, not the exceptional
+     * one. nd_svc_server_stop()'s two-second join deadline is absolute, so on
+     * a REALTIME base a forward step makes it expire at once (an app that was
+     * answering is abandoned mid-request) and a backward step pushes it out
+     * by the size of the step (the UI thread sits in the join instead, which
+     * is the freeze this whole design exists to avoid). Falling back to the
+     * default is better than not starting the service, so a libc without
+     * pthread_condattr_setclock gets a deadline a clock step can still fool. */
+    {
+        pthread_condattr_t cattr;
+        bool have_cattr = pthread_condattr_init(&cattr) == 0;
+        int rc;
+
+        s->cv_monotonic = have_cattr && pthread_condattr_setclock(&cattr, CLOCK_MONOTONIC) == 0;
+        rc = pthread_cond_init(&s->cv, s->cv_monotonic ? &cattr : NULL);
+        if (have_cattr)
+            (void)pthread_condattr_destroy(&cattr);
+        if (rc != 0) {
+            (void)pthread_mutex_destroy(&s->mu);
+            (void)close(sv[0]);
+            (void)close(sv[1]);
+            free(s);
+            return ND_ERR_IO;
+        }
     }
     *out = s;
     return ND_OK;
@@ -1778,6 +1805,7 @@ void nd_svc_server_free(nd_svc_server *s)
 void nd_svc_server_stop(nd_svc_server *s)
 {
     struct timespec deadline;
+    pthread_t tid;
     bool finished;
 
     if (s == NULL)
@@ -1794,10 +1822,15 @@ void nd_svc_server_stop(nd_svc_server *s)
      * costs nothing at all rather than one poll slice. */
     (void)shutdown(s->fd, SHUT_RDWR);
 
-    /* CLOCK_REALTIME because that is the base pthread_cond_timedwait() uses
-     * by default; the fraction is carried so that changing ND_SVC_JOIN_S to
-     * something that is not a whole number does not silently round it away. */
-    (void)clock_gettime(CLOCK_REALTIME, &deadline);
+    /* The same base s->cv was created on, which is CLOCK_MONOTONIC wherever
+     * the libc allowed it -- see nd_svc_server_open(). It used to be
+     * CLOCK_REALTIME unconditionally, on the grounds that it is the default
+     * base, and that is exactly the bug: this deadline is absolute, so a
+     * clock step during the wait either expires it instantly or pushes it out
+     * by the size of the step. The fraction is carried so that changing
+     * ND_SVC_JOIN_S to something that is not a whole number does not silently
+     * round it away. */
+    (void)clock_gettime(s->cv_monotonic ? CLOCK_MONOTONIC : CLOCK_REALTIME, &deadline);
     deadline.tv_sec += (time_t)ND_SVC_JOIN_S;
     deadline.tv_nsec += (long)((ND_SVC_JOIN_S - (double)(time_t)ND_SVC_JOIN_S) * 1e9);
     if (deadline.tv_nsec >= 1000000000L) {
@@ -1811,12 +1844,29 @@ void nd_svc_server_stop(nd_svc_server *s)
             break;
     }
     finished = s->finished;
+    /* ============ THE LAST READ OF *s ON THE ABANDON PATH ============
+     *
+     * `s->abandoned = true` hands the free to the serving thread, and the
+     * only thing keeping that thread out of server_destroy() is this mutex.
+     * The instant it is dropped, the thread may finish its request, take the
+     * lock, see the flag and free(s) -- so the `pthread_detach(s->tid)` that
+     * used to be the last line of this function was a read of freed memory,
+     * and the pthread_t it read could be anything by then. It is not a narrow
+     * window either: the abandon path is only reached after a request has run
+     * for ND_SVC_JOIN_S, and the request that does that is an SMS send, which
+     * the header at the top of this file records as taking up to
+     * THIRTY-SEVEN SECONDS on real hardware. Under QEMU the modem is
+     * simulated and answers immediately, so this path is not reached at all.
+     *
+     * The thread id is copied out here, under the same lock, and neither
+     * branch below touches `s` again except where it owns it. */
+    tid = s->tid;
     if (!finished)
         s->abandoned = true;
     (void)pthread_mutex_unlock(&s->mu);
 
     if (finished) {
-        (void)pthread_join(s->tid, NULL);
+        (void)pthread_join(tid, NULL);
         server_destroy(s);
         return;
     }
@@ -1826,7 +1876,7 @@ void nd_svc_server_stop(nd_svc_server *s)
      * thirty-seven seconds to watch it finish is the freeze this design
      * exists to avoid, so it is detached and frees itself. */
     nd_log(ND_LOG_OS, "App service: a request is still running; leaving it to finish");
-    (void)pthread_detach(s->tid);
+    (void)pthread_detach(tid);
 }
 
 /* ------------------------------------------------------------------ *

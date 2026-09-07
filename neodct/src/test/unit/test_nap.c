@@ -301,6 +301,49 @@ static void test_inspect_joins_the_prefix(void)
     CHECK(!info.has_icon);
 }
 
+/* ============ THE JOINED ustar NAME, AT ITS WIDEST ============
+ *
+ * prefix is 155 bytes and name is 100, so a header that fills both describes
+ * a 256-character path and needs 257 bytes to hold it with its terminator.
+ * walk() joined it into a char[256] and wrote that terminator at raw[256] --
+ * one byte off the end of a stack array, at an offset chosen entirely by
+ * bytes in a file on the SD card, which nd_nap.h names as untrusted input.
+ * Neither field has to be NUL-terminated at its full width, and the checksum
+ * is over bytes the same author picked, so nothing upstream stops it.
+ *
+ * Nothing on x86-64 noticed: the frame has padding after a 256-byte array and
+ * one stray NUL landed in it. That is not a guarantee on 32-bit ARM, and it is
+ * not a guarantee here either -- ASan reports this case as a
+ * stack-buffer-overflow against the old code, which is what makes this a test
+ * and not a re-reading of the arithmetic.
+ *
+ * Widest-that-fits is the interesting end, so that is the one asserted: the
+ * package must be ACCEPTED, because refusing it would be a different bug. */
+static void test_a_ustar_name_that_fills_both_fields(void)
+{
+    nd_nap_info info;
+    char prefix[156];
+    char name[101];
+    tw t;
+
+    memset(prefix, 'p', sizeof prefix - 1u);
+    prefix[sizeof prefix - 1u] = '\0';
+    memset(name, 'n', sizeof name - 1u);
+    name[sizeof name - 1u] = '\0';
+
+    tw_init(&t);
+    tw_file(&t, "manifest.json", MANIFEST_LUCKFOX);
+    tw_file(&t, "app.so", "SO");
+    /* 155 + '/' + 100 = 256 characters of path, which is the most a ustar
+     * header can express. An ordinary data file of the app's, so the package
+     * is otherwise perfectly good. */
+    tw_add_full(&t, name, prefix, '0', "DATA", 4u, 0644u);
+    tw_write(&t, "/card/widename.nap");
+    tw_free(&t);
+
+    CHECK_INT(nd_nap_inspect("/card/widename.nap", &info, NULL, 0u), ND_OK);
+}
+
 /* One refusal, checked the same way every time: an error, a reason, and
  * nothing on the card. */
 static void expect_refused(const char *path, const char *fragment)
@@ -586,6 +629,35 @@ static void test_refusals(void)
     tw_write(&t, "/card/twomanifests.nap");
     tw_free(&t);
     expect_refused("/card/twomanifests.nap", "two manifests");
+
+    /* ============ AN id THAT ONLY FITS ON THE BUILD HOST ============
+     *
+     * manifest_id() parsed the string form with strtol into a `long` and
+     * guarded with `parsed > INT32_MAX`. On x86-64 and on QEMU aarch64 a
+     * `long` is 64 bits, the value survives, the guard catches it and the
+     * package is refused -- which is what this test used to have no reason to
+     * pin. On the Luckfox `long` IS 32 bits: strtol saturates to 2147483647
+     * and sets ERANGE, the guard compares 2147483647 > 2147483647 and is
+     * false, and the package INSTALLS with a menu id it did not ask for. The
+     * suite proving the opposite of what ships is the whole reason this is
+     * here; the parse is strtoll with an errno check now, which is 64-bit on
+     * both. */
+    tw_init(&t);
+    tw_file(&t, "manifest.json",
+            "{\"name\": \"Demo App\", \"id\": \"2147483648\", \"arch\": \"luckfox-armv7\"}");
+    tw_file(&t, "app.so", "SO");
+    tw_write(&t, "/card/bigid.nap");
+    tw_free(&t);
+    expect_refused("/card/bigid.nap", "bad id");
+
+    /* The same value as a JSON number, which takes the other branch. */
+    tw_init(&t);
+    tw_file(&t, "manifest.json",
+            "{\"name\": \"Demo App\", \"id\": 2147483648, \"arch\": \"luckfox-armv7\"}");
+    tw_file(&t, "app.so", "SO");
+    tw_write(&t, "/card/bigid2.nap");
+    tw_free(&t);
+    expect_refused("/card/bigid2.nap", "bad id");
 
     /* A name that reduces to nothing on the card. */
     tw_init(&t);
@@ -997,6 +1069,7 @@ int main(void)
     RUN(test_inspect_single);
     RUN(test_inspect_universal);
     RUN(test_inspect_joins_the_prefix);
+    RUN(test_a_ustar_name_that_fills_both_fields);
     RUN(test_inspect_reads_optional_metadata);
     RUN(test_extract_icon);
     RUN(test_refusals);

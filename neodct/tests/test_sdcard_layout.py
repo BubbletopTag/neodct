@@ -73,6 +73,46 @@ def users_exist():
     return True
 
 
+def _resolvable(name):
+    try:
+        pwd.getpwnam(name)
+    except KeyError:
+        return False
+    return True
+
+
+# ============ WHY THE TWO NAMES ARE NOT ALWAYS "ndusr" HERE ============
+#
+# apply_layout()'s media walk is
+#
+#     find "$dir" -xdev ! -user "$CARD_USER" -exec chown ... {} +
+#
+# and `-user NAME` is a passwd LOOKUP. On a build host with no ndusr, find
+# exits non-zero before it looks at a single file, apply_layout() returns that
+# status, and every test in this file that runs it fails -- which is what had
+# been happening since the walk replaced the old shell loop. That is a fact
+# about the host, not about the script, and a test that cannot run on the
+# machine it is run on is not covering anything.
+#
+# So the two names come from the environment, which is a contract the helper
+# already has (CARD_USER/CARD_USER_UT default to ndusr/ndusr_ut and are
+# overridable so an image built without BR2_ROOTFS_USERS_TABLES still lays a
+# card out). The real names are used when the host has them -- a phone always
+# does, and so does the QEMU image -- and two accounts that certainly exist
+# otherwise. Every assertion below names these rather than the literals, so
+# what is checked is identical either way.
+if users_exist():
+    CARD_USER, CARD_USER_UT = "ndusr", "ndusr_ut"
+else:
+    _HAVE = [n for n in ("root", "daemon", "bin", "sys", "nobody", "games")
+             if _resolvable(n)]
+    assert len(_HAVE) >= 2, "no two resolvable accounts to stand in for ndusr"
+    CARD_USER, CARD_USER_UT = _HAVE[0], _HAVE[1]
+
+OWNER = "%s:%s" % (CARD_USER, CARD_USER)
+OWNER_UT = "%s:%s" % (CARD_USER, CARD_USER_UT)
+
+
 # The confinement half needs root -- to hand a directory to somebody else and
 # then to become them -- and needs the two users to exist in /etc/passwd at
 # all. Both are facts about the machine, so they skip with a reason rather
@@ -84,34 +124,91 @@ NEEDS_USERS = pytest.mark.skipif(
 )
 
 
-# The stub every case below records chowns with. It DROPS a leading -h, which
-# apply_layout() passes on every chown: -h is about symlinks and none of the
-# assertions here are, so recording it would only mean four places to edit the
-# next time the flag changes. What -h is for, and why it must not go away, is
+# `chown OWNER PATH...` -> one "OWNER PATH" line per path. find batches with
+# `-exec ... {} +`, so one call can carry a whole app directory; splitting here
+# is what keeps every assertion below able to say "and app.so specifically".
+_FAKE_CHOWN = """#!/bin/sh
+# apply_layout() passes -h on every chown, so that root cannot be aimed at
+# whatever a planted symlink points at. It is dropped here rather than
+# recorded: none of the assertions below is about symlinks, and recording it
+# would mean editing every one of them the next time the flag changes. What -h
+# is for, and why it must not go away, is
 # test_every_chown_in_the_layout_refuses_to_follow_a_link().
-def chown_stub(path):
-    return 'chown() { [ "$1" = -h ] && shift; echo "$*" >> "%s"; }\n' % path
+[ "$1" = -h ] && shift
+who=$1
+shift
+for p in "$@"; do
+    printf '%%s %%s\\n' "$who" "$p" >> "%s"
+done
+exit 0
+"""
+
+# ============ AND WHY mount(8) IS STUBBED TOO ============
+#
+# do_layout() ends in mount_untrusted_noexec(), which bind-mounts untrusted/
+# over itself. Sourced by this suite AS ROOT -- which is how it runs inside
+# QEMU, and how it runs on a developer box that used sudo -- that is a real
+# mount(2) against the machine running the tests, left behind in the host's
+# mount table after the test's tmp_path is deleted. It happened: three stale
+# mounts of the host's own root device under /tmp/pytest-of-root.
+#
+# This is the same hazard the C harness has fakebin for, and the reason is on
+# the record in AGENTS.md: a test that reaches a system verb has to be stopped
+# by the harness, not trusted not to. So mount and umount resolve to a
+# recorder, and the suite cannot change what is mounted on the host.
+_FAKE_MOUNT = """#!/bin/sh
+printf '%%s\\n' "$*" >> "%s"
+exit 0
+"""
 
 
-def sh(tmp_path, mount, body, stubs="", env=None):
-    """Source the helper with MOUNT_POINT pointed at `mount`, and run `body`.
+def fake_bin(tmp_path):
+    """chown, mount and umount early on $PATH: recorded, never performed.
 
-    `env` adds to the environment the script is given -- the only user of it
-    is apply_layout_here(), which needs a CARD_USER this machine has."""
+    A shell function cannot do this job. apply_layout() reaches chown two ways
+    -- directly, and through `find ... -exec chown {} +` -- and find execs the
+    BINARY, so a function defined in the sourced shell is invisible to it.
+    Every ownership assertion about an app's files was reading a log the walk
+    never wrote to. On $PATH it catches both.
+    """
+    binder = tmp_path / "fakebin"
+    binder.mkdir(exist_ok=True)
+    for name, body, logname in (("chown", _FAKE_CHOWN, "chowns"),
+                                ("mount", _FAKE_MOUNT, "mounts.asked"),
+                                ("umount", _FAKE_MOUNT, "mounts.asked")):
+        prog = binder / name
+        prog.write_text(body % (tmp_path / logname))
+        prog.chmod(0o755)
+    return binder
+
+
+def sh(tmp_path, mount, body, stubs="", stub_chown=True, extra_env=None):
+    """Source the helper with MOUNT_POINT pointed at `mount`, and run `body`."""
     (tmp_path / "cmdline").write_text("neodct.sys=/dev/vda neodct.user=/dev/vdb\n")
     (tmp_path / "mounts").write_text("")
     (tmp_path / "boot_state").write_text("")
-    child_env = dict(os.environ,
-                     NEODCT_SDCARD_SOURCE_ONLY="1",
-                     NEODCT_CMDLINE=str(tmp_path / "cmdline"),
-                     NEODCT_MOUNTS=str(tmp_path / "mounts"),
-                     NEODCT_BOOT_STATE=str(tmp_path / "boot_state"),
-                     NEODCT_RUN_DIR=str(tmp_path / "run"),
-                     NEODCT_SDCARD_MOUNT=str(mount))
-    child_env.update(env or {})
+    env = dict(os.environ,
+               NEODCT_SDCARD_SOURCE_ONLY="1",
+               NEODCT_CMDLINE=str(tmp_path / "cmdline"),
+               NEODCT_MOUNTS=str(tmp_path / "mounts"),
+               NEODCT_BOOT_STATE=str(tmp_path / "boot_state"),
+               NEODCT_RUN_DIR=str(tmp_path / "run"),
+               NEODCT_CARD_USER=CARD_USER,
+               NEODCT_CARD_USER_UT=CARD_USER_UT,
+               NEODCT_SDCARD_MOUNT=str(mount))
+    # apply_layout_here() names a CARD_USER this machine actually has; every
+    # other caller wants the shipped names.
+    env.update(extra_env or {})
+    # mount/umount are stubbed even when the chowns are real: the root-only
+    # cases below want the ownership to land, and none of them wants the host's
+    # mount table touched.
+    binder = fake_bin(tmp_path)
+    if not stub_chown:
+        (binder / "chown").unlink()
+    env["PATH"] = "%s%s%s" % (binder, os.pathsep, env.get("PATH", ""))
     script = '. "%s"\n%s\n%s\n' % (HELPER, stubs, body)
     return subprocess.run(["sh", "-c", script], capture_output=True, text=True,
-                          env=child_env)
+                          env=env)
 
 
 def build_card(mount, mode=0o777, apps=("Demo",), folders=FOLDERS):
@@ -148,8 +245,7 @@ def apply_layout(tmp_path, mount, real_chown=False):
     either way. real_chown=True is for the root-only cases below, which need
     the ownership to actually land."""
     chowns = tmp_path / "chowns"
-    stubs = "" if real_chown else chown_stub(chowns)
-    result = sh(tmp_path, mount, "apply_layout", stubs=stubs)
+    result = sh(tmp_path, mount, "apply_layout", stub_chown=not real_chown)
     assert result.returncode == 0, result.stderr
     asked = chowns.read_text().splitlines() if chowns.exists() else []
     return asked
@@ -232,7 +328,7 @@ def test_the_data_directory_is_made_here_and_not_by_the_app(tmp_path):
     data = card / "apps" / "Demo" / "data"
     assert data.is_dir(), "the app would have had to create this itself"
     assert mode_of(data) == 0o770
-    assert any(line.split()[0] == "ndusr:ndusr_ut" and line.endswith("/data")
+    assert any(line.split()[0] == OWNER_UT and line.endswith("/data")
                for line in asked), asked
 
 
@@ -289,14 +385,14 @@ def test_the_ownership_asked_for_is_the_layouts(tmp_path):
                 return who
         return None
 
-    assert owner_of(card) == "ndusr:ndusr", asked
-    assert owner_of(card / "apps") == "ndusr:ndusr", asked
-    assert owner_of(card / "untrusted") == "ndusr:ndusr_ut", asked
+    assert owner_of(card) == OWNER, asked
+    assert owner_of(card / "apps") == OWNER, asked
+    assert owner_of(card / "untrusted") == OWNER_UT, asked
     for name in MEDIA:
-        assert owner_of(card / name) == "ndusr:ndusr", (name, asked)
-    assert owner_of(card / "apps" / "Demo") == "ndusr:ndusr", asked
-    assert owner_of(card / "apps" / "Demo" / "app.so") == "ndusr:ndusr", asked
-    assert owner_of(card / "apps" / "Demo" / "data") == "ndusr:ndusr_ut", asked
+        assert owner_of(card / name) == OWNER, (name, asked)
+    assert owner_of(card / "apps" / "Demo") == OWNER, asked
+    assert owner_of(card / "apps" / "Demo" / "app.so") == OWNER, asked
+    assert owner_of(card / "apps" / "Demo" / "data") == OWNER_UT, asked
 
 
 def test_nothing_is_chowned_to_a_user_the_image_may_not_have(tmp_path):
@@ -306,14 +402,14 @@ def test_nothing_is_chowned_to_a_user_the_image_may_not_have(tmp_path):
     silently failed to lay out on such an image."""
     card = build_card(tmp_path / "sdcard", mode=0o777)
     chowns = tmp_path / "chowns"
-    result = sh(tmp_path, card, "apply_layout",
-                stubs=chown_stub(chowns),
-                )
+    result = sh(tmp_path, card, "apply_layout")
     assert result.returncode == 0, result.stderr
 
     for line in chowns.read_text().splitlines():
         who = line.split()[0]
-        assert who in ("ndusr:ndusr", "ndusr:ndusr_ut"), line
+        assert who in (OWNER, OWNER_UT), line
+
+
 
 
 # --- what a PERSON put on the card, and what root will not reach -----------
@@ -331,8 +427,7 @@ def apply_layout_here(tmp_path, mount):
     chowns = tmp_path / "chowns"
     me = pwd.getpwuid(os.geteuid()).pw_name
     env = {"NEODCT_CARD_USER": me, "NEODCT_CARD_USER_UT": me}
-    result = sh(tmp_path, mount, "apply_layout",
-                stubs=chown_stub(chowns), env=env)
+    result = sh(tmp_path, mount, "apply_layout", extra_env=env)
     assert result.returncode == 0, result.stderr
     return result
 
@@ -510,6 +605,9 @@ def test_the_card_marker_is_never_written_through_a_link():
 
 # --- the shape of the card the layout is applied to ------------------------
 
+
+# --- the shape of the card the layout is applied to ------------------------
+
 def test_every_folder_the_helper_creates_has_a_mode_of_its_own(tmp_path):
     """FOLDERS and CARD_LAYOUT are two lists and they have to agree.
 
@@ -570,8 +668,7 @@ def layout_verb(tmp_path, mount, mounts_line, marker=True):
     # table of this test's own, after the helper has been sourced.
     table = tmp_path / "mounts.layout"
     table.write_text(mounts_line)
-    stubs = (chown_stub(chowns) +
-             'MOUNTS="%s"\n' % table)
+    stubs = 'MOUNTS="%s"\n' % table
     if marker:
         (mount / ".neodct").write_text("")
     result = sh(tmp_path, mount, "do_layout", stubs=stubs)
@@ -597,7 +694,7 @@ def test_layout_restates_a_mounted_neodct_card(tmp_path):
     # directory, so the path it names has a doubled one; the kernel does not
     # care and neither does this.
     data = str(card / "apps" / "Fresh" / "data")
-    assert any(a.startswith("ndusr:ndusr_ut ") and a.split(" ", 1)[1].replace("//", "/") == data
+    assert any(a.startswith(OWNER_UT + " ") and a.split(" ", 1)[1].replace("//", "/") == data
                for a in asked), asked
 
 

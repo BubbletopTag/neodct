@@ -164,6 +164,19 @@ static const struct {
      * does not fall back to 999. */
     {"BadId", "{\"name\": \"Bad Id\", \"id\": \"abc\"}"},
 
+    /* ============ AND AN id THAT DOES NOT FIT IN ONE ============
+     *
+     * Dropped, the same way "abc" is, and for a reason that is invisible on
+     * this machine: manifest_id() parsed the string form with strtol into a
+     * `long` and never looked at the range. On x86-64 and on QEMU aarch64 a
+     * `long` is 64 bits and 2147483648 survives to be truncated to
+     * INT32_MIN; on the Luckfox it is 32 bits, so strtol SATURATES to
+     * 2147483647 and sets ERANGE. Two ABIs, two menu positions, one manifest
+     * -- and the list is sorted by id, so the tile moves. Both forms are
+     * pinned because both paths had the bug. */
+    {"HugeStringId", "{\"name\": \"Huge\", \"id\": \"2147483648\"}"},
+    {"HugeNumberId", "{\"name\": \"Huge2\", \"id\": 4294967296}"},
+
     /* int("7.5") raises too: Python's int() refuses a decimal point in a
      * string, unlike float(). Also dropped. */
     {"DecimalId", "{\"name\": \"Decimal\", \"id\": \"7.5\"}"},
@@ -309,7 +322,7 @@ static void test_synthetic_manifests(void)
 
     memset(apps, 0, sizeof apps);
     n = nd_ui_scan_apps(SYNTH_DIR, apps, ND_APP_MAX);
-    CHECK_INT(n, ND_ARRAY_LEN(SURVIVORS), "seven of the fourteen synthetic manifests are rejected");
+    CHECK_INT(n, ND_ARRAY_LEN(SURVIVORS), "nine of the nineteen synthetic manifests are rejected");
     if (n != ND_ARRAY_LEN(SURVIVORS))
         goto done;
 
@@ -918,6 +931,71 @@ static void test_app_list_is_cached_until_something_changes(nd_ui *ui)
     CHECK_INT(nd_ui_app_count(ui), base, "and turning it back on restores it");
 }
 
+/* ============ THE COUNTER'S OWN DURABILITY ============
+ *
+ * nd_appgen_bump() used to be fopen("wb") + fprintf + fclose, which truncates
+ * the file first and puts the bytes down afterwards, with no fsync and no
+ * rename. Two bytes on NAND on a phone with a removable battery, and the file
+ * is read from the core's frame path -- so the window in which it is EMPTY is
+ * a window in which the counter reads back as 0.
+ *
+ * It is temp + fsync + rename now, the shape nd_props_write_atomic() already
+ * uses for everything else on /NeoDCT/User. The atomic swap itself cannot be
+ * asserted from here; what can, and what the change is really for, is that a
+ * bump which FAILS leaves the previous value exactly where it was rather than
+ * replacing it with nothing. nd_paths.h promises the caller that `false`
+ * means "the note did not land", and a truncated file is a note that landed
+ * as the wrong number.
+ *
+ * The failure is injected by putting a DIRECTORY where the temp file goes, so
+ * the create fails for every uid. A mode would say nothing to root, and this
+ * suite runs as root inside QEMU. */
+static void test_the_generation_counter_survives_a_failed_bump(void)
+{
+    char resolved[ND_PATH_MAX];
+    char tmp[ND_PATH_MAX];
+    unsigned long first;
+
+    if (!stage_mkdir_p("/NeoDCT/User")) {
+        CHECK(false, "staged the user partition");
+        return;
+    }
+    if (nd_path_resolve(resolved, sizeof resolved, ND_PATH_APPGEN) != ND_OK ||
+        nd_snprintf(tmp, sizeof tmp, "%s.tmp", resolved) != ND_OK) {
+        CHECK(false, "resolved the counter's path");
+        return;
+    }
+    (void)remove(resolved);
+    (void)remove(tmp);
+
+    /* From nothing at all. */
+    CHECK(nd_appgen_bump(), "the first bump lands");
+    first = nd_appgen_value();
+    CHECK_INT((int)first, 1, "and a counter that was not there starts at one");
+
+    /* And it reads back what it wrote, which is what makes the next bump
+     * differ from this one rather than repeating it. */
+    CHECK(nd_appgen_bump(), "the second bump lands");
+    CHECK_INT((int)nd_appgen_value(), 2, "the counter moves by one");
+
+    /* No litter: a temp file left beside it would be read by nothing, but it
+     * is the visible half of a write that did not finish. */
+    {
+        struct stat st;
+
+        CHECK(stat(tmp, &st) != 0, "no .tmp is left behind by a bump that worked");
+    }
+
+    /* Now the create cannot succeed. The OLD value has to still be there. */
+    if (mkdir(tmp, 0755u) != 0) {
+        CHECK(false, "staged an obstruction where the temp file goes");
+        return;
+    }
+    CHECK(!nd_appgen_bump(), "a bump that cannot write says so");
+    CHECK_INT((int)nd_appgen_value(), 2, "and leaves the counter it could not replace");
+    (void)rmdir(tmp);
+}
+
 static void run_overlay_half(void)
 {
     nd_capture *cap = NULL;
@@ -952,6 +1030,7 @@ static void run_overlay_half(void)
     /* LAST: it stages a card and extra apps, so it must not run before the
      * tests that count the shipped app list. */
     test_app_list_is_cached_until_something_changes(&ui);
+    test_the_generation_counter_survives_a_failed_bump();
 
     nd_ui_teardown(&ui);
     nd_ui_sim_clear(&ui);

@@ -71,7 +71,17 @@ ifeq ($(ASAN),1)
   VARIANT  := asan
   # -fno-omit-frame-pointer so the reports name real functions, and -O1 so the
   # inliner does not eat the frames they name.
-  SANFLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer -fno-common -O1 -g3
+  #
+  # -fno-sanitize-recover=undefined, and it is not cosmetic. AddressSanitizer
+  # aborts on its first report, so an ASan finding has always failed the run.
+  # UndefinedBehaviorSanitizer does NOT: by default it prints "runtime error:
+  # ..." and CARRIES ON, the binary exits 0, and run-tests.sh -- which reads
+  # exit status -- calls the run green. `make ASAN=1 test` could therefore
+  # print a signed overflow, a misaligned load or a bad shift on every line of
+  # its output and still say "all tests passed", which is the shape of gate
+  # that is worse than no gate. The two sanitizers now fail the same way.
+  SANFLAGS := -fsanitize=address,undefined -fno-sanitize-recover=undefined \
+              -fno-omit-frame-pointer -fno-common -O1 -g3
 endif
 
 ifeq ($(TSAN),1)
@@ -314,17 +324,43 @@ $(BINDIR)/nd-apprun: $(APPRUN_OBJS) $(LIB)
 # are ordinary driver byte-arithmetic in code that is proven on real hardware,
 # and silencing them by editing a working panel driver would risk more than it
 # would buy. Everything else in the warning set, including -Werror, applies.
-DISPLAYD_CFLAGS := $(filter-out -Wconversion -Wsign-conversion,$(CFLAGS))
+#
+# ============ "EVERYTHING ELSE APPLIES" DID NOT ============
+#
+# The filter-out was over $(CFLAGS) -- the developer's or the environment's,
+# which is EMPTY in every build this tree does. It is not $(CFLAGS_ALL) and it
+# does not contain $(WARNINGS), so -Wall, -Wextra, -Werror, -std=c11,
+# -Wstrict-prototypes, -Wmissing-prototypes and -Wvla were all absent from the
+# one translation unit in the tree that drives the panel over SPI, and the
+# sanitizers never reached it either. A missing prototype, an implicit
+# declaration or a VLA in here compiled silently while the same mistake was a
+# hard error everywhere else -- in a file that cannot be exercised by the host
+# suite at all, because the host has no /dev/spidev.
+#
+# Spelled the way RECUI_CFLAGS below already spells it, minus the two
+# conversion warnings and their reason above. It compiles clean as it stands,
+# so this changes no code today; it is the next edit it is for. -D_GNU_SOURCE
+# comes with -std=c11, which defines __STRICT_ANSI__ and would otherwise hide
+# most of POSIX.
+# The filter is over the WHOLE assembled set and not over $(WARNINGS) alone.
+# Buildroot hands the same warning list in again through NEODCT_CFLAGS
+# (buildroot/package/neodct/neodct.mk), so filtering only our copy leaves
+# -Wconversion on for the cross build -- which is the one that matters and the
+# one a host `make` does not exercise. That is not hypothetical: it is how this
+# change first broke the image build.
+DISPLAYD_CFLAGS := $(filter-out -Wconversion -Wsign-conversion, \
+	$(WARNINGS) $(OPTFLAGS) $(SANFLAGS) $(NEODCT_CFLAGS) $(CFLAGS)) \
+	-D_GNU_SOURCE -MMD -MP
 
 $(OBJDIR)/displayd/%.o: displayd/%.c
 	$(Q)mkdir -p $(dir $@)
 	$(Q)printf '  %-7s %s\n' 'CC' '$<'
-	$(Q)$(CC) $(DISPLAYD_CFLAGS) $(CPPFLAGS) -MMD -MP -c $< -o $@
+	$(Q)$(CC) $(DISPLAYD_CFLAGS) $(CPPFLAGS) -c $< -o $@
 
 $(BINDIR)/neodct_displayd: $(DISPLAYD_OBJS)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)printf '  %-7s %s\n' 'LINK' '$@'
-	$(Q)$(CC) $(DISPLAYD_OBJS) -o $@ $(LDFLAGS)
+	$(Q)$(CC) $(DISPLAYD_OBJS) -o $@ $(SANFLAGS) $(NEODCT_LDFLAGS) $(LDFLAGS)
 
 # ---- nd-recui: the on-screen recovery UI ---------------------------
 #

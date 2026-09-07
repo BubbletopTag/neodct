@@ -173,6 +173,23 @@ extern "C" {
  * ND_PROC_MAX_HIDE paths) and far below SOCK_SEQPACKET's default limit. */
 #define ND_BROKER_BLOB_MAX 8192
 
+/* How many environment entries a spawn may carry.
+ *
+ * The receiving vector in do_spawn() used to be `envp[24]`, which is not a
+ * stated limit but the size of an array -- and blob_take() refuses rather than
+ * truncates, so an environment of 24 entries made EVERY app launch fail with a
+ * parse error and no log line. nd_proc.c's build_envp() allocates to fit the
+ * real environment precisely so there is no such cliff one layer up; this is
+ * the number that keeps the promise down here.
+ *
+ * 128 because the phone's own environment is about eighteen entries with the
+ * ten nd_proc adds, an ordinary desktop shell exports around sixty-six, and
+ * AGENTS.md tells developers to add their own in /NeoDCT/User/env.sh. The
+ * vector is 128 pointers on the broker's stack (1 KB on a 64-bit build) and
+ * the blob it is filled from is capped at ND_BROKER_BLOB_MAX regardless, so
+ * this cannot be made to allocate. */
+#define ND_BROKER_MAX_ENVP 128
+
 typedef struct nd_broker nd_broker;
 
 /* Fork the broker. Call this BEFORE dropping privilege and BEFORE starting any

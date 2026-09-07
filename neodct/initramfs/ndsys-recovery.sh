@@ -525,12 +525,45 @@ recovery_install_package() {
         return 1
     fi
 
+    # ============ dd CANNOT WRITE THE PHONE'S SYSTEM DEVICE ============
+    #
+    # This wrote the image with `dd of="$device"`, and on the Luckfox $device
+    # is /dev/ubiblock0_0 (docs/PARTITIONS.md; the cmdline says
+    # `ubi.mtd=4 ubi.block=0,system neodct.sys=/dev/ubiblock0_0`). ubiblock is
+    # registered READ-ONLY by the kernel on purpose -- it exists so squashfs
+    # and dm-verity have a block device to READ -- so that dd cannot succeed
+    # for anyone, ever.
+    #
+    # ndsys-apply.sh already learned this, at length, above ubi_volume_for():
+    # the writable side of a UBI volume is its character device, and a STATIC
+    # volume cannot be seek-and-written at all, which is why the boot-time
+    # applier grew write_system()/ubiupdatevol. Recovery kept the dd. So the
+    # phone's ONLY repair path that does not need a reflash rig could not
+    # repair the only hardware it ships on -- and the owner saw "FAILED. See
+    # the serial console for why." with stderr swallowed by 2>/dev/null.
+    #
+    # Invisible both ways round: the host tests install onto an ordinary file,
+    # which dd is happy with, and under QEMU $device is /dev/vda, which is a
+    # writable block device.
+    #
+    # init sources ndsys-apply.sh before this file, so ubi_volume_for(),
+    # ubi_fit() and write_system() are already in scope. SYS_DEV is set from
+    # $device rather than trusted from the environment, because that is what
+    # write_system()'s non-UBI branch writes to -- and it is what keeps the
+    # host tests, which pass a temp file and never set SYS_DEV, working.
+    SYS_DEV="$device"
+    if UBI_VOL="$(ubi_volume_for "$device")"; then
+        log "recovery: writing to $UBI_VOL (the ubi volume behind $device)"
+    else
+        UBI_VOL=""
+        log "recovery: writing to $device"
+    fi
+
     # Pass 2: write it.
-    log "recovery: writing to $device"
     if ! unzip -p "$package" rootfs.squashfs 2>/dev/null \
             | recovery_meter "Writing image" "$image_bytes" \
-            | dd of="$device" bs=1M conv=fsync 2>/dev/null; then
-        log "recovery: write to $device failed"
+            | write_system "$image_bytes"; then
+        log "recovery: write to ${UBI_VOL:-$device} failed"
         return 1
     fi
     sync
@@ -538,9 +571,20 @@ recovery_install_package() {
     # Pass 3: read back what landed. The meter goes INSIDE hash_prefix's own
     # pipeline -- the function returns a 64-character hash, so metering its
     # output would report 64 bytes against 48 MB.
+    #
+    # THROUGH WHATEVER WAS WRITTEN, which for UBI is the volume character
+    # device and not the ubiblock disk. apply_pending has the same line and
+    # the same reason: the block device has a page cache nothing invalidated,
+    # the kernel's only reaction to a static volume being updated is
+    # ubiblock_resize(), and an image the same size as the old one produces no
+    # capacity change and no reason to drop anything -- so this would hash the
+    # PREVIOUS system and report a mismatch on a write that was perfectly
+    # good. Reading the character device is also the write in reverse, so the
+    # check is over the same bytes through the same path.
     RECOVERY_METER_TOTAL="$image_bytes"
-    if [ "$(hash_prefix "$device" "$image_bytes" recovery_verify_meter)" != "$want_sha" ]; then
-        log "recovery: read-back mismatch on $device"
+    if [ "$(hash_prefix "${UBI_VOL:-$device}" "$image_bytes" recovery_verify_meter)" \
+            != "$want_sha" ]; then
+        log "recovery: read-back mismatch on ${UBI_VOL:-$device}"
         return 1
     fi
 
@@ -674,7 +718,17 @@ recovery_action_wipe_system() {
     # instant compared with erasing 134MB. That is also why this gets a
     # message screen and not a progress bar: a bar that fills in 80 ms is a
     # lie. The bar belongs on the install, which is three passes over ~48 MB.
-    dd if=/dev/zero of="$SYS_DEV" bs=1M count=1 conv=fsync 2>/dev/null
+    #
+    # And on the phone it is not dd, for the reason spelled out in
+    # recovery_install_package(): the system device there is a ubiblock disk
+    # the kernel registered read-only. `ubiupdatevol -t` truncates the volume,
+    # which is UBI's own way of saying "this holds nothing now" and is both
+    # faster and more honest than a megabyte of zeroes.
+    if _wipe_vol="$(ubi_volume_for "$SYS_DEV")"; then
+        "$NDSYS_UBIUPDATEVOL" -t "$_wipe_vol" 2>/dev/null
+    else
+        dd if=/dev/zero of="$SYS_DEV" bs=1M count=1 conv=fsync 2>/dev/null
+    fi
     sync
     log "recovery: system image wiped"
     recovery_say "System wiped." "Install an update" "from an SD card."

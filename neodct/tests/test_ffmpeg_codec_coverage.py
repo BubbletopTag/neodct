@@ -20,6 +20,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OVERLAY = os.path.join(ROOT, "overlay")
 DEFCONFIGS = sorted(glob.glob(os.path.join(ROOT, "configs", "*_defconfig")))
 
+# Where MusicPlayer states what it will open. It is the C source now: the
+# extension lists live in nd_music_is_supported()'s STREAM_EXTS / MPV_EXTS.
+MUSIC_EXTS_SOURCE = os.path.join(ROOT, "src", "apps", "MusicPlayer", "meta.c")
+
 # What libavformat/libavcodec each container needs. Audio containers matter
 # as much as video ones: 35 .mp3 and 51 .wav files ship in the overlay.
 NEEDS = {
@@ -89,15 +93,21 @@ def test_music_player_can_play_what_it_advertises(defconfig):
     if demuxers is None:
         pytest.skip("this defconfig does not trim ffmpeg")
 
-    player = open(os.path.join(
-        OVERLAY, "NeoDCT", "System", "apps", "MusicPlayer", "main.py")).read()
+    player = open(MUSIC_EXTS_SOURCE).read()
     advertised = set()
     for line in player.splitlines():
-        if line.strip().startswith("EXTS"):
-            for ext in NEEDS:
-                if '"%s"' % ext in line:
-                    advertised.add(ext)
-    assert advertised, "could not read MusicPlayer's EXTS lists"
+        # STREAM_EXTS[] and MPV_EXTS[] in meta.c, which are the C port of the
+        # Python's _MiniaudioPlayer.EXTS / _MpvPlayer.EXTS. The test used to
+        # read apps/MusicPlayer/main.py in the overlay; nothing on the phone
+        # runs Python any more, so that file stopped existing and this check
+        # -- which is the only thing tying the codec trim to the promise the
+        # UI makes -- turned into an unconditional FileNotFoundError.
+        if "_EXTS[]" not in line:
+            continue
+        for ext in NEEDS:
+            if '"%s"' % ext in line:
+                advertised.add(ext)
+    assert advertised, "could not read MusicPlayer's EXTS lists from %s" % MUSIC_EXTS_SOURCE
 
     for ext in sorted(advertised):
         assert NEEDS[ext][0] in demuxers, (

@@ -257,6 +257,34 @@ nd_updsvc_err nd_upd_package_verify_signature(nd_upd_package *pkg, const char *k
     return ND_UPDSVC_OK;
 }
 
+/* ============ nd_strlcpy DOES NOT RETURN AN nd_err ============
+ *
+ * Both returns of nd_upd_package_thumbnail_path() were
+ *
+ *     return nd_strlcpy(out, pkg->thumb_path, out_sz) == ND_OK ? OK : INVALID;
+ *
+ * and nd_strlcpy() returns strlen(src) (nd_util.c, BSD semantics), while
+ * ND_OK is 0 (nd_types.h). So the comparison is "the string I just copied was
+ * EMPTY", which is the one case that cannot happen at either site -- the
+ * first is guarded by thumb_path[0] != '\0' and the second has just built a
+ * path. The function therefore returned ND_UPDSVC_INVALID for every package
+ * that HAS a picture, and thumbnail_path() in main.c falls back to the stock
+ * icon on anything but OK: the update screen has never shown a package's own
+ * artwork.
+ *
+ * It is not only cosmetic. Reaching the second return means the thumbnail has
+ * already been inflated (up to 256 KB), SHA-256'd against the manifest and
+ * written to /NeoDCT/User/.ndsys -- all of it work done on a 64 MB
+ * single-core phone, and all of it thrown away.
+ *
+ * Truncation is a real failure here and not a rounding: the caller hands the
+ * result to nd_detailpage_init() as a path, and half a path names either
+ * nothing or the wrong file. */
+static nd_updsvc_err copy_out(char *out, size_t out_sz, const char *src)
+{
+    return nd_strlcpy(out, src, out_sz) < out_sz ? ND_UPDSVC_OK : ND_UPDSVC_INVALID;
+}
+
 nd_updsvc_err nd_upd_package_thumbnail_path(nd_upd_package *pkg, char *out, size_t out_sz)
 {
     uint8_t *art = NULL;
@@ -272,7 +300,7 @@ nd_updsvc_err nd_upd_package_thumbnail_path(nd_upd_package *pkg, char *out, size
 
     /* Already extracted for this package: hand back the same file. */
     if (pkg->thumb_path[0] != '\0')
-        return nd_strlcpy(out, pkg->thumb_path, out_sz) == ND_OK ? ND_UPDSVC_OK : ND_UPDSVC_INVALID;
+        return copy_out(out, out_sz, pkg->thumb_path);
 
     /* nd_package_read_thumbnail() returns art ONLY when the manifest names a
      * thumbnail_sha256 and the bytes hash to it -- the signature covers
@@ -313,7 +341,7 @@ nd_updsvc_err nd_upd_package_thumbnail_path(nd_upd_package *pkg, char *out, size
     (void)fclose(f);
     free(art);
 
-    return nd_strlcpy(out, pkg->thumb_path, out_sz) == ND_OK ? ND_UPDSVC_OK : ND_UPDSVC_INVALID;
+    return copy_out(out, out_sz, pkg->thumb_path);
 }
 
 /* ------------------------------------------------------------------ *

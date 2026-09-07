@@ -66,6 +66,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -242,7 +243,8 @@ struct koki_sink {
     pid_t pid;         /* aplay; -1 when idle                     */
     pthread_t thread;
     bool thread_live;
-    volatile sig_atomic_t stop;
+    /* An atomic, not a volatile word: see lib/nd_notify.c's nd_ringer. */
+    atomic_int stop;
     int32_t alsa_ms;    /* what aplay was asked for      */
     int32_t sock_bytes; /* payload the socket really holds */
 
@@ -295,13 +297,13 @@ static void *sink_feed(void *arg)
     double t0 = 0.0;
     bool started = false;
 
-    while (s->stop == 0) {
+    while (atomic_load_explicit(&s->stop, memory_order_relaxed) == 0) {
         size_t bytes = KOKI_MIX_CHUNK_FRAMES * sizeof s->buf[0];
         size_t sent = 0u;
 
         (void)koki_mixer_pull(s->mixer, s->buf, KOKI_MIX_CHUNK_FRAMES);
 
-        while (sent < bytes && s->stop == 0) {
+        while (sent < bytes && atomic_load_explicit(&s->stop, memory_order_relaxed) == 0) {
             /* MSG_NOSIGNAL, not write(): when the sink is torn down the
              * player dies and this send is what notices, and on a pipe that
              * would be a process-wide SIGPIPE landing in an app with no
@@ -350,7 +352,7 @@ void koki_sink_stop(struct koki_sink *s)
     if (s == NULL)
         return;
 
-    s->stop = 1;
+    atomic_store_explicit(&s->stop, 1, memory_order_relaxed);
 
     /* ORDER MATTERS, and it is lib/nd_notify.c's order for its reasons:
      *   1. the player dies, which is what makes a blocked send() return --

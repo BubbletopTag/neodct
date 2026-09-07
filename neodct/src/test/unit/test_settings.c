@@ -147,6 +147,22 @@ static void test_a_read_only_settings_path_still_reads(void)
     CHECK_STR(nd_settings_get(ND_SET_OS_VERSIONNUMBER, NULL), "0.3.2a");
     CHECK_STR(nd_settings_get(ND_SET_UI_ENGINEERING, NULL), "ON");
     CHECK(!nd_path_exists("/blocked/settings.prop"));
+
+    /* ============ AND SETTING ONE SAYS SO ============
+     *
+     * Reads must survive an unwritable partition -- that is what the rest of
+     * this case is about -- but nd_settings_set() returned ND_OK regardless,
+     * because it answered with the result of updating the in-memory map and
+     * save_settings() returned void. So the phone reported a setting saved
+     * that it had not saved, and every screen that says "Saved" says it on
+     * this return value. Sleepy's brightness, a Bluetooth pairing and the
+     * call-log timer all go through here.
+     *
+     * Not an artificial state either: /NeoDCT/User is 8 MB of NAND, and
+     * ENOSPC out of nd_props_write_atomic() reaches the caller by exactly the
+     * same path this file-standing-in-for-a-directory does. */
+    CHECK(nd_settings_set(ND_SET_UI_WALLPAPER, "/NeoDCT/User/w.jpg") != ND_OK);
+    CHECK(!nd_path_exists("/blocked/settings.prop"));
 }
 
 /* The boot splash had the number typed into it, so it drifted a release
@@ -184,10 +200,16 @@ static void test_the_splash_still_says_something_with_no_version_prop(void)
  * Beyond the pytest: the parts of the module it does not reach
  * ------------------------------------------------------------------ */
 
-/* R-24 / C-5. DEFAULTS holds three system.os.* keys, the writer strips
- * exactly those, so "missing" is permanently true and every read rewrites the
- * file. This asserts the CURRENT behaviour, and is the test that has to change
- * when the approved one-line fix lands in nd_settings_flush_if_needed(). */
+/* R-24 / C-5, and this is the test that had to change when the fix landed.
+ *
+ * DEFAULTS holds three system.os.* keys and the writer strips exactly those,
+ * so nd_settings_flush_if_needed()'s "missing" test is permanently true and
+ * every read reached the writer. What the writer does with that is now the
+ * question: a file that already says the right thing is left alone, and a
+ * file that is absent or truncated is still repaired. Both halves matter --
+ * dropping the repair would be a phone whose settings never appear, and
+ * keeping the rewrite is an erase/program cycle on NAND per settings read,
+ * which since 0.5.14a means one per app the owner closes. */
 /* ============ AND THE ONE CASE THAT WRITE-ON-READ GETS WRONG ============
  *
  * nd-core is root for about a second at boot and reads a setting in that
@@ -254,11 +276,12 @@ static void test_root_does_not_create_the_settings_file_for_somebody_else(void)
     CHECK_STR(nd_settings_get(ND_SET_UI_WALLPAPER, "NONE"), "NONE");
 }
 
-static void test_every_read_rewrites_settings_prop(void)
+static void test_a_read_repairs_the_file_but_does_not_rewrite_a_good_one(void)
 {
     struct stat before;
     struct stat after;
     char resolved[ND_PATH_MAX];
+    size_t i;
 
     use_scratch_paths();
     write_version("system.os.versionnumber=0.3.2a\n");
@@ -270,13 +293,51 @@ static void test_every_read_rewrites_settings_prop(void)
 
     CHECK_INT(nd_path_resolve(resolved, sizeof resolved, SETTINGS), ND_OK);
     CHECK_INT(stat(resolved, &before), 0);
-    /* Truncating the file and reading again must put it back: that is the
-     * observable consequence of the write-on-read branch firing. */
+
+    /* Truncating it and reading again must put it back. */
     pt_write_text(SETTINGS, "");
     (void)nd_settings_get(ND_SET_UI_WALLPAPER, "NONE");
     CHECK_INT(stat(resolved, &after), 0);
     CHECK(after.st_size == before.st_size);
     CHECK(after.st_size > 0);
+
+    /* And now the half that is new: reading a file that is already right
+     * must not write it again.
+     *
+     * The witness is st_mtim, with its nanoseconds, and NOT the inode
+     * number. nd_props_write_atomic() renames a fresh file over the target,
+     * so a write does change the inode -- but the one it frees is the
+     * obvious one for the next temp file to be given, and on a small
+     * filesystem it is handed straight back, so a rewrite can land on the
+     * same number it started from. That is exactly the shape of witness that
+     * makes a test pass against the bug it was written for.
+     *
+     * Twenty reads, because one that happened not to write proves nothing. */
+    CHECK_INT(stat(resolved, &before), 0);
+    for (i = 0u; i < 10u; i++) {
+        (void)nd_settings_get(ND_SET_UI_WALLPAPER, "NONE");
+        (void)nd_settings_get(ND_SET_AUDIO_RINGTONE, "NONE");
+    }
+    CHECK_INT(stat(resolved, &after), 0);
+    CHECK(after.st_mtim.tv_sec == before.st_mtim.tv_sec &&
+          after.st_mtim.tv_nsec == before.st_mtim.tv_nsec);
+    CHECK(after.st_size == before.st_size);
+
+    /* And a file that is NOT already right is still repaired -- asserted on
+     * the content rather than on a timestamp, which is the thing that
+     * actually has to be true: a stale system.os.* key must be gone
+     * afterwards, because dropping those is the whole point of the
+     * settings/version split. */
+    pt_write_text(SETTINGS, "system.os.versionnumber=9.9.9z\nsystem.ui.wallpaper=NONE\n");
+    (void)nd_settings_get(ND_SET_UI_WALLPAPER, "NONE");
+    {
+        char body[512];
+        size_t n = pt_read_text(SETTINGS, body, sizeof body);
+
+        CHECK(n > 0u);
+        CHECK(strstr(body, "system.os.versionnumber") == NULL);
+        CHECK(strstr(body, "system.ui.wallpaper=NONE") != NULL);
+    }
 }
 
 static void test_effective_map_is_layered_lowest_to_highest(void)
@@ -360,7 +421,7 @@ int main(void)
     RUN(test_the_boot_splash_reads_the_version_out_of_the_image);
     RUN(test_the_splash_still_says_something_with_no_version_prop);
 
-    RUN(test_every_read_rewrites_settings_prop);
+    RUN(test_a_read_repairs_the_file_but_does_not_rewrite_a_good_one);
     RUN(test_root_does_not_create_the_settings_file_for_somebody_else);
     RUN(test_effective_map_is_layered_lowest_to_highest);
     RUN(test_get_copy_and_absent_keys);

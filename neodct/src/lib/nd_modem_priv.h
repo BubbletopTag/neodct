@@ -424,6 +424,11 @@ struct nd_modem {
     pthread_mutex_t req_mu;
     pthread_cond_t req_cv;  /* the thread waits here for work or a tick */
     pthread_cond_t done_cv; /* callers wait here for a slot or a result */
+    /* req_cv's clock base. The 100 ms tick is an ABSOLUTE deadline, so it
+     * has to be computed on whatever base the cond was created with. See
+     * nd_modem__create(); done_cv needs no flag because nothing ever waits
+     * on it with a timeout. */
+    bool req_cv_monotonic;
     nd_modem_req *pending;
     bool quit;
     pthread_t thread;

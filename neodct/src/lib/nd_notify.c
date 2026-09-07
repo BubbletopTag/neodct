@@ -76,6 +76,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -387,7 +388,23 @@ typedef struct {
     pid_t pid; /* the player; -1 when idle                */
     pthread_t thread;
     bool thread_live;
-    volatile sig_atomic_t stop;
+    /* ============ WHY THIS IS AN ATOMIC AND NOT A volatile WORD ============
+     *
+     * It was `volatile sig_atomic_t`, which is the traditional spelling and is
+     * what the code emitted is anyway: a single aligned word, loaded every time
+     * because volatile forbids caching it in a register. Nothing about the
+     * generated instructions changes here, and neither does the property the
+     * audio path depends on -- no lock is taken to read one integer.
+     *
+     * What changes is that it is no longer a data race. `volatile` says nothing
+     * about inter-thread ordering in C11, so ThreadSanitizer reports every one of
+     * these -- correctly -- and 12 reports across the ringer, Koki's sink and
+     * MusicPlayer's feeder is enough noise to bury the report that matters.
+     * memory_order_relaxed asks the compiler for exactly what volatile was
+     * already delivering and asks the hardware for nothing at all, so this costs
+     * a plain load on ARM as it does on x86, and `make TSAN=1 test` can start
+     * being a gate rather than a wall of expected output. */
+    atomic_int stop;
     /* The ~64 kB the whole deviation is about. On the heap with the rest of
      * the ringer, never on a stack and never per-callback. */
     int16_t buf[ND_RING_CHUNK_FRAMES * 2u];
@@ -683,7 +700,7 @@ static void *ring_feed(void *arg)
 {
     nd_ringer *r = (nd_ringer *)arg;
 
-    while (r->stop == 0) {
+    while (atomic_load_explicit(&r->stop, memory_order_relaxed) == 0) {
         size_t frames = nd_tone_src_read(r->src, r->buf, ND_RING_CHUNK_FRAMES);
         size_t bytes;
         size_t sent = 0u;
@@ -694,7 +711,7 @@ static void *ring_feed(void *arg)
             break;
 
         bytes = frames * 2u * sizeof r->buf[0];
-        while (sent < bytes && r->stop == 0) {
+        while (sent < bytes && atomic_load_explicit(&r->stop, memory_order_relaxed) == 0) {
             /* MSG_NOSIGNAL, not write(): when stop_ring() kills the player
              * this send is what notices, and on a pipe that would be a
              * process-wide SIGPIPE. See the file header. */
@@ -718,7 +735,7 @@ static void ringer_free(nd_ringer *r)
     if (r == NULL)
         return;
 
-    r->stop = 1;
+    atomic_store_explicit(&r->stop, 1, memory_order_relaxed);
 
     /* ORDER MATTERS, and this is the order:
      *

@@ -180,6 +180,24 @@ int32_t nd_vlist_show(nd_vlist *l);
  * Messages does. Returns the chosen index, ND_WIDGET_BACK, or
  * ND_WIDGET_RESULT_NONE-equivalent (-2) for "keep going". */
 #define ND_VLIST_CONTINUE (-2)
+
+/* The phone started ringing while a VerticalList was open.
+ *
+ * nd_vlist_handle_key() had no branch for a negative key, so
+ * ND_KEY_INCOMING_CALL fell through to ND_VLIST_CONTINUE and nd_vlist_show()
+ * looped -- and ring_tick() re-reports the call on every read, immediately,
+ * so the loop never blocked again. That is a busy-wait at 100% of the phone's
+ * one core with the call unanswered on screen, in the CORE's contact picker,
+ * which is what Up or Down from the home screen opens: the ordinary way to
+ * ring somebody by name is also the way to be unreachable while doing it.
+ *
+ * ND_APPSEL_RINGING's reasoning applies here word for word; this is the same
+ * answer for the other selector. Distinct from ND_WIDGET_BACK for the same
+ * reason: Back means the level above, and a call means get off this screen.
+ * A caller that treats any negative as Back is still correct -- getting out
+ * of the loop is what lets the core's own handler see the call -- and an APP
+ * cannot receive one at all, because an app process has no modem (nd_ui.h). */
+#define ND_VLIST_RINGING (-4)
 int32_t nd_vlist_handle_key(nd_vlist *l, int32_t key);
 
 /* ================================================================== *
@@ -430,7 +448,11 @@ void nd_msgdialog_render(nd_msgdialog *d);
 void nd_msgdialog_measure(nd_msgdialog *d, size_t *needed, size_t *fits);
 
 /* Draw, then return the key that dismissed it. Callers compare against
- * ND_KEY_ENTER to tell Yes from No. Any other key is ignored with no redraw.
+ * ND_KEY_ENTER to tell Yes from No. Any other key is ignored with no redraw --
+ * except ND_KEY_INCOMING_CALL, which is RETURNED so the caller unwinds and the
+ * core can answer the phone. A caller that only tests for ND_KEY_ENTER reads
+ * it as "No", which is the safe half of every dialog here. Without that the
+ * loop spins: ring_tick() re-reports the call on every read.
  *
  * When the message needs more than two lines at 20 px the dialog switches to
  * the 14 px left-aligned paragraph look; two lines or fewer keep the centred

@@ -46,6 +46,11 @@ extern "C" {
  * The PCF8575 i2c expander
  * ------------------------------------------------------------------ */
 
+/* The name the core gives the uinput keyboard it creates to feed keys INTO a
+ * program that reads /dev/input itself -- netsurf, mpv, the shell. Shared with
+ * nd_evdev.c so that discovery can leave it alone: see is_our_injector(). */
+#define ND_UINPUT_KBD_NAME "neodct-t9-keypad"
+
 #define ND_I2C_SLAVE        0x0703 /* linux/i2c-dev.h                       */
 #define ND_I2C_BUS_DEFAULT  3
 #define ND_I2C_ADDR_DEFAULT 0x20
