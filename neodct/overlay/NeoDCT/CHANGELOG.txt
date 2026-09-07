@@ -1,5 +1,34 @@
 # NeoDCT OS Changelog
 
+0.5.14a
+The menu fix from 0.5.13a, actually finished.
+
+0.5.13a stopped the phone re-reading the memory card every time you closed an
+app. It did not, quite. The check it used to decide whether anything had
+changed asked the card daemon a question that quietly looks at five folders on
+the card itself -- so the pause did not go away, it moved from opening the menu
+to closing an app, and it happened every time rather than only sometimes. The
+check now reads only files on the phone's own storage, which is what it was
+always supposed to do.
+
+Turning Engineering Mode off or on works again. In 0.5.13a the setting was left
+out of that same check, so the Engineering tile stayed exactly as it was until
+something else happened to change the phone's mind.
+
+Installing an app tells you the truth if something goes wrong. The note the
+installer leaves for the rest of the phone could fail to be written, and the
+screen still said the app was in the menu -- when in fact it was installed,
+invisible, and would stay that way until a restart. It now says to restart.
+The same silent failure could happen when setting up a card, and that is
+reported too.
+
+Swapping one memory card for another, or formatting one, is now noticed. Two
+cards of this phone's own kind describe themselves identically, and so does
+one card before and after being erased, so neither used to register as a
+change -- the menu could go on offering apps from a card that had been taken
+out or wiped. Each card event now carries its own number.
+
+
 0.5.13a
 The menu opens straight away.
 

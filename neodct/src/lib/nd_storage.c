@@ -585,6 +585,21 @@ bool nd_storage_setup_folders(void)
         if (nd_mkdir_p(path, 0755u) != ND_OK)
             return false;
     }
+    /* The folders are what turn a mounted card into a READY one, and READY is
+     * what lets the app scan look at it. Nothing in the card daemon's state
+     * file moves when they are created, so without this the newly usable card
+     * would not be re-read until something else changed. See ND_PATH_APPGEN. */
+    if (!nd_appgen_bump()) {
+        /* Dropping this would re-create, one function along, exactly the
+         * silent failure nd_appgen_bump() was given a return value for: the
+         * folders exist, the card is READY, and the core is never told to look
+         * at it -- so an app already on the card stays out of the menu with
+         * "Card is ready to use." on screen. */
+        nd_log_err(ND_LOG_OS,
+                   "card set up but could not write %s -- apps on this card will not appear "
+                   "until the phone restarts",
+                   ND_PATH_APPGEN);
+    }
     return true;
 }
 

@@ -900,50 +900,63 @@ static void sort_apps_by_id(nd_app_entry *apps, size_t n)
 
 /* ============ "DO I NEED TO READ THE CARD?" ============
  *
- * A short string that changes when, and only when, the set of installed apps
- * could have changed. Two sources, and NEITHER of them touches the card:
+ * A short string that changes when, and only when, the set of menu entries
+ * could have changed. Three sources, and NONE of them touches the card:
  *
- *   the card's identity and state   nd_storage_card() parses the state file
- *                                   the card daemon publishes on tmpfs. A
- *                                   card arriving, leaving, or being swapped
- *                                   for a different one moves this.
- *   ND_PATH_APPGEN                  a counter on the user partition that
- *                                   nd_nap_install() bumps. An app being
- *                                   installed moves this.
+ *   the card daemon's state file   READ AS BYTES, folded into a checksum. It
+ *                                  lives on tmpfs and carries a counter the
+ *                                  daemon bumps on every card event, so a
+ *                                  card arriving, leaving, being swapped for
+ *                                  another that describes itself identically,
+ *                                  or being formatted all move it. Nothing is
+ *                                  written while a card sits still.
+ *   ND_PATH_APPGEN                 a counter on the user partition, bumped by
+ *                                  nd_nap_install() and by the card's folder
+ *                                  setup. An app being installed moves it.
+ *   engineering mode               the Engineering tile is added by
+ *                                  rescan_apps() only when the setting is on,
+ *                                  so the setting is part of the answer.
  *
- * That is the whole list of things that can add or remove an
- * apps/<x>/manifest.json. Fetch writes into apps/PSX/ and into untrusted/, so
- * it changes files without changing the SET; an installed app runs as
- * ndusr_ut in a private mount namespace and may write only its own data/.
+ * ============ TWO MISTAKES THIS FUNCTION ALREADY MADE ============
  *
- * Before this existed the question was answered by re-walking all three
- * directories after every app exit -- because an app that exited MIGHT have
- * been Settings installing something, and nothing said otherwise. One of those
- * directories is the SD card, the walk runs before the menu draws its first
- * frame, and a slow card cannot be interrupted while it answers. That is the
- * frozen home screen an owner reported. */
-static void apps_generation(char *out, size_t out_sz)
+ * It called nd_storage_card(), which looked like a tmpfs read and is not: on
+ * a card reporting `mounted`, `share` or `ready` -- the ordinary case for a
+ * working card -- it calls has_folders(), which stats FIVE directories ON THE
+ * CARD (nd_storage.c). Since this is called from nd_ui_refresh_after_app(),
+ * that put five blocking card reads on EVERY app exit, unconditionally. The
+ * freeze it was written to remove had moved from menu-open to app-exit, which
+ * is worse: it no longer needed the owner to open the menu at all. The raw
+ * bytes of the state file answer the same question and cost nothing.
+ *
+ * And it left engineering mode out, so flipping the toggle in Settings stopped
+ * adding or removing the Engineering tile until an install, a card event or a
+ * reboot happened to move the token. */
+static uint32_t fold(const char *path)
 {
     char resolved[ND_PATH_MAX];
-    nd_card card;
-    unsigned long gen = 0ul;
+    /* FNV-1a, for a fingerprint and nothing else -- this compares a file with
+     * itself a moment later, and is never a claim about anybody's data. */
+    uint32_t h = 2166136261u;
     FILE *f;
+    int c;
 
-    memset(&card, 0, sizeof card);
-    nd_storage_card(&card);
-
-    if (nd_path_resolve(resolved, sizeof resolved, ND_PATH_APPGEN) == ND_OK) {
-        f = fopen(resolved, "rb");
-        if (f != NULL) {
-            if (fscanf(f, "%lu", &gen) != 1)
-                gen = 0ul;
-            (void)fclose(f);
-        }
+    if (nd_path_resolve(resolved, sizeof resolved, path) != ND_OK)
+        return h;
+    f = fopen(resolved, "rb");
+    if (f == NULL)
+        return h;
+    while ((c = fgetc(f)) != EOF) {
+        h ^= (uint32_t)(unsigned char)c;
+        h *= 16777619u;
     }
+    (void)fclose(f);
+    return h;
+}
 
-    /* The label and the device both, because a card can be swapped for another
-     * that mounts at the same place with the same state. */
-    (void)nd_snprintf(out, out_sz, "%d|%s|%s|%lu", (int)card.state, card.device, card.label, gen);
+static void apps_generation(nd_ui *ui, char *out, size_t out_sz)
+{
+    (void)nd_snprintf(out, out_sz, "%d|%lu|%08x", nd_ui_engineering_mode(ui) ? 1 : 0,
+                      nd_appgen_value(), (unsigned)fold(ND_PATH_SDCARD_STATE));
 }
 
 static void rescan_apps(nd_ui *ui)
@@ -1016,7 +1029,7 @@ static void rescan_apps(nd_ui *ui)
     sort_apps_by_id(ui->home_.apps, ui->home_.n_apps);
     /* Stamped AFTER the walk, so a scan interrupted by anything is not
      * recorded as having covered the state it was interrupted in. */
-    apps_generation(ui->home_.apps_gen, sizeof ui->home_.apps_gen);
+    apps_generation(ui, ui->home_.apps_gen, sizeof ui->home_.apps_gen);
     nd_ui_watch_end(saved);
 }
 
@@ -3307,7 +3320,7 @@ void nd_ui_refresh_after_app(nd_ui *ui)
     {
         char now[ND_UI_APPS_GEN_MAX];
 
-        apps_generation(now, sizeof now);
+        apps_generation(ui, now, sizeof now);
         if (strcmp(now, ui->home_.apps_gen) != 0)
             ui->home_.apps_ready = false;
     }

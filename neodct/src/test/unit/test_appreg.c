@@ -891,11 +891,31 @@ static void test_app_list_is_cached_until_something_changes(nd_ui *ui)
     nd_ui_refresh_after_app(ui);
     CHECK_INT(nd_ui_app_count(ui), base + 2u, "the installer's note is noticed");
 
-    /* And the card going away is noticed too, which also puts the staged root
-     * back for anything that runs after this. */
+    /* 4. And the card going away is noticed too. */
     (void)stage_write(ND_PATH_SDCARD_STATE, "state=absent\n");
     nd_ui_refresh_after_app(ui);
     CHECK_INT(nd_ui_app_count(ui), base, "a card leaving is noticed");
+
+    /* 5. ENGINEERING MODE IS PART OF THE ANSWER TOO.
+     *
+     * The Engineering tile is added by rescan_apps() only when the setting is
+     * on, so a token that leaves the setting out makes the Settings toggle
+     * stop working: it flips, and the tile neither appears nor disappears
+     * until an install or a card event happens to move the token. The first
+     * version of this token did exactly that. */
+    if (!stage_write("/NeoDCT/User/settings.prop", "system.ui.engineering_mode=OFF\n")) {
+        CHECK(false, "staged engineering mode off");
+        return;
+    }
+    nd_ui_refresh_after_app(ui);
+    CHECK_INT(nd_ui_app_count(ui), base - 1u, "turning engineering mode off drops the tile");
+
+    if (!stage_write("/NeoDCT/User/settings.prop", "system.ui.engineering_mode=ON\n")) {
+        CHECK(false, "staged engineering mode on");
+        return;
+    }
+    nd_ui_refresh_after_app(ui);
+    CHECK_INT(nd_ui_app_count(ui), base, "and turning it back on restores it");
 }
 
 static void run_overlay_half(void)

@@ -3783,3 +3783,100 @@ Suite green, MAKE_TEST_EXIT=0, 85 binaries.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df
+
+================================================================================
+
+0.5.14a: 0.5.13a's token read the card, forgot engineering mode, and lied about a failed install
+
+A code review of 0.5.13a found three defects. All three are real, all three were
+verified against the code before anything was changed, and a fourth and fifth
+came out of fixing them. 0.5.13a was mine, so this is the correction to my own
+work rather than to anybody else's.
+
+============ 1. THE TOKEN READ THE CARD ============
+
+The worst of them, because it meant the release did not do the thing it was cut
+for. apps_generation() called nd_storage_card(), which LOOKS like a tmpfs read
+and is not: for a card reporting `mounted`, `share` or `ready` -- the ordinary
+case for a working card -- it falls through to
+`out->state = has_folders() ? ND_CARD_READY : ND_CARD_NEEDS_SETUP`
+(lib/nd_storage.c), and has_folders() stats FIVE directories on the card.
+
+Since the token is computed in nd_ui_refresh_after_app(), that put five
+blocking card reads on every app exit, unconditionally. The freeze had moved
+from menu-open to app-exit and got worse: it no longer needed the owner to open
+the menu at all. I checked nd_storage_card() when writing 0.5.13a, saw it parse
+the state file, and stopped reading at the `legacy` branch -- which returns
+early and never reaches has_folders().
+
+The token now folds the RAW BYTES of the state file with FNV-1a. /run is tmpfs
+(overlay/etc/fstab), so nothing on this path touches the card.
+
+============ 2. ENGINEERING MODE WAS NOT IN THE TOKEN ============
+
+rescan_apps() adds the Engineering tile only when nd_ui_engineering_mode(ui) is
+true, and the token did not include it -- so flipping the toggle in Settings
+cleared eng_mode_ready and left apps_ready alone, and the tile neither appeared
+nor disappeared until an install or a card event happened to move the token.
+apps_generation() takes `ui` now and asks. eng_mode_ready is cleared just above
+the call, so the value is re-read rather than served from the cache, and that
+adds no settings.prop write: ui_home.json's "Eng. Mode" element makes the home
+screen read the same flag on the first frame after every app exit anyway.
+
+============ 3. A FAILED NOTE HID A SUCCESSFUL INSTALL ============
+
+The counter bump was best-effort and silent, and its comment claimed a failed
+write merely "costs a menu open its cached app list". That is backwards. An
+unchanged counter is read by the core as "nothing changed", so an install whose
+note did not land is an app that is really on the card and never appears, with
+nothing on screen and nothing in the log.
+
+nd_appgen_bump() returns bool. nd_nap_info carries needs_restart_to_appear, and
+Settings says "Restart the phone to see it in the menu" instead of "It is in
+the menu", which would have been false in exactly the case the flag exists for.
+The first cut of this fix set the flag and surfaced it nowhere, which is the
+same fault with a struct field in front of it; the review caught that too.
+
+nd_storage_setup_folders() -- the second bump site, added below -- had the same
+`(void)` on its call and now logs its failure.
+
+============ 4. A CARD SET UP DID NOT COUNT AS A CHANGE ============
+
+Found while fixing the above. Creating the five folders turns a card from
+NEEDS_SETUP into READY, and READY is what makes nd_storage_media_available()
+true and the card's apps/ worth walking -- but nothing in the state file moves,
+so the newly usable card would not be read until something else changed.
+nd_storage_setup_folders() bumps the counter.
+
+============ 5. A SWAP AND A FORMAT LOOKED LIKE NOTHING ============
+
+The review filed these against 0.5.13a rather than against the fix, correctly,
+and they are real either way. Two NeoDCT cards publish identical records --
+same state, same device node, same ext4, same NEODCT label -- and so does one
+card before and after a format. Neither moved the token, so the menu could go
+on offering apps from a card that had been swapped out or erased.
+
+write_state() in the card daemon now carries seq=, one higher than the record
+it replaces, read back out of the file rather than held in a variable because
+the script runs once per udev event. Every card event moves it; nothing is
+written while a card sits still, so the stability the whole comparison rests on
+is untouched. Deliberately NOT a filesystem UUID: identity there means blkid,
+and the block at the top of that script explains at length why it decides what
+a card is by looking at the mounted filesystem instead.
+
+============ WHAT THE REVIEW CONFIRMED ============
+
+Worth recording because it is the property the design stands on: the state file
+is five fixed key=value lines with no timestamp, no uptime and no free-space
+figure, write_state() is reached only from the boot scan, the two udev handlers
+and the broker's format/layout/setup verbs, and there is no polling loop
+anywhere in the overlay. A card sitting still produces no writes at all.
+
+test_appreg covers the engineering toggle in both directions alongside the four
+cases from 0.5.13a. All 86 test binaries green, zero failures -- run in two
+parts, because `make test` was twice killed by the host's memory watchdog with
+a 17 GB QEMU guest of the owner's running beside it, which is not a property of
+the suite.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df

@@ -87,6 +87,25 @@ extern "C" {
  * "otherwise". */
 #define ND_PATH_APPGEN "/NeoDCT/User/.appgen"
 
+/* Bump the counter -- "the set of installed apps changed". Two callers:
+ * nd_nap_install(), and nd_storage_setup_folders() (which turns a mounted card
+ * into a READY one, i.e. one whose apps/ is looked at at all).
+ *
+ * FALSE WHEN IT COULD NOT BE WRITTEN, and the caller has to care. The failure
+ * is not fail-safe and it would be comfortable to pretend otherwise: an
+ * unchanged counter is read by the core as "nothing changed", so a successful
+ * install whose note did not land is an app that never appears in the menu,
+ * with nothing on screen and nothing in the log saying why. Fail-safe would be
+ * the other direction, and there is no way to spell it in a counter.
+ *
+ * A counter and not a timestamp: nd_clock.h's boot floor exists because this
+ * phone can come up believing it is 1970, and a token that goes backwards
+ * would pin a stale list until the next install. */
+bool nd_appgen_bump(void);
+
+/* The counter's current value, or 0 when it has never been written. */
+unsigned long nd_appgen_value(void);
+
 /* The one directory on the card that ndusr_ut may WRITE: the browser's and
  * the media player's own state, and where a download lands. Deliberately not
  * inside apps/ -- it is shared, and app storage is not.

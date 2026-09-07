@@ -2012,7 +2012,13 @@ static bool install_one(nd_ui *ui, const char *path)
      * save until the card is next mounted. That is said rather than hidden:
      * "installed" with a silent caveat is how an owner comes to think an
      * app is broken. */
-    if (nd_svc_layout_card()) {
+    if (info.needs_restart_to_appear) {
+        /* The files are on the card and the core was not told. Saying "it is
+         * in the menu" here would be false, and the owner would go looking for
+         * an app that is installed and invisible. See nd_appgen_bump(). */
+        (void)nd_snprintf(message, sizeof message,
+                          "Installed %s.\nRestart the phone to\nsee it in the menu.", info.name);
+    } else if (nd_svc_layout_card()) {
         (void)nd_snprintf(message, sizeof message, "Installed %s.\nIt is in the menu.", info.name);
     } else {
         nd_log_err(ND_LOG_OS, "Settings: the card's layout was not restated after installing %s",

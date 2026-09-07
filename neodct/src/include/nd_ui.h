@@ -129,7 +129,9 @@ typedef enum {
  *
  * 972 puts it immediately after Power (971) and before the 9xx engineering
  * block, so no stock app's menu index moves. */
-/* state|device|label|counter -- see apps_generation() in nd_ui.c. */
+/* "<engineering-flag>|<install-counter>|<card-state-hash>" -- about 32 bytes.
+ * See apps_generation() in nd_ui.c for what each part is and why none of them
+ * reads the SD card. */
 #define ND_UI_APPS_GEN_MAX 160
 
 #define ND_UI_ENG_TILE_ID   972

@@ -248,3 +248,44 @@ bool nd_path_give_to_dir_owner(const char *path)
 
     return chown(resolved, dir_st.st_uid, dir_st.st_gid) == 0;
 }
+
+/* ------------------------------------------------------------------ *
+ * The installed-apps generation counter -- see ND_PATH_APPGEN
+ * ------------------------------------------------------------------ */
+
+unsigned long nd_appgen_value(void)
+{
+    char resolved[ND_PATH_MAX];
+    unsigned long value = 0ul;
+    FILE *f;
+
+    if (nd_path_resolve(resolved, sizeof resolved, ND_PATH_APPGEN) != ND_OK)
+        return 0ul;
+    f = fopen(resolved, "rb");
+    if (f == NULL)
+        return 0ul;
+    if (fscanf(f, "%lu", &value) != 1)
+        value = 0ul;
+    (void)fclose(f);
+    return value;
+}
+
+bool nd_appgen_bump(void)
+{
+    char resolved[ND_PATH_MAX];
+    unsigned long value = nd_appgen_value();
+    FILE *f;
+    bool ok;
+
+    if (nd_path_resolve(resolved, sizeof resolved, ND_PATH_APPGEN) != ND_OK)
+        return false;
+    f = fopen(resolved, "wb");
+    if (f == NULL)
+        return false;
+    ok = fprintf(f, "%lu\n", value + 1ul) > 0;
+    /* fclose can fail where fprintf did not; a counter half-written is a
+     * counter that may read back as something else entirely. */
+    if (fclose(f) != 0)
+        ok = false;
+    return ok;
+}

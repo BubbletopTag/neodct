@@ -20,6 +20,7 @@
 # The state file is what System/core/Storage reads, so the UI never has to
 # poke at block devices itself:
 #   state=mounted|legacy|foreign|unmountable|unformatted|share|absent
+#   seq=<n>   one higher than the last record's; see write_state()
 #   device=  fstype=  label=
 #   untrusted=<path>              empty unless this is a NeoDCT card with
 #                                 somewhere for a download to go; see below
@@ -264,12 +265,40 @@ UNTRUSTED_STATE=""
 write_state() {   # write_state STATE DEVICE FSTYPE LABEL
     mkdir -p "$STATE_DIR" 2>/dev/null
     chmod 0755 "$STATE_DIR" 2>/dev/null
+
+    # ============ WHY THERE IS A COUNTER IN HERE ============
+    #
+    # The other five fields describe WHAT is in the slot, and two different
+    # NeoDCT cards describe themselves identically: same state, same device
+    # node, same ext4, same NEODCT label. So does one card before and after a
+    # format. A reader that compares this file with its own last copy -- which
+    # is what the core does, to decide whether it must re-read the card's app
+    # directory -- sees no change across a swap and no change across a format,
+    # and goes on showing apps that are on a card that is no longer there or
+    # has just been erased.
+    #
+    # Every EVENT gets a number instead. It is read back out of the file this
+    # replaces rather than held in a variable, because this script is run once
+    # per udev event and does not survive between them. Nothing is written
+    # while a card sits still, so a reader that samples this twice with nothing
+    # happening in between still sees no change -- which is the whole point of
+    # the comparison and must not be broken to fix the above.
+    #
+    # Deliberately NOT a filesystem UUID: identity here would mean blkid, and
+    # the block at the top of this file explains at length why this script
+    # decides what a card is by looking at the mounted filesystem instead.
+    _seq=$(sed -n 's/^seq=//p' "$STATE_FILE" 2>/dev/null | head -n1)
+    case "$_seq" in
+        '' | *[!0-9]*) _seq=0 ;;
+    esac
+
     cat > "$STATE_FILE.new" <<EOF
 state=$1
 device=$2
 fstype=$3
 label=$4
 untrusted=$UNTRUSTED_STATE
+seq=$((_seq + 1))
 EOF
     # Before the rename, not after: mv is a rename(2) and the mode travels with
     # the inode, so a reader that catches the new name always sees 0644.

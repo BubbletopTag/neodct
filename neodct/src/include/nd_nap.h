@@ -178,6 +178,10 @@ typedef struct {
     char author[ND_NAP_AUTHOR_MAX];    /* manifest "author"; "" when absent  */
     char description[ND_NAP_DESC_MAX]; /* manifest "description"; "" absent   */
     char icon[ND_NAP_ICON_MAX];        /* the icon file's name in the package */
+    /* The install worked and the note to the core did not. The app is on the
+     * card and will not be in the menu until the phone restarts; the caller
+     * has to say so, because nothing else will. See nd_appgen_bump(). */
+    bool needs_restart_to_appear;
 } nd_nap_info;
 
 /* ---- what phone is this ---------------------------------------------- */
