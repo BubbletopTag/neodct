@@ -17,6 +17,7 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -270,22 +271,93 @@ unsigned long nd_appgen_value(void)
     return value;
 }
 
+/* ============ TEMP + fsync + rename, NOT fopen("wb") ============
+ *
+ * This wrote the new value straight over the old one. fopen(..., "wb")
+ * truncates FIRST and the two bytes go down afterwards, so between those two
+ * moments the file on disk is empty -- and the storage under it is NAND on a
+ * phone whose battery the owner can pull, with no fsync anywhere to say when
+ * the bytes actually landed. The window is small and the file is two bytes,
+ * which is exactly the shape of thing that never reproduces on a desktop and
+ * shows up on hardware.
+ *
+ * The shape is nd_props_write_atomic()'s (nd_props.c), which is what every
+ * other durable write on /NeoDCT/User already uses: write the replacement
+ * beside the target, fsync it, rename over the top, and fsync the DIRECTORY
+ * so the rename itself is durable rather than merely ordered. rename(2) is
+ * atomic, so a reader -- nd_appgen_value(), called from the core's frame
+ * path -- sees either the old counter or the new one and never nothing.
+ *
+ * A failure now leaves the previous value intact instead of a zero-length
+ * file, which matters for what false MEANS to the caller: nd_paths.h promises
+ * that a false return is "the note did not land", and a truncated file is a
+ * note that landed as the wrong number. */
 bool nd_appgen_bump(void)
 {
     char resolved[ND_PATH_MAX];
+    char tmp[ND_PATH_MAX];
     unsigned long value = nd_appgen_value();
-    FILE *f;
-    bool ok;
+    char text[32];
+    int len;
+    int fd;
+    bool ok = false;
 
     if (nd_path_resolve(resolved, sizeof resolved, ND_PATH_APPGEN) != ND_OK)
         return false;
-    f = fopen(resolved, "wb");
-    if (f == NULL)
+    if (nd_snprintf(tmp, sizeof tmp, "%s.tmp", resolved) != ND_OK)
         return false;
-    ok = fprintf(f, "%lu\n", value + 1ul) > 0;
-    /* fclose can fail where fprintf did not; a counter half-written is a
-     * counter that may read back as something else entirely. */
-    if (fclose(f) != 0)
+
+    len = snprintf(text, sizeof text, "%lu\n", value + 1ul);
+    if (len < 0 || (size_t)len >= sizeof text)
+        return false;
+
+    fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return false;
+    {
+        size_t off = 0u;
+
+        ok = true;
+        while (off < (size_t)len) {
+            ssize_t w = write(fd, text + off, (size_t)len - off);
+
+            if (w < 0) {
+                if (errno == EINTR)
+                    continue;
+                ok = false;
+                break;
+            }
+            off += (size_t)w;
+        }
+    }
+    if (ok && fsync(fd) != 0)
         ok = false;
-    return ok;
+    if (close(fd) != 0)
+        ok = false;
+    if (ok && rename(tmp, resolved) != 0)
+        ok = false;
+    if (!ok) {
+        (void)unlink(tmp);
+        return false;
+    }
+
+    /* The rename is what makes the new value visible, and on NAND it is not
+     * on the medium until its directory is. Best effort: a filesystem that
+     * refuses to fsync a directory (some do) has still done the rename. */
+    {
+        char *slash = strrchr(resolved, '/');
+
+        if (slash != NULL && slash != resolved) {
+            int dfd;
+
+            *slash = '\0';
+            dfd = open(resolved, O_RDONLY | O_DIRECTORY);
+            *slash = '/';
+            if (dfd >= 0) {
+                (void)fsync(dfd);
+                (void)close(dfd);
+            }
+        }
+    }
+    return true;
 }

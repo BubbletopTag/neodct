@@ -41,6 +41,7 @@
  */
 
 #include <dirent.h>
+#include <errno.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -742,20 +743,39 @@ static bool manifest_id(const nd_json_val *o, int32_t *out)
         *out = 999;
         return true;
     }
+    /* ============ AND AN id THAT DOES NOT FIT IS NOT AN id ============
+     *
+     * Both paths truncated: (int32_t)n on a 64-bit JSON number, and a strtol
+     * into a `long` whose result was never range-checked at all. That gives
+     * the same manifest two different menu positions on two ABIs -- the list
+     * is sorted by id, and on the phone `long` is 32 bits, so strtol
+     * SATURATES to 2147483647 where the 64-bit host wraps to something else
+     * entirely. An out-of-range id is now a dropped entry, which is what this
+     * function already does with an unparseable one and what nd_nap.c's copy
+     * does with the same value at install time.
+     *
+     * NEGATIVES STAY LEGAL. nd_nap.c refuses them because it is deciding
+     * whether to install; this is only deciding where to sort, nothing on the
+     * phone forbids one, and there is a case in test_appreg.c that pins a
+     * negative id sorting first. */
     if (nd_json_int(v, &n)) {
+        if (n < INT32_MIN || n > INT32_MAX)
+            return false;
         *out = (int32_t)n;
         return true;
     }
     if (nd_json_str(v, &s) && s != NULL) {
         char *end = NULL;
-        long parsed;
+        long long parsed;
 
         while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r')
             s++;
         if (*s == '\0')
             return false;
-        parsed = strtol(s, &end, 10);
-        if (end == s)
+        errno = 0;
+        parsed = strtoll(s, &end, 10);
+        if (end == s || errno == ERANGE || parsed < (long long)INT32_MIN ||
+            parsed > (long long)INT32_MAX)
             return false;
         while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')
             end++;

@@ -2177,8 +2177,19 @@ static void *modem_thread(void *arg)
         nd_modem_poll(m);
 
         /* One UI tick. read_keypress() called poll() at this rate and every
-         * cadence inside poll() was measured against it. */
-        (void)clock_gettime(CLOCK_REALTIME, &ts);
+         * cadence inside poll() was measured against it.
+         *
+         * On req_cv's OWN base, which is CLOCK_MONOTONIC wherever the libc
+         * allowed it. This was CLOCK_REALTIME, and pthread_cond_timedwait
+         * takes an absolute deadline: the phone has no RTC, comes up
+         * believing it is 1970 and has its clock set from NTP -- or by the
+         * owner in the Clock app -- a minute or so into every boot. A
+         * BACKWARD step of that size parks this thread on a deadline that
+         * far away, and this thread is the one that notices RING. The owner
+         * gets a phone that does not ring, right after the correction that
+         * caused it, with nothing in the log. Under QEMU the host clock is
+         * already right and the step never happens. */
+        (void)clock_gettime(m->req_cv_monotonic ? CLOCK_MONOTONIC : CLOCK_REALTIME, &ts);
         ts.tv_nsec += 100L * 1000L * 1000L;
         if (ts.tv_nsec >= 1000L * 1000L * 1000L) {
             ts.tv_nsec -= 1000L * 1000L * 1000L;
@@ -2359,11 +2370,27 @@ nd_err nd_modem__create(nd_modem **out)
         free(m);
         return ND_ERR_IO;
     }
-    if (pthread_cond_init(&m->req_cv, NULL) != 0 || pthread_cond_init(&m->done_cv, NULL) != 0) {
-        (void)pthread_mutex_destroy(&m->req_mu);
-        (void)pthread_mutex_destroy(&m->st_mu);
-        free(m);
-        return ND_ERR_IO;
+    /* req_cv on CLOCK_MONOTONIC if this libc will give it -- see the tick in
+     * modem_thread(), and nd_ui.c's watchdog, which asks for the same thing
+     * for the same reason. done_cv keeps the default: nothing waits on it
+     * with a deadline, so its base cannot be stepped out from under anyone. */
+    {
+        pthread_condattr_t cattr;
+        bool have_cattr = pthread_condattr_init(&cattr) == 0;
+        int rc;
+
+        m->req_cv_monotonic = have_cattr && pthread_condattr_setclock(&cattr, CLOCK_MONOTONIC) == 0;
+        rc = pthread_cond_init(&m->req_cv, m->req_cv_monotonic ? &cattr : NULL);
+        if (have_cattr)
+            (void)pthread_condattr_destroy(&cattr);
+        if (rc != 0 || pthread_cond_init(&m->done_cv, NULL) != 0) {
+            if (rc == 0)
+                (void)pthread_cond_destroy(&m->req_cv);
+            (void)pthread_mutex_destroy(&m->req_mu);
+            (void)pthread_mutex_destroy(&m->st_mu);
+            free(m);
+            return ND_ERR_IO;
+        }
     }
 
     m->pcm_rate = pcm_rate_setting();

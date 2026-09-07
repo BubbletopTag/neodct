@@ -315,7 +315,8 @@ static nd_err walk(const char *path, entry_fn fn, void *ctx, char *why, size_t w
         uint8_t block[TAR_BLOCK];
         const tar_header *h = (const tar_header *)block;
         tar_entry e;
-        char raw[256];
+        /* prefix + '/' + name + NUL, from the header's own field widths. */
+        char raw[sizeof h->prefix + 1u + sizeof h->name + 1u];
         uint64_t size;
         long header_at;
         size_t got;
@@ -353,7 +354,24 @@ static nd_err walk(const char *path, entry_fn fn, void *ctx, char *why, size_t w
 
         /* The name: prefix + "/" + name when the prefix field is in use,
          * which POSIX permits only under a ustar magic. Neither field is
-         * necessarily NUL-terminated at its full width. */
+         * necessarily NUL-terminated at its full width.
+         *
+         * ============ raw[] IS 257, AND IT USED TO BE 256 ============
+         *
+         * prefix is 155 bytes and name is 100, so the joined form is at most
+         * 155 + 1 + 100 = 256 characters and needs 257 bytes with its NUL.
+         * The buffer was 256, so a header with BOTH fields full wrote
+         * raw[256] -- one byte past the end of a stack array, in a function
+         * parsing a file the owner (or whoever wrote their SD card) chose.
+         * nd_nap.h states that threat model explicitly. Neither field has to
+         * be terminated, the checksum is over bytes the same author picked,
+         * and one stray NUL on the stack is a saved register or a canary
+         * depending on how the frame is laid out -- which is a different
+         * answer on 32-bit ARM than on the x86-64 the tests run on.
+         *
+         * The size is spelled from the header fields rather than written out,
+         * so it cannot drift if the struct ever changes, and the entry is
+         * refused if it somehow still does not fit. */
         {
             size_t name_len = strnlen(h->name, sizeof h->name);
             size_t prefix_len = 0u;
@@ -361,11 +379,21 @@ static nd_err walk(const char *path, entry_fn fn, void *ctx, char *why, size_t w
             if (memcmp(h->magic, "ustar", 5u) == 0)
                 prefix_len = strnlen(h->prefix, sizeof h->prefix);
             if (prefix_len > 0u) {
+                if (prefix_len + 1u + name_len >= sizeof raw) {
+                    say(why, why_sz, "Package has an unusable file name.");
+                    rc = ND_ERR_PARSE;
+                    break;
+                }
                 memcpy(raw, h->prefix, prefix_len);
                 raw[prefix_len] = '/';
                 memcpy(raw + prefix_len + 1u, h->name, name_len);
                 raw[prefix_len + 1u + name_len] = '\0';
             } else {
+                if (name_len >= sizeof raw) {
+                    say(why, why_sz, "Package has an unusable file name.");
+                    rc = ND_ERR_PARSE;
+                    break;
+                }
                 memcpy(raw, h->name, name_len);
                 raw[name_len] = '\0';
             }
@@ -468,14 +496,29 @@ static bool manifest_id(const nd_json_val *o, int32_t *out)
     }
     if (nd_json_str(v, &s) && s != NULL) {
         char *end = NULL;
-        long parsed;
+        /* ============ long IS 32 BITS ON THE PHONE ============
+         *
+         * strtol into a `long` with `parsed > INT32_MAX` as the guard is a
+         * check that only works on the machine the tests run on. The Luckfox
+         * is ILP32, so there LONG_MAX == INT32_MAX and the comparison is one
+         * the compiler folds away: strtol saturates an out-of-range string to
+         * 2147483647, sets errno to ERANGE, and the guard waves it through.
+         * The same package is refused on x86-64 and on QEMU aarch64 (both
+         * LP64) and ACCEPTED on the phone -- which is the worst shape a check
+         * can have, because the suite proves the opposite of what ships.
+         *
+         * strtoll is 64-bit on both ABIs and errno is the only thing that
+         * distinguishes a saturated value from a real one. nd_keymap.c and
+         * nd_keypadsetup.c already spell it this way. */
+        long long parsed;
 
         while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r')
             s++;
         if (*s == '\0')
             return false;
-        parsed = strtol(s, &end, 10);
-        if (end == s || parsed < 0 || parsed > INT32_MAX)
+        errno = 0;
+        parsed = strtoll(s, &end, 10);
+        if (end == s || errno == ERANGE || parsed < 0 || parsed > (long long)INT32_MAX)
             return false;
         while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')
             end++;
