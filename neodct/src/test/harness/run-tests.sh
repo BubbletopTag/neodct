@@ -69,8 +69,23 @@ have_user() {
     grep -q "^$1:" /etc/passwd 2>/dev/null
 }
 
+# euid 0 is NOT the same as "can drop", and this banner claimed it was.
+#
+# sandbox.sh is bubblewrap, bubblewrap puts the run in a user namespace, and it
+# writes "deny" to /proc/self/setgroups when it sets the map up. In there
+# setgroups(2) is EPERM for uid 0 as much as for anybody, so nd_priv_become()
+# fails at its FIRST syscall -- which made `make test` red for every root run
+# (a container, a CI box, anyone who reached for sudo) while telling them every
+# drop was succeeding. The two cases in test_priv.c ask the kernel the same
+# question now; this asks it for the banner.
+setgroups_denied() {
+    [ "$(cat /proc/self/setgroups 2>/dev/null)" = "deny" ]
+}
+
 drop_testable=0
-if [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
+if [ "$(id -u 2>/dev/null || echo 1)" = "0" ] && setgroups_denied; then
+    drop_note="running as ROOT but in a user namespace with setgroups=deny (the sandbox), so a drop is REFUSED and no test exercises one"
+elif [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
     drop_note="running as ROOT, so every drop SUCCEEDS and no test reaches the failure"
 elif have_user ndusr && have_user ndusr_ut; then
     drop_testable=1
