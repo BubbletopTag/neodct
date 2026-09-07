@@ -161,6 +161,39 @@ static void test_no_new_privs(void)
 
 /* ---- the drop itself, which needs privilege to exercise --------------- */
 
+/* ============ euid 0 IS NOT THE SAME AS "CAN DROP" ============
+ *
+ * The two cases below used `geteuid() != 0` to decide whether the drop could
+ * be exercised, and inside `make test` that is the wrong question. The suite
+ * runs in test/harness/sandbox.sh, which is bubblewrap, which puts the run in
+ * a USER NAMESPACE -- and bwrap writes "deny" to /proc/self/setgroups when it
+ * sets up the map. In there getuid() is 0 and setgroups(2) returns EPERM for
+ * everybody, so nd_priv_become() fails at its first syscall and the child
+ * exits 10. `make test` therefore FAILED for anyone running it as root (a
+ * container, a CI box, a developer who reached for sudo) and passed for a
+ * normal user only because the guard skipped it -- a red suite for the one
+ * configuration the header above says these cases exist to cover.
+ *
+ * So the question is asked of the kernel instead of guessed from the uid.
+ * setgroups(0, NULL) in a throwaway child is the same syscall the drop starts
+ * with, and its answer is the only thing that matters here. */
+static bool can_really_drop(void)
+{
+    pid_t pid;
+    int status = 0;
+
+    if (geteuid() != 0)
+        return false;
+    pid = fork();
+    if (pid < 0)
+        return false;
+    if (pid == 0)
+        _exit(setgroups(0u, NULL) == 0 ? 0 : 1);
+    if (waitpid(pid, &status, 0) < 0)
+        return false;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 static void test_the_drop(void)
 {
     nd_priv_id id;
@@ -169,8 +202,14 @@ static void test_the_drop(void)
     pid_t pid;
     int status = 0;
 
-    if (geteuid() != 0) {
-        SKIP("not root: cannot exercise an actual drop");
+    if (!can_really_drop()) {
+        SKIP(geteuid() != 0
+                 ? "not root: cannot exercise an actual drop"
+                 : "root, but setgroups() is refused -- a user namespace with "
+                   "/proc/self/setgroups=deny, which is what `make test`'s "
+                   "bubblewrap sandbox creates. Run `make test-one "
+                   "T=test_priv NEODCT_TEST_SANDBOX=none` on a machine that "
+                   "can spare it, or nd-selftest on the phone.");
         return;
     }
     user = some_real_user(&target);
@@ -251,8 +290,10 @@ static void test_spawn_runs_the_child_as_the_user(void)
     char buf[64];
     ssize_t n;
 
-    if (geteuid() != 0) {
-        SKIP("not root: cannot exercise a drop through nd_proc_spawn");
+    if (!can_really_drop()) {
+        SKIP(geteuid() != 0
+                 ? "not root: cannot exercise a drop through nd_proc_spawn"
+                 : "root, but setgroups() is refused -- see can_really_drop()");
         return;
     }
     user = some_real_user(&target);

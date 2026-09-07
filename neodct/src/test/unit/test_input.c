@@ -95,6 +95,18 @@ static int open_over_pipe(nd_input **in)
  * Decoding
  * ------------------------------------------------------------------ */
 
+/* CPU seconds this process has burned. Local rather than in
+ * platform_test.h: only this file needs it, and only to tell a wait that
+ * sleeps from a wait that spins -- which wall-clock time cannot. */
+static double pt_cpu_seconds(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) != 0)
+        return 0.0;
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
 static void test_a_press_and_a_release_both_arrive(void)
 {
     nd_input *in = NULL;
@@ -441,6 +453,116 @@ static void test_the_app_channel_carries_presses_and_releases(void)
     nd_input_channel_close(&ch);
 }
 
+/* ============ MORE THAN ONE RECORD IN THE PIPE AT ONCE ============
+ *
+ * The ordinary case, not an edge one: nd_proc.c's pump sends a press and its
+ * release, and an app that was mid-frame finds all four records (each press
+ * is a KEY and a SYN) waiting when it next reads. The channel is a PIPE, so
+ * unlike a character device it hands back whatever it has rather than whole
+ * records -- and nd_evdev_read_record() asked for sizeof(buf), which is 24:
+ * the size of the record on a 64-bit build and NOT its size on the phone,
+ * where `long` is four bytes and the record is 16.
+ *
+ * So on the Luckfox the first read took one record and half of the next, the
+ * leftover eight bytes were dropped, and from the second read on the type,
+ * code and value came out of the middle of a timestamp. Every app, on the one
+ * path by which an app receives a key.
+ *
+ * THIS TEST CANNOT FAIL ON THIS MACHINE, and it is here anyway. x86-64 and
+ * QEMU aarch64 are both LP64, so 24 IS the record size and the old code lined
+ * up by accident; the failure needs ILP32. It was reproduced standalone under
+ * `gcc -m32` -- old: one garbage record out of two presses, new: none -- and
+ * what this pins is the property that reproduction is about: everything put
+ * into the channel comes back out of it, in order, however much of it is
+ * queued at once. */
+static void test_everything_queued_in_the_channel_comes_back(void)
+{
+    nd_input_channel ch;
+    nd_input *child = NULL;
+    nd_key_event ev;
+    static const int32_t SENT[] = {ND_KEY_1, ND_KEY_2, ND_KEY_3, ND_KEY_4};
+    size_t i;
+
+    CHECK_INT(nd_input_channel_open(&ch), ND_OK);
+
+    /* All of them before the reader exists, so they are certainly all in the
+     * pipe together rather than being read one at a time as they arrive. */
+    for (i = 0u; i < ND_ARRAY_LEN(SENT); i++) {
+        CHECK_INT(nd_input_channel_send(&ch, SENT[i], true), ND_OK);
+        CHECK_INT(nd_input_channel_send(&ch, SENT[i], false), ND_OK);
+    }
+
+    CHECK_INT(nd_input_open_pipe(&child, ch.read_fd), ND_OK);
+    for (i = 0u; i < ND_ARRAY_LEN(SENT); i++) {
+        CHECK(nd_input_read_event(child, 0.5, &ev));
+        CHECK_INT(ev.code, SENT[i]);
+        CHECK(ev.pressed);
+        CHECK(nd_input_read_event(child, 0.5, &ev));
+        CHECK_INT(ev.code, SENT[i]);
+        CHECK(!ev.pressed);
+    }
+    /* And nothing else: a desynchronised stream shows up here as an extra
+     * event decoded out of somebody's timestamp. */
+    CHECK(!nd_input_read_event(child, 0.05, &ev));
+
+    ch.read_fd = -1; /* nd_input_open_pipe took it */
+    nd_input_close(child);
+    nd_input_channel_close(&ch);
+}
+
+/* ============ AND A CHANNEL WHOSE WRITER HAS GONE ============
+ *
+ * ppoll() reports POLLHUP whether or not .events asked for it, so a pipe with
+ * no writer left is ALWAYS ready. nd_evdev_read_record() returned plain false
+ * for that, exactly as it does for "nothing yet", and the wait loop asks
+ * again on false -- so the moment the core exits, or closes its write end to
+ * tell the app to quit, an app sitting in nd_input_wait_key() spins on the
+ * phone's single Cortex-A7 with no sleep in the loop. With a timeout it
+ * returns eventually and burns the whole timeout doing it; with no timeout it
+ * never returns at all.
+ *
+ * The bound below is what makes this a test rather than a description: a
+ * blocking wait on a hung-up descriptor has to come back, and it has to come
+ * back without having spun. */
+static void test_a_channel_whose_writer_has_gone_does_not_spin(void)
+{
+    nd_input_channel ch;
+    nd_input *child = NULL;
+    nd_key_event ev;
+    double t0;
+
+    CHECK_INT(nd_input_channel_open(&ch), ND_OK);
+    CHECK_INT(nd_input_channel_send(&ch, ND_KEY_5, true), ND_OK);
+    CHECK_INT(nd_input_open_pipe(&child, ch.read_fd), ND_OK);
+    ch.read_fd = -1; /* the reader owns it now */
+
+    /* Everything already written still arrives. */
+    CHECK(nd_input_read_event(child, 0.5, &ev));
+    CHECK_INT(ev.code, ND_KEY_5);
+
+    /* Now the core goes away. */
+    nd_input_channel_close_write(&ch);
+
+    /* CPU time, not wall time, and that is the whole point. A wait on a
+     * phone with no keyboard is SUPPOSED to sleep out its timeout -- the
+     * "no backend at all" branch says so -- so the clock on the wall looks
+     * the same either way. What separates a nap from a spin is whether the
+     * core was busy for it. Against the old code this burns very nearly the
+     * whole second; against this one it burns nothing. */
+    t0 = pt_cpu_seconds();
+    CHECK(!nd_input_read_event(child, 1.0, &ev));
+    CHECK(pt_cpu_seconds() - t0 < 0.20);
+
+    /* And again, because the first call is the one that notices: the second
+     * must not go back to polling a descriptor that has finished. */
+    t0 = pt_cpu_seconds();
+    CHECK(!nd_input_read_event(child, 1.0, &ev));
+    CHECK(pt_cpu_seconds() - t0 < 0.20);
+
+    nd_input_close(child);
+    nd_input_channel_close(&ch);
+}
+
 static void test_a_dead_child_is_an_io_error_not_a_hang(void)
 {
     nd_input_channel ch;
@@ -758,6 +880,8 @@ int main(void)
     RUN(test_the_repeat_set_can_be_widened_and_disabled);
     RUN(test_the_defaults_are_the_documented_ones);
     RUN(test_the_app_channel_carries_presses_and_releases);
+    RUN(test_everything_queued_in_the_channel_comes_back);
+    RUN(test_a_channel_whose_writer_has_gone_does_not_spin);
     RUN(test_a_dead_child_is_an_io_error_not_a_hang);
     RUN(test_discovery_falls_back_to_event0);
     RUN(test_a_by_path_kbd_symlink_wins_over_event0);

@@ -40,6 +40,7 @@
 #include <unistd.h>
 
 #include "nd_input.h"
+#include "nd_keypad.h"
 #include "nd_log.h"
 #include "nd_paths.h"
 
@@ -237,6 +238,36 @@ static void device_name_or_unknown(const char *path, char *out, size_t out_sz)
  * The first call, from nd_input_open(), is the one worth reading, and it
  * still logs. The retries do the same work silently and speak only when they
  * succeed, which nd_input.c logs itself. */
+/* ============ THE CORE MUST NOT ADOPT ITS OWN KEYBOARD ============
+ *
+ * nd_proc.c creates a uinput keyboard for an app that reads /dev/input itself
+ * -- the Browser, the shells -- and feeds the owner's keypresses into it. It
+ * appears in /dev/input like any other device, and discovery is retried once
+ * a second for the life of the core whenever it has no descriptor, which on
+ * the Luckfox is ALWAYS: the keypad there is an i2c matrix and /dev/input is
+ * empty.
+ *
+ * So opening the Browser handed the core an evdev device to adopt, and every
+ * key the owner pressed on the matrix was written into it by keydev_feed()
+ * and read straight back out again by the core's own input layer. That is a
+ * key that repeats itself for as long as the app is up, on a phone whose
+ * only way out of the app is a key.
+ *
+ * Excluded by NAME rather than by a path registered at creation: it is the
+ * same answer for a node left behind by a launch that crashed, and it needs
+ * no lifetime plumbing between two modules that otherwise do not know each
+ * other. An explicit ND_ENV_KEYPAD_DEVICE override is deliberately NOT
+ * filtered -- pointing the core at a particular node is somebody saying they
+ * mean it. */
+static bool is_our_injector(const char *path)
+{
+    char name[128];
+
+    if (nd_evdev_device_name(path, name, sizeof name) != ND_OK)
+        return false;
+    return strcmp(name, ND_UINPUT_KBD_NAME) == 0;
+}
+
 static nd_err discover_impl(char *out_path, size_t out_sz, bool quiet)
 {
     char candidates[DEVLIST_MAX][DEVPATH_MAX];
@@ -297,6 +328,11 @@ static nd_err discover_impl(char *out_path, size_t out_sz, bool quiet)
             (void)nd_strlcpy(seen[n_seen++], resolved, DEVPATH_MAX);
         if (!nd_path_exists(resolved))
             continue;
+        if (is_our_injector(resolved)) {
+            if (!quiet)
+                nd_log(ND_LOG_INPUT, "Skipping %s: it is our own key injector", resolved);
+            continue;
+        }
 
         device_name_or_unknown(resolved, name, sizeof name);
         if (!quiet)
@@ -305,12 +341,19 @@ static nd_err discover_impl(char *out_path, size_t out_sz, bool quiet)
         return ND_OK;
     }
 
-    /* 5. whatever event device exists, lowest-numbered first. */
+    /* 5. whatever event device exists, lowest-numbered first -- skipping our
+     * own injector, which on a phone with no other input device is the ONLY
+     * thing this step would ever find. */
     got = glob_virtual("/dev/input/event*", candidates, ND_ARRAY_LEN(candidates));
-    if (got > 0u) {
+    for (i = 0u; i < got; i++) {
         char fallback[DEVPATH_MAX];
 
-        virtual_realpath(candidates[0], fallback, sizeof fallback);
+        virtual_realpath(candidates[i], fallback, sizeof fallback);
+        if (is_our_injector(fallback)) {
+            if (!quiet)
+                nd_log(ND_LOG_INPUT, "Skipping %s: it is our own key injector", fallback);
+            continue;
+        }
         device_name_or_unknown(fallback, name, sizeof name);
         if (!quiet)
             nd_log(ND_LOG_INPUT, "Fallback input device: %s (%s)", fallback, name);
@@ -354,10 +397,15 @@ int nd_evdev_open(const char *path)
     return open(resolved, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
 }
 
-/* One record, decoded. Returns false on timeout or on anything unreadable.
+/* One record, decoded. Returns false on timeout or on anything unreadable;
+ * see nd_input_priv.h for what `hung_up` separates out and why.
  * Shared with nd_input.c, which needs releases as well as presses. */
-bool nd_evdev_read_record(int fd, double timeout_s, uint16_t *type, uint16_t *code, int32_t *value)
+bool nd_evdev_read_record(int fd, double timeout_s, uint16_t *type, uint16_t *code, int32_t *value,
+                          bool *hung_up)
 {
+    /* The larger of the two layouts, so the compat branch below has somewhere
+     * to land whichever build this is; only sizeof(evdev_record) is ever
+     * asked for. */
     uint8_t buf[24];
     struct timespec ts;
     struct timespec *tsp = &ts;
@@ -366,6 +414,8 @@ bool nd_evdev_read_record(int fd, double timeout_s, uint16_t *type, uint16_t *co
     evdev_record ev;
     int rc;
 
+    if (hung_up != NULL)
+        *hung_up = false;
     if (fd < 0)
         return false;
 
@@ -393,8 +443,57 @@ bool nd_evdev_read_record(int fd, double timeout_s, uint16_t *type, uint16_t *co
     if (rc <= 0)
         return false; /* any poll error reads as "nothing", as in the Python */
 
-    got = read(fd, buf, sizeof buf);
-    if (got == 24) {
+    /* ============ ONE RECORD, NOT "AS MUCH AS 64-BIT WOULD BE" ============
+     *
+     * This asked for `sizeof buf`, which is 24 -- the size of evdev_record on
+     * a 64-bit build and NOT its size on the phone, where `long` is four
+     * bytes and the record is 16. A character device only ever hands back
+     * whole events, so on a real /dev/input/eventN that asked for 24 and got
+     * 16 and took the compat branch below, which happens to be the right
+     * layout. THE APP KEY CHANNEL IS A PIPE (nd_input.c
+     * nd_input_channel_open), and a pipe is a byte stream that returns
+     * whatever it has.
+     *
+     * So on the Luckfox, with a key press and its SYN waiting -- 32 bytes --
+     * the read returned 24: one whole record and half of the next. The first
+     * decoded correctly, the leftover eight bytes were DISCARDED, and the
+     * stream was left one record out of step. With two presses queued the
+     * second read starts mid-record and the type, code and value come out of
+     * a timestamp. That is every app on the phone, on the one path by which
+     * an app receives a key at all, and it cannot happen under QEMU: aarch64
+     * is LP64, so there sizeof buf IS the record size and everything lines up.
+     *
+     * A torn record cannot arrive on the pipe: nd_input_channel_send() writes
+     * both records in a single write() of 32 or 48 bytes, and a write of at
+     * most PIPE_BUF is atomic, so the reader sees all of it or none of it. A
+     * short read is therefore still "nothing usable", as it was. */
+    got = read(fd, buf, sizeof ev);
+    /* ============ "NOTHING YET" IS NOT "NOTHING EVER" ============
+     *
+     * Both used to come back as plain false, and the caller waits again on
+     * false. ppoll() reports POLLHUP and POLLERR whether or not .events asked
+     * for them, so once the other end of the key channel is gone -- the core
+     * exited, or the app was told to quit and the core closed its write end
+     * -- the poll returns ready IMMEDIATELY, every time, and the read returns
+     * 0. A screen sitting in nd_input_wait_key() then spins on the phone's
+     * single Cortex-A7 with no sleep in the loop and no way out, which is a
+     * hot, silent, unkillable-looking phone rather than an app that exits.
+     * The same shape catches an evdev node that is unplugged mid-read, where
+     * read() fails with ENODEV for ever after.
+     *
+     * EINTR and EAGAIN are neither: the first is a signal, the second is a
+     * non-blocking descriptor with nothing on it, and both mean try again. */
+    if (got == 0) {
+        if (hung_up != NULL)
+            *hung_up = true;
+        return false;
+    }
+    if (got < 0) {
+        if (hung_up != NULL && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
+            *hung_up = true;
+        return false;
+    }
+    if (got == (ssize_t)sizeof ev) {
         memcpy(&ev, buf, sizeof ev);
     } else if (got == 16) {
         /* 32-bit timeval: two 32-bit words, then the same tail. */
@@ -436,7 +535,7 @@ int32_t nd_evdev_read_key(int fd, double timeout_s)
             if (remaining < 0.0)
                 remaining = 0.0;
         }
-        if (!nd_evdev_read_record(fd, remaining, &type, &code, &value))
+        if (!nd_evdev_read_record(fd, remaining, &type, &code, &value, NULL))
             return ND_KEY_NONE;
 
         /* Only a press. Value 2 is the kernel's own autorepeat, which this

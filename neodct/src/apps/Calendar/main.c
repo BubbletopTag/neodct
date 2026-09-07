@@ -271,6 +271,14 @@ static void new_event(nd_ui *ui, int32_t year, int32_t month, int32_t day)
     char confirmation[160];
     char date[16];
     char clock[32];
+    /* Not &ev.start. nd_cal_event.start is int64_t because it is a sqlite
+     * column, nd_cal_compose() writes a time_t, and the two are only the same
+     * type by coincidence of the ABI -- on x86-64 and on musl/armv7 (time64)
+     * both are 64 bits, so it compiles here and on the phone. On any 32-bit
+     * glibc target time_t is `long` and the call would write four bytes into
+     * an eight-byte field. ask_event(), thirty lines up, already does it this
+     * way; this was the one that did not. */
+    time_t start;
 
     memset(&ev, 0, sizeof ev);
     ev.id = ND_CAL_NO_ID;
@@ -284,10 +292,11 @@ static void new_event(nd_ui *ui, int32_t year, int32_t month, int32_t day)
     /* Midday, so the date is a real instant before the time question is
      * asked and ask_event() has something to split. The hour is replaced by
      * whatever is typed; nothing is stored until then. */
-    if (!nd_cal_compose(year, month, day, 12, 0, &ev.start)) {
+    if (!nd_cal_compose(year, month, day, 12, 0, &start)) {
         say(ui, nd_cal_app_bad_date);
         return;
     }
+    ev.start = (int64_t)start;
 
     if (!ask_event(ui, &ev, false))
         return;

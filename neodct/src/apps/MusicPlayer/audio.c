@@ -46,6 +46,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -206,23 +207,26 @@ static struct {
     size_t chunk_frames;
     pthread_t thread;
     bool thread_live;
-    volatile sig_atomic_t stop;
+    /* An atomic, not a volatile word: see lib/nd_notify.c's nd_ringer. */
+    atomic_int stop;
 
     pthread_mutex_t lock;
     bool lock_live;
     uint64_t sent_bytes; /* under lock: written to the player, i.e. heard */
 
     /* Volume. `gain_q15` is what the FEEDER reads, once per chunk, and it is
-     * deliberately the only thing it reads: `volatile sig_atomic_t` is a
-     * single aligned word on both targets, so the feeder either sees the old
-     * gain or the new one and never half of each. That is the same guarantee
-     * `stop` above relies on, and it is why neither needs the mutex -- taking
-     * a lock in the audio path to read one integer would be a worse trade
-     * than a chunk of audio at the previous level.
+     * deliberately the only thing it reads: one relaxed atomic word, so the
+     * feeder either sees the old gain or the new one and never half of each.
+     * That is the same guarantee `stop` above relies on, and it is why
+     * neither needs the mutex -- taking a lock in the audio path to read one
+     * integer would be a worse trade than a chunk of audio at the previous
+     * level. It was `volatile sig_atomic_t`, which delivered the same thing
+     * in practice and was a data race on paper; nd_notify.c's nd_ringer has
+     * the reasoning for the change.
      *
      * `level` is the UI's number, 0..ND_MUSIC_VOLUME_MAX, and only the UI
      * thread touches it. */
-    volatile sig_atomic_t gain_q15;
+    atomic_int gain_q15;
     int32_t level;
     bool volume_known; /* false until the first load or set */
 } g = {
@@ -434,7 +438,7 @@ static void apply_level(int32_t level)
 
     g.level = level;
     /* One word, and the feeder picks it up on its next chunk. */
-    g.gain_q15 = (sig_atomic_t)nd_music_gain_q15(level);
+    atomic_store_explicit(&g.gain_q15, nd_music_gain_q15(level), memory_order_relaxed);
     g.volume_known = true;
 }
 
@@ -492,7 +496,7 @@ static void *feed(void *arg)
 {
     ND_UNUSED(arg);
 
-    while (g.stop == 0) {
+    while (atomic_load_explicit(&g.stop, memory_order_relaxed) == 0) {
         size_t got = src_read(&g.src, g.buf, g.chunk_frames);
         size_t bytes;
         size_t sent = 0u;
@@ -508,11 +512,12 @@ static void *feed(void *arg)
          * matters: a level change then lands on a chunk boundary rather than
          * partway through a waveform, which is what a click is; and g.level
          * is a plain int the UI thread owns, so reading IT from here would be
-         * a data race where reading the one volatile word is not. */
-        gain_buffer_q15(g.buf, got * (size_t)g.src.channels, (int32_t)g.gain_q15);
+         * a data race where reading the one atomic word is not. */
+        gain_buffer_q15(g.buf, got * (size_t)g.src.channels,
+                        (int32_t)atomic_load_explicit(&g.gain_q15, memory_order_relaxed));
 
         bytes = got * (size_t)g.src.channels * sizeof g.buf[0];
-        while (sent < bytes && g.stop == 0) {
+        while (sent < bytes && atomic_load_explicit(&g.stop, memory_order_relaxed) == 0) {
             /* MSG_NOSIGNAL, not write(): when stop() kills the player this
              * send is what notices, and on a pipe that would be a
              * process-wide SIGPIPE landing in an app that has no handler. */
@@ -560,7 +565,7 @@ static void release_child(void)
 
 void nd_music_stop(void)
 {
-    g.stop = 1;
+    atomic_store_explicit(&g.stop, 1, memory_order_relaxed);
 
     /* ORDER MATTERS, and it is nd_notify.c's order for nd_notify.c's reason:
      *   1. the player dies, which is what makes a blocked send() return;
@@ -586,7 +591,7 @@ void nd_music_stop(void)
     g.sent_bytes = 0u;
     g.paused = false;
     g.running = ND_MUSIC_BACKEND_NONE;
-    g.stop = 0;
+    atomic_store_explicit(&g.stop, 0, memory_order_relaxed);
 }
 
 /* ------------------------------------------------------------------ *

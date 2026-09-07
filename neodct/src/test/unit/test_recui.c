@@ -328,6 +328,47 @@ static void simple_map(nd_reckeymap *map)
     map->any_key = true;
 }
 
+/* ============ A KEYPAD IT CANNOT TALK TO IS NOT A KEYPAD ============
+ *
+ * nd_recmatrix_open() returned 0 whenever /dev/i2c-N merely existed -- which
+ * on the Luckfox it always does. open(2) and ioctl(I2C_SLAVE) are both purely
+ * local: i2c-dev range-checks the address and records it, and never touches
+ * the wires. The only transaction that does is the 0xFFFF release word, and
+ * its result was thrown away.
+ *
+ * So an unseated ribbon, a dead expander rail, or a keymap.json naming the
+ * wrong bus or address (both come straight off the writable partition) gave
+ * nd-recui a keypad that reported no key, ever. nd_recinput_open() then
+ * returned 0 because have_matrix was true, so nd-recui did NOT exit
+ * ND_RECUI_EXIT_NO_INPUT, so ndsys-recovery.sh never fell back to the serial
+ * text menu: a recovery menu on the panel that answers nothing, on a phone
+ * that is in recovery because it would not boot.
+ *
+ * nd_recmatrix_open() cannot be exercised here -- it opens a literal
+ * /dev/i2c-N with no root indirection -- but nd_recmatrix_attach() shares the
+ * probe and takes a descriptor, so the property is asserted through it. */
+static void t_a_descriptor_that_does_not_answer_is_refused(void)
+{
+    nd_reckeymap map;
+    nd_recmatrix mx;
+    int fd;
+
+    simple_map(&map);
+    /* A descriptor the release word cannot go down. Read-only rather than a
+     * socket whose peer has closed: that would raise SIGPIPE, and nd-recui
+     * links no libneodct and installs no handler, so the test process would
+     * die instead of asserting. write() here fails with EBADF and no signal,
+     * which models a chip that NAKs (EREMOTEIO) just as well for this. */
+    fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    CHECK(fd >= 0);
+    if (fd < 0)
+        return;
+
+    CHECK(nd_recmatrix_attach(&mx, &map, fd) != 0);
+
+    (void)close(fd);
+}
+
 static void t_the_scan_drives_rows_low_and_reads_columns(void)
 {
     nd_reckeymap map;
@@ -1125,6 +1166,7 @@ int main(void)
     RUN(t_a_mangled_keymap_loses_only_what_is_broken);
     RUN(t_a_structurally_broken_keymap_is_refused_whole);
     RUN(t_row_pin_singular_cannot_be_mistaken_for_row_pins);
+    RUN(t_a_descriptor_that_does_not_answer_is_refused);
     RUN(t_the_scan_drives_rows_low_and_reads_columns);
     RUN(t_a_closed_switch_becomes_its_key);
     RUN(t_a_held_key_is_reported_once_and_released_after_three_scans);

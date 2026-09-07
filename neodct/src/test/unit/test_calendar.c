@@ -49,6 +49,7 @@ static int64_t add_at(const char *title, int32_t y, int32_t m, int32_t d, int32_
                       int32_t repeat, int32_t alarm_min)
 {
     nd_cal_event ev;
+    time_t when;
 
     memset(&ev, 0, sizeof ev);
     ev.id = ND_CAL_NO_ID;
@@ -56,10 +57,14 @@ static int64_t add_at(const char *title, int32_t y, int32_t m, int32_t d, int32_
     ev.kind = ND_CAL_KIND_REMINDER;
     ev.repeat = repeat;
     ev.alarm_min = alarm_min;
-    if (!nd_cal_compose(y, m, d, hh, mm, &ev.start)) {
+    /* Through a time_t and then cast, not straight into the int64_t field.
+     * See the note in apps/Calendar/main.c new_event(): the two types are the
+     * same only by ABI coincidence. */
+    if (!nd_cal_compose(y, m, d, hh, mm, &when)) {
         CHECK(false);
         return ND_CAL_NO_ID;
     }
+    ev.start = (int64_t)when;
     return nd_cal_add(&ev);
 }
 

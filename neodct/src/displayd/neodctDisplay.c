@@ -53,7 +53,6 @@
 #include <time.h>
 #include <signal.h>
 #include <errno.h>
-#include <sys/time.h>
 
 /* ---------- configuration ---------- */
 
@@ -118,11 +117,26 @@ static long st_rect_px = 0;
 
 /* ---------- time ---------- */
 
+/* CLOCK_MONOTONIC, not gettimeofday().
+ *
+ * This is the frame pacer's clock, and the pacer sleeps for the difference
+ * between a deadline and now. On the wall clock a BACKWARD step makes that
+ * difference the size of the step: the phone has no RTC, comes up believing
+ * it is 1970 and has its clock set from NTP a minute into every boot -- and
+ * the owner can set it by hand in the Clock app at any time. Either one
+ * parked this loop, and this loop is the only thing that puts pixels on the
+ * ST7789: the panel simply stops updating, with the UI behind it running
+ * perfectly. Under QEMU there is no SPI panel and this program does not run.
+ *
+ * Nothing else here needs the wall clock, so it is monotonic throughout: the
+ * stats interval wants elapsed time too. */
 static double now_ms(void)
 {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0.0;
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
 }
 
 /* ---------- gpio (sysfs) ---------- */
@@ -708,6 +722,14 @@ int main(int argc, char *argv[])
         }
 
         double elapsed = now_ms() - t0;
+
+        /* Clamped as well as monotonic. A monotonic clock cannot go
+         * backwards, but a failed clock_gettime() returns 0.0 above, and a
+         * sleep computed from a negative elapsed is a panel that stops --
+         * which is too expensive an outcome to leave resting on one
+         * assumption. The sleep can never exceed one frame. */
+        if (elapsed < 0.0)
+            elapsed = 0.0;
         if (elapsed < frame_ms)
             usleep((useconds_t)((frame_ms - elapsed) * 1000.0));
     } while (!quit_flag && !once_mode);

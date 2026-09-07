@@ -370,9 +370,27 @@ static bool fd_poll_into_queue(nd_input *in, double wait_s)
         uint16_t type = 0u;
         uint16_t code = 0u;
         int32_t value = 0;
+        bool hung_up = false;
 
-        if (!nd_evdev_read_record(in->fd, got_any ? 0.0 : wait_s, &type, &code, &value))
+        if (!nd_evdev_read_record(in->fd, got_any ? 0.0 : wait_s, &type, &code, &value, &hung_up)) {
+            /* ============ A DESCRIPTOR THAT HAS FINISHED IS LET GO ============
+             *
+             * Without this the caller's wait loop asks again, ppoll() answers
+             * POLLHUP at once because it always does, and the whole thing
+             * becomes a busy-wait on the one core this phone has -- with no
+             * sleep anywhere in it and, for a wait with no timeout, no way
+             * out. Closing it drops the loop into the "no backend at all"
+             * branch below, which sleeps out its timeout rather than
+             * spinning; on the core, where may_reopen is true, the ordinary
+             * once-a-second retry then picks the device back up if it comes
+             * back. */
+            if (hung_up) {
+                nd_log(ND_LOG_INPUT, "input: the key descriptor has gone; closing it");
+                (void)close(in->fd);
+                in->fd = -1;
+            }
             break;
+        }
         got_any = true;
 
         if (type != ND_EV_KEY)
@@ -735,7 +753,29 @@ static void try_reopen_evdev(nd_input *in, uint64_t now, bool force)
         return;
     in->reopen_after_us = now + ND_REOPEN_INTERVAL_US;
 
-    (void)nd_evdev_discover_quiet(path, sizeof path);
+    /* ============ DISCOVERY'S VERDICT, NOT JUST ITS PATH ============
+     *
+     * The return value was thrown away, and discovery's LAST step is a
+     * deliberate diagnostic: with nothing found it answers ND_ERR_NOTFOUND
+     * and hands back ND_PATH_KEYPAD ("/dev/input/event0") anyway, so that
+     * nd_input_open()'s open() can produce the one error message naming what
+     * is actually wrong. That is right for the open at boot. It is wrong
+     * here, once a second, for the life of the core.
+     *
+     * On a Luckfox the keypad is the i2c matrix and /dev/input is empty, so
+     * this retry runs for ever -- and the moment the owner opens the Browser,
+     * nd_proc.c creates the uinput keyboard, which with no other input device
+     * on the board lands at exactly /dev/input/event0. is_our_injector()
+     * refuses it by name in every discovery step that chooses a device, and
+     * then step 6 hands it back as the default and this line opened it. The
+     * core adopting its own key injector -- every keypress written in and
+     * read straight back out -- survives the exclusion on the ONE path that
+     * runs on the phone.
+     *
+     * nd_input_open()'s own fallback is deliberately left alone: it runs once,
+     * before any injector can exist, and the diagnostic is the point there. */
+    if (nd_evdev_discover_quiet(path, sizeof path) != ND_OK)
+        return;
     fd = nd_evdev_open(path);
     if (fd < 0)
         return;

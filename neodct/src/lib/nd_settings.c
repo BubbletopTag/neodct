@@ -239,34 +239,111 @@ static bool settings_dir_blocks_the_write(void)
     return access(dir, W_OK | X_OK) != 0;
 }
 
-/* save_settings(): drop every system.os.* key, then write atomically. All
- * failures are swallowed -- an unwritable user partition must not stop the
- * phone booting, it just means preferences do not stick. */
-static void save_settings(const nd_props *settings)
+/* save_settings(): drop every system.os.* key, then write atomically.
+ *
+ * ============ THE FAILURE IS REPORTED NOW, NOT SWALLOWED ============
+ *
+ * "All failures are swallowed" was the whole contract, and it is right for
+ * the caller that reads a setting -- the flush that keeps settings.prop in
+ * step with the defaults must not stop the phone booting. It is wrong for the
+ * caller that SETS one: nd_settings_set() returned the result of updating the
+ * in-memory map and nothing else, so it answered ND_OK for a write that had
+ * been refused outright (a user partition root would orphan the file on) or
+ * had failed with ENOSPC on 8 MB of NAND that had filled up.
+ *
+ * What that costs is a setting the phone believes it saved. Sleepy's
+ * brightness, the Bluetooth pairing, the call-log timer: all written, all
+ * reported as saved, all gone at the next boot, with one line in a log the
+ * owner cannot read. Every screen that says "Saved" is saying it on the
+ * strength of this return value.
+ *
+ * So the errors travel and the FLUSH path is the one that ignores them --
+ * which is the way round it should always have been. */
+/* True when settings.prop already holds exactly the pairs `out` would write.
+ *
+ * Compared as a MAP and not as bytes: two files with the same pairs in a
+ * different order say the same thing, and rewriting one to reorder it is the
+ * write this is here to avoid. A file that cannot be read at all is not the
+ * same as `out`, so the write goes ahead -- which is what repairs a truncated
+ * or missing one. */
+static bool same_as_stored(const nd_props *out)
+{
+    nd_props *cur;
+    bool same;
+    size_t i;
+
+    if (!nd_path_exists(g_settings_path))
+        return false;
+    cur = nd_props_parse_settings(g_settings_path);
+    if (cur == NULL)
+        return false;
+
+    same = nd_props_count(cur) == nd_props_count(out);
+    for (i = 0u; same && i < nd_props_count(out); i++) {
+        const char *have = nd_props_get(cur, nd_props_key_at(out, i), NULL);
+
+        same = have != NULL && strcmp(have, nd_props_value_at(out, i)) == 0;
+    }
+    nd_props_free(cur);
+    return same;
+}
+
+static nd_err save_settings(const nd_props *settings)
 {
     nd_props *out;
     size_t i;
-    nd_err rc;
+    nd_err rc = ND_OK;
 
     /* The refusal comes BEFORE the allocation. It used to come after it, and
      * the `return` then dropped a whole nd_props on the floor every time the
      * write was declined -- once per setting read, on every boot of a phone
      * with a fresh user partition. */
     if (settings_dir_blocks_the_write())
-        return;
+        return ND_ERR_PERM;
 
     /* owned here; freed on every path out of this function */
     out = nd_props_new();
     if (out == NULL)
-        return;
+        return ND_ERR_NOMEM;
 
     for (i = 0u; i < nd_props_count(settings); i++) {
         const char *key = nd_props_key_at(settings, i);
 
         if (strncmp(key, ND_SETTINGS_SYSTEM_PREFIX, strlen(ND_SETTINGS_SYSTEM_PREFIX)) == 0)
             continue;
-        if (nd_props_set(out, key, nd_props_value_at(settings, i)) != ND_OK)
+        rc = nd_props_set(out, key, nd_props_value_at(settings, i));
+        if (rc != ND_OK)
             goto done;
+    }
+
+    /* ============ C-5: ONLY WHEN THE CONTENT ACTUALLY CHANGED ============
+     *
+     * OPEN-QUESTIONS.md C-5, approved and until now unimplemented. DEFAULTS
+     * holds three system.os.* keys, the loop above strips exactly those, so
+     * nd_settings_flush_if_needed()'s "missing keys" test is PERMANENTLY
+     * true -- and every get_setting() therefore reached this line and did a
+     * full atomic rewrite: temp file, fsync, rename. On 128 MB of UBIFS/NAND
+     * the owner cannot replace, from services that read settings on hot
+     * paths.
+     *
+     * 0.5.14a made it worse without anyone noticing. Its app-generation token
+     * asks nd_ui_engineering_mode(), which is a settings read, on EVERY app
+     * exit -- so a write that used to be attached to whatever happened to
+     * read a setting became one guaranteed erase/program cycle per app the
+     * owner closes. Measured on the running phone: settings.prop's mtime
+     * moves on every single app exit and on nothing else.
+     *
+     *     BEFORE 09:05:31   (open one app, close it)
+     *     AFTER1 09:06:17
+     *     IDLE6  09:06:17   (six seconds later, untouched)
+     *
+     * The flush still repairs a file that is absent, truncated or carrying
+     * stale system.os.* keys -- that is what it is for, and those all differ
+     * from what would be written. What it no longer does is rewrite a
+     * correct file to say the same thing again. */
+    if (same_as_stored(out)) {
+        rc = ND_OK;
+        goto done;
     }
 
     rc = nd_props_write_atomic(g_settings_path, out, true);
@@ -296,6 +373,7 @@ static void save_settings(const nd_props *settings)
 
 done:
     nd_props_free(out);
+    return rc;
 }
 
 nd_err nd_settings_flush_if_needed(nd_props *effective, const nd_props *stored)
@@ -328,7 +406,11 @@ nd_err nd_settings_flush_if_needed(nd_props *effective, const nd_props *stored)
     }
 
     if (stale || missing || !nd_path_exists(g_settings_path))
-        save_settings(effective);
+        /* Deliberately ignored HERE and nowhere else: this is the flush that
+         * keeps settings.prop in step with the defaults, and an unwritable
+         * user partition must not stop a phone reading a setting. The caller
+         * that SETS one gets the error. */
+        (void)save_settings(effective);
 
     return ND_OK;
 }
@@ -436,7 +518,7 @@ nd_err nd_settings_set(const char *key, const char *value)
      * as in the Python -- set_setting() has no idea the prefix is special. */
     rc = nd_props_set(eff, key, value);
     if (rc == ND_OK)
-        save_settings(eff);
+        rc = save_settings(eff);
 
     nd_props_free(eff);
     return rc;

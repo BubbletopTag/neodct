@@ -34,6 +34,18 @@ def phone(tmp_path, monkeypatch):
         "authorized_keys": RemoteShell.AUTHORIZED_KEYS,
         "known_hosts": RemoteShell.KNOWN_HOSTS,
     })
+    # An sshd binary that exists. check_ready()'s FIRST question is whether
+    # this build has one, and a build host without openssh installed answers
+    # "no" -- so every test below about the relay address, the keys and the
+    # known_hosts got "This build has no ssh server." instead of the refusal
+    # it was written for. Which check fires is the whole assertion in those
+    # tests, so the first one has to be satisfied for the rest to be reached.
+    # test_it_will_not_start_without_an_sshd covers the unsatisfied case.
+    sshd = tmp_path / "sbin" / "sshd"
+    sshd.parent.mkdir(parents=True, exist_ok=True)
+    sshd.write_text("#!/bin/sh\nexit 0\n")
+    sshd.chmod(0o755)
+    monkeypatch.setattr(RemoteShell, "SSHD", str(sshd))
     card = tmp_path / "sdcard"
     (card / "remote").mkdir(parents=True)
     return type("Phone", (), {"user": user, "card": card, "tmp": tmp_path})()
@@ -178,6 +190,17 @@ def test_a_relay_address_with_a_quote_in_it_cannot_run_a_command(phone, tmp_path
 
 
 # --- refusing to start ------------------------------------------------------
+
+def test_it_will_not_start_without_an_sshd(phone, monkeypatch):
+    """The first question, and the one the build answers rather than the
+    owner: an image without openssh cannot serve a shell whatever else is
+    configured, and saying so beats starting a tunnel to nothing."""
+    monkeypatch.setattr(RemoteShell, "SSHD", str(phone.tmp / "sbin" / "absent"))
+    RemoteShell.save_settings(host="relay.example")
+
+    with pytest.raises(RemoteShell.RemoteShellError, match="no ssh server"):
+        RemoteShell.check_ready()
+
 
 def test_it_will_not_start_without_a_relay(phone):
     with pytest.raises(RemoteShell.RemoteShellError, match="relay address"):

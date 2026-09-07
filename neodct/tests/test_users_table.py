@@ -186,6 +186,8 @@ NEODCT_MK = os.path.join(REPO, "buildroot", "package", "neodct", "neodct.mk")
 
 
 POST_IMAGE = os.path.join(REPO, "neodct", "scripts", "post-image-neodct.sh")
+# Where the guard actually lives; post-image-neodct.sh ends by running it.
+CHECK_USERS = os.path.join(REPO, "neodct", "scripts", "check-users.sh")
 
 
 @pytest.mark.skipif(not os.path.exists(NEODCT_MK), reason="buildroot not vendored")
@@ -240,16 +242,25 @@ def test_the_table_is_not_read_with_a_make_4_only_function():
     assert "$(shell sed" in code, "read the table with $(shell), which is portable"
 
 
-@pytest.mark.skipif(not os.path.exists(POST_IMAGE), reason="script missing")
+@pytest.mark.skipif(not os.path.exists(CHECK_USERS), reason="script missing")
 def test_the_build_refuses_an_image_with_no_users():
     """Belt and braces, and the braces matter more.
 
     Both mechanisms above can fail -- a renamed file, an odd .config, a make
     that behaves unexpectedly. What must never happen again is that such a
-    build SUCCEEDS and hands over an image where every app is root. post-image
+    build SUCCEEDS and hands over an image where every app is root. The check
     greps the users table buildroot actually handed mkusers and exits non-zero
-    if the users are not in it."""
-    body = open(POST_IMAGE).read()
+    if the users are not in it.
+
+    It used to be the last function in post-image-neodct.sh and this test read
+    that file. It is check-users.sh now, because post-image-neodct.sh runs for
+    the QEMU target only and the LUCKFOX image -- the one that goes on the
+    phone -- therefore had no guard at all. Reading the old file made this test
+    fail rather than follow the move, so the assertions below are on the script
+    that holds the check today, and the test underneath is on the wiring that
+    reaches it from BOTH defconfigs, which is the half that was actually
+    wrong."""
+    body = open(CHECK_USERS).read()
 
     assert "full_users_table.txt" in body, "the check must read what mkusers got"
     assert "ndusr_ut" in body, "both users have to be checked, not just ndusr"
@@ -258,6 +269,40 @@ def test_the_build_refuses_an_image_with_no_users():
     # wrongly left the path non-existent, which took the "cannot verify" branch
     # and passed -- a check that silently passes is worse than no check.
     assert "BASE_DIR" in body, "BUILD_DIR is not exported; derive it from BASE_DIR"
+
+
+# NeoDCT's own defconfigs, in both places they are kept. buildroot/configs
+# also holds several hundred upstream ones, which are none of this project's
+# business; the names in neodct/configs are what says which are ours.
+OUR_DEFCONFIGS = sorted(
+    os.path.join(d, name)
+    for name in os.listdir(os.path.join(REPO, "neodct", "configs"))
+    if name.endswith("_defconfig")
+    for d in (os.path.join(REPO, "neodct", "configs"),
+              os.path.join(REPO, "buildroot", "configs"))
+    if os.path.exists(os.path.join(d, name)))
+
+
+@pytest.mark.parametrize("defconfig", OUR_DEFCONFIGS,
+                         ids=lambda p: "%s/%s" % (
+                             os.path.basename(os.path.dirname(os.path.dirname(p))),
+                             os.path.basename(p)))
+def test_every_defconfig_reaches_the_users_check(defconfig):
+    """The guard has to run for the target that SHIPS, not only for QEMU.
+
+    It ran for QEMU only once, because it lived at the end of
+    post-image-neodct.sh and only neodct_qemu_defconfig named that script. A
+    defconfig may reach check-users.sh directly or through
+    post-image-neodct.sh, which ends by running it; naming neither is the
+    failure this asserts against, on both copies of every defconfig."""
+    line = ""
+    for candidate in open(defconfig).read().splitlines():
+        if candidate.startswith("BR2_ROOTFS_POST_IMAGE_SCRIPT="):
+            line = candidate
+    assert line, "no BR2_ROOTFS_POST_IMAGE_SCRIPT at all"
+    assert "check-users.sh" in line or "post-image-neodct.sh" in line, (
+        "%s runs no script that checks the users table, so it can build an "
+        "image in which every app is root" % os.path.basename(defconfig))
 
 
 @pytest.mark.skipif(not os.path.exists(MKUSERS), reason="buildroot not vendored")

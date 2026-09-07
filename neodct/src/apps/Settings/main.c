@@ -1549,6 +1549,7 @@ static format_outcome run_format_job(nd_ui *ui)
  */
 static void report_format_failure(nd_ui *ui)
 {
+    static const int32_t ok_key = ND_KEY_ENTER;
     nd_msgdialog dialog;
     nd_card after;
 
@@ -1572,14 +1573,35 @@ static void report_format_failure(nd_ui *ui)
                           "until it is formatted.");
     }
     nd_msgdialog_set_button(&dialog, "OK");
-    /* cancel_keys=(): a destructive operation that did not finish has to be
-     * acknowledged rather than backed past. */
-    nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
+    /* ============ AN "OK" BUTTON WITH NO KEY BEHIND IT ============
+     *
+     * Seven places in this file passed an empty accept set AND an empty
+     * cancel set. That is nd_msgdialog_show()'s documented UN-CANCELLABLE
+     * case -- the one the low-battery shutdown wants, where the loop is
+     * waiting for the power to go and not for a key. It never returns. So
+     * every one of these drew an "OK" softkey that answered nothing and left
+     * the phone dead until the battery came out.
+     *
+     * The project has already been here once: install_notice() below carries
+     * the note, because this froze the phone on the "Installed ..." notice
+     * after every install. The intent -- Clear must not back past a result
+     * the owner should read -- is kept by an accept set of ND_KEY_ENTER and
+     * an EMPTY cancel set, which is what that function does. An empty accept
+     * set is not that intent; it is no way out.
+     *
+     * These seven are the memory-card path: a format that failed, one that
+     * could not start, one that ran out of time, a card with no device, a
+     * setup that could not write, and a card whose status could not be read.
+     * Every one is a real branch, several are the ordinary answer for a card
+     * that is merely busy, and each ended in a phone that had to have its
+     * battery pulled. */
+    nd_msgdialog_set_keys(&dialog, &ok_key, 1u, NULL, 0u);
     (void)nd_msgdialog_show(&dialog);
 }
 
 static void offer_format(nd_ui *ui, const nd_card *card)
 {
+    static const int32_t ok_key = ND_KEY_ENTER;
     nd_msgdialog dialog;
     format_outcome outcome;
     const char *saved;
@@ -1591,7 +1613,7 @@ static void offer_format(nd_ui *ui, const nd_card *card)
     if (card->device[0] == '\0') {
         nd_msgdialog_init(&dialog, ui, "No card device to format.");
         nd_msgdialog_set_button(&dialog, "OK");
-        nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
+        nd_msgdialog_set_keys(&dialog, &ok_key, 1u, NULL, 0u);
         (void)nd_msgdialog_show(&dialog);
         return;
     }
@@ -1631,7 +1653,7 @@ static void offer_format(nd_ui *ui, const nd_card *card)
                           "start. Nothing was\n"
                           "changed.");
         nd_msgdialog_set_button(&dialog, "OK");
-        nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
+        nd_msgdialog_set_keys(&dialog, &ok_key, 1u, NULL, 0u);
         (void)nd_msgdialog_show(&dialog);
         return;
     case FORMAT_TIMED_OUT:
@@ -1652,7 +1674,7 @@ static void offer_format(nd_ui *ui, const nd_card *card)
                           "The card is unusable\n"
                           "until it is formatted.");
         nd_msgdialog_set_button(&dialog, "OK");
-        nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
+        nd_msgdialog_set_keys(&dialog, &ok_key, 1u, NULL, 0u);
         (void)nd_msgdialog_show(&dialog);
         return;
     case FORMAT_STOPPED:
@@ -1661,7 +1683,7 @@ static void offer_format(nd_ui *ui, const nd_card *card)
                           "The card is unusable\n"
                           "until it is formatted.");
         nd_msgdialog_set_button(&dialog, "OK");
-        nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
+        nd_msgdialog_set_keys(&dialog, &ok_key, 1u, NULL, 0u);
         (void)nd_msgdialog_show(&dialog);
         return;
     case FORMAT_FAILED:
@@ -1697,6 +1719,7 @@ static bool fstype_is_ext(const char *fstype)
 
 static void setup_card(nd_ui *ui, const nd_card *card)
 {
+    static const int32_t ok_key = ND_KEY_ENTER;
     nd_msgdialog dialog;
 
     /* Both halves of this can take a moment on a slow card -- the layout pass
@@ -1728,8 +1751,9 @@ static void setup_card(nd_ui *ui, const nd_card *card)
                               "It may be locked or damaged.");
         }
         nd_msgdialog_set_button(&dialog, "OK");
-        /* cancel_keys=(): the failure has to be acknowledged. */
-        nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
+        /* An accept key, not an empty set: see the note above the first of
+         * these. Clear still does not dismiss, which is the intent. */
+        nd_msgdialog_set_keys(&dialog, &ok_key, 1u, NULL, 0u);
         (void)nd_msgdialog_show(&dialog);
         return;
     }
@@ -1750,6 +1774,7 @@ static void setup_card(nd_ui *ui, const nd_card *card)
 
 static void show_memory_card(nd_ui *ui)
 {
+    static const int32_t ok_key = ND_KEY_ENTER;
     nd_card card;
     nd_msgdialog dialog;
     nd_scroller help;
@@ -1786,7 +1811,7 @@ static void show_memory_card(nd_ui *ui)
                           "out and put it back,\n"
                           "or restart the phone.");
         nd_msgdialog_set_button(&dialog, "OK");
-        nd_msgdialog_set_keys(&dialog, NULL, 0u, NULL, 0u);
+        nd_msgdialog_set_keys(&dialog, &ok_key, 1u, NULL, 0u);
         (void)nd_msgdialog_show(&dialog);
         return;
     }
