@@ -440,6 +440,32 @@ int32_t nd_msgdialog_show(nd_msgdialog *d)
         for (;;) {
             int32_t key = nd_ui_wait_for_key(d->ui);
 
+            /* ============ A CALL IS NOT "ANY OTHER KEY" ============
+             *
+             * ND_KEY_INCOMING_CALL fell into the ignore branch below, and
+             * ring_tick() re-reports it on EVERY read for as long as the
+             * phone rings -- so the wait stopped waiting and the loop became
+             * a busy-wait on this device's one core, with the call
+             * unanswered behind a dialog that could not be got past. Every
+             * modal in the core is affected: the crash notice, the format
+             * warning, "Restart the phone?".
+             *
+             * nd_crash.c's own key loop has answered this since it was
+             * written ("An incoming call must not be trapped behind a crash
+             * screen"), and nd_appsel and nd_vlist answer it for the two
+             * selectors. This is the same answer for the third widget that
+             * owns a key loop.
+             *
+             * Returned rather than swallowed, so the caller unwinds and the
+             * core's own handler sees the call. A caller comparing against
+             * ND_KEY_ENTER to tell Yes from No reads it as No, which is the
+             * safe half of every dialog in the tree -- and is what the crash
+             * loop's plain `return` already amounts to. */
+            if (key == ND_KEY_INCOMING_CALL) {
+                out = key;
+                break;
+            }
+
             /* Any other key is ignored with NO redraw. An un-cancellable
              * notice (n_accept == n_cancel == 0) therefore never returns,
              * which is what the low-battery shutdown wants -- it is waiting

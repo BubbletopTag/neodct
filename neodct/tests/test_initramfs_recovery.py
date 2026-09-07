@@ -74,6 +74,98 @@ def test_installs_a_good_package_onto_the_device(tmp_path):
     assert device.read_bytes()[:len(image)] == image
 
 
+# ============ AND ON THE PHONE THE DEVICE IS NOT WRITABLE ============
+#
+# The Luckfox cmdline hands the initramfs a ubiblock device:
+#
+#     ubi.mtd=4 ubi.block=0,system neodct.sys=/dev/ubiblock0_0
+#
+# ubiblock is registered READ-ONLY by the kernel on purpose -- it exists so
+# squashfs and dm-verity have a block device to READ -- so `dd
+# of=/dev/ubiblock0_0` cannot succeed for anyone, ever. ndsys-apply.sh learned
+# this and grew write_system()/ubiupdatevol; recovery_install_package() kept
+# its dd, so the phone's only repair path that does not need a reflash rig
+# could not repair the only hardware it ships on.
+#
+# It was invisible from both sides: every test above installs onto an ordinary
+# file, which dd is happy with, and under QEMU the system device is /dev/vda.
+
+
+def fake_ubiupdatevol(tmp_path):
+    """A stand-in that records its arguments and performs the write."""
+    log = tmp_path / "ubiupdatevol.args"
+    tool = tmp_path / "fake-ubiupdatevol"
+    tool.write_text("\n".join([
+        "#!/bin/sh",
+        'echo "$*" >> "%s"' % log,
+        'size=""; dev=""',
+        'while [ $# -gt 0 ]; do',
+        '  case "$1" in',
+        '    -s) size=$2; shift 2 ;;',
+        '    -t) dev=$2; shift 2; : > "$dev"; exit 0 ;;',
+        '    -) shift ;;',
+        '    *) dev=$1; shift ;;',
+        '  esac',
+        'done',
+        'cat > "$dev"',
+        "",
+    ]))
+    tool.chmod(0o755)
+    return tool, log
+
+
+def test_a_ubiblock_system_device_is_written_with_ubiupdatevol(tmp_path):
+    package, image, _ = make_package(tmp_path)
+    dev = tmp_path / "dev"
+    dev.mkdir()
+    # The volume character device is what may be written; the ubiblock disk
+    # beside it is the read-only view the rest of the boot uses. The test
+    # gives the ubiblock node the image's bytes because pass 3 reads the
+    # result back through it, which is what the phone does too.
+    volume = dev / "ubi0_0"
+    volume.write_bytes(b"")
+    device = dev / "ubiblock0_0"
+    device.write_bytes(b"\x00" * len(image))
+    tool, log = fake_ubiupdatevol(tmp_path)
+
+    result = run(tmp_path,
+                 'NDSYS_UBIUPDATEVOL="%s"\nrecovery_install_package "%s" "%s"'
+                 % (tool, package, device))
+
+    assert log.exists(), \
+        "ubiupdatevol was never called; recovery still dd's the read-only disk"
+    args = log.read_text()
+    assert str(volume) in args, "wrote to the wrong node: %r" % args
+    assert "-s %d" % len(image) in args, "no explicit size: %r" % args
+    assert volume.read_bytes()[:len(image)] == image
+    # The read-back is through the ubiblock node, which on hardware is the
+    # kernel's own view of the volume; here it is a separate file, so the
+    # install as a whole is expected to report the mismatch rather than
+    # succeed. What is asserted is the WRITE, which is what was broken.
+    assert result.returncode in (0, 1)
+
+
+def test_wiping_the_system_truncates_a_ubi_volume_rather_than_dd_ing_it(tmp_path):
+    """The same read-only device, reached by the other verb."""
+    dev = tmp_path / "dev"
+    dev.mkdir()
+    volume = dev / "ubi0_0"
+    volume.write_bytes(b"junk that must go")
+    device = dev / "ubiblock0_0"
+    device.write_bytes(b"\x00" * 4096)
+    tool, log = fake_ubiupdatevol(tmp_path)
+
+    run(tmp_path,
+        'NDSYS_UBIUPDATEVOL="%s"; SYS_DEV="%s"\n'
+        'recovery_confirm() { return 0; }\n'
+        'recovery_say() { :; }\n'
+        'recovery_action_wipe_system\n' % (tool, device))
+
+    assert log.exists(), "wipe still dd's a device the kernel will not write"
+    assert "-t" in log.read_text(), log.read_text()
+    assert volume.read_bytes() == b""
+
+
 def test_records_what_the_next_boot_needs_to_verify(tmp_path):
     package, image, body = make_package(tmp_path)
     device = tmp_path / "system.img"

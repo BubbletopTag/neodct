@@ -448,7 +448,11 @@ void nd_msgdialog_render(nd_msgdialog *d);
 void nd_msgdialog_measure(nd_msgdialog *d, size_t *needed, size_t *fits);
 
 /* Draw, then return the key that dismissed it. Callers compare against
- * ND_KEY_ENTER to tell Yes from No. Any other key is ignored with no redraw.
+ * ND_KEY_ENTER to tell Yes from No. Any other key is ignored with no redraw --
+ * except ND_KEY_INCOMING_CALL, which is RETURNED so the caller unwinds and the
+ * core can answer the phone. A caller that only tests for ND_KEY_ENTER reads
+ * it as "No", which is the safe half of every dialog here. Without that the
+ * loop spins: ring_tick() re-reports the call on every read.
  *
  * When the message needs more than two lines at 20 px the dialog switches to
  * the 14 px left-aligned paragraph look; two lines or fewer keep the centred

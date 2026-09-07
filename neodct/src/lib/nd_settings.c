@@ -259,6 +259,35 @@ static bool settings_dir_blocks_the_write(void)
  *
  * So the errors travel and the FLUSH path is the one that ignores them --
  * which is the way round it should always have been. */
+/* True when settings.prop already holds exactly the pairs `out` would write.
+ *
+ * Compared as a MAP and not as bytes: two files with the same pairs in a
+ * different order say the same thing, and rewriting one to reorder it is the
+ * write this is here to avoid. A file that cannot be read at all is not the
+ * same as `out`, so the write goes ahead -- which is what repairs a truncated
+ * or missing one. */
+static bool same_as_stored(const nd_props *out)
+{
+    nd_props *cur;
+    bool same;
+    size_t i;
+
+    if (!nd_path_exists(g_settings_path))
+        return false;
+    cur = nd_props_parse_settings(g_settings_path);
+    if (cur == NULL)
+        return false;
+
+    same = nd_props_count(cur) == nd_props_count(out);
+    for (i = 0u; same && i < nd_props_count(out); i++) {
+        const char *have = nd_props_get(cur, nd_props_key_at(out, i), NULL);
+
+        same = have != NULL && strcmp(have, nd_props_value_at(out, i)) == 0;
+    }
+    nd_props_free(cur);
+    return same;
+}
+
 static nd_err save_settings(const nd_props *settings)
 {
     nd_props *out;
@@ -285,6 +314,36 @@ static nd_err save_settings(const nd_props *settings)
         rc = nd_props_set(out, key, nd_props_value_at(settings, i));
         if (rc != ND_OK)
             goto done;
+    }
+
+    /* ============ C-5: ONLY WHEN THE CONTENT ACTUALLY CHANGED ============
+     *
+     * OPEN-QUESTIONS.md C-5, approved and until now unimplemented. DEFAULTS
+     * holds three system.os.* keys, the loop above strips exactly those, so
+     * nd_settings_flush_if_needed()'s "missing keys" test is PERMANENTLY
+     * true -- and every get_setting() therefore reached this line and did a
+     * full atomic rewrite: temp file, fsync, rename. On 128 MB of UBIFS/NAND
+     * the owner cannot replace, from services that read settings on hot
+     * paths.
+     *
+     * 0.5.14a made it worse without anyone noticing. Its app-generation token
+     * asks nd_ui_engineering_mode(), which is a settings read, on EVERY app
+     * exit -- so a write that used to be attached to whatever happened to
+     * read a setting became one guaranteed erase/program cycle per app the
+     * owner closes. Measured on the running phone: settings.prop's mtime
+     * moves on every single app exit and on nothing else.
+     *
+     *     BEFORE 09:05:31   (open one app, close it)
+     *     AFTER1 09:06:17
+     *     IDLE6  09:06:17   (six seconds later, untouched)
+     *
+     * The flush still repairs a file that is absent, truncated or carrying
+     * stale system.os.* keys -- that is what it is for, and those all differ
+     * from what would be written. What it no longer does is rewrite a
+     * correct file to say the same thing again. */
+    if (same_as_stored(out)) {
+        rc = ND_OK;
+        goto done;
     }
 
     rc = nd_props_write_atomic(g_settings_path, out, true);

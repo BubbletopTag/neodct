@@ -353,6 +353,12 @@ static void sleep_us(long usec)
  * a plain two-byte read after one I2C_SLAVE ioctl ARE the correct raw
  * transactions. Low byte first, which is the order it latches its two ports
  * in. Writing 1 releases a pin to its weak pull-up; writing 0 drives it low. */
+/* lib/nd_matrix.c's PROBE_TRIES / PROBE_RETRY_US, on purpose: the same chip on
+ * the same board, and a recovery that gave up sooner than the ordinary boot
+ * does would call a working keypad dead. */
+#define ND_RECMATRIX_PROBE_TRIES    10
+#define ND_RECMATRIX_PROBE_RETRY_US 50000L
+
 static int chip_write(int fd, uint16_t value)
 {
     uint8_t out[2];
@@ -372,13 +378,21 @@ static int chip_read(int fd, uint16_t *value)
     return 0;
 }
 
-static void matrix_reset_state(nd_recmatrix *mx, const nd_reckeymap *map)
+/* Release every pin on the way in, so a restart mid-scan cannot leave a row
+ * driven low against a pressed key -- AND report whether the chip answered.
+ *
+ * That write is the only thing in nd_recmatrix_open() that ever touches the
+ * wires. open(2) on /dev/i2c-N and ioctl(I2C_SLAVE) are both purely local:
+ * i2c-dev's I2C_SLAVE handler range-checks the address and records it, and
+ * never probes. lib/nd_pcf8575.c says the same thing about the same chip
+ * ("This is the FIRST transaction that ever touches the wires"), and
+ * lib/nd_matrix.c's scanner_finish_init() acts on it. This one discarded the
+ * result. */
+static int matrix_reset_state(nd_recmatrix *mx, const nd_reckeymap *map)
 {
     mx->map = map;
     memset(mx->held, -1, sizeof mx->held);
-    /* Release every pin on the way in, so a restart mid-scan cannot leave a
-     * row driven low against a pressed key. */
-    (void)chip_write(mx->fd, 0xFFFFu);
+    return chip_write(mx->fd, 0xFFFFu);
 }
 
 int nd_recmatrix_open(nd_recmatrix *mx, const nd_reckeymap *map)
@@ -407,8 +421,46 @@ int nd_recmatrix_open(nd_recmatrix *mx, const nd_reckeymap *map)
         return -1;
     }
     mx->owns_fd = true;
-    matrix_reset_state(mx, map);
-    return 0;
+
+    /* ============ AND NOW ASK WHETHER THE CHIP IS THERE ============
+     *
+     * This returned 0 unconditionally, so nd-recui claimed a keypad whenever
+     * /dev/i2c-N merely existed -- which on the Luckfox it always does. With
+     * an unseated ribbon, a dead expander rail, or a keymap.json naming the
+     * wrong bus or address (both come straight off the writable partition),
+     * every scan then read 0xFFFF-or-nothing and no key was ever reported.
+     *
+     * What that costs is the whole point of recovery: nd_recinput_open()
+     * returns 0 because have_matrix is true, so nd-recui does NOT exit
+     * ND_RECUI_EXIT_NO_INPUT, so ndsys-recovery.sh never falls back to the
+     * serial text menu -- and the owner is left looking at a recovery menu on
+     * the panel that answers nothing, on a phone that is already in recovery
+     * because it would not boot.
+     *
+     * The budget is lib/nd_matrix.c's, deliberately: ten tries 50 ms apart,
+     * so an expander whose rail is still rising this early in the initramfs
+     * is not written off on the first NAK. */
+    {
+        int try_no;
+
+        for (try_no = 0; try_no < ND_RECMATRIX_PROBE_TRIES; try_no++) {
+            if (try_no > 0)
+                sleep_us(ND_RECMATRIX_PROBE_RETRY_US);
+            if (matrix_reset_state(mx, map) == 0) {
+                if (try_no > 0)
+                    fprintf(stderr, "nd-recui: expander at 0x%02X answered on attempt %d\n",
+                            map->i2c_addr, try_no + 1);
+                return 0;
+            }
+        }
+    }
+
+    fprintf(stderr, "nd-recui: no expander at 0x%02X on %s: %s\n", map->i2c_addr, path,
+            strerror(errno));
+    (void)close(mx->fd);
+    mx->fd = -1;
+    mx->owns_fd = false;
+    return -1;
 }
 
 int nd_recmatrix_attach(nd_recmatrix *mx, const nd_reckeymap *map, int fd)
@@ -418,7 +470,15 @@ int nd_recmatrix_attach(nd_recmatrix *mx, const nd_reckeymap *map, int fd)
     memset(mx, 0, sizeof *mx);
     mx->fd = fd;
     mx->owns_fd = false;
-    matrix_reset_state(mx, map);
+    /* The same question nd_recmatrix_open() asks, for the same reason: a
+     * descriptor handed in is no more evidence that a chip is on the other
+     * end of it than one this function opened itself. No retry loop here --
+     * the caller has already decided this descriptor is the keypad, so a
+     * refusal is an answer rather than a race. */
+    if (matrix_reset_state(mx, map) != 0) {
+        mx->fd = -1;
+        return -1;
+    }
     return 0;
 }
 

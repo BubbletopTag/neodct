@@ -753,7 +753,29 @@ static void try_reopen_evdev(nd_input *in, uint64_t now, bool force)
         return;
     in->reopen_after_us = now + ND_REOPEN_INTERVAL_US;
 
-    (void)nd_evdev_discover_quiet(path, sizeof path);
+    /* ============ DISCOVERY'S VERDICT, NOT JUST ITS PATH ============
+     *
+     * The return value was thrown away, and discovery's LAST step is a
+     * deliberate diagnostic: with nothing found it answers ND_ERR_NOTFOUND
+     * and hands back ND_PATH_KEYPAD ("/dev/input/event0") anyway, so that
+     * nd_input_open()'s open() can produce the one error message naming what
+     * is actually wrong. That is right for the open at boot. It is wrong
+     * here, once a second, for the life of the core.
+     *
+     * On a Luckfox the keypad is the i2c matrix and /dev/input is empty, so
+     * this retry runs for ever -- and the moment the owner opens the Browser,
+     * nd_proc.c creates the uinput keyboard, which with no other input device
+     * on the board lands at exactly /dev/input/event0. is_our_injector()
+     * refuses it by name in every discovery step that chooses a device, and
+     * then step 6 hands it back as the default and this line opened it. The
+     * core adopting its own key injector -- every keypress written in and
+     * read straight back out -- survives the exclusion on the ONE path that
+     * runs on the phone.
+     *
+     * nd_input_open()'s own fallback is deliberately left alone: it runs once,
+     * before any injector can exist, and the diagnostic is the point there. */
+    if (nd_evdev_discover_quiet(path, sizeof path) != ND_OK)
+        return;
     fd = nd_evdev_open(path);
     if (fd < 0)
         return;
