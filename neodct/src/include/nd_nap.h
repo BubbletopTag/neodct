@@ -162,6 +162,21 @@ extern "C" {
  * nd_msgdialog shows five lines of 14 px; every string written here fits. */
 #define ND_NAP_WHY_MAX 128
 
+/* The one refusal that is not about the package at all, hoisted out of
+ * nd_nap.c for the same reason ND_UI_MODEM_FAULT_MESSAGE is hoisted out of
+ * nd_ui.c: a message the phone really shows needs a test that can NAME it and
+ * measure it, and nd_msgdialog clips silently with a glyph the font does not
+ * have. test_widgets_dialogs.c measures this one.
+ *
+ * It exists at all because 0.5.14a said "Cannot read the package." for EACCES
+ * as well as ENOENT, which sent the owner to look at two packages that were
+ * perfectly good -- they were 0640 root:root from an engineering app running
+ * as root under umask 0027, in a folder ndusr owns. The repair named here is
+ * real: re-seating the card runs neodct-sdcard's apply_layout(), whose
+ * untrusted/ pass restates exactly these modes. */
+#define ND_NAP_WHY_UNREADABLE \
+    "Not allowed to read\nthe package.\nTake the card out and\nput it back in."
+
 /* How many .nap files a scan of the card reports. */
 #define ND_NAP_MAX_FOUND 64
 
@@ -187,7 +202,23 @@ typedef struct {
 /* ---- what phone is this ---------------------------------------------- */
 
 /* uname(2)'s machine field as a package tag, or "" for a machine no package
- * can name. Cached on first use. */
+ * can name. Cached on first use.
+ *
+ * DELIBERATELY NOT nd_platform.h, although /NeoDCT/platform's image= key
+ * carries two of these three strings and the duplication is real. Two reasons
+ * it must stay uname(2):
+ *
+ *   The question is an ABI question. A .nap carries native app.so files, so
+ *   what decides which of them can be loaded is the machine executing this
+ *   code -- not what an image once recorded about itself. host-x86_64 is the
+ *   proof: it is a legitimate answer here, nd-shoot and the unit tests are in
+ *   it every day, and no image= will ever say it.
+ *
+ *   And UNKNOWN has no safe meaning in a package path. A phone whose flag was
+ *   missing would resolve to "" and every install and every arch match would
+ *   fail -- so a cheap-looking substitution turns a missing four-line file
+ *   into a phone that cannot install anything. uname(2) does not have a
+ *   missing case. */
 const char *nd_nap_phone_arch(void);
 
 /* The mapping itself, exposed so a test can pin it: "armv7l" -> luckfox,

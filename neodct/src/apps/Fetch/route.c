@@ -197,13 +197,62 @@ nd_err fetch_dest_path(const char *mount, const char *name, bool psx_installed, 
     }
 }
 
+const char *fetch_dest_note(const char *name, bool psx_installed)
+{
+    fetch_dest_kind k;
+
+    if (name == NULL || psx_installed)
+        return NULL;
+    k = fetch_classify(name);
+    /* The same two kinds fetch_dest_path() downgrades, tested the same way, so
+     * the sentence cannot come to describe a rule this file no longer has. */
+    if (k != FETCH_DEST_GAME && k != FETCH_DEST_BIOS)
+        return NULL;
+    return FETCH_NOTE_NO_PSX;
+}
+
+/* One component of the chain, made and then STATED.
+ *
+ * mkdir(2)'s mode argument is masked by the process umask, which under
+ * run_neodct.sh is 0027, so the 0755 asked for here arrives as 0750 and the
+ * root that asked for it owns it. That is a games/<Title>/ the PSX app --
+ * ndusr_ut, and "other" in an ndusr:ndusr tree -- cannot list or traverse,
+ * beside a bios/ it cannot reach either: the same disease as the file inside,
+ * one level up, and it hides the cure. So the mode is restated with an
+ * explicit chmod and the directory is handed to whoever owns its parent.
+ *
+ * Only when THIS call created it. An EEXIST is untrusted/ or music/ or the
+ * card root, each of which has a mode of its own out of neodct-sdcard's
+ * CARD_LAYOUT -- 0770 ndusr:ndusr_ut for untrusted/, notably -- and a
+ * mkdir_p that chmodded 0755 on its way past would quietly widen the arrival
+ * area every time somebody downloaded a disc image.
+ *
+ * The walk is top-down, which is what makes the handover correct: by the time
+ * a new directory asks who owns its parent, the parent either predates this
+ * app (and apply_layout() has stated it) or was made and given away one
+ * iteration ago. */
+static nd_err mkdir_one(const char *path)
+{
+    char resolved[ND_PATH_MAX];
+
+    if (nd_path_resolve(resolved, sizeof resolved, path) != ND_OK)
+        return ND_ERR_TOOLONG;
+    if (mkdir(resolved, 0755) != 0)
+        return (errno == EEXIST) ? ND_OK : ND_ERR_IO;
+    /* Ownership before mode, the same order fetch_give_to_reader() uses and
+     * for the same reason: the halfway state after a failed chmod is still
+     * usable, the one after a failed chown is not. */
+    (void)nd_path_give_to_dir_owner(path);
+    (void)chmod(resolved, 0755u);
+    return ND_OK;
+}
+
 /* mkdir every component of `dir` that is missing. Bounded by the caller's
  * buffer and by the fact that every path here is built from constants and one
  * vetted name, so there is no recursion and no unbounded walk. */
 static nd_err mkdir_p(const char *dir)
 {
     char work[ND_PATH_MAX];
-    char resolved[ND_PATH_MAX];
     size_t i;
 
     if (nd_strlcpy(work, dir, sizeof work) >= sizeof work)
@@ -213,17 +262,14 @@ static nd_err mkdir_p(const char *dir)
         if (work[i] != '/')
             continue;
         work[i] = '\0';
-        if (nd_path_resolve(resolved, sizeof resolved, work) == ND_OK) {
-            if (mkdir(resolved, 0755) != 0 && errno != EEXIST)
-                return ND_ERR_IO;
-        }
+        /* A prefix too long to resolve is skipped rather than fatal, exactly
+         * as it was before: the component that matters is the last one, and
+         * it reports for itself. */
+        if (mkdir_one(work) == ND_ERR_IO)
+            return ND_ERR_IO;
         work[i] = '/';
     }
-    if (nd_path_resolve(resolved, sizeof resolved, work) != ND_OK)
-        return ND_ERR_TOOLONG;
-    if (mkdir(resolved, 0755) != 0 && errno != EEXIST)
-        return ND_ERR_IO;
-    return ND_OK;
+    return mkdir_one(work);
 }
 
 nd_err fetch_prepare_dir(const char *path)
@@ -240,6 +286,130 @@ nd_err fetch_prepare_dir(const char *path)
         return ND_OK; /* nothing above it to make */
     *slash = '\0';
     return mkdir_p(dir);
+}
+
+/* ------------------------------------------------------------------ *
+ * Handing a finished file to the app that reads it
+ * ------------------------------------------------------------------ */
+
+/* ============ THE MODE IS PART OF THE DESTINATION ============
+ *
+ * The owner is the same answer everywhere -- whoever owns the directory, which
+ * nd_path_give_to_dir_owner() copies down -- because CARD_LAYOUT already
+ * decided who each of these folders belongs to. The MODE is not, and the
+ * tempting single answer is wrong in both directions:
+ *
+ *   music/       0750 ndusr:ndusr        0640  the reader IS the owner.
+ *                                              MusicPlayer is ndusr; ndusr_ut
+ *                                              is denied the media side by
+ *                                              design, and o+r would be this
+ *                                              app arguing with that.
+ *   apps/PSX/    0755 ndusr:ndusr        0644  the reader is ndusr_ut, which
+ *                                              is OTHER here. A blanket 0660
+ *                                              would give the emulator a disc
+ *                                              image it still cannot open --
+ *                                              the same failure, moved.
+ *   untrusted/   0770 ndusr:ndusr_ut     0660  two principals share this
+ *                                              folder: Settings' installer
+ *                                              reads a .nap as ndusr (the
+ *                                              owner) and the browser writes
+ *                                              here as ndusr_ut (the group).
+ *                                              Group-write grants nothing
+ *                                              new -- the directory is 0770,
+ *                                              so ndusr_ut could already
+ *                                              unlink and replace anything in
+ *                                              it.
+ *
+ * The first two are the modes neodct-sdcard's apply_layout() will restate on
+ * the next mount, which is the property that matters: nd_nap.c states its
+ * 0644 for the same reason, and a writer that picked a different number would
+ * see the card silently change it back.
+ *
+ * untrusted/ is the exception and it is worth knowing why, because it used to
+ * be in that sentence. apply_layout() no longer chmods anything in there: it
+ * is the one directory the untrusted set can write, so a root chmod in it is
+ * a root chmod at a path an attacker chooses -- chmod(1) has no -h on busybox
+ * and follows a symlink planted mid-walk. What survived is a chown -h of
+ * *.nap, so 0660 here is this app's own answer, checked by nobody afterwards.
+ *
+ * ============ AND WHY NEITHER HALF NAMES THE FILE ANY MORE ============
+ *
+ * This function used to be chown(2) then chmod(2), both by path, and both
+ * were the very hole quoted above, moved from the shell into the C: THIS APP
+ * IS ROOT (nd_proc.c runs the engineering set as root), FETCH_DEST_NAP and
+ * FETCH_DEST_OTHER both land in untrusted/, and the two PSX kinds are
+ * downgraded to FETCH_DEST_OTHER when the emulator is not installed -- so the
+ * ordinary case is root chmodding a name inside the one directory ndusr_ut
+ * can write. Between the write and the chmod, the browser or any installed
+ * .nap app can unlink that name and put a symlink to
+ * /NeoDCT/User/settings.prop there instead. The paragraph directly above --
+ * "a root chmod in it is a root chmod at a path an attacker chooses" -- was
+ * already the rule the code underneath it was breaking, which is worth
+ * saying: a comment that states a property nothing enforces reads as
+ * evidence that somebody checked.
+ *
+ * So the handover is done on an OBJECT: nd_path_give_fd_to_dir_owner() for a
+ * caller holding the descriptor it wrote through (ftp.c, which never lets go
+ * of the .part it created), and nd_path_give_to_dir_owner_nofollow() for one
+ * that has only a name. nd_path.c has the mechanics.
+ */
+
+/* The table above, as code. Split out so ftp.c can state the same mode on
+ * the descriptor it is still holding, rather than reopening a name. */
+static unsigned int mode_of_kind(fetch_dest_kind kind)
+{
+    switch (kind) {
+    case FETCH_DEST_MUSIC:
+        return 0640u;
+    case FETCH_DEST_GAME:
+    case FETCH_DEST_BIOS:
+        return 0644u;
+    case FETCH_DEST_NAP:
+    case FETCH_DEST_OTHER:
+    default:
+        return 0660u;
+    }
+}
+
+/* One sentence for both entry points, so a log line says which file and which
+ * of the three refusals it was rather than "cannot give". */
+static nd_err complain(nd_err rc, const char *path, unsigned int mode)
+{
+    switch (rc) {
+    case ND_OK:
+        return ND_OK;
+    case ND_ERR_PERM:
+        nd_log_err(ND_LOG_FETCH,
+                   "refusing to give %s to its folder's owner: it is not the plain file this "
+                   "app wrote -- a symlink or a second hard link is in its place",
+                   path);
+        return ND_ERR_IO;
+    case ND_ERR_NOTFOUND:
+        nd_log_err(ND_LOG_FETCH, "cannot give %s to its folder's owner: it is not there", path);
+        return ND_ERR_IO;
+    default:
+        nd_log_err(ND_LOG_FETCH, "cannot give %s to its folder's owner at %04o: %s", path, mode,
+                   strerror(errno));
+        return ND_ERR_IO;
+    }
+}
+
+nd_err fetch_give_fd_to_reader(int fd, const char *path, fetch_dest_kind kind)
+{
+    unsigned int mode = mode_of_kind(kind);
+
+    if (fd < 0 || path == NULL)
+        return ND_ERR_INVAL;
+    return complain(nd_path_give_fd_to_dir_owner(fd, path, mode), path, mode);
+}
+
+nd_err fetch_give_to_reader(const char *path, fetch_dest_kind kind)
+{
+    unsigned int mode = mode_of_kind(kind);
+
+    if (path == NULL)
+        return ND_ERR_INVAL;
+    return complain(nd_path_give_to_dir_owner_nofollow(path, mode), path, mode);
 }
 
 /* ------------------------------------------------------------------ *
@@ -295,6 +465,14 @@ nd_err fetch_write_cue(const char *bin_path)
         (void)unlink(resolved);
         return ND_ERR_IO;
     }
+    /* The cue is the file the emulator actually opens -- a .bin at 0644 beside
+     * a cue root wrote at 0640 is a disc that still does not boot -- so it goes
+     * through the same handover as the image it describes. Logged rather than
+     * returned: the caller treats everything but ND_ERR_UNSUPPORTED as "the cue
+     * is there", and turning this into a failed download would be a lie about
+     * the bytes. The log line is what says which of the two files is wrong. */
+    if (fetch_give_to_reader(cue, FETCH_DEST_GAME) != ND_OK)
+        nd_log_err(ND_LOG_FETCH, "%s: written, but not readable by the emulator", cue);
     nd_log(ND_LOG_FETCH, "wrote %s", cue);
     return ND_OK;
 }

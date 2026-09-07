@@ -12,12 +12,48 @@
  * read into a bounded heap buffer and parsed line by line. Nothing about that
  * text is trusted: see fetch_parse_list_line().
  *
- * A DOWNLOAD is `curl -o <path>.part ftp://host/dir/name`. curl writes the
- * file itself rather than piping it through this process, which removes the
- * whole read-and-append loop nd_remote needs -- and progress then comes from
- * stat()ing the partial file five times a second, against the size the
+ * A DOWNLOAD is `curl ftp://host/dir/name` with its STDOUT pointed at a
+ * descriptor this process opened on <path>.part. curl writes the file itself
+ * rather than piping it through this process, which removes the whole
+ * read-and-append loop nd_remote needs -- and progress then comes from
+ * fstat()ing that descriptor five times a second, against the size the
  * listing already gave. That is a cruder progress bar than counting bytes as
  * they arrive and it is exactly as accurate, because it is the same bytes.
+ *
+ * ============ AND WHY IT IS NOT `-o <path>.part` ANY MORE ============
+ *
+ * IT WAS, AND THAT WAS A ROOT-PRIVILEGED ARBITRARY FILE WRITE. Fetch is an
+ * engineering app and runs as ROOT (nd_proc.c). The ordinary destination is
+ * the card's untrusted/ -- 0770 ndusr:ndusr_ut, the one directory the
+ * untrusted set can write, where every .nap and every "other" download lands,
+ * and where a disc image lands too when PSX is not installed. `curl -o NAME`
+ * opens NAME with no O_NOFOLLOW, as root. The unlink() below removes whatever
+ * a previous attempt left, but the browser -- or any installed .nap app, all
+ * of them ndusr_ut -- can put a symlink back at that name in the window
+ * between that unlink and curl's fopen, and then root writes the download
+ * through it: /NeoDCT/User/settings.prop, an ssh key, anything on the
+ * writable partition. A race an attacker can retry as often as they like is
+ * not a race they have to win first time.
+ *
+ * The fix is that curl is never told a path at all. This process creates the
+ * .part itself with O_CREAT|O_EXCL|O_NOFOLLOW -- EEXIST if anything is
+ * already there under that name, symlink included, and the object is
+ * therefore one this app made -- and hands the DESCRIPTOR to the child as fd
+ * 1, the same way the listing above hands it a pipe. curl's default output is
+ * stdout, so there is no argument to get wrong, and nd_proc_spec's fds[] was
+ * always able to carry this (lib/nd_remote.c already gives curl a descriptor,
+ * as -D /proc/self/fd/3). The mode and the owner are then stated on that same
+ * descriptor before the rename, so no step of a download names a file twice.
+ *
+ * What is left, said plainly: an ndusr_ut process can still unlink the .part
+ * and put its own file or symlink at that name, and the rename(2) below will
+ * then move THAT into place under the download's final name. It cannot make
+ * root write or chmod anything outside untrusted/ -- rename(2) does not
+ * follow symlinks on either side, so the link is moved rather than its
+ * target, and the handover has already happened on the descriptor -- so the
+ * whole of the remaining exposure is a process rearranging files inside the
+ * one directory it can already unlink anything in. The download would be
+ * wrong; nothing else would be.
  *
  * ============ WHY .part AND A RENAME ============
  *
@@ -745,21 +781,22 @@ done:
  * Downloading
  * ------------------------------------------------------------------ */
 
-static int64_t file_size(const char *path)
+/* How much of it has arrived, asked of the OPEN FILE rather than of its name.
+ * The name can be replaced by an ndusr_ut process mid-download (see the
+ * header); the descriptor cannot, so the progress bar and the short-file
+ * check below are both about the bytes curl is actually writing. */
+static int64_t fd_size(int fd)
 {
-    char resolved[ND_PATH_MAX];
     struct stat st;
 
-    if (nd_path_resolve(resolved, sizeof resolved, path) != ND_OK)
-        return -1;
-    if (stat(resolved, &st) != 0)
+    if (fd < 0 || fstat(fd, &st) != 0)
         return -1;
     return (int64_t)st.st_size;
 }
 
 nd_err fetch_download(const fetch_conn *c, const char *dir, const char *name,
-                      const char *local_path, int64_t total, fetch_progress_fn on_progress,
-                      void *ctx, char *why, size_t why_sz)
+                      const char *local_path, fetch_dest_kind kind, int64_t total,
+                      fetch_progress_fn on_progress, void *ctx, char *why, size_t why_sz)
 {
     const char *argv[26];
     size_t argn = 0u;
@@ -772,10 +809,12 @@ nd_err fetch_download(const fetch_conn *c, const char *dir, const char *name,
     char connect_s[16];
     char stall_s[16];
     int err_fd[2] = {-1, -1};
+    int part_fd = -1;
     nd_proc_spec spec;
     nd_proc_status status;
     pid_t pid = -1;
     char *err_text = NULL;
+    nd_err handover;
     nd_err rc = ND_ERR_IO;
     bool cancelled = false;
 
@@ -800,13 +839,33 @@ nd_err fetch_download(const fetch_conn *c, const char *dir, const char *name,
         say_why(why, why_sz, "Cannot make the folder on the card.");
         return ND_ERR_IO;
     }
-    /* Whatever a previous attempt left. curl would truncate it anyway; doing
-     * it here means the progress bar starts at zero rather than at whatever
-     * the last attempt reached. */
+    /* Whatever a previous attempt left, and it has to go before the O_EXCL
+     * below can succeed. unlink(2) removes the NAME -- a symlink planted
+     * there is unlinked rather than followed -- so this cannot itself be
+     * turned into a delete of something else. */
     (void)unlink(part_resolved);
+
+    /* The file curl will write, made HERE and never named again. O_EXCL means
+     * a name that reappeared between the unlink above and this open is an
+     * EEXIST rather than a file somebody else chose; O_NOFOLLOW means a
+     * symlink is ELOOP rather than a root write through it. 0600 for the
+     * moment it is root's: the mode the reader needs is stated on the
+     * descriptor once the bytes are all there, and a half-written download
+     * has no business being readable by anything that scans the folder. */
+    part_fd = open(part_resolved, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (part_fd < 0) {
+        say_why(why, why_sz, "Cannot write to the card: %s", strerror(errno));
+        return (errno == EEXIST || errno == ELOOP) ? ND_ERR_PERM : ND_ERR_IO;
+    }
 
     if (write_netrc(c, netrc, sizeof netrc) != ND_OK) {
         say_why(why, why_sz, "Cannot write the login file.");
+        /* Taken back rather than left. The failure paths below leave their
+         * .part where it is -- nothing scans one and the next attempt unlinks
+         * it -- but this one has not had a byte written to it, so leaving an
+         * empty file behind would say a transfer was tried when none was. */
+        (void)close(part_fd);
+        (void)unlink(part_resolved);
         return ND_ERR_IO;
     }
     (void)nd_snprintf(connect_s, sizeof connect_s, "%d", ND_FETCH_CONNECT_TIMEOUT);
@@ -817,19 +876,22 @@ nd_err fetch_download(const fetch_conn *c, const char *dir, const char *name,
         goto done;
     }
 
+    /* No -o: curl's default output IS stdout, and stdout is the descriptor
+     * this process opened on the .part. See the header for what naming the
+     * file to a root child cost. */
     argv[argn++] = "curl";
     argn = common_args(argv, argn, netrc, connect_s, stall_s);
-    argv[argn++] = "-o";
-    argv[argn++] = part_resolved;
     argv[argn++] = url;
     argv[argn++] = NULL;
 
     memset(&spec, 0, sizeof spec);
     spec.argv = argv;
     spec.owner = ND_OWNER_SYSTEM;
-    spec.fds[0].child_fd = 2;
-    spec.fds[0].our_fd = err_fd[1];
-    spec.n_fds = 1u;
+    spec.fds[0].child_fd = 1;
+    spec.fds[0].our_fd = part_fd;
+    spec.fds[1].child_fd = 2;
+    spec.fds[1].our_fd = err_fd[1];
+    spec.n_fds = 2u;
 
     if (nd_proc_spawn(exe, &spec, &pid) != ND_OK) {
         say_why(why, why_sz, "Cannot start curl.");
@@ -850,7 +912,7 @@ nd_err fetch_download(const fetch_conn *c, const char *dir, const char *name,
             say_why(why, why_sz, "Lost track of the download.");
             goto done;
         }
-        if (on_progress != NULL && !on_progress(ctx, file_size(part), total)) {
+        if (on_progress != NULL && !on_progress(ctx, fd_size(part_fd), total)) {
             cancelled = true;
             (void)nd_proc_terminate(pid, 1.0, &status);
             pid = -1;
@@ -875,13 +937,38 @@ nd_err fetch_download(const fetch_conn *c, const char *dir, const char *name,
     /* curl exited 0 with a file shorter than the listing said. That is a
      * server that changed its mind mid-transfer, and renaming it into music/
      * would produce a track that plays for four seconds. */
-    if (total > 0 && file_size(part) != total) {
+    if (total > 0 && fd_size(part_fd) != total) {
         say_why(why, why_sz, "The file arrived short.");
         rc = ND_ERR_IO;
         goto done;
     }
+
+    /* The file is root's, and 0600, and every reader of these folders is
+     * somebody else -- so it is unreadable until this runs. Fetch is root
+     * here and the readers are not, so nobody downstream could repair it
+     * afterwards even knowing it was wrong.
+     *
+     * BEFORE THE RENAME, and on the descriptor. Both halves matter: the
+     * object being given away is the one this process created and has held
+     * open ever since, so the ownership and the mode cannot land on a file
+     * somebody substituted, and by the time the download has a name anything
+     * scans, it already has the mode that name needs. `local_path` is passed
+     * only so the directory whose owner is copied down is the one the file is
+     * about to live in -- which for a .part is the same directory anyway. */
+    handover = fetch_give_fd_to_reader(part_fd, local_path, kind);
+
     if (rename(part_resolved, final_resolved) != 0) {
         say_why(why, why_sz, "Cannot save it: %s", strerror(errno));
+        rc = ND_ERR_IO;
+        goto done;
+    }
+    /* A failure of the handover is a failed download, said out loud. The file
+     * is renamed into place first and left there rather than unlinked: the
+     * bytes came a long way over a carrier link, taking the card out and
+     * putting it back runs apply_layout(), and that repairs exactly this. */
+    if (handover != ND_OK) {
+        say_why(why, why_sz,
+                "Saved, but nothing\ncan read it.\nTake the card out and\nput it back in.");
         rc = ND_ERR_IO;
         goto done;
     }
@@ -891,6 +978,8 @@ nd_err fetch_download(const fetch_conn *c, const char *dir, const char *name,
 done:
     if (pid > 0)
         (void)nd_proc_terminate(pid, 1.0, &status);
+    if (part_fd >= 0)
+        (void)close(part_fd);
     if (err_fd[0] >= 0)
         (void)close(err_fd[0]);
     if (err_fd[1] >= 0)

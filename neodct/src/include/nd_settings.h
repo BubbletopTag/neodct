@@ -81,6 +81,42 @@ extern "C" {
 #define ND_SET_MODEM_ALLOW_CALLS "system.modem.allow_calls"   /* "ON"      */
 #define ND_SET_MODEM_BOOT_GRACE  "system.modem.boot_grace_s"  /* "30"      */
 
+/* HOW LOUD THE MICROPHONE IS, as an ALSA capture percentage.
+ *
+ * There has only ever been one gain lever on this phone and it was a constant
+ * in a boot script: S17audio raised every "Capture Volume" control on the USB
+ * card to 80% once, at boot, and nothing else in the image ever touched the
+ * mixer again. 80% was a guess made against the one microphone on the
+ * developer's desk, and an electret on a C-Media adapter is quieter than that
+ * guess allowed for. So the number stops being a constant here.
+ *
+ * Read by THREE things that cannot share a cache, which is why it is a
+ * setting and not a build-time number:
+ *
+ *   S17audio        at boot, to bring the card up at the owner's level.
+ *   nd_modem_audio  once per core process, cached in nd_modem, and re-applied
+ *                   to the card before every call -- see start_mic_pipe().
+ *   MicTest         live, so the owner can hear the change while turning it.
+ *
+ * NOT in DEFAULTS, for the reason the wallpaper and brightness keys give at
+ * length: R-24 means every nd_settings_get() rewrites settings.prop with an
+ * fsync whatever key it was asked for, and the table is what each of those
+ * rewrites has to carry. Keeping it out costs nothing -- the call sites all
+ * pass ND_SET_HW_MIC_GAIN_DFLT -- and keeps this key off the write path of
+ * every other read in the phone.
+ *
+ * 100 rather than the old 80, and 100 rather than "whatever the driver came
+ * up with". A capture control at full scale is not a distortion risk the way
+ * a playback one is: it is the preamp in front of an 8 kHz voice codec, the
+ * far end's AGC is downstream of it, and every report of this phone's audio
+ * has been "they cannot hear me", never "I am too loud".
+ *
+ * Bounded 0..100 by nd_mic_gain_from_setting() before it reaches an argv,
+ * because the value is a string on a writable partition and amixer takes
+ * arguments. Anything unparseable, negative or above 100 falls back here. */
+#define ND_SET_HW_MIC_GAIN      "system.hw.mic_gain" /* "100" */
+#define ND_SET_HW_MIC_GAIN_DFLT "100"
+
 /* Wallpaper behind the framework's own chrome -- lists, dialogs, text boxes,
  * every screen that used to be flat black. ON by default, because that is the
  * point of the feature; a phone whose owner wants the old look turns it off

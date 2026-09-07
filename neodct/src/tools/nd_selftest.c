@@ -116,6 +116,7 @@
 #include "nd_fb.h"
 #include "nd_media.h"
 #include "nd_paths.h"
+#include "nd_platform.h"
 #include "nd_storage.h"
 #include "nd_priv.h"
 #include "nd_proc.h"
@@ -697,9 +698,37 @@ static void section_devices(const nd_priv_id *usr, const nd_priv_id *ut)
             expect_allow(usr, ND_PRIV_USER, P_RDWR, i2c,
                          ND_PRIV_USER " can open the i2c bus (the fuel gauge; the "
                          "keypad crosses the drop on a descriptor)");
+        /* ============ AND WHAT AN ABSENT BUS MEANS ============
+         *
+         * This SKIP used to read "expected on QEMU; NOT expected on the
+         * phone" and name both, because the tool could not tell which it was
+         * on. It can now (nd_platform.h), so it says one thing per machine --
+         * and on hardware an absent bus stops being a skip at all. A phone
+         * with no /dev/i2c-* has no fuel gauge and no keypad expander, both
+         * soldered to that bus; calling that "did not run" hides a dead
+         * device behind a line that reads as normal, which is the exact
+         * shape of failure this whole file exists to find.
+         *
+         * The promotion is gated on is_hw() and NOT on !is_qemu(), which is
+         * nd_platform.h's rule: an image carrying no /NeoDCT/platform keeps
+         * the old both-ways wording and stays a SKIP. Turning a developer's
+         * checkout or an unlabelled image red would train people to ignore
+         * the colour, and then the phone's genuine failure goes unread. */
+        else if (nd_platform_is_hw())
+            report(R_FAIL, ND_PRIV_USER " can open the i2c bus",
+                   "there is no /dev/i2c-* on this phone AT ALL, so this is a missing "
+                   "bus and not a missing grant. The MAX17048 fuel gauge and the "
+                   "PCF8575 keypad expander are both on it -- look at i2c-dev and at "
+                   "the device tree, not at 61-neodct-devices.rules");
+        else if (nd_platform_is_qemu())
+            report(R_SKIP, ND_PRIV_USER " can open the i2c bus",
+                   "no /dev/i2c-* here, and this image is QEMU, which has no i2c bus "
+                   "for the rules to grant");
         else
             report(R_SKIP, ND_PRIV_USER " can open the i2c bus",
-                   "no /dev/i2c-* on this build (expected on QEMU; NOT expected on the phone)");
+                   "no /dev/i2c-* on this build (expected on QEMU; NOT expected on the "
+                   "phone) -- and this image carries no " ND_PATH_PLATFORM ", so which "
+                   "of the two it is cannot be said here");
         if (have_modem)
             expect_allow(usr, ND_PRIV_USER, P_RDWR, modem, ND_PRIV_USER " can open the modem");
         else
@@ -1401,7 +1430,65 @@ typedef struct {
     unsigned deflt;    /* what "nothing touched it" looks like */
     const char *what;  /* for the human, and for the check's name */
     const char *rule;  /* which file is supposed to have done it */
+    /* True when the node's ABSENCE is itself a fault on hardware, so that a
+     * missing device is reported as a FAIL rather than as a SKIP. Read the
+     * block above GRANTS before setting it on anything else. */
+    bool hw_required;
 } grant_row;
+
+/* ============ WHICH ROWS MAY BE PROMOTED, AND WHY ONLY ONE IS ============
+ *
+ * With nd_platform.h the tool knows it is on the phone, and "nothing matching
+ * /dev/i2c-* here" on the phone is not a check that did not run -- it is a
+ * bus that is not there. So `hw_required` turns that SKIP into a FAIL.
+ *
+ * It is set on exactly one row, and the restraint is the point. A selftest
+ * that goes red on a healthy phone is worse than one that says SKIP too
+ * often, because the first thing anybody does with a tool that cries wolf is
+ * stop reading it -- and this is the only instrument in the tree that runs on
+ * the real hardware as the real user. So the bar is: absent on a WORKING
+ * phone must be impossible, not merely unlikely.
+ *
+ *   the i2c bus       promoted. The controller is on the SoC, the PCF8575 and
+ *                     the MAX17048 are soldered to it, and i2c-dev is in the
+ *                     kernel config. There is no state of a working phone in
+ *                     which /dev/i2c-* is absent.
+ *
+ *   the modem's port  NOT promoted, and this one is deliberate rather than
+ *                     cautious: whether a ttyUSB enumerated is the question
+ *                     nd_modem.h spends a page insisting must not be
+ *                     conflated with which machine this is. A modem that has
+ *                     not enumerated is the modem's own fault to report, and
+ *                     it has a fault path that says so properly.
+ *
+ *   an evdev keypad   NOT promoted. On the phone the event node is created by
+ *                     the uinput bridge inside the running UI, so a selftest
+ *                     run from a serial console before the UI is up correctly
+ *                     finds nothing.
+ *
+ *   the sound card,   NOT promoted. Each depends on a driver binding, and the
+ *   the microphone    ALSA numbers arrive in probe order; absent means the
+ *                     card did not bind, which is a different report.
+ *
+ *   the key bridge,   NOT promoted. /dev/uinput needs CONFIG_INPUT_UINPUT and
+ *   the hardware      /dev/rtc0 needs the RTC driver to have bound. Both are
+ *   clock             kernel-configuration facts, and `kernel` is the section
+ *                     that reports those -- a second, differently worded
+ *                     failure here would only split one finding in two.
+ *
+ *   the PWM backlight NOT promoted, and it would have been wrong: the Mini B
+ *                     drives its backlight from GPIO53, so /sys/class/backlight
+ *                     is legitimately empty on the one board this tree ships
+ *                     for. The GPIO row is not promoted either -- that pin is
+ *                     exported by S90display, so its absence is a boot-order
+ *                     question the row cannot distinguish from a fault.
+ *
+ *   the framebuffer,  NOT promoted. Both are certainly present on a working
+ *   the CPU ceiling   phone, but neither absence is silent: no fb0 means
+ *                     nothing has been drawn since boot, and cpufreq shows up
+ *                     in its own section. Promoting them buys nothing and
+ *                     spends the tool's credibility.
+ */
 
 static const grant_row GRANTS[] = {
     /* The four eudev's own 50-udev-default.rules covers. They are here
@@ -1410,35 +1497,43 @@ static const grant_row GRANTS[] = {
      * ttyUSB grant depends entirely on stock rules and on the coldplug
      * reaching the tty subsystem in time. */
     {"/dev/fb0", NULL, NULL, NULL, NULL, "video", 0660u, 0600u, "the framebuffer",
-     "eudev 50-udev-default.rules"},
+     "eudev 50-udev-default.rules", false},
     {NULL, "/dev/input", "event", NULL, NULL, "input", 0660u, 0600u, "an evdev keypad",
-     "eudev 50-udev-default.rules"},
+     "eudev 50-udev-default.rules", false},
     {NULL, "/dev/snd", "pcmC", "p", NULL, "audio", 0660u, 0600u, "the sound card",
-     "eudev 50-udev-default.rules"},
+     "eudev 50-udev-default.rules", false},
     {NULL, "/dev", "ttyUSB", NULL, NULL, "dialout", 0660u, 0600u, "the modem's AT port",
-     "eudev 50-udev-default.rules"},
+     "eudev 50-udev-default.rules", false},
 
     /* And the ones this tree does own. */
     {NULL, "/dev", "i2c-", NULL, NULL, "i2c", 0660u, 0600u, "the i2c bus",
-     "61-neodct-devices.rules"},
+     "61-neodct-devices.rules", true},
     {"/dev/uinput", NULL, NULL, NULL, NULL, "ndusr", 0660u, 0600u, "the key bridge",
-     "61-neodct-devices.rules"},
+     "61-neodct-devices.rules", false},
     {NULL, "/dev", "rtc", NULL, NULL, "ndusr", 0660u, 0600u, "the hardware clock",
-     "61-neodct-devices.rules"},
+     "61-neodct-devices.rules", false},
     {NULL, "/dev/snd", "pcmC", "c", NULL, "ndusr", 0660u, 0600u, "the microphone",
-     "61-neodct-devices.rules"},
+     "61-neodct-devices.rules", false},
 
     /* The sysfs tiers. A sysfs attribute with no rule is root-owned 0644 --
      * READABLE by everyone and writable by nobody but root -- so the failure
      * here is quieter than a device node's: the phone can read the brightness
      * it cannot change, and nd_backlight.c's write silently returns false. */
     {NULL, ND_BL_BACKLIGHT_ROOT, NULL, NULL, "/brightness", "video", 0664u, 0644u,
-     "the PWM backlight", "61-neodct-devices.rules"},
+     "the PWM backlight", "61-neodct-devices.rules", false},
     {ND_BL_GPIO_ROOT "/gpio53/value", NULL, NULL, NULL, NULL, "video", 0664u, 0644u,
-     "the GPIO backlight", "S90display"},
+     "the GPIO backlight", "S90display", false},
     {ND_CPUFREQ_DIR "/scaling_max_freq", NULL, NULL, NULL, NULL, "ndusr", 0664u, 0644u,
-     "the CPU ceiling", "61-neodct-devices.rules"},
+     "the CPU ceiling", "61-neodct-devices.rules", false},
 };
+
+/* A row whose node is missing is a FAIL only when the image says it is a
+ * phone. nd_platform_is_hw() and not !nd_platform_is_qemu(): an image with no
+ * /NeoDCT/platform is not an image that gets told it has hardware. */
+static bool absence_is_a_fault(const grant_row *g)
+{
+    return g->hw_required && nd_platform_is_hw();
+}
 
 static void section_grants(void)
 {
@@ -1472,8 +1567,12 @@ static void section_grants(void)
             char match[ND_PATH_MAX];
 
             if (!first_matching(g->dir, g->prefix, g->suffix, match, sizeof match)) {
-                report(R_SKIP, name, "nothing matching %s/%s* here", g->dir,
-                       g->prefix != NULL ? g->prefix : "");
+                report(absence_is_a_fault(g) ? R_FAIL : R_SKIP, name,
+                       "nothing matching %s/%s* here%s", g->dir,
+                       g->prefix != NULL ? g->prefix : "",
+                       absence_is_a_fault(g) ? " -- and on this board there is no state "
+                                               "in which that node is legitimately absent"
+                                             : "");
                 continue;
             }
             (void)snprintf(path, sizeof path, "%s%s", match,
@@ -1481,7 +1580,10 @@ static void section_grants(void)
         }
 
         if (stat(path, &st) != 0) {
-            report(R_SKIP, name, "%s is not there", path);
+            report(absence_is_a_fault(g) ? R_FAIL : R_SKIP, name, "%s is not there%s", path,
+                   absence_is_a_fault(g) ? " -- and on this board there is no state in "
+                                           "which that node is legitimately absent"
+                                         : "");
             continue;
         }
         mode = (unsigned)(st.st_mode & 07777);
@@ -2388,6 +2490,14 @@ int main(int argc, char **argv)
     if (geteuid() != 0u)
         printf("  (running as uid %ld -- the probes that need to drop will skip)\n",
                (long)geteuid());
+    /* Said at the top because several verdicts below now turn on it, and a
+     * reader has to be able to see the input to a decision that turned a SKIP
+     * into a FAIL. "unknown" is printed as itself: an image with no
+     * /NeoDCT/platform is exactly the state in which "expected on QEMU; NOT
+     * expected on the phone" is undecidable, and that should be on the page
+     * rather than inferred from the absence of a line. */
+    printf("  platform: %s%s%s\n", nd_platform_name(),
+           nd_platform_board()[0] != '\0' ? ", board " : "", nd_platform_board());
 
     if (wanted(argc, argv, "users"))
         section_users(&usr, &ut);

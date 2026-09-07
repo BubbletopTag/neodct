@@ -83,6 +83,11 @@ extern "C" {
 #define ND_LOG_POWER      "Power"
 #define ND_LOG_BLUETOOTH  "Bluetooth"
 #define ND_LOG_FETCH      "Fetch"
+/* The mixer, shared by the call path and MicTest. Spelled the way
+ * /etc/init.d/S17audio already prefixes its boot lines, so `grep AUDIO` over
+ * a serial log shows the capture path being set up at boot and re-applied at
+ * every call as one story. */
+#define ND_LOG_AUDIO "AUDIO"
 
 /* The colour every line on stderr is painted, tag or no tag. */
 #define ND_LOG_ERROR_COLOUR 196

@@ -54,6 +54,7 @@
 #include "nd_log.h"
 #include "nd_panic.h"
 #include "nd_paths.h"
+#include "nd_platform.h"
 #include "nd_text.h"
 #include "nd_types.h"
 #include "nd_ui.h"
@@ -88,9 +89,15 @@ static crash_report g_report;
 
 bool nd_crash_is_simulation(void)
 {
-    /* The launcher's own detection: real Rockchip/Luckfox hardware exposes the
-     * FIQ debug console, QEMU does not. A DEVICE path, so no ND_ROOT. */
-    return access(ND_PATH_SERIAL_FIQ, F_OK) != 0;
+    /* This used to be access("/dev/ttyFIQ0"), on the reasoning that real
+     * Rockchip/Luckfox hardware exposes the FIQ debug console and QEMU does
+     * not. Both halves of that are true and the conclusion still was not: a
+     * hardware kernel built without the FIQ debugger has no such node, and
+     * every crash report it filed said "QEMU/simulation" -- in the `mode:`
+     * field, which is the first thing a bug report is triaged by. The image
+     * knows which machine it is; it no longer has to be deduced from a device
+     * that may or may not have enumerated. */
+    return nd_platform_is_qemu();
 }
 
 /* ------------------------------------------------------------------ *
@@ -391,6 +398,21 @@ static void rotate_if_needed(void)
         (void)rename(cur, old);
 }
 
+/* The `mode:` field, which is what a bug report is sorted by before anyone
+ * reads it. */
+static const char *crash_mode_text(void)
+{
+    switch (nd_platform()) {
+    case ND_PLATFORM_QEMU:
+        return "QEMU/simulation";
+    case ND_PLATFORM_HW:
+        return "hardware";
+    case ND_PLATFORM_UNKNOWN:
+    default:
+        return "unknown (this image carries no " ND_PATH_PLATFORM ")";
+    }
+}
+
 const char *nd_crash_log(const char *source, const nd_crash_info *info, const char *note)
 {
     char path[ND_PATH_MAX];
@@ -401,11 +423,9 @@ const char *nd_crash_log(const char *source, const nd_crash_info *info, const ch
     time_t now;
     struct tm tmv;
     FILE *f;
-    bool sim;
 
     if (source == NULL)
         source = "app";
-    sim = nd_crash_is_simulation();
 
     read_first_field("/proc/uptime", uptime, sizeof uptime, "?");
     if (strcmp(uptime, "?") != 0)
@@ -430,7 +450,11 @@ const char *nd_crash_log(const char *source, const nd_crash_info *info, const ch
 
     (void)fprintf(f, "============================================================\n");
     (void)fprintf(f, "time:   %s (epoch %lld)\n", stamp, (long long)now);
-    (void)fprintf(f, "mode:   %s\n", sim ? "QEMU/simulation" : "hardware");
+    /* Three values, because the image can genuinely fail to say. Writing
+     * "hardware" or "QEMU/simulation" over an image that carries no
+     * /NeoDCT/platform would be a triage field that is confidently wrong,
+     * which is worse than one that admits it does not know. */
+    (void)fprintf(f, "mode:   %s\n", crash_mode_text());
     (void)fprintf(f, "source: %s\n", source);
     (void)fprintf(f, "uptime: %s   mem: %s\n", uptime, mem);
     if (note != NULL && note[0] != '\0')
@@ -460,7 +484,12 @@ const char *nd_crash_log(const char *source, const nd_crash_info *info, const ch
     fsync_dir(ND_PATH_LOG_DIR);
     fsync_dir(ND_PATH_USER);
 
-    if (sim) {
+    /* NOT nd_crash_is_simulation(), and the difference is the rule in
+     * nd_platform.h. Whether to print one more line on a console somebody is
+     * watching is a COST question, so UNKNOWN takes the branch that costs a
+     * line and helps a developer on a host that has no flag at all. The
+     * `mode:` field above is a TRUTH question and answers UNKNOWN honestly. */
+    if (!nd_platform_is_hw()) {
         nd_log(ND_LOG_CRASH, "%s: %s (report -> %s)", source,
                summary[0] != '\0' ? summary : "(no exception info)", ND_PATH_CRASH_LOG);
     }

@@ -68,7 +68,15 @@ extern "C" {
  * ------------------------------------------------------------------ */
 
 extern const char *const nd_kmi2c_output_path;      /* OUTPUT_PATH          */
-extern const char *const nd_kmi2c_i2c_required_msg; /* I2C_REQUIRED_MSG     */
+/* I2C_REQUIRED_MSG, once per platform. The first is the Python's string
+ * unchanged and is what an image with no /NeoDCT/platform still shows; the
+ * other two say what the flag makes knowable. Pick one with
+ * nd_kmi2c_i2c_required_text() rather than by hand -- the whole point is that
+ * no call site gets to decide which machine it is on. */
+extern const char *const nd_kmi2c_i2c_required_msg;      /* UNKNOWN: as before  */
+extern const char *const nd_kmi2c_i2c_required_qemu_msg; /* qemu: no bus, ever  */
+extern const char *const nd_kmi2c_i2c_required_hw_msg;   /* hw: a fault, not an
+                                                          * explanation         */
 extern const char *const nd_kmi2c_intro_msg;        /* run()'s first dialog */
 extern const char *const nd_kmi2c_cancel_msg;       /* MENU pressed         */
 extern const char *const nd_kmi2c_title;            /* both dialog + prompt */
@@ -150,8 +158,16 @@ void nd_kmi2c_config_from(nd_kmi2c_config *out, const char *rows, const char *co
 bool nd_kmi2c_validate_pins(const nd_kmi2c_config *cfg, char *err, size_t err_sz);
 
 /* _i2c_available(): len(glob("/dev/i2c-*")) > 0. Goes through ND_ROOT like
- * every other path, so a host test can build a fake /dev. */
+ * every other path, so a host test can build a fake /dev.
+ *
+ * Still a DEVICE probe and deliberately still the only gate: whether run()
+ * can capture anything turns on whether a bus node is actually there, never
+ * on what the image says the machine is. nd_platform.h is consulted only to
+ * word the refusal, below. */
 bool nd_kmi2c_i2c_available(void);
+
+/* Which of the three refusals to show, from nd_platform(). Never NULL. */
+const char *nd_kmi2c_i2c_required_text(void);
 
 /* ------------------------------------------------------------------ *
  * The prompt

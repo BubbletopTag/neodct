@@ -65,8 +65,25 @@ typedef struct {
     char detail[ND_CRASH_DETAIL_MAX]; /* the child's own backtrace */
 } nd_crash_info;
 
-/* True when the phone is running without hardware -- the crash screen is
- * chattier there, because a developer is looking at it. */
+/* True on QEMU and ONLY on QEMU: nd_platform_is_qemu(), under the name
+ * CrashHandler._is_simulation() has carried since the Python and the name
+ * docs/c-rewrite/spec-storage-settings.md publishes.
+ *
+ * NOTHING IN THE TREE CALLS IT any more, and that is a decision rather than
+ * an oversight left to tidy up. It used to be nd_crash_log()'s single gate,
+ * answering two questions with one bit: what to write in the `mode:` field,
+ * and whether to echo the crash to a console somebody is watching. Those are
+ * a TRUTH question and a COST question, and nd_platform.h is explicit that
+ * they must not share an answer -- so nd_crash_log() now asks each of them
+ * separately and this predicate has no caller left. It stays because it is
+ * the one published name for the fact, and test_platform.c drives it in all
+ * three states so a kept API cannot rot unwatched.
+ *
+ * DO NOT NEGATE IT. !nd_crash_is_simulation() reads as "hardware" and is not
+ * -- it is also true of an image carrying no /NeoDCT/platform, which is the
+ * one case where nothing is known at all. "Nobody is holding a phone, so be
+ * chatty" is !nd_platform_is_hw(); "there is a phone here" is
+ * nd_platform_is_hw(). The header says why there is no helper for either. */
 bool nd_crash_is_simulation(void);
 
 /* Append to the log, rotating first when needed. Returns the log path, or

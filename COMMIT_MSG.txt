@@ -3880,3 +3880,941 @@ the suite.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df
+
+================================================================================
+
+platform: the image says which machine it is, instead of six places guessing
+
+Half a dozen places worked out where they were running by looking for a device
+and drawing a conclusion. nd_crash.c and nd_keypadsetup.c tested
+access("/dev/ttyFIQ0"); S10udevd and S90display tested [ -e /dev/spidev0.0 ];
+KeypadMapperI2C told the owner "this application can not run in QEMU" on the
+strength of an empty /dev/i2c-* glob; nd-selftest could not tell which machine
+it was on at all and named both in its skip text. Every one of those is a proxy
+and a proxy is wrong in both directions: a hardware kernel built without the
+FIQ debugger reads as QEMU, and any emulator that grew a spidev node reads as a
+phone. The damage was real -- a phone filing every crash report as
+"QEMU/simulation" in the field a bug report is triaged by, and a phone that
+never waited for its own keypad bus and came up with no keys.
+
+post-build-system-metadata.sh now writes /NeoDCT/platform beside version.prop,
+from the same $PLATFORM argument, so the two cannot disagree. Four lines, one
+lowercase token per value, inside the squashfs and under dm-verity. Read from C
+through nd_platform.h and from busybox sh through /bin/nd-platform. An unknown
+platform id stops the build rather than shipping an image that looks finished:
+post-build-prune-tests.sh is the record of what falling through quietly costs.
+
+============ THE THIRD VALUE, WHICH IS THE WHOLE DESIGN ============
+
+A missing or unreadable file is ND_PLATFORM_UNKNOWN, a real answer and not a
+shorthand for either of the others. Defaulting to hw arms every hardware wait
+on a developer's laptop and in every unit test. Defaulting to qemu is the
+0.5.9a regression class in reverse: a real phone quietly taking every cheap
+emulator path. So is_hw() and is_qemu() are separate predicates, both false
+under UNKNOWN, and there is deliberately no negation helper -- the day somebody
+writes !is_qemu() the phone starts claiming hardware nobody told it it has.
+
+The rule at the call site is that UNKNOWN may decide a COST question and never
+a TRUTH question. "Should I spend 600 ms waiting for a bus that may be coming?"
+is a cost; UNKNOWN takes the cheap branch and claims nothing. "Is this crash
+report from a phone?" is a truth; UNKNOWN says so, and the log now carries
+"mode: unknown (this image carries no /NeoDCT/platform)" rather than a triage
+field that is confidently wrong.
+
+============ WHAT WAS CONVERTED ============
+
+nd_crash.c: the `mode:` field is three-valued, and the decision to echo the
+crash to a watched console is now a separate !is_hw() -- one bit used to answer
+both questions. nd_keypadsetup.c's gate, S10udevd's ttyUSB wait and S90display,
+which also stopped conflating "is this a machine with a panel" (the image can
+say) with "has spidev enumerated yet" (it cannot) and silently skipping the
+backlight grant when the answer to the second was not yet.
+
+KeypadMapperI2C has three refusals instead of one: on QEMU it names the
+emulator, on the phone it says a missing bus is a FAULT rather than an
+explanation, and with no record it shows the string it always showed -- with no
+flag it has exactly the evidence it had before, and the header's rule is that
+such a site keeps what it had. All three measured with nd_msgdialog_measure(),
+because the dialog clips with an ellipsis this font cannot draw.
+
+nd-selftest prints the platform in its banner and stops naming both machines in
+one skip. A missing /dev/i2c-* is promoted to a real FAIL, gated on is_hw() and
+never on !is_qemu(): the bus carries the fuel gauge and the keypad expander and
+there is no state of a working phone in which it is absent. Exactly one GRANTS
+row is marked, and the block above the table records why each of the other ten
+is not -- a selftest that goes red on a healthy phone is worse than one that
+skips, because it is the only instrument in the tree that runs on the real
+hardware as the real user.
+
+============ WHAT WAS DELIBERATELY NOT CONVERTED ============
+
+Recorded so nobody does it later for symmetry. The modem's SIM-vs-UNREACHABLE
+gate and the battery's SIM-vs-UNREADABLE gate turn on whether a candidate
+device enumerated, which is a different question; both headers already record
+what conflating the two cost. nd_log_redirect_serial() tests the very node it
+is about to open, so the flag would hand a hardware kernel with no FIQ debugger
+a console that is not there. nd_nap_phone_arch() reads uname(2) because a .nap
+carries native code: that is an ABI question with a host-x86_64 answer no image
+will ever record, and an UNKNOWN there turns a missing four-line file into a
+phone that can install nothing.
+
+The initramfs cannot read the file and does not want to. It runs before the
+root is mounted, nothing in neodct/initramfs/ asks which machine it is on --
+every decision there is made from the evidence in front of it -- and a copy in
+the cpio would be a second copy of the fact with its own lifetime, since no
+.ndsw carries a kernel. An earlier comment claimed mkinitramfs.py packed it;
+that claim is gone and the reasoning is written down in its place.
+
+nd_crash_is_simulation() is kept rather than removed. It has no caller left --
+nd_crash_log() now asks its two questions separately -- but it is the published
+name in docs/c-rewrite/spec-storage-settings.md, and a test drives it in all
+three states so a kept API cannot rot unwatched. Its header warns at length
+against negating it.
+
+Tests: new test_platform.c (47 checks) covers both real answers, a missing file,
+an unparseable word, a record with no platform key, a non-UTF-8 file, the board
+defaulting to "" and never NULL, the board withheld when the platform word did
+not parse, the environment override in four shapes, and the cache. test_proc.c
+gains the three `mode:` strings; test_keypadsetup.c's gate fixture is now the
+image rather than a planted ttyFIQ0, plus a case for the unknown image;
+test_keypadmapper.c pins the three refusals and measures them. Host side:
+test_nd_platform_helper.py (22 cases) drives the shipped shell helper including
+a value with shell metacharacters, which is rejected rather than passed on, and
+test_post_build_metadata.py covers both real argv tags and the refusal.
+
+All 87 C test binaries green, zero failures, and the four touched binaries green
+under ASAN as well. Host suite 1219 passed; the 20 failures are byte-identical
+to HEAD's and belong to test_sdcard_layout, test_sdcard_helper,
+test_post_build_pyc, test_ffmpeg_codec_coverage and test_users_table, none of
+which this touches.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df
+
+
+audio: the microphone gain is the owner's, and the card is un-muted per call
+
+Two requests, one cause. "Increase the microphone gain (make it adjustable in
+the MicTest app as well)" and "sometimes the mic wouldn't work" turn out to be
+the same sentence about the same file: nothing in this image owns the ALSA
+mixer after boot.
+
+============ WHAT WAS THERE ============
+
+Exactly one gain lever existed in the whole OS: NEODCT_CAPTURE_LEVEL=80, a
+constant in /etc/init.d/S17audio, applied by numid once, out of the `start`
+case, out of rcS. There is no alsactl in the image, no asound.state, and no
+udev rule that re-runs it -- the script's own comment says "NOTHING ELSE IN
+THIS IMAGE DOES", and it was right.
+
+The 0.4.6a changelog already records what that costs: this phone's card powers
+up with "a capture path switched off and its gain at zero, which arecord
+reports as a clean recording of nothing". nd_modem_audio.c's own header
+already records that the card "re-enumerates once per call". Put the two
+together and the intermittent dead mic is not intermittent at all: a card that
+re-enumerates comes back muted and STAYS muted for the rest of the session,
+while arecord, the pipe, the modem and the UI all report success. There is
+nothing in the phone to look at, and the only symptom is somebody on the other
+end saying they could not hear you.
+
+AT+CMIC, AT+CLVL, AT+CTXVOL and AT+CSDVC appear zero times in the tree and
+still do -- see the last section.
+
+============ THE SETTING ============
+
+system.hw.mic_gain, in the "read with a call-site default, never in DEFAULTS"
+group of nd_settings.h, default 100. Out of DEFAULTS for R-24's sake: a read
+of ANY key rewrites the whole of settings.prop with an fsync against the
+DEFAULTS table, so the table is what every such rewrite has to carry, and this
+key stays off it.
+
+100 rather than 80, and the header says why: this is the preamp in front of an
+8 kHz voice codec with the far end's AGC downstream of it, not a playback
+level. Every report about this phone's audio has been "they cannot hear me".
+
+============ nd_mic.h GREW A MIXER ============
+
+The shape nd_mic.h already established -- pure decisions in nd_mic.c, spawning
+in the caller:
+
+  nd_mic_parse_controls()   `amixer -c N controls` -> the numids whose names
+                            END "Capture Switch'" / "Capture Volume'". The
+                            same discrimination S17audio makes and for the
+                            same reason, carried into the comment: ALSA's
+                            simple mixer merges "Mic Capture Volume" and "Mic
+                            Playback Volume" into one control called "Mic", so
+                            `sset Mic 100%` raises the MONITOR path and puts
+                            the microphone into the earpiece. On a phone that
+                            is feedback, which is a worse bug than silence.
+                            EVERY match, not the first: a codec with a master
+                            capture control as well as a per-input one holds
+                            the mic at zero through whichever was left there.
+  nd_mic_cset_command()     the argv, built exactly as nd_mic_record_command()
+                            builds arecord's.
+  nd_mic_controls_command() the listing argv.
+  nd_mic_gain_from_setting()  the string -> a number, or the default.
+  nd_mic_card_of()          "plughw:2,0" -> 2, the sscanf apps/Settings uses.
+  nd_mic_list_controls()    the listing, run and parsed, once.
+  nd_mic_set_controls()     the csets for controls already listed.
+  nd_mic_apply_gain()       the two composed -- what the call path calls.
+
+The list/set split is not decoration. UP and DOWN repeat every 120 ms
+(ND_REPEAT_INTERVAL_S), and a screen that re-listed the card and re-asserted
+its switch on every press would spend roughly twenty-four amixer children a
+second on a single-core Cortex-A7 to answer a question that cannot have
+changed. MicTest lists once when the screen opens, sets switch and level once,
+and then moves only the volume controls -- one fork per press on the card this
+was written for.
+
+THE BUILDER IS THE CHOKE POINT. The percentage arrives from settings.prop, on
+the writable partition, and leaves as an execve() argument -- so it is
+formatted there from an int and never passed through as a string, and a card
+or a percentage out of range is REFUSED with ND_ERR_INVAL rather than clamped.
+Clamping would turn a hand-edited file into a silent success.
+
+Auto Gain Control is still left alone, deliberately, and S17audio's paragraph
+about it is expanded rather than replaced. It pumps on a codec this cheap --
+it rides the noise floor up between words and ducks the first syllable after a
+pause, which sounds like a bad line rather than a quiet one. That is a taste
+question with no right answer where the level is a correctness one. If it is
+ever exposed it belongs behind its own setting, defaulting OFF.
+
+============ S17audio ============
+
+The level stops being a constant and becomes the setting, still overridable by
+NEODCT_CAPTURE_LEVEL so the pytest can pin one without a settings file.
+settings.prop is read with `while IFS='=' read` and NEVER sourced -- the rule
+neodct/initramfs/init already follows, for the reason env.sh is gated on
+something outside the writable partition -- and the value is then checked to
+be one to three digits and no more than 100 before it reaches an argument.
+
+============ THE MicTest UI ============
+
+UP and DOWN move the level by 5%, clamped 0..100, applied at once so the owner
+hears and sees it working; the value is drawn on the line the layout has
+always reserved, beside a peak reading derived from the nd_mic_column extremes
+the app was already computing. The app re-applies switch and level BEFORE
+arecord opens the card, so the screen that exists to tell a dead microphone
+from a working one can no longer be fooled by a card that came back muted.
+
+ONE settings write, after the loop, and only if the number moved. Not per
+keypress: R-24 makes each one a full rewrite with an fsync, and holding UP for
+two seconds is eight of them on UBIFS over SPI NAND. The app's header, which
+said "no gain control ... the mixer is amixer's job", says what changed and
+why that stopped being true.
+
+============ THE CALL PATH -- THE HIGH-VALUE HALF ============
+
+start_mic_pipe() now parses the card out of the resolved plughw string and
+re-applies the capture switch and the configured gain BEFORE arecord is
+spawned. Three short-lived amixer children per call. That is the fix: a card
+that re-enumerated mid-session is un-muted at the start of the next call
+instead of silently recording nothing for its whole length.
+
+The gain is CACHED IN nd_modem, read once in nd_modem__create() beside
+pcm_rate, allow_calls and the boot grace. Reading it per call would be one
+settings rewrite per call for a number that changes about once in the life of
+a phone. The consequence is written down where it matters: a level changed in
+MicTest reaches CALLS at the next core start, exactly like the other three
+system.hw.modem_* settings, and reaches MicTest's own live preview at once.
+
+And the four silent returns. start_mic_pipe() had four paths that left
+mic_live false; one of them (the path-resolve failure) logged nothing at all,
+and none of them was retryable, because nd_modem__watch_audio_proc()'s retry
+was gated on mic_live -- so it only ever saw a pipe that had STARTED and then
+died. A card caught halfway through re-enumerating has no pcm*c node for a
+moment, the scan missed, and the call finished listen-only over a condition
+that had cleared three seconds later.
+
+Every one of them now goes through mic_start_failed(), which names itself in
+the log and decides whether the mic is owed another try. "No capture device
+yet" is retryable; system.hw.modem_mic_device=OFF is a decision and is not.
+The retry is a separate mic_retry_at rather than the shared next_audio_restart,
+so the speaker's watchdog is untouched; it is armed only while the strikes are
+left, cleared by _stop_call_audio(), and gated behind the existing pcm_active
+check, so it cannot spin and cannot fire outside a call. Three failures of any
+kind per call and it stops, which is the promise the file already made.
+
+One existing assertion moved with it, deliberately: a death followed by a
+restart that also fails is now two strikes rather than one, because a failed
+start counts. test_a_mic_that_ran_for_a_while_starts_its_strikes_over() still
+proves what it was written to prove -- without the reset the death would have
+been strike three -- and now says so explicitly.
+
+============ PRIVILEGE ============
+
+Nothing new is needed. ndusr is in group `audio` (configs/users-table.txt) and
+eudev's stock rule leaves /dev/snd/controlC* root:audio 0660, so the core and
+MicTest -- both ndusr -- can already drive the mixer. The capture PCM nodes
+they open are the ndusr 0660 ones 61-neodct-devices.rules makes.
+
+============ DELIBERATELY OUT OF SCOPE ============
+
+Modem-side gain: AT+CMIC and AT+CTXVOL. Nothing in this repo establishes
+whether SIMCom applies either to the USB PCM uplink or only to the analogue
+codec path, nor the valid range on this firmware. That needs the SIM7600G-H AT
+manual and a bench test, and a guess would be worse than nothing.
+
+Tests: test_mic.c 131 checks (was 51) -- the control parser against a real
+C-Media listing including the monitor path it must not touch, every-match
+rather than first-match, the closing quote that keeps "Mic Capture Volume
+Enum" out, both argv builders, the refusals, the settings parse including
+"50; reboot" and "50 --quiet", and apply_gain end to end against a stand-in
+amixer, and the list-once/set-many split the key path leans on. New
+test_mictest.c, 40 checks: the keys, the clamps, every other key being a
+no-op, the two spellings of the default agreeing, a thirteen-press session
+that writes ONCE, a round trip that writes nothing, and the peak reading at
+both ends of full scale. test_modem.c 724 checks (was 700): the ORDER -- switch and level before arecord, not after
+-- the mixer re-applied on the NEXT call, a missed capture device retried, and
+the give-up after three. test_s17audio.py 17 (was 8) including seven shapes of
+nonsense in the settings file.
+
+One trap worth recording, because it cost an hour: a stub on $PATH must be
+PREPENDED, not substituted. A shell script whose $PATH holds only its own
+directory cannot find `cat`, so the heredoc answering `controls` produces
+nothing and the stub still exits 0 -- a tool reporting success with no output,
+which is the exact shape of the bug under test.
+
+All 88 C test binaries green; test_mic, test_mictest and test_modem green
+under ASAN as well. Host suite 1231 passed; the same 20 failures as HEAD, in
+test_sdcard_layout, test_sdcard_helper, test_post_build_pyc,
+test_ffmpeg_codec_coverage and test_users_table, none of which this touches.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df
+
+
+audio: the mixer's budget belongs to the call, not to each amixer child
+
+Review of the uncommitted work found two blockers. Both are here, plus four
+documentation drifts it listed.
+
+============ 1. amixer was on the call-connect critical path ============
+
+apply_capture_mixer() put SYNCHRONOUS, WAITED-FOR children on a path where
+nothing had ever blocked before. call_audio_up() -> nd_modem__start_mic() ->
+start_mic_pipe() runs inside nd_modem_poll() on the modem thread, and
+nd_modem.c's submit() makes every UI-thread modem call -- hangup, answer, dial
+-- wait on done_cv until that tick finishes. Everything else on that path goes
+through spawn_quiet() and is never waited for.
+
+The per-child bound was written down (two seconds) and the aggregate was not,
+which is the whole fault. nd_mic_apply_gain() spawns one `amixer controls`
+plus one cset per control found, up to ND_MIC_CONTROLS_MAX = 8; each child
+could cost 2.0 s of poll, 2.0 s of nd_proc_wait and then nd_proc_terminate()'s
+0.5 s of grace plus 2.0 s after the SIGKILL. Nine children of 6.5 s is 58 s of
+frozen END key, in ONE tick. The owner is already chasing a phone that freezes
+during a call and a tick with no deadline is the leading explanation, so this
+would have made the reported bug materially worse rather than better.
+
+Fixed as the review's option (a): ONE deadline per entry point, taken when it
+starts and shared by every child it spawns. run_amixer() takes the deadline
+instead of making its own, checks it before the fork, uses what is left of it
+for the poll AND the wait, and buries a child that blew it with SIGKILL plus
+ND_MIC_MIXER_REAP_S rather than nd_proc_terminate()'s 2.5 s tail -- that tail
+being exactly the unstated cost the budget exists to remove. nd_mic_apply_gain()
+hands the SAME deadline to the listing and to every cset. The aggregate is
+therefore ND_MIC_MIXER_BUDGET_S + ND_MIC_MIXER_REAP_S = 2.5 s, whatever the
+card publishes, and it is now STATED -- in nd_mic.h, on apply_gain() itself,
+and at the call site in nd_modem_audio.c -- because a per-child number written
+down alone is how this reached 58 s without anyone noticing.
+
+Option (c) -- skip the mixer on the mic_retry_at re-entry -- is DELIBERATELY
+NOT taken, and the reason is a correctness one rather than a preference. The
+commonest retryable failure is the AUTO path finding no capture device and
+finding one three seconds later, which IS a card that has just finished
+re-enumerating: driver defaults, capture switch off, volume zero. That retry is
+the attempt that most needs the mixer, and skipping it would put the
+intermittent dead microphone back on the exact path this feature was written
+for. The multiplication (c) guards against is across ticks and not within one
+-- each retry is its own tick, ND_AUDIO_RESTART_HOLDOFF_S apart -- so with (a)
+in place no single tick pays more than the 2.5 s above, which is the number
+submit() actually blocks for. Both the call-site comment and this message say
+so on purpose; the next person to read "three tries" should not have to work
+it out again. Option (b), the mixer off the modem thread entirely, is the right
+long-term shape and is a bigger change than a release should carry.
+
+test_mic.c gains test_a_hanging_amixer_cannot_hold_the_call_path(): a stand-in
+amixer on the front of $PATH that answers `controls` instantly with EIGHT
+capture controls -- ND_MIC_CONTROLS_MAX, the worst case -- and then sleeps for
+three seconds on every cset. One assertion, that the whole apply_gain() returns
+inside the stated budget plus two seconds of headroom. It was checked against
+the broken shape as well as the fixed one: give each cset its own deadline
+again and the case takes 20 s and fails, which is what makes it a bound rather
+than a benchmark of this host.
+
+============ 2. three test fixtures were overridable by the environment ============
+
+given_the_image_says() in test_keypadsetup.c, test_proc.c and
+test_keypadmapper.c wrote /NeoDCT/platform and dropped the cache but never
+unset NEODCT_PLATFORM -- and nd_platform.c's resolve() reads the environment
+FIRST and returns before it opens the file. So every case in those three
+helpers was silently decided by an ambient variable, which is precisely what a
+developer reproducing a platform bug has exported.
+`NEODCT_PLATFORM=hw make test-one T=test_keypadsetup` was "4 of 694 checks
+FAILED" before this. `(void)unsetenv(ND_ENV_PLATFORM)` is now the first line of
+each, matching test_platform.c's own given_* helpers, which have always done
+it. Verified green with NEODCT_PLATFORM=hw and with =qemu exported:
+test_keypadsetup 694, test_proc 279, test_keypadmapper 249, identical counts
+under both.
+
+============ AND THE DRIFTS ============
+
+S10udevd: the call-site comment above wait_for_ttyusb still said the wait was
+gated on /dev/spidev0.0. The function became `/bin/nd-platform is hw` in this
+same diff, and the note beside the definition already said so; only the caller
+was stale.
+
+test_mictest.c: "Nine presses, ONE write" over a SESSION[] of thirteen keys.
+Thirteen, and twelve values passed through.
+
+COMMIT_MSG.txt: both lists of the pre-existing host failures named four files
+for 20 failures spanning five. test_sdcard_helper added to each.
+
+S17audio: the comment claimed NEODCT_CAPTURE_LEVEL is "how
+neodct/tests/test_s17audio.py pins a level without a settings file", while
+run_start() popped it out of the environment and no case ever put it back --
+the override shipped completely unexercised. Preferred the test:
+test_the_environment_beats_the_settings_file() sets it to 30 against a
+settings.prop saying 55 and asserts the card gets 30 and never sees 55. The
+comment now says what the override is actually for -- a boot before
+/NeoDCT/User is mounted -- and names the case that holds it.
+
+All 88 C test binaries green, zero failures; test_mic (135 checks, was 131),
+test_mictest, test_modem, test_keypadsetup, test_proc and test_keypadmapper
+green under ASAN as well. Host suite 1232 passed (was 1231, +1 for the new
+S17audio case); the same 20 failures as before, in test_sdcard_layout,
+test_sdcard_helper, test_post_build_pyc, test_ffmpeg_codec_coverage and
+test_users_table, none of which this touches.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df
+
+---
+
+fetch: a download nobody could read, and "Cannot read the package" for it
+
+The owner's report, on 0.5.14a: "I just slowly managed to download the Bible
+and PlayStation nap packages. But then I tried to actually install them. It
+just says cannot read the package."
+
+Both packages were fine. Every byte had arrived, Settings LISTED them, and
+what it could not do was open them.
+
+## The gap
+
+Fetch is an engineering app, so nd_proc.c grants it root
+(ND_PATH_ENG_APPS_DIR). Its curl child is not dropped -- ftp.c memsets the
+spawn spec and never sets run_as, so nd_proc.c's privilege-drop block is
+skipped -- and run_neodct.sh sets umask 0027 for the whole process tree, with
+no umask() call anywhere in the C. curl asks for 0666 and gets 0640; mkdir
+asks for 0755 and gets 0750. rename(2) at the end of a download keeps both,
+and Fetch chmodded and chowned nothing: `grep -n "chmod\|chown"
+apps/Fetch/*.c` returned nothing at all.
+
+Settings is ndusr, and ndusr is not in group root. So:
+
+    nd_nap_find()     filters with nd_path_is_file(), which is stat(2). stat
+                      needs +x on the DIRECTORY, and ndusr owns untrusted/.
+                      LISTED.
+    nd_nap_inspect()  walk() opens with fopen(), which needs +r on the FILE.
+                      EACCES -> ND_ERR_IO -> "Cannot read the package."
+
+Listed and then refused, with a sentence that blamed the package. Nothing
+repaired it either: apply_layout() in neodct-sdcard recursively chowned apps/*
+and the five media folders, and untrusted/ was in neither list.
+
+fetch_app.h had written the opposite down -- "lands root-owned and 0644, which
+is what the readers need" -- which is arithmetically wrong under umask 0027
+and was the stated justification for Fetch running as root, so it invited the
+next writer to repeat it.
+
+## Fixed at the writer, because that is the only place it can be fixed
+
+ndusr can neither chown nor chmod a file it does not own. Fetch is root at the
+moment of the rename, so two syscalls there are enough -- and the mode has to
+suit the DESTINATION, because a single answer is wrong in both directions:
+
+    music/       0750 ndusr:ndusr      -> 0640  the reader IS the owner
+    apps/PSX/    0755 ndusr:ndusr      -> 0644  the reader is ndusr_ut, which
+                                                is OTHER here. "chown to the
+                                                directory owner, chmod 0660"
+                                                would leave the emulator
+                                                unable to open its own disc
+    untrusted/   0770 ndusr:ndusr_ut   -> 0660  two principals share it:
+                                                Settings reads a .nap as
+                                                ndusr, the browser writes as
+                                                ndusr_ut
+
+Every one of those is what apply_layout() restates on the next mount, which is
+the property that matters -- the same reason nd_nap.c states its own 0644.
+
+route.c's new fetch_give_to_reader() does it, reusing
+nd_path_give_to_dir_owner() (the 0.5.8b keymap.json helper) for the ownership
+half: CARD_LAYOUT already decided who owns each folder, so copying the
+directory's uid AND gid down is right in all three cases, and the helper
+already no-ops when the caller is not root. fetch_download() takes the kind as
+a parameter rather than leaving the caller to apply it afterwards: the rename
+is the instant the file becomes visible to its reader, and there are already
+two writers here.
+
+THE DIRECTORIES TOO. route.c created them with mkdir(0755), which the umask
+turned into 0750 root:root -- a games/<Title>/ the PSX app could not even
+traverse. mkdir_one() restates the mode and hands the directory over, and only
+for one it actually created: an EEXIST is untrusted/ or music/ or the card
+root, each with a mode of its own, and a mkdir_p that chmodded 0755 past
+untrusted/ would have quietly widened the arrival area every time somebody
+downloaded a disc image.
+
+And the cue sheet, which fetch_write_cue() writes itself: it is the file
+PCSX-ReARMed actually opens, so a 0644 disc image beside a 0640 cue is still a
+game that does not boot.
+
+## The repair pass, as the net under it
+
+apply_layout() now has an untrusted/ contents pass: ndusr:ndusr_ut, 0770 on
+directories and 0660 on files. Deliberately NOT the media loop's
+`chown ndusr:ndusr`, which would fix the installer by taking the browser's own
+cookie jar and playback state away from it -- ndusr_ut is not in group ndusr
+and users-table.txt calls that membership "the whole boundary". Group-write
+grants nothing new: the directory is 0770, so ndusr_ut could already unlink
+and replace anything in it, and the area is mounted noexec.
+
+This pass is NOT the fix for the reported flow -- the card is already mounted
+when a download arrives, and Settings only calls the layout verb AFTER a
+successful install -- it is the complement to the writer-side fix, for a card
+that arrives with bad modes from a PC.
+
+THE BROWSER REACHES THE SAME EACCES BY THE OTHER ROAD and this does not fix
+it: netsurf is ndusr_ut under the same umask, so a .nap it downloads is 0640
+ndusr_ut:ndusr_ut, and no amount of care on the writing side helps -- a
+process cannot give a file to a group it is not in. It would have to be fixed
+at the browser's spawn (a umask for the netsurf child that leaves o+r, which
+is safe only because untrusted/ is 0770 and nothing else can traverse it), or
+by re-seating the card, which runs the pass above. Written down beside the
+pass so the next person does not have to rediscover it.
+
+## The wording, which is what sent the owner to the wrong place
+
+EACCES and ENOENT both said "Cannot read the package." The errno was in the
+log line and on no screen anybody had. The permission case now names itself
+and names the repair -- ND_NAP_WHY_UNREADABLE, hoisted into nd_nap.h for the
+same reason ND_UI_MODEM_FAULT_MESSAGE is hoisted out of nd_ui.c: nd_msgdialog
+clips silently with a glyph the font does not have, so a shipped message needs
+a test that can name and measure it. 4 lines of a 5-line budget, checked with
+nd-dialogfit and pinned by test_widgets_dialogs.c. ENOENT keeps its old
+sentence; this distinguishes two errnos, it does not rename one.
+
+## Why the suite could not see any of this
+
+test_nap.c was 927 lines with no permission or ownership case at all -- every
+test ran as one uid, created its own fixtures and could read everything it
+made. test_a_package_the_caller_may_not_open() pins the gap itself: the
+package is still LISTED with mode 0000 and then refused, with the message that
+says why, and the installer refuses it the same way. It skips loudly as root,
+which reads a 0000 file.
+
+test_fetch.c gets the mode table per destination, the directories a download
+creates, and the handover itself (root + ndusr only, SKIP with a reason
+otherwise). test_fetch_app.c drives the same thing through a real download
+against the stand-in curl, with umask(0027) SET in the test -- the phone's --
+so an assertion coming back 0644 or 0660 is proof the chmod ran rather than a
+restatement of the umask. Confirmed load-bearing: with the two chmods removed
+the new cases fail 6 and 10 checks respectively.
+
+All 88 C test binaries green, and green again under ASAN: test_nap 337 checks
+(was 315), test_fetch 170 (was 132), test_fetch_app 94 (was 80),
+test_widgets_dialogs 202 (was 198).
+Host suite 1232 passed, and the same 20 pre-existing failures in
+test_sdcard_layout, test_sdcard_helper, test_post_build_pyc,
+test_ffmpeg_codec_coverage and test_users_table -- test_sdcard_layout's are a
+`find ! -user ndusr` on a host with no ndusr, which this does not touch.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df
+
+---
+
+sdcard: root followed a symlink into the one folder an app can write
+
+Five fixes held back the 0.5.15a tag. The first is the reason it was held.
+
+============ 1. THE BLOCKER: a root chown at a path an app chooses ============
+
+The untrusted/ repair pass added earlier in this changeset walked the whole of
+untrusted/ as root and ran `chown` and `chmod` over every file and directory in
+it. untrusted/ is 0770 ndusr:ndusr_ut -- THE ONE DIRECTORY on the card the
+untrusted set can write -- and both chown(1) and chmod(1) DEREFERENCE SYMLINKS.
+
+find's `-type f` is an lstat, so a symlink never matches it. That is not the
+hole. With `-exec ... +` the batch runs AFTER the walk, so the window between
+find looking at a file and root touching it is the whole length of the walk,
+and in that window the browser (or any installed .nap app -- they are all
+ndusr_ut) can unlink a regular file and put a symlink there instead. Root then
+chowns and chmods whatever it points at: /NeoDCT/User/settings.prop, for one.
+The apps/ loop above it was never this, because it -prunes data/, the only
+subtree under apps/ ndusr_ut can write, and it goes on pruning it.
+
+A race window on a directory an attacker writes cannot be closed from a shell
+script, so both halves of the fix are about REACH:
+
+  chown -h        confirmed available on the target before relying on it:
+                  busybox's chown puts -h in OPT_STR unconditionally, not
+                  behind FEATURE_CHOWN_LONG_OPTIONS, and the shipped ARM
+                  binary at build-luckfox/target/bin/busybox carries
+                  "-h  Affect symlinks instead of symlink targets" in its
+                  chown usage. CONFIG_CHOWN=y is enough.
+
+  *.nap only      the reviewer's call, and it is the right one. Fetch states
+                  its own modes at the moment it writes now, so the only
+                  reader still needing a repair here is Settings' installer,
+                  reading a package as ndusr that the browser or a PC wrote.
+                  Everything else in untrusted/ belongs to ndusr_ut and is
+                  read by ndusr_ut -- cookie jars, playback state -- and root
+                  taking those off it bought nobody anything.
+
+  -maxdepth 1     nd_nap_find() reads one level of the card root, apps/ and
+                  untrusted/ and does not recurse, so a .nap in a subdirectory
+                  is invisible to the installer anyway. Root now never
+                  descends into a directory the browser made.
+
+THE chmod IS GONE rather than made safe. busybox chmod has no -h, and the
+chmod turned out to be doing nothing the chown did not: chown makes ndusr the
+OWNER of the package, and every mode a plausible writer leaves (0640 from a
+0027 umask, 0600 out of a tarball) is owner-readable. Losing it costs the
+installer nothing and removes the operation that had no -h to give.
+
+Three more symlink holes of the same family, all reachable from a card written
+on a PC rather than from an app, closed while in here: `[ -d ]` is true of a
+symlink to a directory, so the CARD_LAYOUT loop would have chowned and chmodded
+the target of an "untrusted -> /NeoDCT/User" left on a card (now `[ -L ] &&
+continue`); the `apps/*/` glob matches one the same way (same guard); and
+`$app/data` is addressed by name rather than by the walk, so it is the one path
+the -prune cannot protect (now skipped when it is a link, with a log line).
+Every remaining chown in apply_layout() carries -h, including the media loop's,
+and test_every_chown_in_the_layout_refuses_to_follow_a_link() holds it there --
+the flag is one character from coming back off, and whether root followed a
+link is only observable as root.
+
+============ 2. 2.5 s of dead END key was still 2.5 s ============
+
+ND_MIC_MIXER_BUDGET_S 2.0 -> 0.5. An honest amixer answers in about 20 ms --
+it opens a control device, writes one value and exits -- so 2.0 s was a
+hundredfold margin on a number that is paid by the UI thread: start_mic_pipe()
+runs on the modem thread inside one nd_modem_poll() tick, and nd_modem.c's
+submit() blocks every UI-thread modem call, hangup included, until that tick
+finishes. The owner is already reporting a phone that freezes during calls.
+0.5 s is still twenty-five times an honest run, so no working card can notice;
+the aggregate the END key can pay drops from 2.5 s to 1.0 s.
+
+Every comment that states the arithmetic was updated, because the whole point
+of that note is that the number is written down: nd_mic.h's budget section (a
+new "AND WHY HALF A SECOND, NOT TWO"), the apply_gain() aggregate bound,
+nd_mic.c's deadline comment, and nd_modem_audio.c's "WHAT THIS COSTS THE CALL,
+AS ONE NUMBER" and its file header. The one remaining 2.5 s in nd_mic.c is
+nd_proc_terminate()'s own tail and is unrelated; the one in nd_mic.h is the
+history sentence saying what the number used to be. No test hard-coded 2.0.
+
+============ 3. S17audio dropped the last line of settings.prop ============
+
+`while IFS='=' read -r key value` with no `|| [ -n "$key" ]`: read returns
+non-zero on a final record with no newline after it, having already filled the
+variables, so the plain form silently drops it. settings.prop is one key per
+line and the last line is whichever key was written last, so a file ending
+"system.hw.mic_gain=0" gave the DEFAULT of 100 and the owner's saved gain was
+ignored on every boot with nothing to say so. /bin/nd-platform's platform_get()
+documents and guards this exact edge on the same file format; the two readers
+of one format now agree about where a file ends.
+test_a_last_line_with_no_newline_is_still_a_setting() uses 0 deliberately --
+the value easiest to confuse with "nothing was read", which is what the bug did
+with it.
+
+============ 4. the test defending the call-path number had 80% slack ========
+
+test_mic.c asserted `spent <= BUDGET + REAP + 2.0` -- 4.5 s against a header
+promising 2.5 s. A regression that nearly doubled the real cost passed it. The
+slack is now MIXER_BOUND_SLACK_S 0.5, which is what the HOST adds and the phone
+does not (two fork/execs of a shell, a SIGKILL, poll granularity) -- half the
+bound rather than twice it.
+
+The floor had to be re-derived, as warned: `spent >= 1.0` was true of a 2.0 s
+budget and fails at 0.5. It is now `>= ND_MIC_MIXER_BUDGET_S / 2.0`, derived
+rather than typed: the first cset sleeps STUB_HANG_S, longer than the whole
+budget, so run_amixer() sits in poll(2) until the deadline and the call cannot
+return before the budget has really passed. Half of it is wide margin for clock
+granularity and still two orders of magnitude above the few milliseconds an
+amixer that was never found on $PATH would cost -- which is the case that check
+exists to catch.
+
+============ 5. the disc image, and the evening it cost ============
+
+The owner downloaded a PlayStation image with Fetch, it went to untrusted/
+instead of the emulator, they hand-made games/DigimonWorld/ on the card, put
+the .bin in it, chowned the FILE, and the emulator still said "No discs".
+
+FETCH NOW SAYS WHY. fetch_dest_path() downgrades FETCH_DEST_GAME and
+FETCH_DEST_BIOS to untrusted/ when PSX is not installed -- correct, there is no
+games/ to write into -- and said nothing, so the confirm dialog offered a
+destination nobody asked for with no reason attached. Correct-by-design
+behaviour that looks like a fault is still a fault. route.c's new
+fetch_dest_note() returns FETCH_NOTE_NO_PSX for exactly the two kinds
+fetch_dest_path() downgrades and NULL for everything else, so a caller prints
+it with one test and a note never becomes noise.
+
+IT HAS TO FIT, and nd_msgdialog clips with a U+2026 this font cannot draw, so
+an overlong message does not look truncated -- it looks like a sentence that
+ends there. nd_dialogfit.c's own note says which way round to solve that: bound
+the interpolation, because a variable-length string pushing fixed guidance off
+the bottom was three of the six clipped messages it found. So main.c bounds the
+NAME with nd_text_fit() to the dialog's body column and the sentence is the
+part that cannot be pushed off. test_the_fetch_no_psx_notice_fits() measures
+the widest thing this can build -- 96 W's fitted, "1023.9 MB", "Downloads" and
+the note -- with nd_msgdialog_measure(), beside the three existing shipped-
+message cases. 4 lines of a 5-line budget.
+
+THE HAND-MADE FOLDER already worked, and that is worth saying plainly rather
+than pretending otherwise: apply_layout()'s apps/ walk became recursive in
+0.5.9a (15289dae) -- this changeset only added the -L guards and the -h, not
+the recursion -- and its `-type d` branch already takes a 0750 root:root
+games/DigimonWorld/ to 0755 ndusr:ndusr, which is what an ndusr_ut emulator
+needs to opendir() it -- 0755/0644 ndusr:ndusr being what
+nd_nap.c writes and calls "the modes apply_layout() will restate". What was
+missing was any test saying so, which is how it would have been quietly
+widened or lost. test_a_game_folder_a_person_made_is_traversable_by_the_app()
+now pins it, and test_the_walk_still_stops_at_the_apps_own_data() pins the half
+that must NOT move: data/ stays pruned, for exactly the symlink reason in fix 1.
+test_root_touches_only_packages_in_the_arrival_area() pins the narrowed reach --
+a 0640 .nap keeps 0640 (no chmod), the browser's cookies.db and its own
+directory are untouched, and a .nap one level down is never reached.
+
+## Why four new sdcard cases run where twelve old ones do not
+
+test_sdcard_layout.py fails 12 cases on this machine and did before any of
+this: apply_layout()'s last command is `find ... ! -user "$CARD_USER"`, and
+find refuses a user name that is not in /etc/passwd, so on a build host with no
+ndusr the function returns non-zero however well it did its job. IT THEREFORE
+CANNOT COVER THIS CHANGE, and saying it passed would be a lie. The four cases
+added here go through apply_layout_here(), which sets NEODCT_CARD_USER to
+whoever is running the tests -- the variable exists for this -- so the walk is
+actually exercised wherever the suite runs. The 12 pre-existing failures are
+left exactly as they were; fixing them is not this release's job.
+
+The shared chown stub now drops a leading -h before recording, in one place
+rather than four, so the assertions stay about who a file was given to.
+
+## Tests
+
+All 88 C test binaries green, and green again under ASAN. test_fetch 180 checks
+(was 170), test_widgets_dialogs 205 (was 202), test_mic 135, test_fetch_app 94.
+
+Host suite 1237 passed (was 1232: +1 test_s17audio, +4 test_sdcard_layout), 10
+skipped, and the same 20 pre-existing failures in test_sdcard_layout (12),
+test_post_build_pyc (4), test_ffmpeg_codec_coverage (2), test_sdcard_helper (1)
+and test_users_table (1). None of them is new and none is touched here.
+
+Not covered by anything that can run on a build host: whether root really
+declines to follow a link. That needs root and the two users, which is
+nd-selftest's half -- run it on the phone after this.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df
+
+# ============================================================================
+
+fetch: the handover happens on a descriptor, not on a name
+
+A release gate found the symlink hole that fix 1 closed in neodct-sdcard
+REINTRODUCED in the C beside it, and a worse one that had been there longer.
+Both are root-privileged operations on a path an untrusted process controls.
+
+## The chown and the chmod, moved from the shell into the C
+
+fetch_give_to_reader() was chown(2) then chmod(2), both by path. Fetch is an
+ENGINEERING app and engineering apps run as root (nd_proc.c); fetch_dest_path()
+sends FETCH_DEST_NAP and FETCH_DEST_OTHER to $mount/untrusted/<name>, and
+downgrades the two PSX kinds to FETCH_DEST_OTHER when the emulator is not
+installed -- so the ordinary case was root chmodding a name inside the one
+directory on the card ndusr_ut can write. Between the rename and the chmod the
+browser, or any installed .nap app, could unlink that name and put a symlink to
+/NeoDCT/User/settings.prop there instead. The comment block directly above the
+function stated the rule -- "a root chmod inside the one directory the
+untrusted set can write is a root chmod at a path an attacker picks" -- which
+is worth saying out loud, because a comment asserting a property nothing
+enforces reads as evidence that somebody checked.
+
+A NAME CANNOT BE MADE SAFE FROM A RACE; AN OBJECT CAN. So nd_path.c grows the
+pattern once instead of it being open-coded:
+
+  nd_path_give_fd_to_dir_owner(fd, path, mode)  fstat/fchown/fchmod on a
+                                                descriptor the caller already
+                                                holds. `path` is used ONLY to
+                                                find the directory whose owner
+                                                is copied down.
+  nd_path_give_to_dir_owner_nofollow(path, mode)  the same, for a caller with
+                                                only a name: the open carries
+                                                O_NOFOLLOW (a planted symlink
+                                                is ELOOP, not a root fchmod of
+                                                what it points at) and
+                                                O_NONBLOCK (a planted fifo is
+                                                not a UI thread waiting for a
+                                                writer that never comes).
+
+Both refuse anything that is not a plain file with ONE link. The link count is
+not decoration: this image sets no fs.protected_hardlinks, so a process that
+can write untrusted/ can keep a second name for a file somewhere it owns and
+still hold it after root has changed the owner.
+
+The old nd_path_give_to_dir_owner() is unchanged and still chowns by name. Its
+three call sites were judged rather than converted for symmetry:
+
+  nd_keymap.c / KeypadMapperI2C   /NeoDCT/User/keymap.json. The partition root
+                                  is 0751 ndusr:ndusr and ndusr_ut is not in
+                                  that group, so nothing untrusted can create
+                                  a name there to plant. Root, and ndusr, are
+                                  the only writers -- and ndusr is who the
+                                  file is being given to.
+  nd_settings.c                   settings.prop, same directory, same argument,
+                                  and already gated on geteuid() == 0.
+  route.c mkdir_one()             only ever touches a directory THIS call just
+                                  made with mkdir(2), which returns EEXIST on
+                                  a symlink rather than following one, and
+                                  whose parents are apps/ (0755 ndusr:ndusr)
+                                  or the card root (0751). Not reachable.
+
+Its header now says which places it is for, so the next caller does not have to
+work that out.
+
+## And the one underneath it, which was worse
+
+curl ran as root with `-o <local_path>.part` in that same untrusted/ directory.
+The unlink() before it removes a planted symlink; an ndusr_ut process that
+RE-PLANTS between that unlink and curl's fopen gets a ROOT-PRIVILEGED ARBITRARY
+FILE WRITE, reachable from the browser, retryable as often as it likes.
+
+curl is never told a path any more. ftp.c opens the .part itself --
+O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600 -- and hands curl the DESCRIPTOR as fd 1,
+which is curl's default output, so there is no argument to get wrong.
+nd_proc_spec's fds[] was always able to carry this: the LISTING invocation
+three hundred lines up already passes a pipe the same way, and nd_remote.c
+gives curl a descriptor as -D /proc/self/fd/3. Of the two designs the gate
+offered, this is the smaller by a wide margin -- a root-owned scratch directory
+on the card would have to survive a full card, be cleaned up on every failure
+path, and stay on the same filesystem for the rename, which is three new ways
+to lose a download for a property the O_EXCL already has.
+
+Progress and the short-file check moved to fstat() of that descriptor, so both
+are about the bytes curl is writing rather than about whatever currently
+answers to the name. The mode and the owner are stated on the same descriptor
+BEFORE the rename, which is what lets fetch_give_to_reader()'s path form
+disappear from this path entirely.
+
+WHAT REMAINS, PRECISELY. An ndusr_ut process can still unlink the .part and put
+its own file or symlink at that name, and the rename(2) will then move THAT
+into place under the download's final name. It cannot make root write, chown or
+chmod anything outside untrusted/: rename(2) does not follow symlinks on either
+side -- it moves the link, not its target, which was checked rather than
+assumed -- and the handover has already happened on the descriptor. The whole
+of the remaining exposure is a process rearranging files inside the one
+directory it can already unlink anything in. The download would be wrong;
+nothing else would be.
+
+fetch_write_cue() keeps writing its cue with fopen(), and that is not the same
+hole: main.c only writes one when the kind is still FETCH_DEST_GAME, which
+means PSX is installed and the directory is apps/PSX/games/<Title>/ -- 0755
+ndusr:ndusr, where ndusr_ut cannot create a name. Its handover goes through the
+nofollow form anyway, because it costs nothing.
+
+## The apps/ walk chmods before it descends
+
+`-exec chmod {} +` batches and the batch runs AFTER the walk that collected it.
+find's -type tests are lstat, so a symlink matches neither branch when it is
+LOOKED at -- but the file that did match can be replaced by one in the whole
+length of the walk that follows, and busybox chmod has no -h to refuse it.
+
+The release note claimed apps/ was not the same hole as untrusted/ because it
+prunes data/. THAT CLAIM IS NOW CORRECTED IN THE FILE, because it is true only
+of a card this phone has already normalised: a card written on a PC arrives
+with the PC's modes, and apps/PSX/games/ at 0777 is the exact case the
+recursion was added for. Until this pass has run, every untrusted app on the
+phone can write in it.
+
+The chmods are `\;` -- one process per entry, run while find is standing on it
+and BEFORE find descends into a directory it has just taken back to 0755
+ndusr:ndusr. $app itself is stated the same way before find starts, so the
+invariant holds from the top: root never chmods a path whose parent it has not
+already taken. Dropping the chmod entirely was the other option offered and it
+is wrong here -- the reader of a game folder is PCSX-ReARMed, which is ndusr_ut
+and therefore OTHER in an ndusr:ndusr tree, so ownership alone leaves a 0750
+directory it still cannot traverse. That is the disc the emulator could not
+see, and there is a test for it. The chowns stay batched: -h makes a chown of a
+planted symlink harmless, so they are the half that can afford to run late.
+
+## Four small ones
+
+nd_platform.c set g_resolved on resolve()'s FIRST line, so another thread
+calling nd_platform() in that window saw "resolved" with a freshly-zeroed
+ND_PLATFORM_UNKNOWN -- a crash report saying "unknown (this image carries no
+/NeoDCT/platform)" about a phone that carries one, which is worse than saying
+nothing because it is believed. It is now the last statement, with one exit
+instead of three; a lost race costs a redundant re-parse of a small file.
+
+nd_mic.h documented list_controls() and set_controls() as bounded by
+ND_MIC_MIXER_BUDGET_S alone, when both can additionally pay
+ND_MIC_MIXER_REAP_S for a child that had to be SIGKILLed. All three entry
+points now say ND_MIC_MIXER_BUDGET_S + ND_MIC_MIXER_REAP_S -- 1.0 s -- as
+apply_gain() already did, which is the whole point of the note above the
+constant: a bound its reader has to multiply out is a bound that gets quoted
+wrong. MicTest calls set_controls() on every UP and DOWN, so 1.0 s is that
+app's worst case for one keypress, and mixer_set_level() now says so where a
+reader of MicTest will actually see it.
+
+The two CARD_MARKER sites are outside apply_layout() and were not covered by
+the new source assertion: `: > "$MOUNT_POINT/.neodct"` follows a symlink and
+truncates what it points at, and the chown beside it had no -h. Low -- the card
+root is 0751 ndusr:ndusr, so this is a card written on a PC rather than
+anything untrusted -- but it made the file contradict its own rule. Both now
+`[ -L ] && rm -f` first (removed rather than skipped: without a marker the
+phone does not recognise its own card) and chown -h, and
+test_the_card_marker_is_never_written_through_a_link() holds both sites and the
+guard above each.
+
+COMMIT_MSG's account of the hand-made game folder said the apps/ walk "stopped
+being one level deep earlier in this same changeset". It did not: that
+recursion arrived in 0.5.9a (15289dae), and this changeset added only the -L
+guards and the -h. Reworded so a future reader looks in the right release.
+
+## Tests
+
+test_fetch grows three cases, all of which run as an ordinary user and still
+prove the refusal, because what they assert is that the DECOY was not touched:
+a symlink planted at the download's name leaves the file it points at at 0600
+and stays a symlink; a second hard link to the download is refused the same
+way; and the descriptor form states the same mode on an open .part. A run as
+root would prove the same thing about a file it could not have changed anyway.
+
+neodct/tests/ftp/fake-curl writes the body to STDOUT rather than to an -o
+target, which is what the real curl does with no -o, so test_fetch_app's
+assertions about the file that appears are now assertions about the descriptor
+ftp.c opened. Its header says why, since a stand-in that drifts from the real
+argv is a test that proves nothing.
+
+test_sdcard_layout gains test_the_apps_walk_chmods_before_it_descends(), which
+pins the `\;` as source for the reason the -h assertion beside it gives: the
+race cannot be reproduced on demand, and what must not come back is the one
+character that opens it.
+
+All 88 C test binaries green, and green again under ASAN. test_fetch 203 checks
+(was 180), test_fetch_app 94, test_platform 47, test_mic 135, test_mictest 40.
+
+Host suite 1239 passed (was 1237: +2 test_sdcard_layout), 10 skipped, and the
+same 20 pre-existing failures in test_sdcard_layout (12), test_post_build_pyc
+(4), test_ffmpeg_codec_coverage (2), test_sdcard_helper (1) and
+test_users_table (1). None is new and none is touched here.
+
+Not covered by anything a build host can run: whether root really declines to
+follow the link on the phone, and whether an ndusr_ut process really cannot
+plant one where the layout says it cannot. That is nd-selftest's half -- run
+`nd-selftest boundary` there after this.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df

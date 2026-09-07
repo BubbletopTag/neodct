@@ -39,6 +39,10 @@
  *                       CALL: BEGIN, CLCC <stat> 0 or ATA to report it.
  *   a pipe dies         the speaker is restarted from a flushed port after
  *                       the holdoff; the mic gets its three strikes.
+ *   the mic misses      a mic that never STARTED is now owed a retry too,
+ *                       out of the same three strikes. It was not, and a
+ *                       card caught halfway through re-enumerating therefore
+ *                       cost the whole call. See mic_start_failed().
  *   the call ends       both pipes SIGKILLed, CPCMREG=0 on the next tick.
  *   the modem is lost   the same, because a pipe recorded as live with no
  *                       modem behind it blocked every later call's audio.
@@ -64,6 +68,11 @@
  *    ND_MIC_STABLE_S first was working, and starts its three over.
  *  - _stop_call_audio() sends SIGKILL, not SIGTERM. Popen.kill() is SIGKILL
  *    on Linux and an aplay left in D-state would hold the port.
+ *  - The capture MIXER is re-applied before every arecord, not trusted from
+ *    boot. It is a handful of amixer children, bounded as a whole at 1.0 s
+ *    per attempt, and it is the fix for the intermittent dead microphone;
+ *    apply_capture_mixer() has the whole story, including why that bound had
+ *    to be stated rather than left to be multiplied out.
  *
  * The children go through nd_proc_spawn(), which forks and execs with nothing
  * in between (CODING-STANDARDS.md section 1.1) and whose reaper keeps the
@@ -81,6 +90,7 @@
 #include <unistd.h>
 
 #include "nd_log.h"
+#include "nd_mic.h"
 #include "nd_modem_priv.h"
 #include "nd_paths.h"
 #include "nd_proc.h"
@@ -383,6 +393,123 @@ static void start_speaker_pipe(nd_modem *m, const char *port)
     }
 }
 
+/* ============ EVERY WAY OUT OF start_mic_pipe(), AND WHY IT SAYS SO ======
+ *
+ * It had four returns that left mic_live false, and only two of them logged
+ * anything a person could act on -- the path-resolve failure logged NOTHING
+ * AT ALL. That mattered more than tidiness, because the retry watchdog in
+ * nd_modem__watch_audio_proc() was gated on mic_live: a pipe that DIED was
+ * retried three times, and a pipe that never started was not retried at all.
+ * So one transient miss -- a card halfway through re-enumerating, an arecord
+ * that lost a race for the device -- cost the whole call, silently, and the
+ * only evidence was a caller saying they could not be heard.
+ *
+ * So every failure now goes through here, and it does two things: it names
+ * itself in the log, and it decides whether the mic is owed another try.
+ *
+ * `retryable` is the whole judgement. A capture device that is not there yet
+ * may be there in three seconds, and that is exactly the re-enumeration case.
+ * system.hw.modem_mic_device=OFF will still be OFF in three seconds, and
+ * retrying a deliberate configuration until the strikes run out would fill
+ * the log arguing with the owner.
+ *
+ * The count is ND_MIC_GIVE_UP_AFTER, shared with the pipe-died path, because
+ * it is the same promise: three tries and the call carries on listen-only
+ * rather than spinning for its whole length. nd_modem__start_mic() zeroes it
+ * at the start of each call, so the three are per call.
+ */
+static void mic_start_failed(nd_modem *m, bool retryable)
+{
+    m->mic_pid = -1;
+    m->mic_live = false;
+    m->mic_retry_at = 0.0;
+    if (!retryable)
+        return;
+
+    m->mic_fails++;
+    if (m->mic_fails >= ND_MIC_GIVE_UP_AFTER) {
+        nd_log(ND_LOG_MODEM, "Mic uplink failed to start %d times; call continues listen-only.",
+               (int)m->mic_fails);
+        return;
+    }
+    m->mic_retry_at = nd_modem__now() + ND_AUDIO_RESTART_HOLDOFF_S;
+}
+
+/* ============ THE MIXER, BEFORE EVERY arecord ============
+ *
+ * This is the fix for the intermittent dead microphone, and it is three lines
+ * because the whole bug was that nobody owned the mixer after boot.
+ *
+ * /etc/init.d/S17audio turns the capture switch on and sets the capture level
+ * ONCE, out of its `start` case, out of rcS. There is no alsactl in this
+ * image, no asound.state, and no udev rule that re-runs it -- its own comment
+ * says "NOTHING ELSE IN THIS IMAGE DOES". The header of this file already
+ * records that this card "re-enumerates once per call", and a C-Media adapter
+ * that re-enumerates comes back with the driver's defaults: capture switch
+ * OFF, capture volume ZERO. arecord then opens it, reports success, and
+ * streams a flat line at the far end for the rest of the session. Every layer
+ * says it worked.
+ *
+ * So the mixer is re-applied here instead of trusted: at the start of every
+ * call, on whatever card the uplink is about to open, from the level the
+ * owner set.
+ *
+ * ============ WHAT THIS COSTS THE CALL, AS ONE NUMBER ============
+ *
+ * A handful of short-lived amixer children, and they are WAITED FOR on the
+ * modem thread -- which nothing else on this path is. spawn_quiet() starts
+ * arecord and aplay and never looks back; this blocks.
+ *
+ * That matters because of who is behind it. start_mic_pipe() runs inside
+ * nd_modem_poll(), and nd_modem.c's submit() makes every UI-thread modem call
+ * -- hangup, answer, dial -- wait on done_cv until the tick it landed in has
+ * finished. So whatever this costs is time the END key does not respond, and
+ * a call that will not hang up is a worse fault than a call nobody can hear.
+ *
+ * nd_mic_apply_gain() therefore takes ONE deadline for the listing and every
+ * cset together: ND_MIC_MIXER_BUDGET_S + ND_MIC_MIXER_REAP_S, 1.0 s, whatever
+ * the card publishes and however badly amixer behaves. It is stated here as
+ * well as in nd_mic.h because a per-child bound written down on its own is
+ * what let this reach nine children of six and a half seconds -- 58 s in one
+ * tick -- before anybody multiplied it out.
+ *
+ * ND_MIC_GIVE_UP_AFTER attempts per call means the mixer is re-applied on
+ * each retry, so the per-CALL total is three of those. That is deliberate and
+ * it is not folded into one: each retry is a separate tick, separated by
+ * ND_AUDIO_RESTART_HOLDOFF_S, so no single tick pays more than the 1.0 s
+ * above -- and skipping the re-apply on a retry would break the fix outright.
+ * The commonest retry is the AUTO path finding no capture device and then
+ * finding one three seconds later, which IS a card that has just finished
+ * re-enumerating: it is sitting at the driver's defaults, muted, and it is
+ * the one attempt that most needs the mixer. "Re-applied before every
+ * arecord" at the top of this file is the rule, and the retry is an arecord.
+ *
+ * The gain comes from m->mic_gain, cached at nd_modem__create(). It is NOT
+ * read here: R-24 means an nd_settings_get() rewrites settings.prop with an
+ * fsync whatever key it was asked for, and doing that once per call is flash
+ * wear on UBIFS for a number that changes about once in the life of a phone.
+ *
+ * A failure is logged by nd_mic_apply_gain() and then ignored on purpose. A
+ * card that refuses a cset may still record perfectly well -- the onboard
+ * codec publishes no capture control at all -- and refusing to open it would
+ * turn "possibly quiet" into "definitely nothing".
+ */
+static void apply_capture_mixer(nd_modem *m, const char *device)
+{
+    int32_t card;
+
+    if (!nd_mic_card_of(device, &card)) {
+        /* system.hw.modem_mic_device can be set to anything arecord takes,
+         * "hw:1,0" and "default" included, and neither carries a card number
+         * in a form this can read. Not an error: the owner asked for that
+         * device by name and gets it, unmixed. */
+        nd_log(ND_LOG_MODEM, "Mic device %s carries no card number; capture mixer left alone.",
+               device);
+        return;
+    }
+    (void)nd_mic_apply_gain(card, m->mic_gain);
+}
+
 static void start_mic_pipe(nd_modem *m, const char *port)
 {
     char device[128];
@@ -418,21 +545,34 @@ static void start_mic_pipe(nd_modem *m, const char *port)
 
         if (upper[0] == '\0' || strcmp(upper, "OFF") == 0 || strcmp(upper, "NONE") == 0) {
             nd_log(ND_LOG_MODEM, "Mic uplink disabled (system.hw.modem_mic_device=OFF).");
+            /* Not retryable: this one is a decision, not a fault. */
+            mic_start_failed(m, false);
             return;
         }
         if (strcmp(upper, "AUTO") == 0) {
             if (!nd_modem__find_capture_device(device, sizeof device)) {
-                nd_log(ND_LOG_MODEM,
-                       "No ALSA capture device found (arecord -l); call is listen-only.");
+                nd_log(ND_LOG_MODEM, "No ALSA capture device found (arecord -l); will look again.");
+                /* THE re-enumeration case. A card that is halfway through
+                 * coming back has no pcm*c node for a moment, and three
+                 * seconds later it has one. */
+                mic_start_failed(m, true);
                 return;
             }
             nd_log(ND_LOG_MODEM, "Mic auto-detected: %s", device);
         }
     }
 
+    apply_capture_mixer(m, device);
+
     (void)snprintf(rate, sizeof rate, "%d", (int)m->pcm_rate);
-    if (nd_path_resolve(resolved, sizeof resolved, port) != ND_OK)
+    if (nd_path_resolve(resolved, sizeof resolved, port) != ND_OK) {
+        /* This branch logged nothing whatsoever. It is reachable when the
+         * port string is longer than ND_PATH_MAX once ND_ROOT is prepended,
+         * which is a configuration mistake nobody could see from the phone. */
+        nd_log_err(ND_LOG_MODEM, "Mic uplink: PCM port %s does not resolve to a path.", port);
+        mic_start_failed(m, false);
         return;
+    }
 
     argv[0] = "arecord";
     argv[1] = "-q";
@@ -452,14 +592,15 @@ static void start_mic_pipe(nd_modem *m, const char *port)
     if (spawn_quiet(argv, &pid)) {
         m->mic_pid = pid;
         m->mic_live = true;
+        m->mic_retry_at = 0.0;
         m->mic_started_at = nd_modem__now();
         nd_log(ND_LOG_MODEM, "Mic uplink: arecord -D %s -> %s (%d Hz %s).", device, port,
                (int)m->pcm_rate, ND_MODEM_PCM_FORMAT);
     } else {
-        m->mic_pid = -1;
-        m->mic_live = false;
-        nd_log(ND_LOG_MODEM, "Mic uplink unavailable (arecord: %s); call is listen-only.",
-               strerror(errno));
+        nd_log(ND_LOG_MODEM, "Mic uplink unavailable (arecord: %s); retrying.", strerror(errno));
+        /* Retryable: the common cause is the device being busy for a beat,
+         * and a missing arecord simply uses up the three strikes at once. */
+        mic_start_failed(m, true);
     }
 }
 
@@ -558,9 +699,16 @@ void nd_modem__start_mic(nd_modem *m)
 {
     if (m->mic_live)
         return;
-    if (!pcm_port_ready(m, /*flush_input=*/false))
+    if (!pcm_port_ready(m, /*flush_input=*/false)) {
+        /* pcm_port_ready() logs which of its own two failures this was. The
+         * mic is not owed a retry for it: without a PCM port there is no call
+         * audio in either direction, and the speaker path drives what happens
+         * next. */
+        m->mic_retry_at = 0.0;
         return;
+    }
     m->mic_fails = 0;
+    m->mic_retry_at = 0.0;
     start_mic_pipe(m, m->active_pcm_port);
 }
 
@@ -580,6 +728,7 @@ void nd_modem__stop_call_audio(nd_modem *m)
     m->active_pcm_port[0] = '\0';
     m->pcm_active = false;
     /* Nothing is owed to a call that is over. */
+    m->mic_retry_at = 0.0;
     m->pcm_setup_pending = false;
     m->audio_connect_pending = false;
     m->pcm_reg_ok = false;
@@ -645,5 +794,21 @@ void nd_modem__watch_audio_proc(nd_modem *m, double now)
             nd_log(ND_LOG_MODEM, "Mic pipe exited rc=%d; retrying.", rc);
             start_mic_pipe(m, m->active_pcm_port);
         }
+    }
+
+    /* AND THE MIC THAT NEVER STARTED. Everything above is gated on mic_live,
+     * which is the bug this closes: a start that failed left no child to
+     * reap, so no branch here ever ran and the call finished listen-only over
+     * a condition that had cleared seconds later.
+     *
+     * mic_retry_at is set only by mic_start_failed(), only for a failure it
+     * judged transient, and only while the strikes are left -- so this cannot
+     * spin, cannot fire outside a call (the early return above needs
+     * pcm_active, which _stop_call_audio() clears), and cannot touch the
+     * speaker's own restart timer. It is cleared before the attempt so that a
+     * second failure has to arm it again. */
+    if (!m->mic_live && m->mic_retry_at > 0.0 && now >= m->mic_retry_at) {
+        m->mic_retry_at = 0.0;
+        start_mic_pipe(m, m->active_pcm_port);
     }
 }

@@ -17,6 +17,7 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -247,6 +248,117 @@ bool nd_path_give_to_dir_owner(const char *path)
         return true;
 
     return chown(resolved, dir_st.st_uid, dir_st.st_gid) == 0;
+}
+
+/* ============ AND THE SAME QUESTION WHERE THE NAME CANNOT BE TRUSTED =====
+ *
+ * nd_paths.h has the reasoning. What is here is the mechanics, and there are
+ * only two of them that matter.
+ *
+ * The FILE is reached through a descriptor and never again through its name.
+ * fstat(2), fchown(2) and fchmod(2) all act on the open object, so a name
+ * that means something else by the time the second syscall runs changes
+ * nothing: the inode that was checked is the inode that is changed. This is
+ * the whole fix, and it is why the caller in ftp.c holds the descriptor it
+ * created rather than reopening the path it wrote to.
+ *
+ * The DIRECTORY is still reached by name, and that is deliberate rather than
+ * an oversight. Its owner is the answer being copied down, and the
+ * directories in question -- the card root's untrusted/, music/, an app's
+ * games/ -- are created by root or by ndusr in a card root that is 0751
+ * ndusr:ndusr. An untrusted process cannot make a name there, so there is
+ * nothing to plant. Asking through openat(O_DIRECTORY|O_NOFOLLOW) instead
+ * would buy nothing and would cost a caller that only has a name a second
+ * descriptor to get wrong. */
+static nd_err dir_owner_of(const char *path, struct stat *dir_st)
+{
+    char resolved[ND_PATH_MAX];
+    char *slash;
+
+    if (nd_path_resolve(resolved, sizeof resolved, path) != ND_OK)
+        return ND_ERR_TOOLONG;
+
+    /* A bare name lives in the working directory and says nothing about
+     * ownership -- the same answer nd_path_give_to_dir_owner() gives. */
+    slash = strrchr(resolved, '/');
+    if (slash == NULL)
+        return ND_ERR_NOTFOUND;
+    if (slash == resolved)
+        return (stat("/", dir_st) == 0) ? ND_OK : ND_ERR_IO;
+    *slash = '\0';
+    return (stat(resolved, dir_st) == 0) ? ND_OK : ND_ERR_IO;
+}
+
+nd_err nd_path_give_fd_to_dir_owner(int fd, const char *path, unsigned int mode)
+{
+    struct stat file_st;
+    struct stat dir_st;
+    bool have_dir;
+    nd_err rc;
+
+    if (fd < 0 || path == NULL)
+        return ND_ERR_INVAL;
+    if (fstat(fd, &file_st) != 0)
+        return ND_ERR_IO;
+    /* Not a plain file, or not the only link to it. The link count is the
+     * cheap half of the hard-link case nd_paths.h names: this image sets no
+     * fs.protected_hardlinks, so a process that can write the directory can
+     * keep a second name for the file somewhere it owns and still hold it
+     * after root has changed the owner. One link is what a download has. */
+    if (!S_ISREG(file_st.st_mode) || file_st.st_nlink != 1u)
+        return ND_ERR_PERM;
+
+    /* ND_ERR_NOTFOUND here means the path carries no directory at all -- a
+     * bare name, in whatever the working directory is, which says nothing
+     * about who should own the file. The mode still stands; the owner has
+     * nobody to be copied from. */
+    rc = dir_owner_of(path, &dir_st);
+    have_dir = (rc == ND_OK);
+    if (rc != ND_OK && rc != ND_ERR_NOTFOUND)
+        return rc;
+
+    /* Ownership first, mode second, for the reason fetch_give_to_reader()
+     * states: the halfway state after a failed chmod is still a file its
+     * reader owns, and the one after a failed chown is a file nobody can
+     * open. Skipped entirely when the caller is not root (it cannot give a
+     * file away and does not need to -- the file is already its writer's) or
+     * when the directory is root's own, which is an image with no ndusr. */
+    if (have_dir && geteuid() == 0u && dir_st.st_uid != 0u &&
+        (file_st.st_uid != dir_st.st_uid || file_st.st_gid != dir_st.st_gid)) {
+        if (fchown(fd, dir_st.st_uid, dir_st.st_gid) != 0)
+            return ND_ERR_IO;
+    }
+    if (mode != ND_PATH_MODE_KEEP && fchmod(fd, (mode_t)mode) != 0)
+        return ND_ERR_IO;
+    return ND_OK;
+}
+
+nd_err nd_path_give_to_dir_owner_nofollow(const char *path, unsigned int mode)
+{
+    char resolved[ND_PATH_MAX];
+    nd_err rc;
+    int fd;
+
+    if (path == NULL)
+        return ND_ERR_INVAL;
+    if (nd_path_resolve(resolved, sizeof resolved, path) != ND_OK)
+        return ND_ERR_TOOLONG;
+
+    /* O_NOFOLLOW is the point: a symlink here is ELOOP rather than a root
+     * fchmod of whatever it names. O_NONBLOCK is for the other thing that
+     * can be planted under a name -- a fifo, whose open would otherwise wait
+     * for a writer that is never coming, with the UI thread inside it.
+     * O_RDONLY because nothing is written through this descriptor and root
+     * opening a file for writing is a habit worth not having. */
+    fd = open(resolved, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == ELOOP)
+            return ND_ERR_PERM; /* a symlink was planted; say so, do nothing */
+        return (errno == ENOENT) ? ND_ERR_NOTFOUND : ND_ERR_IO;
+    }
+    rc = nd_path_give_fd_to_dir_owner(fd, path, mode);
+    (void)close(fd);
+    return rc;
 }
 
 /* ------------------------------------------------------------------ *

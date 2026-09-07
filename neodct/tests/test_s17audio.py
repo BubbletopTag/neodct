@@ -12,6 +12,16 @@ soldered to a C-Media card it is not: the capture switch comes up off and the
 mic gain at zero, and arecord then returns a flat line of silence with no
 error at all. MicTest draws that faithfully, which looks exactly like a dead
 microphone.
+
+The level is no longer a constant in this script. It is system.hw.mic_gain,
+written by MicTest while its owner listens to the effect, and 100 when nothing
+has set it. That file is on the writable user partition, so the second half of
+these tests is about what the script refuses to pass on from it.
+
+What this file CANNOT cover is the other half of the same fault: a card that
+re-enumerates mid-session comes back muted and this script never runs again.
+That is nd_modem_audio.c's start_mic_pipe(), which re-applies the mixer before
+every call, and neodct/src/test/unit/test_modem.c pins it.
 """
 
 import os
@@ -74,15 +84,37 @@ def fake_proc_asound(tmp_path, card=1, usb=True):
     return root
 
 
-def run_start(tmp_path, proc, amixer):
+def run_start(tmp_path, proc, amixer, settings=None, capture_level=None):
+    """Drive `S17audio start`.
+
+    NEODCT_SETTINGS is ALWAYS pointed somewhere under tmp_path, even when the
+    test has no settings file to offer: without it the script would fall back
+    to the real /NeoDCT/User/settings.prop, and a developer's machine that
+    happened to have one would quietly test a different level than CI did.
+
+    NEODCT_CAPTURE_LEVEL is dropped for the same reason and then put back only
+    when a test asks for it, which is the one case below that covers the
+    override at all. A developer with it exported would otherwise pin every
+    level here to their own and pass regardless of what the script parsed.
+    """
     conf = tmp_path / "asound.conf"
     env = dict(os.environ,
                NEODCT_ASOUND_CONF=str(conf),
                NEODCT_PROC_ASOUND=str(proc),
-               NEODCT_AMIXER=str(amixer))
+               NEODCT_AMIXER=str(amixer),
+               NEODCT_SETTINGS=str(settings or (tmp_path / "no-settings.prop")))
+    env.pop("NEODCT_CAPTURE_LEVEL", None)
+    if capture_level is not None:
+        env["NEODCT_CAPTURE_LEVEL"] = str(capture_level)
     result = subprocess.run(["sh", SCRIPT, "start"], capture_output=True,
                             text=True, env=env)
     return result, conf
+
+
+def settings_file(tmp_path, body):
+    path = tmp_path / "settings.prop"
+    path.write_text(body)
+    return path
 
 
 @pytest.mark.skipif(shutil.which("sh") is None, reason="no shell")
@@ -99,12 +131,128 @@ def test_the_capture_switch_is_turned_on(tmp_path):
 
 
 def test_the_capture_volume_is_raised(tmp_path):
+    """100% with nothing configured, and 100 rather than the 80 this shipped
+    with for eight releases. It is the preamp in front of an 8 kHz voice
+    codec, not a playback level: every report about this phone's audio has
+    been "they cannot hear me"."""
     proc = fake_proc_asound(tmp_path)
     amixer, log = fake_amixer(tmp_path)
 
     run_start(tmp_path, proc, amixer)
 
-    assert "cset numid=6 80%" in log.read_text(), log.read_text()
+    assert "cset numid=6 100%" in log.read_text(), log.read_text()
+
+
+def test_the_owner_can_set_the_level(tmp_path):
+    """system.hw.mic_gain is what MicTest writes, and this is the other end of
+    it: the level the owner heard themselves choose is the level the card
+    comes up at on the next boot."""
+    proc = fake_proc_asound(tmp_path)
+    amixer, log = fake_amixer(tmp_path)
+    prop = settings_file(tmp_path, "system.ui.wallpaper=NONE\n"
+                                   "system.hw.mic_gain=55\n")
+
+    run_start(tmp_path, proc, amixer, settings=prop)
+
+    assert "cset numid=6 55%" in log.read_text(), log.read_text()
+
+
+def test_a_level_of_zero_is_honoured(tmp_path):
+    """0 is a real setting -- it is what a muted card reports, and reproducing
+    it deliberately is how you tell "the mixer is not being applied" from "the
+    microphone is dead". So it must not be read as "unset"."""
+    proc = fake_proc_asound(tmp_path)
+    amixer, log = fake_amixer(tmp_path)
+    prop = settings_file(tmp_path, "system.hw.mic_gain=0\n")
+
+    run_start(tmp_path, proc, amixer, settings=prop)
+
+    assert "cset numid=6 0%" in log.read_text(), log.read_text()
+
+
+def test_a_last_line_with_no_newline_is_still_a_setting(tmp_path):
+    """`while read key value` returns non-zero on a final record with no
+    newline after it, having already filled the variables -- so the plain form
+    silently drops the last line of the file.
+
+    That is not a hypothetical shape. settings.prop is one key per line and
+    the last line is whichever key was written last, so the owner's saved mic
+    gain was being read as "unset" and the default of 100 applied on every
+    boot, with nothing on any screen or in any log to say so. /bin/nd-platform
+    guards the same edge on the same file format; this is the other reader,
+    and the two must agree about where a file ends."""
+    proc = fake_proc_asound(tmp_path)
+    amixer, log = fake_amixer(tmp_path)
+    prop = settings_file(tmp_path, "system.ui.wallpaper=NONE\n"
+                                   "system.hw.mic_gain=0")  # no trailing \n
+
+    run_start(tmp_path, proc, amixer, settings=prop)
+
+    # 0 and not 100: the value that is easiest to confuse with "nothing was
+    # read", which is exactly what the bug did with it.
+    assert "cset numid=6 0%" in log.read_text(), log.read_text()
+
+
+@pytest.mark.parametrize("value", [
+    "400",                      # above the ceiling
+    "-5",                       # below the floor
+    "loud",                     # not a number at all
+    "99999999999999999999",     # too long for busybox `test` to compare
+    "",                         # present and empty
+    "80; touch /tmp/pwned",     # the shape somebody would actually try
+    "$(id)",                    # ... and the other shape
+])
+def test_a_nonsense_level_falls_back_to_the_default(tmp_path, value):
+    """settings.prop lives on the writable user partition -- the one place an
+    attacker who has got a file onto this phone can write -- and this value
+    ends up as an amixer argument. It is read as DATA and never sourced (the
+    same rule the initramfs record parser follows), and then checked to be one
+    to three digits and no more than 100 before it goes anywhere."""
+    proc = fake_proc_asound(tmp_path)
+    amixer, log = fake_amixer(tmp_path)
+    prop = settings_file(tmp_path, "system.hw.mic_gain=%s\n" % value)
+
+    result, _ = run_start(tmp_path, proc, amixer, settings=prop)
+
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text()
+    assert "cset numid=6 100%" in calls, calls
+    assert "pwned" not in calls, calls
+
+
+def test_the_environment_beats_the_settings_file(tmp_path):
+    """NEODCT_CAPTURE_LEVEL wins over system.hw.mic_gain, and this is the only
+    thing that says so.
+
+    The `: "${NEODCT_CAPTURE_LEVEL:=...}"` default is what makes that true, and
+    the script's own comment cited this file as the proof -- while run_start()
+    popped the variable out of the environment and no case ever put it back, so
+    the override shipped entirely unexercised. It is not decoration: it is how
+    a level is pinned on a phone whose settings.prop cannot be written, which
+    is every image before /NeoDCT/User has been mounted.
+    """
+    proc = fake_proc_asound(tmp_path)
+    amixer, log = fake_amixer(tmp_path)
+    prop = settings_file(tmp_path, "system.hw.mic_gain=55\n")
+
+    result, _ = run_start(tmp_path, proc, amixer, settings=prop, capture_level=30)
+
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text()
+    assert "cset numid=6 30%" in calls, calls
+    assert "55%" not in calls, calls
+
+
+def test_a_missing_settings_file_is_not_an_error(tmp_path):
+    """First boot: /NeoDCT/User has just been made and holds nothing yet."""
+    proc = fake_proc_asound(tmp_path)
+    amixer, log = fake_amixer(tmp_path)
+
+    result, _ = run_start(tmp_path, proc, amixer,
+                          settings=tmp_path / "never-written.prop")
+
+    assert result.returncode == 0, result.stderr
+    assert "cset numid=6 100%" in log.read_text(), log.read_text()
 
 
 def test_the_microphone_monitor_path_is_left_alone(tmp_path):

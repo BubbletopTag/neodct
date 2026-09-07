@@ -122,6 +122,23 @@ unsigned long nd_appgen_value(void);
  * to install something rather than an app to decide to stay. */
 #define ND_PATH_APP_DATA_NAME "data"
 #define ND_PATH_VERSION_PROP  "/NeoDCT/System/version.prop"
+
+/* "qemu or hw", hardcoded into the image beside the version so that nothing
+ * has to work it out from a device node. Written by the same block of
+ * post-build-system-metadata.sh that writes version.prop; read by
+ * nd_platform.h in C and by /bin/nd-platform in the boot scripts.
+ *
+ * A sibling of version.prop rather than a key inside it, because this one has
+ * to be legible to busybox sh: /bin/nd-platform hands on only values made of
+ * [A-Za-z0-9._-] and throws the rest away, and version.prop's build time is a
+ * date with spaces and a colon in it.
+ *
+ * NOT visible to the initramfs. This is in the root squashfs and the
+ * initramfs runs before that is mounted; mkinitramfs.py does not pack it, and
+ * nothing in neodct/initramfs/ asks the question -- see the block above the
+ * heredoc in post-build-system-metadata.sh for why that is settled rather
+ * than pending. */
+#define ND_PATH_PLATFORM      "/NeoDCT/platform"
 #define ND_PATH_DISPLAYD      "/NeoDCT/System/hw/neodct_displayd"
 /* The SD-card helper. Lives here rather than in settings_app.h because the
  * CORE runs it now: formatting a card is a verb on the service socket
@@ -240,8 +257,52 @@ bool nd_path_is_file(const char *path);
  * A no-op that returns true when the caller is not root, or when the
  * directory is root's own (an image with no ndusr). False only when the
  * chown itself failed, or the file is not there to be given. ND_ROOT-
- * resolved like everything else here. */
+ * resolved like everything else here.
+ *
+ * ONLY FOR A PATH NOTHING UNTRUSTED CAN WRITE. It chowns by NAME, and
+ * chown(2) follows a symlink, so in a directory somebody else can write this
+ * is a root chown at a path they choose. Its two callers are /NeoDCT/User's
+ * own files (0751 ndusr:ndusr -- ndusr_ut is not in that group and cannot
+ * create a name there) and a directory Fetch has just created with mkdir(2)
+ * inside apps/, which is 0755 ndusr:ndusr for the same reason. Anywhere else
+ * -- untrusted/ above all -- use the two below. */
 bool nd_path_give_to_dir_owner(const char *path);
+
+/* Leave the mode alone. A `mode` argument below is applied with fchmod(2);
+ * this says there is nothing to state, only an owner to hand it to. */
+#define ND_PATH_MODE_KEEP ((unsigned int)~0u)
+
+/* ============ THE SAME HANDOVER, WHERE AN ATTACKER IS STANDING ==========
+ *
+ * The card's untrusted/ is 0770 ndusr:ndusr_ut -- THE ONE directory the
+ * untrusted set can write -- and the engineering Fetch app is root. Every
+ * root operation there that names a FILE can have that name mean something
+ * else by the time the syscall runs: chown(2), chmod(2) and open(2) without
+ * O_NOFOLLOW all dereference, so a planted symlink turns a repair of a
+ * download into a root chmod of /NeoDCT/User/settings.prop. It is the hole
+ * neodct-sdcard's apply_layout() had in 0.5.15a, and a reviewer found it a
+ * second time in the C beside it.
+ *
+ * A name cannot be made safe from a race; an OBJECT can. Both of these act
+ * on a descriptor -- fchown(2) and fchmod(2) -- so whatever the name says a
+ * moment later, the inode changed is the one that was checked:
+ *
+ *   _fd       for a caller that already holds the file open, which is the
+ *             strongest form: it created the object and never let go of it.
+ *             `path` is used ONLY to find the directory whose owner is
+ *             copied down, never to reach the file.
+ *   _nofollow for a caller that has only a name. The open refuses a symlink
+ *             (ELOOP) rather than following it.
+ *
+ * ND_ERR_NOTFOUND when there is nothing there, ND_ERR_PERM when what is
+ * there is not a plain single-linked file (a symlink, a directory, a fifo,
+ * or a hard link somebody else also holds -- this image sets no
+ * fs.protected_hardlinks, so a link into a directory an attacker owns is a
+ * way to keep the file after root has changed its owner), ND_ERR_IO when the
+ * fchown or the fchmod itself failed. ND_OK also covers the not-root and
+ * root's-own-directory cases nd_path_give_to_dir_owner() returns true for. */
+nd_err nd_path_give_fd_to_dir_owner(int fd, const char *path, unsigned int mode);
+nd_err nd_path_give_to_dir_owner_nofollow(const char *path, unsigned int mode);
 
 #ifdef __cplusplus
 }

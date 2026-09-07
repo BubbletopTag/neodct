@@ -415,7 +415,18 @@ nd_err nd_log_redirect_serial(char *chosen_out, size_t chosen_sz)
     /* /dev/ttyFIQ0 is the real Rockchip/Luckfox console; /dev/ttyAMA0 is
      * QEMU's PL011. The environment override is the last resort rather than
      * the first, because on hardware it is usually left over from a QEMU
-     * session and pointing at a device that is not there. */
+     * session and pointing at a device that is not there.
+     *
+     * DELIBERATELY NOT nd_platform.h, and it is worth saying so because the
+     * ordering looks exactly like the platform guesses that were converted.
+     * It is not one. Everywhere else, access("/dev/ttyFIQ0") was a PROXY for
+     * "which machine is this"; here the node being tested IS the node about
+     * to be opened, which is the "did this device enumerate" question
+     * nd_platform.h says to keep answering with evidence. Asking the flag
+     * would be a regression rather than a tidy-up: a hardware kernel built
+     * without the FIQ debugger would be told to open a console that is not
+     * there, and the phone would lose its serial log -- the same class of
+     * fault the flag was introduced to end in nd_crash.c. */
     if (nd_path_exists(ND_PATH_SERIAL_FIQ)) {
         device = ND_PATH_SERIAL_FIQ;
     } else if (nd_path_exists(ND_PATH_SERIAL_AMA)) {

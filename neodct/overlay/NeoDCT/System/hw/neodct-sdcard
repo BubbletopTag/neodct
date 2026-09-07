@@ -704,7 +704,15 @@ apply_layout() {
         path="$MOUNT_POINT/$name"
         [ -z "$name" ] && path="$MOUNT_POINT"
         [ -d "$path" ] || continue
-        chown "$owner:$group" "$path" 2>/dev/null
+        # `[ -d ]` is true of a SYMLINK to a directory, and chown(1) and
+        # chmod(1) both follow one. A card written on a PC carrying
+        # "untrusted -> /NeoDCT/User" would otherwise have this hand the user
+        # partition to ndusr_ut at 0770, as root, the moment it was inserted.
+        # The test is -L rather than a flag because chmod has no -h to give;
+        # skipping is also the honest answer, since a directory that is really
+        # a link is not one of ours whatever mode it ends up with.
+        [ -L "$path" ] && continue
+        chown -h "$owner:$group" "$path" 2>/dev/null
         chmod "$mode" "$path" 2>/dev/null
     done
 
@@ -756,9 +764,13 @@ apply_layout() {
     # The app is ndusr_ut. It can traverse into the subdirectory's NAME,
     # because the app directory above is forced to 0755, and then gets EACCES
     # on the contents -- an emulator that cannot read its own games, with no
-    # message. The same shape catches anything the engineering Fetch app
-    # downloads: Fetch runs as root under run_neodct.sh's umask 0027, so its
-    # files land 0640 root:root and its directories 0750.
+    # message. The same shape caught anything the engineering Fetch app
+    # downloaded: Fetch runs as root under run_neodct.sh's umask 0027, so its
+    # files landed 0640 root:root and its directories 0750. Fetch states both
+    # itself now -- fetch_give_to_reader(), and the untrusted/ pass below says
+    # why that had to be fixed at the writer -- and this stays the net under
+    # it, because a mode nobody restates is a mode that comes back wrong off
+    # the next PC.
     #
     # find rather than a recursive shell loop: busybox has -xdev, -prune and
     # -exec + here (see the busybox fragment), it is one process instead of one
@@ -769,17 +781,154 @@ apply_layout() {
         # `-path "<app>//data"` matches nothing that find ever prints -- so the
         # prune silently misses and the app's own save files get chmod 0644.
         app="${appdir%/}"
-        chown "$CARD_USER:$CARD_USER" "$app" 2>/dev/null
+        # `*/` matches a SYMLINK to a directory as happily as a directory, and
+        # `[ -d ]` agrees with it, so an "app" that is really a link would send
+        # every chown and chmod below to whatever it points at -- with root's
+        # privilege, off removable media. No app can plant one (apps/ is 0755
+        # ndusr:ndusr, so only the owner and root may write there) but a card
+        # written on a PC can arrive carrying one, and the provenance argument
+        # is the same one the untrusted/ pass below makes: what a card says
+        # about itself is a claim, not a fact.
+        [ -L "$app" ] && continue
+        chown -h "$CARD_USER:$CARD_USER" "$app" 2>/dev/null
         chmod 0755 "$app" 2>/dev/null
+        # -h on the chowns, and not because anything untrusted can write here:
+        # a symlink somebody's PC left in an app directory would otherwise get
+        # its TARGET chowned by root. It costs nothing on a regular file --
+        # busybox chown takes -h unconditionally, it is not behind
+        # FEATURE_CHOWN_LONG_OPTIONS -- and it is the same rule the untrusted/
+        # pass below is written around, applied everywhere rather than only
+        # where an attacker is known to be standing.
+        #
+        # ============ AND WHY THE chmods RUN ONE AT A TIME ============
+        #
+        # `-exec chmod {} +` batches, and a batch runs AFTER the walk that
+        # collected it. find's -type tests are lstat, so a symlink matches
+        # neither branch when it is looked at -- but the file that did match
+        # can be unlinked and replaced by a symlink in the whole length of the
+        # walk that follows, and chmod has no -h to refuse it with. That is
+        # the untrusted/ hole exactly, and the claim that it could not happen
+        # here -- "apps/ prunes data/, which is the only subtree ndusr_ut can
+        # write" -- is true only of a card THIS PHONE HAS ALREADY NORMALISED.
+        # On the first mount of a card written on a PC the modes are the PC's:
+        # apps/PSX/games/ arriving 0777 is precisely the case the recursion
+        # was added for, and until this pass has run, every untrusted app on
+        # the phone can write in it.
+        #
+        # So the chmod is `\;` -- one process per entry, immediately, while
+        # find is standing on it. find walks a directory BEFORE descending
+        # into it (busybox's recursive_action is not depth-first unless asked),
+        # so a directory is 0755 ndusr:ndusr before its contents are read: by
+        # the time anything inside it is looked at, the only writers left are
+        # root and the owner, and $app itself was stated the same way two lines
+        # up before find was started at all. Root never chmods a path it did
+        # not just verify with a parent it had already taken back.
+        #
+        # The chowns stay batched. -h makes a chown on a planted symlink
+        # harmless -- it changes the link, not its target -- so they are the
+        # half that can afford to run late, and the cost stays one process for
+        # all of them rather than one per file.
         find "$app" -xdev -path "$app/data" -prune -o \
-            \( -type d -exec chown "$CARD_USER:$CARD_USER" {} + \
-                     -exec chmod 0755 {} + \) -o \
-            \( -type f -exec chown "$CARD_USER:$CARD_USER" {} + \
-                     -exec chmod 0644 {} + \) 2>/dev/null
-        mkdir -p "$app/data" 2>/dev/null
-        chown "$CARD_USER:$CARD_USER_UT" "$app/data" 2>/dev/null
-        chmod 0770 "$app/data" 2>/dev/null
+            \( -type d -exec chown -h "$CARD_USER:$CARD_USER" {} + \
+                     -exec chmod 0755 {} \; \) -o \
+            \( -type f -exec chown -h "$CARD_USER:$CARD_USER" {} + \
+                     -exec chmod 0644 {} \; \) 2>/dev/null
+        # data/ is addressed BY NAME rather than by the walk, so it is the one
+        # place here where a link would be followed rather than skipped -- the
+        # prune above deliberately stops find ever looking at it. Same source
+        # as the app-directory link: a PC, not an app.
+        if [ -L "$app/data" ]; then
+            log "$app/data is a symlink, not this app's data directory"
+        else
+            mkdir -p "$app/data" 2>/dev/null
+            chown -h "$CARD_USER:$CARD_USER_UT" "$app/data" 2>/dev/null
+            chmod 0770 "$app/data" 2>/dev/null
+        fi
     done
+
+    # ============ AND untrusted/, WHERE BOTH PRINCIPALS LIVE ============
+    #
+    # The table above states untrusted/ itself and nothing inside it, and on
+    # 0.5.14a that gap was the whole bug: the owner downloaded two .nap
+    # packages with the engineering Fetch app, Settings LISTED both -- because
+    # nd_nap_find() filters with stat(2), which needs only +x on a folder ndusr
+    # already owns -- and refused to open either, because reading the archive
+    # needs +r on the FILE and root's umask had left them 0640 root:root.
+    # "Cannot read the package", about a package that was perfectly fine.
+    #
+    # Fetch states its own modes now (fetch_give_to_reader), which is the fix
+    # for the case above: this pass cannot be it, because the card is already
+    # mounted when a download arrives and Settings only asks for the layout
+    # verb AFTER an install has succeeded. What is left for this pass is the
+    # package that arrived some OTHER way and cannot state anything for itself
+    # -- copied from a PC, out of a tarball that preserved somebody else's
+    # ownership, or downloaded by the BROWSER, which is ndusr_ut under the
+    # same 0027 umask and leaves a .nap 0640 ndusr_ut:ndusr_ut that ndusr
+    # cannot read. Nothing on the writing side can fix that last one: a
+    # process cannot give a file to a group it is not in, and ndusr_ut has no
+    # business being handed ndusr's. That is why nd_nap.c's permission message
+    # tells the owner to take the card out and put it back in.
+    #
+    # ============ AND WHY IT IS ONE chown ON *.nap AND NOTHING ELSE =========
+    #
+    # It was a recursive chown AND chmod over every file and directory in
+    # untrusted/, and a reviewer stopped 0.5.15a going out with it. untrusted/
+    # is 0770 ndusr:ndusr_ut -- THE ONE DIRECTORY on the card the untrusted set
+    # can write -- and chown(1) and chmod(1) both DEREFERENCE SYMLINKS. find's
+    # -type f is an lstat, so a symlink never matches it; but with `-exec ... +`
+    # the batch runs after the walk, so between find looking at a file and root
+    # touching it there is the whole length of the walk in which the browser,
+    # or any installed .nap app, can unlink that file and put a symlink there
+    # instead. Root then chowns and chmods whatever it points at.
+    # /NeoDCT/User/settings.prop, for instance. The apps/ loop above answers
+    # the same argument differently, and the version of this sentence that
+    # said it was simply "not the same hole -- it prunes data/" was wrong: the
+    # prune is what keeps root out of the only subtree the LAYOUT makes
+    # writable, but a card arriving from a PC carries the PC's modes, so on a
+    # first mount anything under apps/ may be world-writable until this
+    # function has run. The prune stays and the chmods there run one at a
+    # time, top-down, so each directory is taken back before its contents are
+    # read; see the note above the find.
+    #
+    # Both halves of the fix are about REACH, because a race window on a
+    # directory an attacker writes cannot be closed from a shell script:
+    #
+    #   -h        chown(1) takes it (busybox: unconditional in CHOWN, not
+    #             behind FEATURE_CHOWN_LONG_OPTIONS -- confirmed against the
+    #             chown usage string in build-luckfox/target/bin/busybox), so
+    #             the link itself is chowned and a planted one is harmless.
+    #             chmod has NO -h on busybox, which is why there is no longer
+    #             a chmod here at all: see below.
+    #
+    #   *.nap     the only reader that needs anything repaired is Settings'
+    #             installer, reading a package as ndusr. Everything else in
+    #             untrusted/ belongs to ndusr_ut and is read by ndusr_ut -- the
+    #             browser's cookie jar, the media player's state -- and taking
+    #             those files off it bought nobody anything. -maxdepth 1 for
+    #             the same reason: nd_nap_find() reads one level of the card
+    #             root, apps/ and untrusted/ and does not recurse, so a .nap in
+    #             a subdirectory is invisible to the installer anyway, and root
+    #             has no business descending into directories the browser made.
+    #
+    # And the chmod is GONE rather than made safe, because it turns out not to
+    # be needed: chown makes ndusr the OWNER of the package, and every mode a
+    # writer can plausibly leave -- 0640 out of a 0027 umask, 0600 out of a
+    # tarball -- is owner-readable. It was doing nothing that the chown did not
+    # already do, and it was the half with no -h to give it.
+    #
+    # ndusr:ndusr_ut, NOT the media loop's ndusr:ndusr, and that is the whole
+    # care needed in the values. untrusted/ is the one directory two principals
+    # share: ndusr reads a download and installs it, ndusr_ut IS the browser
+    # and the media player. Taking these files to ndusr:ndusr would fix the
+    # installer by breaking the browser -- ndusr_ut is deliberately not in
+    # group ndusr, and configs/users-table.txt calls that membership "the whole
+    # boundary". What a .nap loses is OWNERSHIP: ndusr_ut can still read it,
+    # truncate it and replace it, because the directory is 0770 and it could
+    # already unlink anything in it, and the whole area is mounted noexec.
+    if [ -d "$MOUNT_POINT/$UNTRUSTED_NAME" ]; then
+        find "$MOUNT_POINT/$UNTRUSTED_NAME" -maxdepth 1 -xdev -type f -name '*.nap' \
+            -exec chown -h "$CARD_USER:$CARD_USER_UT" {} + 2>/dev/null
+    fi
 
     # ============ AND THE MEDIA FOLDERS, OWNER ONLY ============
     #
@@ -795,10 +944,14 @@ apply_layout() {
     # is what the confinement actually rests on, and `! -user` means the walk
     # costs one stat per file and a chown only for the ones that are wrong --
     # which on a card the phone has already seen is none of them.
+    #
+    # -h for the reason the apps loop gives: a symlink somebody's PC left in
+    # music/ is not a file whose ownership this pass has any view about, and
+    # without -h root would chown whatever it points at instead.
     for folder in music tones wallpapers backup_db update; do
         [ -d "$MOUNT_POINT/$folder" ] || continue
         find "$MOUNT_POINT/$folder" -xdev ! -user "$CARD_USER" \
-            -exec chown "$CARD_USER:$CARD_USER" {} + 2>/dev/null
+            -exec chown -h "$CARD_USER:$CARD_USER" {} + 2>/dev/null
     done
 }
 
@@ -925,8 +1078,19 @@ after_mount() {   # after_mount DEV FSTYPE
         # Written before the layout pass so the pass can set its mode, and so
         # the NEXT mount recognises the card without needing the folder set --
         # which an owner can delete.
+        #
+        # The -L guard is the same rule apply_layout() is written around,
+        # applied here because this is a root truncate-and-chown of a name off
+        # removable media: `: >` follows a symlink and would empty whatever it
+        # points at. Nothing untrusted can plant one -- the card root is 0751
+        # ndusr:ndusr and ndusr_ut is not in that group -- so what this is
+        # really about is a card written on a PC carrying ".neodct -> ..." ,
+        # and about the file not contradicting its own rule. Removed rather
+        # than skipped: without a marker the phone does not recognise its own
+        # card, so refusing to write one would be refusing the card.
+        [ -L "$MOUNT_POINT/$CARD_MARKER" ] && rm -f "$MOUNT_POINT/$CARD_MARKER"
         : > "$MOUNT_POINT/$CARD_MARKER" 2>/dev/null
-        chown "$CARD_USER:$CARD_USER" "$MOUNT_POINT/$CARD_MARKER" 2>/dev/null
+        chown -h "$CARD_USER:$CARD_USER" "$MOUNT_POINT/$CARD_MARKER" 2>/dev/null
         chmod 0644 "$MOUNT_POINT/$CARD_MARKER" 2>/dev/null
         apply_layout
         if ! mount_untrusted_noexec; then
@@ -1217,9 +1381,11 @@ do_setup() {
         mkdir -p "$MOUNT_POINT/$folder" 2>/dev/null
     done
     # The marker, so the next mount recognises the card without the folder set
-    # -- which an owner can delete.
+    # -- which an owner can delete. -L guard and -h for the reason after_mount()
+    # gives at the other site: a root truncate of a name off removable media.
+    [ -L "$MOUNT_POINT/$CARD_MARKER" ] && rm -f "$MOUNT_POINT/$CARD_MARKER"
     : > "$MOUNT_POINT/$CARD_MARKER" 2>/dev/null
-    chown "$CARD_USER:$CARD_USER" "$MOUNT_POINT/$CARD_MARKER" 2>/dev/null
+    chown -h "$CARD_USER:$CARD_USER" "$MOUNT_POINT/$CARD_MARKER" 2>/dev/null
     chmod 0644 "$MOUNT_POINT/$CARD_MARKER" 2>/dev/null
     if ! card_is_ours; then
         log "setup: could not write the marker to $MOUNT_POINT"

@@ -361,6 +361,12 @@ struct nd_modem {
     pid_t mic_pid; /* arecord: mic -> PCM port     */
     bool mic_live;
     double mic_started_at; /* for ND_MIC_STABLE_S */
+    /* When to try the mic again after a start that never produced a pipe,
+     * or 0.0 for "not owed one". The retry watchdog below used to be gated
+     * on mic_live alone, so a mic that failed to START -- as opposed to one
+     * that started and then died -- was never retried and the caller lost
+     * the whole call. See start_mic_pipe(). */
+    double mic_retry_at;
     char active_pcm_port[ND_MODEM_PORT_MAX];
     bool pcm_active;
     int32_t mic_fails;
@@ -396,6 +402,15 @@ struct nd_modem {
     int32_t pcm_rate;
     char configured_port[ND_MODEM_PORT_MAX];
     bool allow_calls;
+    /* system.hw.mic_gain, read ONCE in nd_modem__create() and never again.
+     * It sits here beside pcm_rate and allow_calls because it is read for
+     * the same reason they are: R-24 makes every nd_settings_get() rewrite
+     * settings.prop with an fsync, and start_mic_pipe() runs on the call
+     * path. One read per core process is what the other three cost, and it
+     * is what this costs. The consequence is stated where it matters -- a
+     * level changed in MicTest reaches CALLS at the next core start, and
+     * reaches MicTest's own live preview immediately. */
+    int32_t mic_gain;
 
     /* Scratch for one transaction, so nothing is allocated per command.
      * `rx_lines` holds what read_pending() just split off the wire; `collected`
@@ -427,8 +442,9 @@ struct nd_modem {
 double nd_modem__now(void);
 void nd_modem__nap(double seconds);
 
-/* Construction without the thread: zeroes the state, reads the three one-shot
- * settings, opens the lock file. Does NOT probe. */
+/* Construction without the thread: zeroes the state, reads the one-shot
+ * settings -- the PCM rate, the AT port, allow_calls, the boot grace and the
+ * mic gain -- and opens the lock file. Does NOT probe. */
 nd_err nd_modem__create(nd_modem **out);
 void nd_modem__destroy(nd_modem *m);
 

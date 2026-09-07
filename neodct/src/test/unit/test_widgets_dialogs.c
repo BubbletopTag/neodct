@@ -55,6 +55,7 @@
 #include "nd_json.h"
 #include "nd_keycodes.h"
 #include "nd_keypad.h"
+#include "nd_nap.h"
 #include "nd_paths.h"
 #include "nd_text.h"
 #include "nd_types.h"
@@ -62,6 +63,11 @@
 #include "nd_widgets.h"
 
 #include "platform_test.h"
+
+/* An app header, the way test_bluetooth.c reads one: the string being
+ * measured has to be THE string the app ships, not a copy of it that can
+ * drift while this file goes on passing. */
+#include "../../apps/Fetch/fetch_app.h"
 
 #define FONT_REL "overlay/NeoDCT/System/ui/resources/fonts/font.ttf"
 
@@ -805,6 +811,85 @@ static void test_the_cannot_confine_message_fits(void)
     fx_free(&fx);
 }
 
+/* And the third, added after 0.5.14a. Settings hands nd_nap.c's `why` straight
+ * to a notice dialog, so a refusal that does not fit is a refusal the owner
+ * reads half of -- and this particular one is four lines of prose whose LAST
+ * line is the only actionable thing in it. Clipping it would leave "Not
+ * allowed to read the package." and throw away the fix. */
+static void test_the_unreadable_package_message_fits(void)
+{
+    fixture fx;
+    nd_msgdialog dlg;
+    size_t needed = 0u, fits = 0u;
+
+    if (!fx_init(&fx)) {
+        CHECK(false);
+        return;
+    }
+
+    /* Built exactly the way Settings' install_notice() builds it: no title, no
+     * icon named, the default triangle, an OK button. */
+    nd_msgdialog_init(&dlg, &fx.ui, ND_NAP_WHY_UNREADABLE);
+    nd_msgdialog_set_button(&dlg, "OK");
+    nd_msgdialog_measure(&dlg, &needed, &fits);
+
+    CHECK_INT((int)fits, 5);
+    CHECK_INT((int)needed, 4);
+    CHECK(needed <= fits);
+    CHECK(needed < fits); /* a line spare, for the same reason as above */
+
+    fx_free(&fx);
+}
+
+/* And the fourth, added after the disc-image evening. Fetch's confirm dialog
+ * now says WHY a PlayStation image is going to Downloads instead of the
+ * emulator, and the sentence is the only part of that dialog the owner has not
+ * already read on the row behind it -- so it is the part that must not be the
+ * part that gets clipped.
+ *
+ * The message is built the way apps/Fetch/main.c builds it, at the widest it
+ * can be: a file name bounded to the body column with nd_text_fit(), the
+ * longest thing fetch_format_size() prints, and the note. If a future name for
+ * a destination or a wordier sentence pushes this over, it fails here rather
+ * than on the phone, where it would look like a sentence that ends early. */
+static void test_the_fetch_no_psx_notice_fits(void)
+{
+    fixture fx;
+    nd_msgdialog dlg;
+    char shown[ND_FETCH_NAME_MAX + 8u];
+    char message[256];
+    size_t needed = 0u, fits = 0u;
+
+    /* 95 W's and an extension: ND_FETCH_NAME_MAX is 96, and W is the widest
+     * glyph in this font, so nothing a server can send is wider. */
+    static const char WIDEST_NAME[] =
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW.bin";
+
+    if (!fx_init(&fx)) {
+        CHECK(false);
+        return;
+    }
+
+    (void)nd_text_fit(shown, sizeof shown, WIDEST_NAME, fx.ui.font_s, ND_UI_W - (8 * 2));
+    /* "1023.9 MB" is the widest fetch_format_size() output short of a card
+     * nobody owns, and "Downloads" is kind_name(FETCH_DEST_OTHER) -- the only
+     * destination this note is ever printed beside. */
+    CHECK(nd_snprintf(message, sizeof message, "%s\n%s, to %s.\n%s", shown, "1023.9 MB",
+                      "Downloads", FETCH_NOTE_NO_PSX) == ND_OK);
+
+    /* Same furniture as the call site: a title, the default triangle, a
+     * button. A dialog measured without them is a different dialog. */
+    nd_msgdialog_init(&dlg, &fx.ui, message);
+    nd_msgdialog_set_title(&dlg, "Download?");
+    nd_msgdialog_set_button(&dlg, "Download");
+    nd_msgdialog_measure(&dlg, &needed, &fits);
+
+    CHECK_INT((int)fits, 5);
+    CHECK(needed <= fits); /* THE INVARIANT */
+
+    fx_free(&fx);
+}
+
 static void test_msgdialog_keys(void)
 {
     fixture fx;
@@ -1453,6 +1538,8 @@ int main(void)
     test_msgdialog_measure_sees_the_clip();
     test_the_modem_fault_message_fits();
     test_the_cannot_confine_message_fits();
+    test_the_unreadable_package_message_fits();
+    test_the_fetch_no_psx_notice_fits();
     test_msgdialog_keys();
     test_msgdialog_notice_dismisses_on_enter_not_clear();
 

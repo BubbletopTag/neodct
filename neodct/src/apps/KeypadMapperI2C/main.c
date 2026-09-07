@@ -102,6 +102,7 @@
 #include "nd_keypad.h"
 #include "nd_log.h"
 #include "nd_paths.h"
+#include "nd_platform.h"
 #include "nd_text.h"
 #include "nd_types.h"
 #include "nd_ui.h"
@@ -126,8 +127,36 @@
  * partition moves this too; the two strings are the same today. */
 const char *const nd_kmi2c_output_path = ND_PATH_KEYMAP;
 
+/* I2C_REQUIRED_MSG, and it is now three messages because the app was making a
+ * claim it had no evidence for.
+ *
+ * One string used to be shown for every machine, and its last sentence --
+ * "This application can not run in QEMU" -- was deduced from an empty
+ * /dev/i2c-* glob and nothing else. On the phone, where the PCF8575 is
+ * soldered on, that sentence told the owner the opposite of the truth: the
+ * bus WAS supposed to be there, its absence was a fault (i2c-dev not loaded,
+ * or the udev grant losing its coldplug race -- see nd_keypadsetup.h), and
+ * the dialog blamed an emulator the phone is not running.
+ *
+ * nd_platform.h answers it outright now, so each case says what is actually
+ * known. UNKNOWN keeps the old wording deliberately and byte for byte: with
+ * no /NeoDCT/platform this app has exactly the evidence it had before the
+ * flag existed, and the header's rule is that a call site with an
+ * unanswerable truth question keeps whatever it already had rather than
+ * inventing a new answer out of the absence of one.
+ *
+ * All three are measured -- nd_widgets.h insists, because the dialog clips
+ * with an ellipsis this font cannot draw -- and test_keypadmapper.c pins the
+ * measurement so a later edit cannot quietly push a line off the bottom. */
 const char *const nd_kmi2c_i2c_required_msg =
     "This app requires I2C. No /dev/i2c-* devices found. This application can not run in QEMU.";
+
+const char *const nd_kmi2c_i2c_required_qemu_msg =
+    "This app requires I2C. This image is QEMU, which has no PCF8575 keypad to capture.";
+
+const char *const nd_kmi2c_i2c_required_hw_msg =
+    "This app requires I2C. No /dev/i2c-* devices found -- on this phone that is a fault. "
+    "Check i2c-dev.";
 
 const char *const nd_kmi2c_intro_msg =
     "Captures PCF8575 keypad presses to /NeoDCT/User/keymap.json.";
@@ -467,6 +496,19 @@ bool nd_kmi2c_validate_pins(const nd_kmi2c_config *cfg, char *err, size_t err_sz
         seen[pin] = true;
     }
     return true;
+}
+
+const char *nd_kmi2c_i2c_required_text(void)
+{
+    switch (nd_platform()) {
+    case ND_PLATFORM_QEMU:
+        return nd_kmi2c_i2c_required_qemu_msg;
+    case ND_PLATFORM_HW:
+        return nd_kmi2c_i2c_required_hw_msg;
+    case ND_PLATFORM_UNKNOWN:
+    default:
+        return nd_kmi2c_i2c_required_msg;
+    }
 }
 
 bool nd_kmi2c_i2c_available(void)
@@ -1146,7 +1188,7 @@ int app_run(nd_ui *ui)
     /* run(ui)'s only gate. Unlike the GPIO sibling there is no second one:
      * the driver is in-tree rather than a missing pip package. */
     if (!nd_kmi2c_i2c_available()) {
-        show_dialog(ui, nd_kmi2c_i2c_required_msg, NULL);
+        show_dialog(ui, nd_kmi2c_i2c_required_text(), NULL);
         return 0;
     }
 

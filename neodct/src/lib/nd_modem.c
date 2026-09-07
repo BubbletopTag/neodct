@@ -73,6 +73,7 @@
 
 #include "nd_clock.h"
 #include "nd_log.h"
+#include "nd_mic.h"
 #include "nd_modem_priv.h"
 #include "nd_paths.h"
 #include "nd_settings.h"
@@ -2206,6 +2207,14 @@ static int32_t pcm_rate_setting(void)
     return rate;
 }
 
+/* system.hw.mic_gain, once. nd_mic.h owns the parse -- the same function
+ * MicTest and the mixer builder use, so a value that is refused here is
+ * refused everywhere and there is one definition of "a usable gain". */
+static int32_t mic_gain_setting(void)
+{
+    return nd_mic_gain_from_setting(nd_settings_get(ND_SET_HW_MIC_GAIN, ND_SET_HW_MIC_GAIN_DFLT));
+}
+
 static void port_from_settings(char *out, size_t out_sz)
 {
     const char *v = nd_settings_get(ND_SET_HW_MODEM_AT_PORT, ND_MODEM_DEFAULT_PORT);
@@ -2369,6 +2378,7 @@ nd_err nd_modem__create(nd_modem **out)
     m->pcm_rate = pcm_rate_setting();
     port_from_settings(m->configured_port, sizeof m->configured_port);
     m->allow_calls = calls_enabled_setting();
+    m->mic_gain = mic_gain_setting();
     m->boot_grace = boot_grace_setting();
     m->boot_deadline = nd_modem__now() + m->boot_grace;
     m->late_grace_deadline = nd_modem__now() + ND_MODEM_LATE_GRACE_MAX_S;

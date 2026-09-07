@@ -281,6 +281,12 @@ typedef enum {
     ND_KPSETUP_GATE_PROBE            /* the bus is there; go and probe it    */
 } nd_kpsetup_gate;
 
+/* "not hardware" above is nd_platform_is_hw() being false, which covers QEMU
+ * and an image with no /NeoDCT/platform alike. Waiting for a bus is a cost,
+ * so the unknown case is allowed to skip it (nd_platform.h); it used to be
+ * decided by whether /dev/ttyFIQ0 existed, and a phone whose kernel lacks the
+ * FIQ debugger consequently never waited for its own keypad. */
+
 /* Everything maybe_run_first_time_setup() decides before it draws anything or
  * sleeps for anything. */
 nd_kpsetup_gate nd_kpsetup_gate_check(int bus);

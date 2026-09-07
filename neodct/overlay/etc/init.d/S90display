@@ -1,6 +1,28 @@
 #!/bin/sh
 # NeoDCT display shim - only runs on hardware with the SPI panel
-[ -e /dev/spidev0.0 ] || exit 0
+#
+# ============ WHY THIS ASKS THE IMAGE AND THEN THE DEVICE ============
+#
+# The gate used to be `[ -e /dev/spidev0.0 ] || exit 0` on its own, which is
+# two questions answered as one. "Is this a machine with an SPI panel?" the
+# image can answer outright now (/NeoDCT/platform, /bin/nd-platform); "has the
+# spidev node turned up yet?" it cannot, and that one used to decide the
+# whole script. So a phone whose spidev had not enumerated by the time init
+# reached S90 skipped the panel daemon AND the backlight grant below, in
+# complete silence, and the owner got a dark screen nothing could light.
+#
+# hw       run, and let neodct_displayd say for itself what it found. It logs;
+#          this script never did.
+# qemu     exit: there is no SPI bus and the virtual framebuffer IS the screen.
+# unknown  fall back to the evidence, which is exactly what this script had
+#          before the flag existed. An image with no platform record is not an
+#          image that gets to be told it has a panel -- nd_platform.h's rule --
+#          so the device node keeps its old casting vote.
+if /bin/nd-platform is qemu; then
+    exit 0
+elif ! /bin/nd-platform is hw; then
+    [ -e /dev/spidev0.0 ] || exit 0
+fi
 
 # The pin the panel's BL wire is on: header pin 11, GPIO1_C5, gpio53. Kept in
 # step with ND_BL_GPIO_PIN in neodct/src/include/nd_fb.h by hand -- there is no

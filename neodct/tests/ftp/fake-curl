@@ -11,7 +11,19 @@
 #
 # It is the same device neodct/tests/remote/fake-curl is for nd_remote, and
 # it is a separate file because it speaks a different protocol: no -D header
-# descriptor, no Range, a listing on stdout and a file written with -o.
+# descriptor, no Range, and both a listing and a download written on STDOUT.
+#
+# ============ WHY THERE IS NO -o ANY MORE ============
+#
+# ftp.c used to pass `-o <path>.part` and this script copied the body there.
+# That was a root-privileged arbitrary file write: Fetch runs as root and the
+# ordinary destination is the card's untrusted/, which ndusr_ut can write, so
+# a symlink planted at that name between the app's unlink() and curl's fopen()
+# sent the download wherever the attacker liked. ftp.c now opens the .part
+# itself with O_CREAT|O_EXCL|O_NOFOLLOW and hands curl the DESCRIPTOR as fd 1,
+# which is curl's default output anyway. So this stand-in writes the body to
+# stdout, exactly as the real curl does with no -o, and the test's assertions
+# about the file that appears are assertions about that descriptor.
 #
 # ============ HOW A SCENARIO IS SET UP ============
 #
@@ -20,7 +32,7 @@
 #
 #   listing   path of a file to print on stdout -- what LIST would have said.
 #             Used when the URL ends in "/".
-#   body      path of a file to copy to the -o target, one chunk at a time.
+#   body      path of a file to write to stdout, one chunk at a time.
 #   exit      the exit code to leave with (default 0). 67 is curl's
 #             "login denied", which the app turns into "Wrong password."
 #   stderr    text to write on stderr, in curl's own "curl: (N) text" shape.
@@ -42,18 +54,14 @@ set -eu
 
 D="${NDFTP_DIR:?fake-curl needs NDFTP_DIR}"
 
-out=""
 netrc=""
 url=""
-want_out=0
 want_netrc=0
 
 for a in "$@"; do
     printf '%s\n' "$a" >> "$D/argv"
-    if [ "$want_out" = 1 ]; then out="$a"; want_out=0; continue; fi
     if [ "$want_netrc" = 1 ]; then netrc="$a"; want_netrc=0; continue; fi
     case "$a" in
-        -o) want_out=1 ;;
         --netrc-file) want_netrc=1 ;;
         ftp://*) url="$a" ;;
     esac
@@ -86,7 +94,6 @@ esac
 
 if [ ! -f "$D/body" ]; then exit 0; fi
 src=$(cat "$D/body")
-if [ -z "$out" ]; then exit 0; fi
 
 total=$(stat -c %s "$src")
 if [ -f "$D/short" ]; then total=$(cat "$D/short"); fi
@@ -95,21 +102,23 @@ chunks=1
 if [ -f "$D/chunks" ]; then chunks=$(cat "$D/chunks"); fi
 if [ "$chunks" -lt 1 ]; then chunks=1; fi
 
-# Block-at-a-time rather than byte-at-a-time: a 100 kB body copied with bs=1
-# takes long enough to look like a hang.
 per=$(( (total + chunks - 1) / chunks ))
 if [ "$per" -lt 1 ]; then per=1; fi
 
-: > "$out"
-n=0
-while [ $((n * per)) -lt "$total" ]; do
-    dd if="$src" of="$out" bs="$per" skip="$n" seek="$n" count=1 \
-       conv=notrunc status=none 2>/dev/null || true
-    n=$((n + 1))
-    if [ "$chunks" -gt 1 ]; then sleep 0.1; fi
+# On STDOUT, which is the descriptor ftp.c opened on the .part -- so the file
+# grows under the app's progress loop exactly as it did when curl was writing
+# it. Exactly `total` bytes: there is no truncate to undo an overshoot on a
+# descriptor somebody else owns, so the last piece is cut to what is left,
+# which is what makes the `short` scenario a short file rather than a whole
+# one.
+sent=0
+while [ "$sent" -lt "$total" ]; do
+    left=$((total - sent))
+    this=$per
+    [ "$this" -gt "$left" ] && this=$left
+    dd if="$src" bs=1 skip="$sent" count="$this" status=none 2>/dev/null || true
+    sent=$((sent + this))
+    if [ "$chunks" -gt 1 ] && [ "$sent" -lt "$total" ]; then sleep 0.1; fi
 done
-# The last block overshoots when `short` is set, or when the body does not
-# divide evenly. The length the app checks is this one.
-truncate -s "$total" "$out"
 
 exit 0

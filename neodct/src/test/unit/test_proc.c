@@ -53,6 +53,7 @@
 #include "nd_keycodes.h"
 #include "nd_keypad.h"
 #include "nd_paths.h"
+#include "nd_platform.h"
 #include "nd_proc.h"
 #include "nd_types.h"
 #include "nd_ui.h"
@@ -998,6 +999,86 @@ static void test_crash_log_rotates(void)
     CHECK(crash_log_contains("source: rotation"));
 }
 
+/* ============ THE ONE FIELD A BUG REPORT IS TRIAGED BY ============
+ *
+ * `mode:` is the first line anybody sorts a crash report on, and it used to
+ * be derived from access("/dev/ttyFIQ0"): real Rockchip hardware exposes the
+ * FIQ console, QEMU does not. Both halves were true and the conclusion was
+ * not -- a hardware kernel built without the FIQ debugger filed every one of
+ * its reports as "QEMU/simulation", confidently and wrongly, at the top of
+ * the page.
+ *
+ * It reads the image now, and it has three values because the image can
+ * genuinely fail to say. The third one is the point of this case: writing
+ * "hardware" or "QEMU/simulation" over an image with no /NeoDCT/platform
+ * would be the same confidently-wrong triage field with a different cause.
+ */
+static void write_one_report(const char *source)
+{
+    char resolved[ND_PATH_MAX];
+    nd_crash_info info;
+
+    /* One report per call, into an empty log, so that "the log contains X"
+     * is a statement about THIS report and not about a previous one. */
+    if (nd_path_resolve(resolved, sizeof resolved, ND_PATH_CRASH_LOG) == ND_OK)
+        (void)remove(resolved);
+
+    memset(&info, 0, sizeof info);
+    info.from_signal = true;
+    info.signo = SIGSEGV;
+    CHECK(nd_crash_log(source, &info, NULL) != NULL);
+}
+
+static void given_the_image_says(const char *platform_word)
+{
+    char resolved[ND_PATH_MAX];
+    char record[64];
+
+    /* THE ENVIRONMENT FIRST, EVERY TIME. nd_platform.c's resolve() reads
+     * NEODCT_PLATFORM before it ever opens the record, so an ambient one --
+     * a developer running the suite with it exported, which is exactly how a
+     * platform bug gets reproduced -- decided every case below and the
+     * fixture underneath was never consulted. test_platform.c's own given_*
+     * helpers have always cleared it; these copies of the pattern did not. */
+    (void)unsetenv(ND_ENV_PLATFORM);
+
+    if (platform_word == NULL) {
+        if (nd_path_resolve(resolved, sizeof resolved, ND_PATH_PLATFORM) == ND_OK)
+            (void)remove(resolved);
+    } else {
+        (void)nd_snprintf(record, sizeof record, "platform=%s\n", platform_word);
+        pt_write_text(ND_PATH_PLATFORM, record);
+    }
+    nd_platform__reset_cache();
+}
+
+static void test_the_crash_log_mode_field_names_the_machine(void)
+{
+    CHECK_INT(nd_mkdir_p(ND_PATH_LOG_DIR, 0755u), ND_OK);
+
+    given_the_image_says("qemu");
+    write_one_report("modes");
+    CHECK(crash_log_contains("mode:   QEMU/simulation"));
+
+    given_the_image_says("hw");
+    write_one_report("modes");
+    CHECK(crash_log_contains("mode:   hardware"));
+    /* Deliberately spelled out: the FIQ console is not on this fixture and
+     * the report still says hardware, which is exactly the phone the old
+     * heuristic mislabelled. */
+    CHECK(!nd_path_exists(ND_PATH_SERIAL_FIQ));
+
+    given_the_image_says(NULL);
+    write_one_report("modes");
+    CHECK(!crash_log_contains("mode:   hardware"));
+    CHECK(!crash_log_contains("mode:   QEMU/simulation"));
+    CHECK(crash_log_contains("mode:   unknown"));
+
+    /* The cache outlives the case root, so put it back or every case after
+     * this one inherits whatever the last line said. */
+    given_the_image_says(NULL);
+}
+
 /* ------------------------------------------------------------------ *
  * Which user an app runs as
  * ------------------------------------------------------------------ */
@@ -1617,6 +1698,7 @@ int main(void)
     test_clean_exit_draws_nothing();
     test_the_core_survived_and_the_stub_app_runs();
     test_crash_log_rotates();
+    test_the_crash_log_mode_field_names_the_machine();
     t_keydev_manifest();
     t_the_browser_asks_for_a_key_device();
     t_wants_performance_manifest();

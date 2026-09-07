@@ -71,6 +71,7 @@
 
 #include "nd_keycodes.h"
 #include "nd_keypad.h"
+#include "nd_platform.h"
 #include "nd_widgets.h"
 
 #include "smallapp_test.h"
@@ -92,6 +93,7 @@ static struct {
                         bool);
     bool (*validate_pins)(const nd_kmi2c_config *, char *, size_t);
     bool (*i2c_available)(void);
+    const char *(*i2c_required_text)(void);
     nd_err (*pin_repr)(char *, size_t, const int32_t *, size_t);
     void (*wrap)(nd_lines *, const char *, const nd_font *, int32_t);
     size_t (*body)(const nd_kmi2c_config *, const char *, char (*)[ND_KMI2C_BODY_MAX], size_t);
@@ -104,6 +106,8 @@ static struct {
     const int32_t *default_cols;
     const char *const *output_path;
     const char *const *i2c_required_msg;
+    const char *const *i2c_required_qemu_msg;
+    const char *const *i2c_required_hw_msg;
     const char *const *intro_msg;
     const char *const *cancel_msg;
     const char *const *title;
@@ -122,6 +126,7 @@ static bool i2c_api_open(void *h)
     *(void **)&i2c.config_from = sa_sym(h, "nd_kmi2c_config_from");
     *(void **)&i2c.validate_pins = sa_sym(h, "nd_kmi2c_validate_pins");
     *(void **)&i2c.i2c_available = sa_sym(h, "nd_kmi2c_i2c_available");
+    *(void **)&i2c.i2c_required_text = sa_sym(h, "nd_kmi2c_i2c_required_text");
     *(void **)&i2c.pin_repr = sa_sym(h, "nd_kmi2c_pin_repr");
     *(void **)&i2c.wrap = sa_sym(h, "nd_kmi2c_wrap");
     *(void **)&i2c.body = sa_sym(h, "nd_kmi2c_body");
@@ -133,6 +138,8 @@ static bool i2c_api_open(void *h)
     i2c.default_cols = sa_sym(h, "nd_kmi2c_default_cols");
     i2c.output_path = sa_sym(h, "nd_kmi2c_output_path");
     i2c.i2c_required_msg = sa_sym(h, "nd_kmi2c_i2c_required_msg");
+    i2c.i2c_required_qemu_msg = sa_sym(h, "nd_kmi2c_i2c_required_qemu_msg");
+    i2c.i2c_required_hw_msg = sa_sym(h, "nd_kmi2c_i2c_required_hw_msg");
     i2c.intro_msg = sa_sym(h, "nd_kmi2c_intro_msg");
     i2c.cancel_msg = sa_sym(h, "nd_kmi2c_cancel_msg");
     i2c.title = sa_sym(h, "nd_kmi2c_title");
@@ -142,10 +149,12 @@ static bool i2c_api_open(void *h)
 
     return i2c.run != NULL && i2c.shutdown != NULL && i2c.parse_pins != NULL &&
            i2c.parse_addr != NULL && i2c.parse_bus != NULL && i2c.config_from != NULL &&
-           i2c.validate_pins != NULL && i2c.i2c_available != NULL && i2c.pin_repr != NULL &&
+           i2c.validate_pins != NULL && i2c.i2c_available != NULL &&
+           i2c.i2c_required_text != NULL && i2c.pin_repr != NULL &&
            i2c.wrap != NULL && i2c.body != NULL && i2c.progress != NULL && i2c.payload != NULL &&
            i2c.save != NULL && i2c.targets != NULL && i2c.default_rows != NULL &&
            i2c.default_cols != NULL && i2c.output_path != NULL && i2c.i2c_required_msg != NULL &&
+           i2c.i2c_required_qemu_msg != NULL && i2c.i2c_required_hw_msg != NULL &&
            i2c.intro_msg != NULL && i2c.cancel_msg != NULL && i2c.title != NULL &&
            i2c.format != NULL && i2c.driver != NULL && i2c.softkey_text != NULL;
 }
@@ -233,10 +242,25 @@ static void test_constants(void)
 {
     CHECK_STR(*i2c.output_path, "/NeoDCT/User/keymap.json", "OUTPUT_PATH");
     CHECK_STR(*i2c.output_path, ND_PATH_KEYMAP, "and it is the path the core reads");
+    /* I2C_REQUIRED_MSG, and it is still exactly the Python's string -- that
+     * one is what an image with no /NeoDCT/platform shows, because with no
+     * flag the app has exactly the evidence it had before the flag existed
+     * and nd_platform.h says such a call site keeps what it had. */
     CHECK_STR(*i2c.i2c_required_msg,
               "This app requires I2C. No /dev/i2c-* devices found. "
               "This application can not run in QEMU.",
               "I2C_REQUIRED_MSG");
+    /* The two the flag makes sayable. On QEMU the emulator is the answer; on
+     * the phone the bus is soldered on, so its absence is a FAULT and the
+     * message must not blame an emulator the phone is not running. */
+    CHECK_STR(*i2c.i2c_required_qemu_msg,
+              "This app requires I2C. This image is QEMU, which has no PCF8575 "
+              "keypad to capture.",
+              "the QEMU refusal");
+    CHECK_STR(*i2c.i2c_required_hw_msg,
+              "This app requires I2C. No /dev/i2c-* devices found -- on this phone "
+              "that is a fault. Check i2c-dev.",
+              "the hardware refusal");
     CHECK_STR(*i2c.intro_msg, "Captures PCF8575 keypad presses to /NeoDCT/User/keymap.json.",
               "run()'s first dialog");
     CHECK_STR(*i2c.cancel_msg, "Calibration canceled. Keymap not saved.", "the MENU dialog");
@@ -905,6 +929,102 @@ static bool digest_of_dialog(sa_fixture *fx, const char *message, char *out, siz
     return digest_of_recent(fx, out, out_sz);
 }
 
+/* Writes a /NeoDCT/platform under the scratch root. The cache is resolved
+ * once per process, so it has to be dropped every time -- and the app.so and
+ * this binary share one libneodct, so what is dropped here is what the app
+ * sees. */
+static bool given_the_image_says(const char *platform_word)
+{
+    char resolved[ND_PATH_MAX];
+    FILE *f;
+
+    /* THE ENVIRONMENT FIRST, EVERY TIME. nd_platform.c's resolve() reads
+     * NEODCT_PLATFORM before it ever opens the record, so an ambient one --
+     * a developer running the suite with it exported, which is exactly how a
+     * platform bug gets reproduced -- decided every case below and the
+     * fixture underneath was never consulted. test_platform.c's own given_*
+     * helpers have always cleared it; these copies of the pattern did not. */
+    (void)unsetenv(ND_ENV_PLATFORM);
+
+    if (platform_word == NULL) {
+        unlink_virtual(ND_PATH_PLATFORM);
+        nd_platform__reset_cache();
+        return true;
+    }
+    if (!touch_virtual(ND_PATH_PLATFORM))
+        return false;
+    if (nd_path_resolve(resolved, sizeof resolved, ND_PATH_PLATFORM) != ND_OK)
+        return false;
+    f = fopen(resolved, "wb");
+    if (f == NULL)
+        return false;
+    (void)fprintf(f, "platform=%s\n", platform_word);
+    (void)fclose(f);
+    nd_platform__reset_cache();
+    return true;
+}
+
+/* ============ THE REFUSAL SAYS WHAT IS KNOWN, NOT WHAT IS GUESSED =========
+ *
+ * One string used to be shown on every machine and its last sentence was
+ * "This application can not run in QEMU", deduced from an empty glob. On the
+ * phone that is the opposite of the truth: the PCF8575 is soldered to that
+ * bus, so an empty glob there is a fault to chase, not an explanation to
+ * accept. Three messages now, and the gate itself is untouched -- whether
+ * anything can be captured still turns on whether a bus node is there.
+ */
+static void test_the_refusal_says_what_is_actually_known(void)
+{
+    root_to_scratch();
+    unlink_virtual("/dev/i2c-3");
+
+    CHECK(given_the_image_says("qemu"), "a qemu image");
+    CHECK_STR(i2c.i2c_required_text(), *i2c.i2c_required_qemu_msg, "on QEMU, say QEMU");
+
+    CHECK(given_the_image_says("hw"), "a hardware image");
+    CHECK_STR(i2c.i2c_required_text(), *i2c.i2c_required_hw_msg,
+              "on the phone, a missing bus is a fault");
+
+    /* THE CENTRAL CASE. No record: the app knows exactly what it knew before
+     * the flag existed, so it says exactly what it said before -- it does not
+     * get to pick either of the other two. */
+    CHECK(given_the_image_says(NULL), "no record at all");
+    CHECK_STR(i2c.i2c_required_text(), *i2c.i2c_required_msg,
+              "with no platform record, the wording it always had");
+
+    /* A word this build has never heard of is the same as no word. */
+    CHECK(given_the_image_says("luckfox"), "an unparseable record");
+    CHECK_STR(i2c.i2c_required_text(), *i2c.i2c_required_msg, "and a bad record too");
+
+    (void)given_the_image_says(NULL);
+    root_restore();
+}
+
+/* nd_widgets.h: "Ask this about any message you ship." The dialog clips with
+ * U+2026 and this font has no glyph for it, so an overlong message does not
+ * look truncated -- it looks like a sentence that ends there. Six shipped
+ * messages were being cut off when nd-dialogfit was written. Two of these
+ * three are new, so they are measured here rather than looked at. */
+static void test_every_refusal_fits_the_dialog(sa_fixture *fx)
+{
+    const char *msgs[3];
+    size_t i;
+
+    msgs[0] = *i2c.i2c_required_msg;
+    msgs[1] = *i2c.i2c_required_qemu_msg;
+    msgs[2] = *i2c.i2c_required_hw_msg;
+
+    for (i = 0u; i < 3u; i++) {
+        nd_msgdialog d;
+        size_t needed = 0u;
+        size_t fits = 0u;
+
+        nd_msgdialog_init(&d, &fx->ui, msgs[i]);
+        nd_msgdialog_measure(&d, &needed, &fits);
+        CHECK(needed > 0u && needed <= fits, "the refusal fits with nothing thrown away");
+    }
+}
+
 static void test_i2c_gate(void)
 {
     sa_fixture fx;
@@ -913,6 +1033,11 @@ static void test_i2c_gate(void)
 
     root_to_scratch();
     unlink_virtual("/dev/i2c-3");
+    /* No platform record, so the dialog under test is the UNKNOWN one -- the
+     * string this app has always shown. The wording per platform is
+     * test_the_refusal_says_what_is_actually_known's subject; this case is
+     * about the gate drawing one frame and stopping. */
+    (void)given_the_image_says(NULL);
     CHECK(!i2c.i2c_available(), "no /dev/i2c-* in an empty tree");
 
     if (!sa_fx_init(&fx)) {
@@ -925,8 +1050,9 @@ static void test_i2c_gate(void)
     CHECK_INT(i2c.run(&fx.ui), 0, "app_run returns cleanly");
     CHECK_INT(nd_capture_frames_drawn(fx.cap), 1, "ONE frame: the gate dialog and nothing else");
     CHECK(digest_of_recent(&fx, shown, sizeof shown), "a frame was committed");
-    CHECK(digest_of_dialog(&fx, *i2c.i2c_required_msg, expect, sizeof expect), "reference dialog");
-    CHECK_STR(shown, expect, "and it was I2C_REQUIRED_MSG");
+    CHECK(digest_of_dialog(&fx, i2c.i2c_required_text(), expect, sizeof expect),
+          "reference dialog");
+    CHECK_STR(shown, expect, "and it was the refusal for this platform");
 
     sa_fx_free(&fx);
 
@@ -981,6 +1107,7 @@ int main(void)
     if (sa_fx_init(&fx)) {
         test_wrap(&fx);
         test_only_four_lines_are_drawn(&fx);
+        test_every_refusal_fits_the_dialog(&fx);
     } else {
         CHECK(false, "fixture for the wrapper cases");
     }
@@ -990,6 +1117,7 @@ int main(void)
     RUN(test_payload_edges);
     RUN(test_saved_file_loads_back);
     RUN(test_save_reports_a_bad_path);
+    RUN(test_the_refusal_says_what_is_actually_known);
     RUN(test_i2c_gate);
     RUN(test_null_safety);
 

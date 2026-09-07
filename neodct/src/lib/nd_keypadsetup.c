@@ -78,6 +78,7 @@
 #include "nd_keypadsetup.h"
 #include "nd_log.h"
 #include "nd_paths.h"
+#include "nd_platform.h"
 #include "nd_types.h"
 
 /* ------------------------------------------------------------------ *
@@ -561,10 +562,19 @@ nd_kpsetup_gate nd_kpsetup_gate_check(int bus)
     if (bus_dev_path(dev, sizeof dev, bus) != ND_OK)
         return ND_KPSETUP_GATE_QUIET;
 
-    /* _is_real_hardware(): the Rockchip FIQ console only exists on the
-     * device, never in QEMU. Same hint the launcher uses, and the reason a
-     * dev box stays silent while a phone announces every skip. */
-    is_hw = nd_path_exists(ND_PATH_SERIAL_FIQ);
+    /* _is_real_hardware(), and it used to be nd_path_exists("/dev/ttyFIQ0")
+     * on the reasoning that the Rockchip FIQ console exists on the device and
+     * never in QEMU. A phone whose kernel was built without the FIQ debugger
+     * therefore read as a dev box, went QUIET, never waited for the i2c bus
+     * its keypad is on, and came up with no keys and nothing on the console
+     * saying why. The image knows; ask it.
+     *
+     * UNKNOWN lands on QUIET with the emulator, and that is the right way
+     * round: this decides whether to spend the coldplug grace waiting for a
+     * bus, which is nd_platform.h's COST question. Nothing is claimed about
+     * hardware, and the worst case is a developer's laptop not waiting for a
+     * keypad it has never had. */
+    is_hw = nd_platform_is_hw();
 
     if (nd_path_exists(dev))
         return ND_KPSETUP_GATE_PROBE;

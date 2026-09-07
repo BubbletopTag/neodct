@@ -1,0 +1,106 @@
+#!/bin/sh
+# nd-platform -- "qemu or hw", for the half of the OS that is busybox sh.
+#
+# The init scripts cannot link libneodct, so they cannot ask nd_platform()
+# (neodct/src/include/nd_platform.h). This is the same answer, read out of the
+# same file, with the same three values.
+#
+# The INITRAMFS is not among its callers and cannot be. Both this script and
+# the file it reads live in the root squashfs, which is not mounted yet when
+# the initramfs runs, and nothing in neodct/initramfs/ asks which machine it
+# is on anyway -- post-build-system-metadata.sh has the reasoning.
+#
+#     nd-platform             print the platform word: qemu, hw or unknown
+#     nd-platform is hw       exit 0 only when the platform is hw
+#     nd-platform is qemu     exit 0 only when the platform is qemu
+#     nd-platform get KEY     print the value of KEY; exit 1 when it is absent
+#
+# ============ WHY `is` AND NOT AN EXIT STATUS ON THE BARE FORM ============
+#
+# nd_platform.h's rule is that UNKNOWN may decide a cost question and may
+# never decide a truth question, and the two predicates are separate so that
+# nobody writes "not qemu" and means "hardware". A bare command whose exit
+# status meant "the record was readable" would be read as "this is a phone" by
+# the first person in a hurry -- `nd-platform && start_the_modem_wait` looks
+# exactly like the check it is not. So the truth questions are spelled out,
+# they mirror nd_platform_is_hw() and nd_platform_is_qemu() one for one, and
+# there is no negation form here either.
+#
+# ============ HOW IT READS THE FILE ============
+#
+# `while IFS='=' read`, never `.` -- AGENTS.md is explicit that a record is
+# parsed and never sourced, so a value can never execute. The value charset is
+# narrower than the file format allows, the same guard S45modem puts on its
+# cache: everything this file can legitimately carry is a lowercase token, and
+# a value that is not one is a file we do not understand rather than one to
+# pass on to a caller.
+#
+# NEODCT_PLATFORM overrides the file with a platform word, exactly as it does
+# in the C -- and, exactly as in the C, it carries no board: a board name is a
+# claim about a piece of hardware and an environment variable is not evidence
+# of one.
+#
+# NEODCT_PLATFORM_FILE is the host tests' hook, in the shape ndsys-apply.sh
+# uses for the same purpose: the default is the real absolute path, and a test
+# points it at an ordinary file.
+: "${NEODCT_PLATFORM_FILE:=/NeoDCT/platform}"
+
+usage() {
+    echo "usage: nd-platform [is hw|qemu | get KEY]" >&2
+    exit 2
+}
+
+# Prints the value of one key, or nothing. Returns 1 when the key is absent.
+platform_get() {
+    _want="$1"
+    _found=""
+    [ -r "$NEODCT_PLATFORM_FILE" ] || return 1
+    # `|| [ -n "$_key" ]` catches a final line with no newline after it. read
+    # returns non-zero there even though it has filled the variables, so the
+    # plain form silently drops the last record -- which in this file is
+    # image=, the key least likely to be missed until something needs it. The
+    # C reader (nd_props, B-1) has never had that edge, and the two readers
+    # agreeing about one four-line file is the point of the file.
+    while IFS='=' read -r _key _value || [ -n "$_key" ]; do
+        [ "$_key" = "$_want" ] || continue
+        case "$_value" in
+            ''|*[!A-Za-z0-9._-]*) continue ;;
+        esac
+        _found="$_value"
+    done < "$NEODCT_PLATFORM_FILE"
+    [ -n "$_found" ] || return 1
+    printf '%s\n' "$_found"
+    return 0
+}
+
+# The platform word, and never empty. An unreadable file, an absent key and a
+# word this script has never heard of all land on "unknown", which is a real
+# answer and not a synonym for either of the others.
+platform_word() {
+    _word="${NEODCT_PLATFORM:-}"
+    [ -n "$_word" ] || _word="$(platform_get platform)" || _word=""
+    case "$_word" in
+        hw|qemu) printf '%s\n' "$_word" ;;
+        *)       printf 'unknown\n' ;;
+    esac
+}
+
+case "${1:-}" in
+    "")
+        platform_word
+        ;;
+    is)
+        [ $# -eq 2 ] || usage
+        case "$2" in
+            hw|qemu) [ "$(platform_word)" = "$2" ] ;;
+            *)       usage ;;
+        esac
+        ;;
+    get)
+        [ $# -eq 2 ] || usage
+        platform_get "$2"
+        ;;
+    *)
+        usage
+        ;;
+esac

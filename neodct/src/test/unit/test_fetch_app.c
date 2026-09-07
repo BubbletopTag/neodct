@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "nd_paths.h"
@@ -53,12 +54,20 @@ typedef struct {
 
 typedef bool (*fetch_progress_fn)(void *ctx, int64_t done, int64_t total);
 
+typedef enum {
+    FETCH_DEST_MUSIC = 0,
+    FETCH_DEST_GAME,
+    FETCH_DEST_BIOS,
+    FETCH_DEST_NAP,
+    FETCH_DEST_OTHER
+} fetch_dest_kind;
+
 static struct {
     void *h;
     nd_err (*list)(const fetch_conn *, const char *, fetch_entry *, size_t, size_t *, char *,
                    size_t);
-    nd_err (*download)(const fetch_conn *, const char *, const char *, const char *, int64_t,
-                       fetch_progress_fn, void *, char *, size_t);
+    nd_err (*download)(const fetch_conn *, const char *, const char *, const char *,
+                       fetch_dest_kind, int64_t, fetch_progress_fn, void *, char *, size_t);
 } api;
 
 /* The password every test types. It is a literal so that the "not in argv"
@@ -441,8 +450,8 @@ static void test_download_lands_where_it_was_asked_to(void)
     g_progress_calls = 0;
 
     conn_init(&c);
-    CHECK(api.download(&c, "music", "A Forest.mp3", "/card/music/A Forest.mp3", 4096,
-                       count_progress, NULL, why, sizeof why) == ND_OK);
+    CHECK(api.download(&c, "music", "A Forest.mp3", "/card/music/A Forest.mp3", FETCH_DEST_MUSIC,
+                       4096, count_progress, NULL, why, sizeof why) == ND_OK);
 
     /* The folder was made on the way -- the card has music/ already, but a
      * PSX game's folder does not exist until a disc is downloaded into it. */
@@ -472,8 +481,8 @@ static void test_progress_is_driven_from_the_growing_file(void)
     g_progress_last = -1;
 
     conn_init(&c);
-    CHECK(api.download(&c, "", "big.bin", "/card/untrusted/big.bin", 64 * 1024, count_progress,
-                       NULL, why, sizeof why) == ND_OK);
+    CHECK(api.download(&c, "", "big.bin", "/card/untrusted/big.bin", FETCH_DEST_OTHER, 64 * 1024,
+                       count_progress, NULL, why, sizeof why) == ND_OK);
     /* The bar moved at least once while the file was still arriving, which is
      * the whole reason the loop polls rather than blocking on wait(). */
     CHECK(g_progress_calls > 0);
@@ -494,8 +503,8 @@ static void test_a_cancelled_download_is_not_saved(void)
     conn_init(&c);
     /* What an incoming call does: the callback says stop, curl is killed and
      * nothing takes the final name. */
-    CHECK(api.download(&c, "", "big.bin", "/card/untrusted/big.bin", 64 * 1024, cancel_at_once,
-                       NULL, why, sizeof why) == ND_ERR_BUSY);
+    CHECK(api.download(&c, "", "big.bin", "/card/untrusted/big.bin", FETCH_DEST_OTHER, 64 * 1024,
+                       cancel_at_once, NULL, why, sizeof why) == ND_ERR_BUSY);
     CHECK_STR(why, "Cancelled.");
     CHECK(!nd_path_is_file("/card/untrusted/big.bin"));
     CHECK(g_progress_calls > 0);
@@ -514,8 +523,8 @@ static void test_a_short_file_is_refused(void)
     conn_init(&c);
     /* Renaming this into music/ would produce a track that plays for four
      * seconds and a bug report about the phone rather than the server. */
-    CHECK(api.download(&c, "music", "A Forest.mp3", "/card/music/A Forest.mp3", 4096, NULL, NULL,
-                       why, sizeof why) == ND_ERR_IO);
+    CHECK(api.download(&c, "music", "A Forest.mp3", "/card/music/A Forest.mp3", FETCH_DEST_MUSIC,
+                       4096, NULL, NULL, why, sizeof why) == ND_ERR_IO);
     CHECK_STR(why, "The file arrived short.");
     CHECK(!nd_path_is_file("/card/music/A Forest.mp3"));
 }
@@ -531,12 +540,84 @@ static void test_a_failed_download_explains_itself(void)
     ctl("stderr", "curl: (9) Server denied you access to the resource\n");
 
     conn_init(&c);
-    CHECK(api.download(&c, "music", "A Forest.mp3", "/card/music/A Forest.mp3", 4096, NULL, NULL,
-                       why, sizeof why) == ND_ERR_IO);
+    CHECK(api.download(&c, "music", "A Forest.mp3", "/card/music/A Forest.mp3", FETCH_DEST_MUSIC,
+                       4096, NULL, NULL, why, sizeof why) == ND_ERR_IO);
     /* curl's own words, with its prefix removed -- better than any table of
      * exit codes this app could carry. */
     CHECK_STR(why, "Server denied you access to the resource");
     CHECK(!nd_path_is_file("/card/music/A Forest.mp3"));
+}
+
+/* ============ THE MODES A FINISHED DOWNLOAD IS LEFT WITH ============
+ *
+ * The rest of this file drives the transport; this drives the thing 0.5.14a
+ * shipped without. curl is a child, so it inherits this process's umask, and
+ * the phone's is 0027 out of run_neodct.sh -- so the umask is SET here rather
+ * than assumed, and a `: > "$out"` in the stand-in then lands 0640 exactly as
+ * the real curl's -o does. An assertion that comes back 0644 or 0660 is proof
+ * that fetch_give_to_reader() ran; without it every number below is 0640 and
+ * the file is one the reading app gets EACCES on.
+ *
+ * Ownership is not checked here -- test_fetch.c does that, where it can skip
+ * loudly on a host with no root and no ndusr. What this file owns is that the
+ * DOWNLOAD PATH applies it at all, for each destination separately, because
+ * the failure was one destination's worth of wrong. */
+static unsigned int mode_of(const char *path)
+{
+    char resolved[ND_PATH_MAX];
+    struct stat st;
+
+    if (nd_path_resolve(resolved, sizeof resolved, path) != ND_OK)
+        return 0u;
+    if (stat(resolved, &st) != 0)
+        return 0u;
+    return (unsigned int)(st.st_mode & 07777u);
+}
+
+static void test_a_download_is_left_readable_by_the_app_that_wants_it(void)
+{
+    fetch_conn c;
+    char why[ND_FETCH_WHY_MAX] = "";
+    mode_t was;
+
+    CHECK(scenario());
+    CHECK(path_with_fake_curl());
+    set_body(4096u);
+    conn_init(&c);
+    was = umask(0027u); /* the phone's, and the whole reason this is a bug */
+
+    /* MusicPlayer is ndusr and so is music/, so owner-read is the whole
+     * requirement -- and 0640 is what the umask happens to give. It is stated
+     * anyway, because "the umask agrees today" is how this drifts. */
+    CHECK(api.download(&c, "music", "A Forest.mp3", "/card/music/A Forest.mp3", FETCH_DEST_MUSIC,
+                       4096, NULL, NULL, why, sizeof why) == ND_OK);
+    CHECK_INT(mode_of("/card/music/A Forest.mp3"), 0640u);
+
+    /* The emulator is ndusr_ut inside an ndusr:ndusr apps/ tree, which makes
+     * it OTHER: 0644, and a folder it can walk into. Both were 0750/0640 and
+     * both had to change. */
+    CHECK(api.download(&c, "roms", "Disc.bin", "/card/apps/PSX/games/Disc/Disc.bin",
+                       FETCH_DEST_GAME, 4096, NULL, NULL, why, sizeof why) == ND_OK);
+    CHECK_INT(mode_of("/card/apps/PSX/games/Disc/Disc.bin"), 0644u);
+    CHECK_INT(mode_of("/card/apps/PSX/games/Disc"), 0755u);
+    CHECK_INT(mode_of("/card/apps/PSX/games"), 0755u);
+
+    CHECK(api.download(&c, "roms", "bios.bin", "/card/apps/PSX/bios/scph1001.bin", FETCH_DEST_BIOS,
+                       4096, NULL, NULL, why, sizeof why) == ND_OK);
+    CHECK_INT(mode_of("/card/apps/PSX/bios/scph1001.bin"), 0644u);
+
+    /* THE REPORTED ONE. Settings reads a .nap as ndusr, the browser writes
+     * into the same folder as ndusr_ut, and 0640 root:root satisfied neither.
+     * "Cannot read the package." */
+    CHECK(api.download(&c, "", "Bible.nap", "/card/untrusted/Bible.nap", FETCH_DEST_NAP, 4096,
+                       NULL, NULL, why, sizeof why) == ND_OK);
+    CHECK_INT(mode_of("/card/untrusted/Bible.nap"), 0660u);
+
+    CHECK(api.download(&c, "", "notes.txt", "/card/untrusted/notes.txt", FETCH_DEST_OTHER, 4096,
+                       NULL, NULL, why, sizeof why) == ND_OK);
+    CHECK_INT(mode_of("/card/untrusted/notes.txt"), 0660u);
+
+    (void)umask(was);
 }
 
 static void test_an_unsafe_name_never_reaches_curl(void)
@@ -548,8 +629,8 @@ static void test_an_unsafe_name_never_reaches_curl(void)
     CHECK(path_with_fake_curl());
     set_body(16u);
     conn_init(&c);
-    CHECK(api.download(&c, "music", "../../etc/passwd", "/card/music/x", 16, NULL, NULL, why,
-                       sizeof why) == ND_ERR_INVAL);
+    CHECK(api.download(&c, "music", "../../etc/passwd", "/card/music/x", FETCH_DEST_MUSIC, 16, NULL,
+                       NULL, why, sizeof why) == ND_ERR_INVAL);
     /* Not "curl refused it" -- curl was never started. */
     CHECK_STR(readback("urls"), "");
 }
@@ -574,6 +655,7 @@ int main(void)
     RUN(test_a_cancelled_download_is_not_saved);
     RUN(test_a_short_file_is_refused);
     RUN(test_a_failed_download_explains_itself);
+    RUN(test_a_download_is_left_readable_by_the_app_that_wants_it);
     RUN(test_an_unsafe_name_never_reaches_curl);
 
     (void)setenv("PATH", g_path_keep, 1);

@@ -126,13 +126,23 @@ pending_grants() {
 # Deliberately NOT part of DEVICE_GRANTS: that table is about a node that
 # exists having the wrong group, and this is about the node not existing yet.
 # Waiting for a device to appear is a bet that it is coming, so it is placed
-# where the bet is safe -- a board with the SPI panel is a NeoDCT phone, and a
-# NeoDCT phone has a SIM7600 on its USB bus.
+# where the bet is safe -- a NeoDCT phone has a SIM7600 soldered to its USB
+# bus, and nothing else does.
+#
+# The bet used to be placed on [ -e /dev/spidev0.0 ], i.e. "a board with the
+# SPI panel is a NeoDCT phone". That is a proxy for a question the image can
+# now answer outright, and a proxy is wrong in both directions: a phone whose
+# SPI node had not enumerated yet would not wait for its modem either.
+#
+# Not hardware means do not wait, and that covers an image with no
+# /NeoDCT/platform as well as QEMU. Deliberate: 600 ms of waiting is a COST,
+# and nd_platform.h's rule is that the unknown case may decide a cost and may
+# never decide a claim. The modem re-probes on its own timer regardless.
 #
 # After the ports appear, the grant loop is what makes sure they are in
 # `dialout`; this only closes the earlier half of the window.
 wait_for_ttyusb() {
-	[ -e /dev/spidev0.0 ] || return 0
+	/bin/nd-platform is hw || return 0
 	[ "${TTYUSB_WAIT_MS:-0}" -gt 0 ] || return 0
 
 	_t=0
@@ -282,9 +292,10 @@ start() {
 	# there yet reads to the owner as "Simulation Mode", and although
 	# nd_modem_open() re-probes on a timer, the status bar has already lied.
 	#
-	# Gated on /dev/spidev0.0 -- the ST7789 panel, i.e. "this is the phone" --
-	# so QEMU, where the modem is a hot-plugged USB device that arrives well
-	# after udevd is up, pays none of it. A board with no modem fitted pays the
+	# Gated on `nd-platform is hw` -- the image's own answer to "am I the
+	# phone", not a proxy for it -- so QEMU, where the modem is a hot-plugged
+	# USB device that arrives well after udevd is up, pays none of it, and so
+	# does an image that does not say. A board with no modem fitted pays the
 	# timeout once per boot, which is the honest cost of not being able to tell
 	# "not fitted" from "not enumerated yet" without asking the USB tree.
 	#

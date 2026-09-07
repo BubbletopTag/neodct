@@ -43,6 +43,7 @@
 #include "nd_settings.h"
 #include "nd_storage.h"
 #include "nd_t9.h"
+#include "nd_text.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_widgets.h"
@@ -54,6 +55,11 @@
 /* The remote path the list is showing, as "music" or "roms/psx". Bounded by
  * what fetch_build_url can carry alongside the host and a file name. */
 #define FETCH_DIR_MAX 256
+
+/* nd_msgdialog's own margin (nd_widgets.h, nd_msgdialog.margin), which is what
+ * sets the body column. Restated rather than read out of the struct because
+ * the name has to be bounded BEFORE the dialog exists. */
+#define FETCH_DIALOG_MARGIN 8
 
 /* Everything one browse session needs, on the heap: the two arrays together
  * are about fourteen kilobytes and this phone has 53 MB with the browser
@@ -230,6 +236,7 @@ static void download_one(nd_ui *ui, const fetch_conn *c, const char *dir, const 
     char why[ND_FETCH_WHY_MAX];
     char message[256];
     char size_text[16];
+    const char *note;
     fetch_dest_kind kind = FETCH_DEST_OTHER;
     fetch_dl_ctx dl;
     nd_msgdialog dlg;
@@ -255,9 +262,36 @@ static void download_one(nd_ui *ui, const fetch_conn *c, const char *dir, const 
     }
 
     fetch_format_size(e->size, size_text, sizeof size_text);
-    if (nd_snprintf(message, sizeof message, "%s\n%s, to %s.", e->name, size_text,
-                    kind_name(kind)) != ND_OK)
+    /* ============ AND WHY THE DESTINATION IS SOMETIMES ARGUED FOR ========
+     *
+     * fetch_dest_path() sends a disc image to untrusted/ when PSX is not
+     * installed, which is right -- there is no games/ to put it in -- and said
+     * nothing about it, which is how the owner came to spend an evening
+     * looking for a bug that was not there. Correct-by-design behaviour that
+     * looks like a fault is still a fault.
+     *
+     * The NAME is bounded and the sentence is not, because the sentence is the
+     * new information and the name is already on the row the owner just
+     * pressed Enter on. nd_dialogfit.c's note is explicit about which way
+     * round this goes: three of the six messages it found clipped were a
+     * variable-length string pushing the fixed guidance off the bottom, and
+     * nd_msgdialog marks the loss with a glyph this font cannot draw, so the
+     * sentence would simply have stopped. test_the_fetch_no_psx_notice_fits()
+     * measures the widest thing this can build. */
+    note = fetch_dest_note(e->name, psx_installed);
+    if (note != NULL) {
+        /* Room for the "..." nd_text_fit() appends to a name it had to cut. */
+        char shown[ND_FETCH_NAME_MAX + 8u];
+
+        (void)nd_text_fit(shown, sizeof shown, e->name, ui->font_s,
+                          nd_ui_width(ui) - (FETCH_DIALOG_MARGIN * 2));
+        if (nd_snprintf(message, sizeof message, "%s\n%s, to %s.\n%s", shown, size_text,
+                        kind_name(kind), note) != ND_OK)
+            return;
+    } else if (nd_snprintf(message, sizeof message, "%s\n%s, to %s.", e->name, size_text,
+                           kind_name(kind)) != ND_OK) {
         return;
+    }
     nd_msgdialog_init(&dlg, ui, message);
     nd_msgdialog_set_title(&dlg, "Download?");
     nd_msgdialog_set_button(&dlg, "Download");
@@ -270,7 +304,7 @@ static void download_one(nd_ui *ui, const fetch_conn *c, const char *dir, const 
     (void)nd_ui_present(ui);
 
     why[0] = '\0';
-    rc = fetch_download(c, dir, e->name, dest, e->size, on_progress, &dl, why, sizeof why);
+    rc = fetch_download(c, dir, e->name, dest, kind, e->size, on_progress, &dl, why, sizeof why);
     if (rc != ND_OK) {
         say_notice(ui, (why[0] != '\0') ? why : "The download failed.");
         return;

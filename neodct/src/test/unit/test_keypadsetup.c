@@ -62,6 +62,7 @@
 #include "nd_keycodes.h"
 #include "nd_keypad.h"
 #include "nd_keypadsetup.h"
+#include "nd_platform.h"
 
 #include "platform_test.h"
 
@@ -873,17 +874,56 @@ static void test_what_it_writes_the_core_can_read(void)
  * The gates
  * ------------------------------------------------------------------ */
 
+/* The image says which machine this is; this is how the fixture says it.
+ * Resolved once per process, so the cache has to be dropped every time the
+ * record changes (nd_platform.h). */
+static void given_the_image_says(const char *platform_word)
+{
+    char record[64];
+
+    /* THE ENVIRONMENT FIRST, EVERY TIME. nd_platform.c's resolve() reads
+     * NEODCT_PLATFORM before it ever opens the record, so an ambient one --
+     * a developer running the suite with it exported, which is exactly how a
+     * platform bug gets reproduced -- decided every case below and the
+     * fixture underneath was never consulted. `NEODCT_PLATFORM=hw make
+     * test-one T=test_keypadsetup` failed four checks for that reason alone.
+     * test_platform.c's own given_* helpers have always cleared it; these
+     * copies of the pattern did not. */
+    (void)unsetenv(ND_ENV_PLATFORM);
+
+    if (platform_word == NULL) {
+        char resolved[ND_PATH_MAX];
+
+        if (nd_path_resolve(resolved, sizeof resolved, ND_PATH_PLATFORM) == ND_OK)
+            (void)remove(resolved);
+    } else {
+        (void)nd_snprintf(record, sizeof record, "platform=%s\n", platform_word);
+        pt_write_text(ND_PATH_PLATFORM, record);
+    }
+    nd_platform__reset_cache();
+}
+
 static void test_gate_check(void)
 {
-    /* QEMU and dev boxes: no bus node, no FIQ console. Silence, because
-     * announcing a missing keypad on a machine that has never had one is
-     * noise on every developer's console. */
+    /* QEMU and dev boxes: no bus node, and an image that does not say it is a
+     * phone. Silence, because announcing a missing keypad on a machine that
+     * has never had one is noise on every developer's console. */
+    given_the_image_says(NULL);
+    CHECK_INT(nd_kpsetup_gate_check(3), ND_KPSETUP_GATE_QUIET);
+    given_the_image_says("qemu");
     CHECK_INT(nd_kpsetup_gate_check(3), ND_KPSETUP_GATE_QUIET);
 
     /* On hardware every skip is announced, so a silently dead keypad can be
      * diagnosed without a serial cable -- which is the whole reason
-     * _is_real_hardware() exists. */
-    pt_write_text(ND_PATH_SERIAL_FIQ, "");
+     * _is_real_hardware() exists.
+     *
+     * THE FIXTURE USED TO BE A /dev/ttyFIQ0. That was the bug: a phone whose
+     * kernel is built without the FIQ debugger has no such node, read as a
+     * dev box, and never waited for the bus its keypad is on. The image is
+     * asked now, and no FIQ console is written here on purpose -- this case
+     * IS that phone. */
+    given_the_image_says("hw");
+    CHECK(!nd_path_exists(ND_PATH_SERIAL_FIQ));
     CHECK_INT(nd_kpsetup_gate_check(3), ND_KPSETUP_GATE_WAIT_FOR_BUS);
 
     /* A bus node that IS there skips the coldplug grace entirely. */
@@ -896,6 +936,29 @@ static void test_gate_check(void)
      * else is or is not plugged in. */
     pt_write_text(ND_PATH_KEYMAP, "{}");
     CHECK_INT(nd_kpsetup_gate_check(3), ND_KPSETUP_GATE_HAVE_KEYMAP);
+
+    /* Put it back for the cases after this one: the cache outlives the case
+     * root, so leaving it saying "hw" would arm the wait everywhere. */
+    given_the_image_says(NULL);
+}
+
+/* An image with no /NeoDCT/platform is UNKNOWN, and UNKNOWN lands on QUIET
+ * with the emulator rather than on WAIT_FOR_BUS with the phone. That is the
+ * cost/truth split in nd_platform.h applied here: waiting is a cost, nothing
+ * is claimed either way, and the worst outcome is a laptop declining to wait
+ * ten seconds for a keypad it has never had. Defaulting the other way would
+ * make every unit test in this directory sit out the coldplug grace. */
+static void test_an_image_with_no_platform_record_stays_quiet(void)
+{
+    given_the_image_says(NULL);
+    CHECK_INT(nd_kpsetup_gate_check(3), ND_KPSETUP_GATE_QUIET);
+
+    /* And a record nobody can parse is the same answer, not a lucky one. */
+    pt_write_text(ND_PATH_PLATFORM, "platform=luckfox\n");
+    nd_platform__reset_cache();
+    CHECK_INT(nd_kpsetup_gate_check(3), ND_KPSETUP_GATE_QUIET);
+
+    given_the_image_says(NULL);
 }
 
 static void test_maybe_run_skips_a_phone_that_already_works(void)
@@ -1184,6 +1247,7 @@ int main(void)
     RUN(test_what_it_writes_the_core_can_read);
 
     RUN(test_gate_check);
+    RUN(test_an_image_with_no_platform_record_stays_quiet);
     RUN(test_maybe_run_skips_a_phone_that_already_works);
     RUN(test_maybe_run_is_quiet_on_a_dev_box);
     RUN(test_a_nonsense_bus_override_disables_setup);

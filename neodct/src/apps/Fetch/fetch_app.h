@@ -26,9 +26,33 @@
  * save anything.
  *
  * An app under System/engineering/apps runs as ROOT in engineering mode
- * (nd_proc_app_needs_root), so it can. What it writes lands root-owned and
- * 0644 under the core's umask, which is what the readers need: MusicPlayer
- * is ndusr and PSX is ndusr_ut, and both only ever read these files.
+ * (nd_proc_app_needs_root), so it can.
+ *
+ * ============ AND BEING ROOT IS THE HALF THAT WENT WRONG ============
+ *
+ * This header used to claim that what Fetch writes "lands root-owned and 0644
+ * under the core's umask, which is what the readers need". Both halves were
+ * false and the second was the arithmetic: run_neodct.sh sets umask 0027, so
+ * curl asking for 0666 gets 0640 and mkdir asking for 0755 gets 0750, and
+ * root-owned is precisely what none of the readers are -- MusicPlayer and
+ * Settings' installer are ndusr, PCSX-ReARMed is ndusr_ut. On 0.5.14a the
+ * owner downloaded two .nap packages over a slow link and then could not
+ * install either: Settings LISTED them, because nd_nap_find() only stats, and
+ * refused to open them, because walk() actually reads. "Cannot read the
+ * package" was true and was about the permissions, not the package.
+ *
+ * The rule that replaces the claim is neodct-sdcard's, which had already
+ * written it down for the same failure arriving from a PC -- see the comment
+ * above apply_layout(): what a card carries is a claim about the past, so the
+ * mode and the owner are STATED by whoever writes a file and restated on every
+ * mount, never inherited from a umask. fetch_give_to_reader() is where this
+ * app states them and route.c's table is which mode goes where; apply_layout()
+ * restates the same values afterwards for music/ and apps/, and the two must
+ * not drift. untrusted/ is the exception -- apply_layout() restates ownership
+ * there and nothing else, because a root chmod inside the one directory the
+ * untrusted set can write is a root chmod at a path an attacker picks. The
+ * mode a file lands with in untrusted/ is therefore the one it keeps, which
+ * makes fetch_give_to_reader() the only statement of it.
  *
  * ============ THE TRANSPORT IS SPAWNED curl, AND WHY NOT nd_remote ============
  *
@@ -190,8 +214,64 @@ bool fetch_name_is_safe(const char *name);
 nd_err fetch_dest_path(const char *mount, const char *name, bool psx_installed, char *out,
                        size_t out_sz, fetch_dest_kind *kind);
 
-/* mkdir -p the directory part of `path`, with mode 0755. */
+/* ============ A DESTINATION THE OWNER DID NOT ASK FOR, EXPLAINED =========
+ *
+ * fetch_dest_path()'s downgrade is correct and it is invisible, which is a
+ * combination that reads as a fault. The owner downloaded a PlayStation disc
+ * image, watched the confirm dialog offer to put it in Downloads, and went
+ * looking for the bug -- there was none: PSX was not installed, so there was
+ * no games/ to put it in, and untrusted/ is where a file with nowhere to be
+ * played waits. Nothing on the screen said any of that.
+ *
+ * So the routing rule says it out loud. Returns the sentence for a name whose
+ * destination was DOWNGRADED, and NULL when the answer is the obvious one --
+ * which is every other name, so a caller may print it or not with one test.
+ *
+ * The string is a #define because the dialog it goes in clips silently (see
+ * nd_msgdialog_measure), so it is measured by a test rather than eyeballed.
+ * ND_FETCH_NAME_MAX is 96 and a name is variable-length, which is exactly the
+ * shape nd_dialogfit.c warns about: main.c bounds the NAME so this fixed
+ * guidance is the part that cannot be pushed off the bottom. */
+#define FETCH_NOTE_NO_PSX "PSX is not installed, so it waits in Downloads."
+const char *fetch_dest_note(const char *name, bool psx_installed);
+
+/* mkdir -p the directory part of `path`, with mode 0755 -- RESTATED after the
+ * mkdir rather than left to it, because the umask this app inherits is 0027
+ * and a 0750 games/<Title>/ is one the emulator cannot even traverse. A
+ * directory this call actually creates is also handed to whoever owns its
+ * parent; one that already existed is left exactly as the card has it, so a
+ * pass over untrusted/ or music/ on the way down cannot undo the layout. */
 nd_err fetch_prepare_dir(const char *path);
+
+/* State the mode and the owner of a file this app has just finished writing.
+ *
+ * Fetch is root and every reader is somebody else, so a downloaded file is
+ * unreadable until this has run -- see the header's second section for the
+ * incident. The owner comes from the DIRECTORY, through the same
+ * nd_path_give_to_dir_owner() family the keypad wizard uses, which is why the
+ * three destinations need no table of user names here: music/ and apps/PSX/
+ * are ndusr:ndusr and untrusted/ is ndusr:ndusr_ut, and copying that down is
+ * right in all three cases. The MODE is not, and route.c holds the table.
+ *
+ * NEITHER FORM CHANGES ANYTHING BY NAME. Fetch is root and the ordinary
+ * destination is untrusted/, the one directory the untrusted set can write,
+ * so a chown or chmod on a path is a chown or chmod on whatever that name
+ * means at the instant the syscall runs -- see route.c's second section, and
+ * nd_path.c. The _fd form is the one to prefer: the caller created the
+ * object and never let go of it, so there is no window at all. The path form
+ * refuses a symlink (and a hard link, and anything not a plain file) instead.
+ * `path` in the _fd form is used ONLY to find the directory whose owner is
+ * copied down -- it may name the file's final resting place rather than the
+ * name it currently has, which is how ftp.c states the mode on a .part.
+ *
+ * ND_ERR_IO when the chown or the chmod failed OR when what was there was not
+ * the file this app wrote, which the caller must report either way: a file
+ * saved where nothing can open it is not a saved file. A no-op that still
+ * fixes the mode when the caller is not root (the tests, and any future
+ * non-engineering caller), because a non-root writer's file is already its
+ * own. */
+nd_err fetch_give_to_reader(const char *path, fetch_dest_kind kind);
+nd_err fetch_give_fd_to_reader(int fd, const char *path, fetch_dest_kind kind);
 
 /* Write a single-track cue sheet beside a raw .bin, if there is not one.
  *
@@ -271,10 +351,20 @@ nd_err fetch_list(const fetch_conn *c, const char *dir, fetch_entry *out, size_t
 
 /* Download one file to `local_path`, which is written through a ".part"
  * sibling and renamed on success -- so an interrupted transfer never leaves
- * something in music/ that the player will try to open. */
+ * something in music/ that the player will try to open.
+ *
+ * `kind` is fetch_dest_path()'s answer for this same file, and it is a
+ * parameter rather than something the caller applies afterwards because the
+ * rename is the instant the file becomes visible to its reader: the mode has
+ * to be settled there, by the one function that does the rename, or the next
+ * writer of a second download path forgets. See fetch_give_to_reader().
+ *
+ * ND_ERR_IO with a `why` that says so when the bytes arrived and the file
+ * could not be handed over -- never a silent success, because an unreadable
+ * download is the failure this whole path exists to prevent. */
 nd_err fetch_download(const fetch_conn *c, const char *dir, const char *name,
-                      const char *local_path, int64_t total, fetch_progress_fn on_progress,
-                      void *ctx, char *why, size_t why_sz);
+                      const char *local_path, fetch_dest_kind kind, int64_t total,
+                      fetch_progress_fn on_progress, void *ctx, char *why, size_t why_sz);
 
 #ifdef __cplusplus
 }

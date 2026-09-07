@@ -292,8 +292,26 @@ static nd_err walk(const char *path, entry_fn fn, void *ctx, char *why, size_t w
     }
     f = fopen(resolved, "rb");
     if (f == NULL) {
-        nd_log_err(ND_LOG_OS, "nap: cannot open %s: %s", path, strerror(errno));
-        say(why, why_sz, "Cannot read the package.");
+        int err = errno;
+
+        nd_log_err(ND_LOG_OS, "nap: cannot open %s: %s", path, strerror(err));
+        /* EACCES is not the same problem as ENOENT and must not read like it.
+         * On 0.5.14a the owner downloaded two packages, watched Settings LIST
+         * both -- nd_nap_find() filters with nd_path_is_file(), which is
+         * stat(2) and needs nothing but +x on the folder ndusr already owns --
+         * and then got "Cannot read the package." from this fopen, which needs
+         * +r on the FILE. The sentence sent them to look at the packages. The
+         * errno was in the log line above and on no screen anybody had.
+         *
+         * So the permission case says what it is and what fixes it: re-seating
+         * the card runs neodct-sdcard's apply_layout(), whose untrusted/ pass
+         * exists to repair exactly this. The return stays ND_ERR_IO because
+         * nothing branches on the code -- Settings shows `why` -- and a second
+         * meaning for a value no caller reads would be decoration. */
+        if (err == EACCES || err == EPERM)
+            say(why, why_sz, ND_NAP_WHY_UNREADABLE);
+        else
+            say(why, why_sz, "Cannot read the package.");
         return ND_ERR_IO;
     }
     /* The archive's real length, so that a header claiming more data than

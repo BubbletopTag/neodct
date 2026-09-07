@@ -29,7 +29,7 @@
 : "${NEODCT_ASOUND_CONF:=/run/asound.conf}"
 : "${NEODCT_PROC_ASOUND:=/proc/asound}"
 : "${NEODCT_AMIXER:=amixer}"
-: "${NEODCT_CAPTURE_LEVEL:=80}"
+: "${NEODCT_SETTINGS:=/NeoDCT/User/settings.prop}"
 # Who owns the file afterwards. nd_btaudio.c rewrites it; that code runs in the
 # core and in Settings, both of which are ndusr now. See conf_owner().
 : "${NEODCT_ASOUND_OWNER:=ndusr}"
@@ -78,6 +78,55 @@ find_usb_card() {
     return 1
 }
 
+# ============ HOW LOUD, AND WHO DECIDES ============
+#
+# This used to be `NEODCT_CAPTURE_LEVEL=80`, a bare constant chosen against
+# the one microphone on the developer's desk. It is now the owner's, through
+# system.hw.mic_gain -- which MicTest writes while you listen to the effect --
+# and 100 when nothing has set it. See nd_settings.h for why 100 rather than
+# 80: this is the preamp in front of an 8 kHz voice codec, and every report
+# about this phone's audio has been "they cannot hear me".
+#
+# settings.prop is READ AS DATA AND NEVER SOURCED. It lives on the writable
+# user partition, which is the one place an attacker who has got a file onto
+# this phone can write -- the same reason neodct/initramfs/init parses its
+# records with `while IFS='=' read` instead of `.`, and the reason env.sh is
+# gated on something outside that partition. A value from here reaches an
+# amixer argument, so it is also checked to be one to three digits and no
+# more than 100 before it gets there; anything else is the default.
+#
+# NEODCT_CAPTURE_LEVEL still wins if it is set, which is how a level is pinned
+# when settings.prop cannot be consulted -- every boot before /NeoDCT/User is
+# mounted -- and what test_the_environment_beats_the_settings_file() in
+# neodct/tests/test_s17audio.py holds it to. The `:=` is the whole mechanism:
+# the parse below runs only when the variable is unset.
+: "${NEODCT_CAPTURE_LEVEL:=$(
+    level=""
+    if [ -r "$NEODCT_SETTINGS" ]; then
+        # `|| [ -n "$key" ]` catches a final record with no newline after it.
+        # read(1) returns non-zero at EOF even though it has already filled the
+        # variables, so the plain form silently drops the last line -- and
+        # settings.prop is written by nd_settings.c one key per line, so the
+        # last line is whichever key was written last. A file ending
+        # "system.hw.mic_gain=0" with no trailing newline gave the DEFAULT of
+        # 100 here, which is to say the owner's saved gain was ignored on every
+        # boot and nothing said so. /bin/nd-platform's platform_get() guards
+        # the same edge on the same file format; two readers of one format
+        # disagreeing about where it ends is a bug waiting for the other one.
+        while IFS='=' read -r key value || [ -n "$key" ]; do
+            [ "$key" = "system.hw.mic_gain" ] || continue
+            level="$value"
+        done < "$NEODCT_SETTINGS"
+    fi
+    case "$level" in
+        ''|*[!0-9]*) level=100 ;;
+    esac
+    if [ "${#level}" -gt 3 ] || [ "$level" -gt 100 ]; then
+        level=100
+    fi
+    echo "$level"
+)}"
+
 # Turn the capture path on. NOTHING ELSE IN THIS IMAGE DOES.
 #
 # There is no alsactl here, so no saved mixer state is restored at boot: the
@@ -104,10 +153,15 @@ find_usb_card() {
 # "Capture Switch" or "Capture Volume" is unambiguously the capture path, and
 # addressing it by numid avoids quoting a name that contains spaces.
 #
-# Auto Gain Control is deliberately LEFT ALONE. It is a real switch on this
-# card and it might well help a quiet electret, but it is a sound-quality
-# choice rather than a correctness one, and turning it on for everybody is not
-# this script's decision to make.
+# Auto Gain Control is deliberately LEFT ALONE, and it stays left alone now
+# that the level beside it is adjustable. It is a real switch on this card and
+# it might well help a quiet electret, but AGC on a codec this cheap pumps: it
+# rides the noise floor up between words and ducks the first syllable after a
+# pause, which on a call sounds like a bad line rather than like a quiet one.
+# That is a sound-quality choice with no right answer, where the capture level
+# is a correctness one -- a card at zero records nothing. If it is ever
+# exposed it belongs behind its own setting, defaulting OFF, and not wired to
+# the gain.
 enable_capture() {
     card="$1"
     "$NEODCT_AMIXER" -c "$card" controls 2>/dev/null | while IFS= read -r line; do

@@ -84,21 +84,34 @@ NEEDS_USERS = pytest.mark.skipif(
 )
 
 
-def sh(tmp_path, mount, body, stubs=""):
-    """Source the helper with MOUNT_POINT pointed at `mount`, and run `body`."""
+# The stub every case below records chowns with. It DROPS a leading -h, which
+# apply_layout() passes on every chown: -h is about symlinks and none of the
+# assertions here are, so recording it would only mean four places to edit the
+# next time the flag changes. What -h is for, and why it must not go away, is
+# test_every_chown_in_the_layout_refuses_to_follow_a_link().
+def chown_stub(path):
+    return 'chown() { [ "$1" = -h ] && shift; echo "$*" >> "%s"; }\n' % path
+
+
+def sh(tmp_path, mount, body, stubs="", env=None):
+    """Source the helper with MOUNT_POINT pointed at `mount`, and run `body`.
+
+    `env` adds to the environment the script is given -- the only user of it
+    is apply_layout_here(), which needs a CARD_USER this machine has."""
     (tmp_path / "cmdline").write_text("neodct.sys=/dev/vda neodct.user=/dev/vdb\n")
     (tmp_path / "mounts").write_text("")
     (tmp_path / "boot_state").write_text("")
-    env = dict(os.environ,
-               NEODCT_SDCARD_SOURCE_ONLY="1",
-               NEODCT_CMDLINE=str(tmp_path / "cmdline"),
-               NEODCT_MOUNTS=str(tmp_path / "mounts"),
-               NEODCT_BOOT_STATE=str(tmp_path / "boot_state"),
-               NEODCT_RUN_DIR=str(tmp_path / "run"),
-               NEODCT_SDCARD_MOUNT=str(mount))
+    child_env = dict(os.environ,
+                     NEODCT_SDCARD_SOURCE_ONLY="1",
+                     NEODCT_CMDLINE=str(tmp_path / "cmdline"),
+                     NEODCT_MOUNTS=str(tmp_path / "mounts"),
+                     NEODCT_BOOT_STATE=str(tmp_path / "boot_state"),
+                     NEODCT_RUN_DIR=str(tmp_path / "run"),
+                     NEODCT_SDCARD_MOUNT=str(mount))
+    child_env.update(env or {})
     script = '. "%s"\n%s\n%s\n' % (HELPER, stubs, body)
     return subprocess.run(["sh", "-c", script], capture_output=True, text=True,
-                          env=env)
+                          env=child_env)
 
 
 def build_card(mount, mode=0o777, apps=("Demo",), folders=FOLDERS):
@@ -135,7 +148,7 @@ def apply_layout(tmp_path, mount, real_chown=False):
     either way. real_chown=True is for the root-only cases below, which need
     the ownership to actually land."""
     chowns = tmp_path / "chowns"
-    stubs = "" if real_chown else 'chown() { echo "$*" >> "%s"; }\n' % chowns
+    stubs = "" if real_chown else chown_stub(chowns)
     result = sh(tmp_path, mount, "apply_layout", stubs=stubs)
     assert result.returncode == 0, result.stderr
     asked = chowns.read_text().splitlines() if chowns.exists() else []
@@ -294,13 +307,205 @@ def test_nothing_is_chowned_to_a_user_the_image_may_not_have(tmp_path):
     card = build_card(tmp_path / "sdcard", mode=0o777)
     chowns = tmp_path / "chowns"
     result = sh(tmp_path, card, "apply_layout",
-                stubs='chown() { echo "$*" >> "%s"; }\n' % chowns,
+                stubs=chown_stub(chowns),
                 )
     assert result.returncode == 0, result.stderr
 
     for line in chowns.read_text().splitlines():
         who = line.split()[0]
         assert who in ("ndusr:ndusr", "ndusr:ndusr_ut"), line
+
+
+# --- what a PERSON put on the card, and what root will not reach -----------
+
+def apply_layout_here(tmp_path, mount):
+    """apply_layout() with CARD_USER naming a user this machine actually has.
+
+    The media loop ends `find ... ! -user "$CARD_USER"`, and find refuses a
+    user name that is not in /etc/passwd. That refusal is the last command in
+    apply_layout(), so on a build host with no ndusr the function returns
+    non-zero however well it did its job -- which is why every case above
+    fails on such a machine and these do not. NEODCT_CARD_USER exists for
+    exactly this (see the definition beside CARD_USER), the names are not what
+    these three cases assert, and a test that cannot run is not a net."""
+    chowns = tmp_path / "chowns"
+    me = pwd.getpwuid(os.geteuid()).pw_name
+    env = {"NEODCT_CARD_USER": me, "NEODCT_CARD_USER_UT": me}
+    result = sh(tmp_path, mount, "apply_layout",
+                stubs=chown_stub(chowns), env=env)
+    assert result.returncode == 0, result.stderr
+    return result
+
+
+def test_a_game_folder_a_person_made_is_traversable_by_the_app(tmp_path):
+    """THE DISC THE EMULATOR COULD NOT SEE.
+
+    A PlayStation image is 600 MB and nd_nap.h caps a packaged file at 64 MiB,
+    so the documented way to get one onto the card is to copy it there. The
+    owner made apps/PSX/games/DigimonWorld/ from the root shell, put the .bin
+    inside it and chowned the FILE. Under run_neodct.sh's umask 0027 a
+    directory made that way is 0750 root:root; PCSX-ReARMed runs as ndusr_ut,
+    which is "other" in an ndusr:ndusr tree, so opendir() returned EACCES,
+    psx_library_scan() returned 0, and the screen said "No discs" with the
+    disc sitting right there.
+
+    An installed app's content is 0755 on directories and 0644 on files, owned
+    by ndusr -- nd_nap.c writes 0644 and says "these are the modes
+    apply_layout() will restate", and a directory has to carry +x as well or
+    the app cannot reach what is inside it."""
+    card = build_card(tmp_path / "sdcard", mode=0o755, apps=("PSX",))
+    games = card / "apps" / "PSX" / "games" / "DigimonWorld"
+    games.mkdir(parents=True)
+    disc = games / "DigimonWorld.bin"
+    disc.write_bytes(b"\x00" * 16)
+    # Exactly what the root shell leaves behind, one level at a time.
+    for path in (games.parent, games):
+        path.chmod(0o750)
+    disc.chmod(0o640)
+
+    apply_layout_here(tmp_path, card)
+
+    assert mode_of(games.parent) == 0o755, "games/ itself has to be traversable"
+    assert mode_of(games) == 0o755, "and so does the folder the disc is in"
+    assert mode_of(disc) == 0o644
+
+
+def test_the_walk_still_stops_at_the_apps_own_data(tmp_path):
+    """The other half of the same walk, and the half that must not move.
+
+    data/ is 0770 ndusr:ndusr_ut -- the one subtree under apps/ the untrusted
+    set can write -- so a root chown or chmod inside it is a root chown at a
+    path an attacker chooses. -prune is what keeps it out, and widening the
+    walk to reach a person's game folder must not widen it to reach here."""
+    card = build_card(tmp_path / "sdcard", mode=0o755, apps=("PSX",))
+    data = card / "apps" / "PSX" / "data"
+    (data / "sub").mkdir()
+    (data / "sub").chmod(0o700)
+    (data / "state.json").chmod(0o600)
+
+    apply_layout_here(tmp_path, card)
+
+    assert mode_of(data) == 0o770, "the directory itself is still stated"
+    assert mode_of(data / "sub") == 0o700, "and nothing inside it is"
+    assert mode_of(data / "state.json") == 0o600
+
+
+def test_root_touches_only_packages_in_the_arrival_area(tmp_path):
+    """untrusted/ is 0770 ndusr:ndusr_ut -- THE ONE DIRECTORY on the card the
+    untrusted set can write -- so every path root walks in here is a path an
+    attacker can replace with a symlink while the walk is running. chown(1)
+    and chmod(1) both dereference, and `-exec ... +` runs the batch after the
+    walk, so the window is the whole of it.
+
+    The answer is reach: one `chown -h` of *.nap at one level, because
+    Settings' installer is the only reader that needs anything repaired here
+    and nd_nap_find() looks exactly that far. Everything else in untrusted/
+    belongs to ndusr_ut and is read by ndusr_ut -- the browser's state, the
+    media player's -- and root taking it bought nobody anything.
+
+    The chmod is gone rather than made safe: busybox chmod has no -h, and
+    chown alone already makes ndusr the OWNER of a package, which is what the
+    installer needs."""
+    card = build_card(tmp_path / "sdcard", mode=0o755)
+    untrusted = card / "untrusted"
+    package = untrusted / "Bible.nap"
+    package.write_text("nap")
+    package.chmod(0o640)
+    cookies = untrusted / "cookies.db"
+    cookies.write_text("{}")
+    cookies.chmod(0o600)
+    deeper = untrusted / "browser"
+    deeper.mkdir()
+    deeper.chmod(0o700)
+    buried = deeper / "Buried.nap"
+    buried.write_text("nap")
+    buried.chmod(0o600)
+
+    apply_layout_here(tmp_path, card)
+
+    assert mode_of(untrusted) == 0o770, "the directory itself comes from CARD_LAYOUT"
+    assert mode_of(package) == 0o640, "no chmod: the chown is the whole repair"
+    assert mode_of(cookies) == 0o600, "the browser's own state is not root's business"
+    assert mode_of(deeper) == 0o700, "nor is a directory the browser made"
+    assert mode_of(buried) == 0o600, "and nd_nap_find() never looks this deep anyway"
+
+
+def test_every_chown_in_the_layout_refuses_to_follow_a_link():
+    """The half of the fix above that a test cannot watch happen.
+
+    Whether root followed a symlink is only visible from root, and the race
+    that makes it reachable cannot be reproduced on demand -- so what is
+    pinned instead is the flag. A chown without -h inside apply_layout() is
+    the bug that held 0.5.15a, and it is one character away from coming back.
+    busybox takes -h unconditionally (CONFIG_CHOWN, not behind
+    FEATURE_CHOWN_LONG_OPTIONS), so there is no image where this costs
+    anything."""
+    body = open(HELPER).read().split("\napply_layout() {", 1)[1].split("\n}\n", 1)[0]
+    calls = [line.strip() for line in body.splitlines()
+             if "chown " in line and not line.lstrip().startswith("#")]
+
+    assert calls, "apply_layout() chowns nothing at all -- has it moved?"
+    for line in calls:
+        assert "chown -h " in line, line
+
+
+def test_the_apps_walk_chmods_before_it_descends():
+    r"""THE HALF THE -h COULD NOT COVER.
+
+    busybox chmod has no -h, so the only defence a chmod has is never to be
+    pointed at a name that can change under it. `-exec chmod {} +` batches and
+    the batch runs AFTER the whole walk, so between find's lstat deciding a
+    path is -type f and root chmodding it there is the length of the walk in
+    which it can be replaced by a symlink -- the untrusted/ hole, in the apps/
+    loop.
+
+    The release note claimed apps/ was safe because it prunes data/. That is
+    true of a card this phone has already normalised and of no other: a card
+    written on a PC arrives with the PC's modes, and apps/PSX/games/ at 0777
+    is the exact case the recursion was added for. So the chmods are `\;` --
+    run immediately, while find is standing on the entry, and BEFORE find
+    descends into a directory it has just taken back to 0755 ndusr:ndusr.
+
+    Pinned as source rather than behaviour for the reason the chown case
+    above gives: the race cannot be reproduced on demand, and what must not
+    come back is the one character that opens it."""
+    body = open(HELPER).read().split("\napply_layout() {", 1)[1].split("\n}\n", 1)[0]
+    execs = [line.strip() for line in body.splitlines()
+             if "-exec chmod" in line and not line.lstrip().startswith("#")]
+
+    assert execs, "the apps/ walk chmods nothing at all -- has it moved?"
+    for line in execs:
+        assert "+" not in line, (
+            "a batched -exec chmod runs after the walk that collected it: " + line)
+        assert "\\;" in line, line
+
+
+def test_the_card_marker_is_never_written_through_a_link():
+    """The two sites OUTSIDE apply_layout() that write a name on the card.
+
+    `: > "$MOUNT_POINT/.neodct"` follows a symlink and truncates whatever it
+    points at, as root, and the chown beside it followed one too. The card
+    root is 0751 ndusr:ndusr so nothing untrusted can plant that link -- this
+    is a card written on a PC, and mostly it is about the file not
+    contradicting its own rule three hundred lines further down.
+
+    The link is REMOVED rather than skipped: without a marker the phone does
+    not recognise its own card, so refusing to write one would be refusing the
+    card."""
+    lines = open(HELPER).read().splitlines()
+    writes = [i for i, line in enumerate(lines)
+              if line.strip().startswith(': > "$MOUNT_POINT/$CARD_MARKER"')]
+
+    assert len(writes) == 2, "the marker is written at two places; found %d" % len(writes)
+    for i in writes:
+        before = lines[i - 1].strip()
+        assert before.startswith('[ -L "$MOUNT_POINT/$CARD_MARKER" ]') and "rm -f" in before, \
+            "no -L guard above the truncate at line %d: %r" % (i + 1, before)
+
+    chowns = [line.strip() for line in lines if "CARD_MARKER" in line and "chown" in line]
+    assert len(chowns) == 2, chowns
+    for line in chowns:
+        assert "chown -h " in line, line
 
 
 # --- the shape of the card the layout is applied to ------------------------
@@ -365,7 +570,7 @@ def layout_verb(tmp_path, mount, mounts_line, marker=True):
     # table of this test's own, after the helper has been sourced.
     table = tmp_path / "mounts.layout"
     table.write_text(mounts_line)
-    stubs = ('chown() { echo "$*" >> "%s"; }\n' % chowns +
+    stubs = (chown_stub(chowns) +
              'MOUNTS="%s"\n' % table)
     if marker:
         (mount / ".neodct").write_text("")

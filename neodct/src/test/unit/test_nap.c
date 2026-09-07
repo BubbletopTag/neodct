@@ -845,6 +845,90 @@ static void test_find(void)
     nd_storage_set_paths(NULL, NULL);
 }
 
+/* ============ THE GAP BETWEEN BEING LISTED AND BEING OPENED ============
+ *
+ * Nine hundred lines of this file, and not one permission case: every test
+ * above runs as one uid, creates its own fixtures and can read everything it
+ * made. That is why the suite was green through 0.5.14a, where the owner
+ * downloaded two .nap packages, saw both in Settings -> Install apps, and got
+ * "Cannot read the package." from each.
+ *
+ * The two halves ask two different questions of the kernel:
+ *
+ *   nd_nap_find()     filters candidates with nd_path_is_file(), which is
+ *                     stat(2). stat needs +x on the DIRECTORY and says nothing
+ *                     about the file -- and ndusr owns untrusted/.
+ *   nd_nap_inspect()  walk() opens the archive with fopen(), which needs +r on
+ *                     the FILE. Fetch was root under umask 0027, so the file
+ *                     was 0640 root:root and ndusr is neither.
+ *
+ * So the package was listed and then refused, which is the worst shape a
+ * failure can have: the phone showed the owner something and then said it was
+ * unreadable, and the sentence blamed the package. The wording is pinned here
+ * as tightly as the behaviour, because being told the wrong thing is what
+ * turned a permissions bug into an evening spent re-downloading.
+ */
+static void test_a_package_the_caller_may_not_open(void)
+{
+    char found[ND_NAP_MAX_FOUND][ND_STORAGE_PATH_MAX];
+    char resolved[ND_PATH_MAX];
+    nd_nap_info info;
+    char why[ND_NAP_WHY_MAX];
+
+    card_ready();
+    write_single(MOUNT "/untrusted/Bible.nap");
+    CHECK(nd_path_resolve(resolved, sizeof resolved, MOUNT "/untrusted/Bible.nap") == ND_OK);
+
+    /* Readable: found, and it inspects. */
+    CHECK_INT(nd_nap_find(found, ND_NAP_MAX_FOUND), 1);
+    CHECK_STR(found[0], MOUNT "/untrusted/Bible.nap");
+    CHECK_INT(nd_nap_inspect(MOUNT "/untrusted/Bible.nap", &info, NULL, 0u), ND_OK);
+
+    CHECK_INT(chmod(resolved, 0000u), 0);
+
+    if (geteuid() == 0u) {
+        /* root reads a 0000 file, so there is no EACCES to produce and the
+         * case cannot run. Said out loud: a SKIP is not a PASS. */
+        fprintf(stderr, "SKIP the unreadable package: running as root, which ignores the mode\n");
+        (void)chmod(resolved, 0644u);
+        nd_storage_set_paths(NULL, NULL);
+        return;
+    }
+
+    /* STILL LISTED. This is the line that pins the gap: take it away and the
+     * bug becomes "Settings does not show my package", which is a different
+     * and much easier report. */
+    CHECK_INT(nd_nap_find(found, ND_NAP_MAX_FOUND), 1);
+    CHECK_STR(found[0], MOUNT "/untrusted/Bible.nap");
+
+    why[0] = '\0';
+    memset(&info, 0x55, sizeof info);
+    CHECK(nd_nap_inspect(MOUNT "/untrusted/Bible.nap", &info, why, sizeof why) != ND_OK);
+    /* Not "Cannot read the package.", which sent the owner to look at the
+     * package. The permission case names itself and names the repair --
+     * re-seating the card runs neodct-sdcard's apply_layout(), whose
+     * untrusted/ pass exists for exactly this. */
+    CHECK_STR(why, "Not allowed to read\nthe package.\nTake the card out and\nput it back in.");
+    CHECK_INT(info.n_arches, 0);
+
+    /* The installer refuses it the same way and writes nothing. */
+    pt_mkdir(MOUNT "/apps");
+    why[0] = '\0';
+    CHECK(nd_nap_install(MOUNT "/untrusted/Bible.nap", MOUNT "/apps", ND_NAP_ARCH_LUCKFOX, NULL,
+                         why, sizeof why) != ND_OK);
+    CHECK_STR(why, "Not allowed to read\nthe package.\nTake the card out and\nput it back in.");
+    CHECK(!nd_nap_is_installed(MOUNT "/apps", "DemoApp"));
+
+    /* And a package that is not there at all keeps the wording it had: this
+     * distinguishes two errnos, it does not rename one. */
+    why[0] = '\0';
+    CHECK(nd_nap_inspect(MOUNT "/untrusted/Missing.nap", &info, why, sizeof why) != ND_OK);
+    CHECK_STR(why, "Cannot read the package.");
+
+    (void)chmod(resolved, 0644u);
+    nd_storage_set_paths(NULL, NULL);
+}
+
 /* ------------------------------------------------------------------ *
  * main
  * ------------------------------------------------------------------ */
@@ -923,5 +1007,6 @@ int main(void)
     RUN(test_a_dead_install_is_replaced_quietly);
     RUN(test_id_conflicts);
     RUN(test_find);
+    RUN(test_a_package_the_caller_may_not_open);
     return pt_report("test_nap");
 }

@@ -988,6 +988,367 @@ static void test_capture_scan_falls_back_when_nothing_is_usb(void)
 }
 
 /* ------------------------------------------------------------------ *
+ * 5b. The mixer, before every arecord -- the intermittent dead mic
+ * ------------------------------------------------------------------ */
+
+/* ============ THE FAULT THESE THREE PIN ============
+ *
+ * /etc/init.d/S17audio turns the capture switch on and sets the capture level
+ * ONCE, out of its `start` case, out of rcS. There is no alsactl in the
+ * image, no asound.state and no udev rule that re-runs it -- its own comment
+ * says "NOTHING ELSE IN THIS IMAGE DOES". The header of nd_modem_audio.c
+ * already records that this phone's sound card "re-enumerates once per call",
+ * and a C-Media adapter that re-enumerates comes back with the driver's
+ * defaults: capture switch OFF, capture volume ZERO. arecord then opens it,
+ * reports success, and sends a flat line to the far end for the rest of the
+ * session. Nothing fails. Nothing logs. The caller says "I could not hear
+ * you" and there is nothing in the phone to look at.
+ *
+ * So the mixer is now re-applied on every call, before arecord is started,
+ * and these tests are what says so: the ORDER is the claim, not merely the
+ * presence, because a mixer set after the device is already open is a mixer
+ * set for the next call.
+ *
+ * Both children are stand-ins on the front of $PATH that append their argv to
+ * one log, so the order in the file is the order they ran. */
+
+static char g_mixbin[ND_PATH_MAX];
+static char g_mixlog[ND_PATH_MAX];
+static char g_mixpath[ND_PATH_MAX];
+
+static bool write_stub(const char *name, const char *body)
+{
+    char path[ND_PATH_MAX];
+    char text[2048];
+    FILE *f;
+
+    if (nd_snprintf(path, sizeof path, "%s/%s", g_mixbin, name) != ND_OK)
+        return false;
+    if (nd_snprintf(text, sizeof text,
+                    "#!/bin/sh\n"
+                    "echo \"%s $*\" >> '%s'\n%s",
+                    name, g_mixlog, body) != ND_OK)
+        return false;
+    f = fopen(path, "w");
+    if (f == NULL)
+        return false;
+    (void)fputs(text, f);
+    (void)fclose(f);
+    return chmod(path, 0755) == 0;
+}
+
+/* PREPENDED to $PATH, not substituted for it: these are shell scripts, and
+ * one whose $PATH holds only its own directory cannot find `cat`, so the
+ * heredoc below produces nothing and the stub reports success with no output
+ * -- which is the exact shape of the bug under test. */
+static bool stub_audio_tools(void)
+{
+    const char *path = getenv("PATH");
+    char ahead[ND_PATH_MAX * 2];
+
+    pt_mkdir("/bin");
+    if (nd_path_resolve(g_mixbin, sizeof g_mixbin, "/bin") != ND_OK)
+        return false;
+    if (nd_snprintf(g_mixlog, sizeof g_mixlog, "%s/audio.log", g_mixbin) != ND_OK)
+        return false;
+
+    /* A real C-Media adapter's control list, in its own order. numid 3 and 4
+     * are Mic PLAYBACK -- the monitor path that feeds the microphone into the
+     * earpiece -- and touching them on a phone is feedback. */
+    if (!write_stub("amixer", "if [ \"$1\" = -c ]; then shift 2; fi\n"
+                              "if [ \"$1\" = controls ]; then\n"
+                              "cat <<'EOF'\n"
+                              "numid=3,iface=MIXER,name='Mic Playback Switch'\n"
+                              "numid=4,iface=MIXER,name='Mic Playback Volume'\n"
+                              "numid=5,iface=MIXER,name='Mic Capture Switch'\n"
+                              "numid=6,iface=MIXER,name='Mic Capture Volume'\n"
+                              "numid=7,iface=MIXER,name='Auto Gain Control'\n"
+                              "EOF\n"
+                              "fi\n"
+                              "exit 0\n"))
+        return false;
+    if (!write_stub("arecord", "exit 0\n"))
+        return false;
+
+    (void)nd_strlcpy(g_mixpath, path != NULL ? path : "", sizeof g_mixpath);
+    if (nd_snprintf(ahead, sizeof ahead, "%s:%s", g_mixbin, g_mixpath) != ND_OK)
+        return false;
+    return setenv("PATH", ahead, 1) == 0;
+}
+
+static void stub_audio_done(void)
+{
+    (void)setenv("PATH", g_mixpath, 1);
+}
+
+static size_t audio_log(char *out, size_t out_sz)
+{
+    FILE *f = fopen(g_mixlog, "rb");
+    size_t n;
+
+    out[0] = '\0';
+    if (f == NULL)
+        return 0u;
+    n = fread(out, 1u, out_sz - 1u, f);
+    out[n] = '\0';
+    (void)fclose(f);
+    return n;
+}
+
+/* The amixer children are waited for inside nd_mic_apply_gain(), so their
+ * lines are in the log by the time start_mic_pipe() returns. arecord is NOT:
+ * spawn_quiet() is fire and forget, which is the whole design -- the pipe is
+ * meant to outlive the call to that starts it. So the log has to be waited on
+ * rather than read once, or this test would be a race that passes on a fast
+ * machine and fails in CI. */
+static bool wait_for_log(const char *needle, double seconds)
+{
+    char text[4096];
+    double deadline = nd_modem__now() + seconds;
+
+    for (;;) {
+        (void)audio_log(text, sizeof text);
+        if (strstr(text, needle) != NULL)
+            return true;
+        if (nd_modem__now() >= deadline)
+            return false;
+        settle(0.02);
+    }
+}
+
+/* The USB sound card the microphone is on, so nd_modem__find_capture_device()
+ * answers plughw:1,0 and the card number the mixer is addressed by is 1. */
+static void give_the_phone_a_usb_microphone(void)
+{
+    pt_mkdir("/proc/asound/card1");
+    pt_write_text("/proc/asound/card1/pcm0c", "");
+    pt_write_text("/proc/asound/card1/usbid", "0d8c:0014\n");
+}
+
+/* THE ORDER IS THE CLAIM. Switch on, level set, THEN arecord -- a card
+ * un-muted after the device is already open is a card un-muted for the next
+ * call, and the caller on this one still hears nothing. */
+static void test_the_mic_pipe_unmutes_the_card_before_recording(void)
+{
+    fake_modem fm;
+    nd_modem *m;
+    char log[2048];
+    const char *sw;
+    const char *level;
+    const char *rec;
+
+    use_scratch_settings("system.hw.mic_gain=65\n"
+                         "system.hw.modem_pcm_port=" MODEM_LINK "\n");
+    give_the_phone_a_usb_microphone();
+    if (!stub_audio_tools()) {
+        CHECK(false);
+        return;
+    }
+    if (!fake_start(&fm, NULL, 0u)) {
+        CHECK(false);
+        stub_audio_done();
+        return;
+    }
+
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        stub_audio_done();
+        return;
+    }
+    CHECK_INT(m->mic_gain, 65);
+
+    nd_modem__start_mic(m);
+    CHECK(m->mic_live);
+    CHECK(wait_for_log("arecord ", 5.0));
+
+    (void)audio_log(log, sizeof log);
+    sw = strstr(log, "amixer -c 1 cset numid=5 on");
+    level = strstr(log, "amixer -c 1 cset numid=6 65%");
+    rec = strstr(log, "arecord ");
+    CHECK(sw != NULL);
+    CHECK(level != NULL);
+    CHECK(rec != NULL);
+    if (sw != NULL && level != NULL && rec != NULL) {
+        CHECK(sw < rec);
+        CHECK(level < rec);
+    }
+    /* The monitor path is still not touched. Raising it would put the
+     * microphone into the earpiece, which is a worse call than a quiet one. */
+    CHECK(strstr(log, "numid=3") == NULL);
+    CHECK(strstr(log, "numid=4") == NULL);
+    /* Auto Gain Control stays off: it pumps, and that is a taste question. */
+    CHECK(strstr(log, "numid=7") == NULL);
+    /* The card the mixer was addressed by is the card arecord was given. */
+    CHECK(strstr(log, "-D plughw:1,0") != NULL);
+
+    nd_modem__stop_call_audio(m);
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+    stub_audio_done();
+}
+
+/* EVERY call, not the first. This is the whole point: the card that comes
+ * back muted comes back muted between calls, so a mixer applied once at the
+ * start of a session is exactly the boot-time state that failed. */
+static void test_the_mixer_is_re_applied_on_the_next_call(void)
+{
+    fake_modem fm;
+    nd_modem *m;
+    char log[4096];
+    const char *first;
+
+    use_scratch_settings("system.hw.mic_gain=40\n"
+                         "system.hw.modem_pcm_port=" MODEM_LINK "\n");
+    give_the_phone_a_usb_microphone();
+    if (!stub_audio_tools()) {
+        CHECK(false);
+        return;
+    }
+    if (!fake_start(&fm, NULL, 0u)) {
+        CHECK(false);
+        stub_audio_done();
+        return;
+    }
+
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        stub_audio_done();
+        return;
+    }
+
+    nd_modem__start_mic(m);
+    nd_modem__stop_call_audio(m);
+    nd_modem__start_mic(m);
+    CHECK(m->mic_live);
+
+    (void)audio_log(log, sizeof log);
+    first = strstr(log, "amixer -c 1 cset numid=6 40%");
+    CHECK(first != NULL);
+    if (first != NULL)
+        CHECK(strstr(first + 1, "amixer -c 1 cset numid=6 40%") != NULL);
+
+    nd_modem__stop_call_audio(m);
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+    stub_audio_done();
+}
+
+/* A START that fails is now retried, and that is a change. The watchdog was
+ * gated on mic_live, so it only ever saw a pipe that had STARTED and then
+ * died; a card caught halfway through re-enumerating has no pcm*c node for a
+ * moment, the scan misses, and the call used to finish listen-only over a
+ * condition that had cleared three seconds later. */
+static void test_a_missed_capture_device_is_tried_again(void)
+{
+    fake_modem fm;
+    nd_modem *m;
+    double when;
+
+    use_scratch_settings("system.hw.modem_pcm_port=" MODEM_LINK "\n");
+    if (!stub_audio_tools()) {
+        CHECK(false);
+        return;
+    }
+    if (!fake_start(&fm, NULL, 0u)) {
+        CHECK(false);
+        stub_audio_done();
+        return;
+    }
+
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        stub_audio_done();
+        return;
+    }
+
+    /* No /proc/asound at all: the card is mid-re-enumeration. */
+    nd_modem__start_mic(m);
+    CHECK(!m->mic_live);
+    CHECK_INT(m->mic_fails, 1);
+    CHECK(m->mic_retry_at > 0.0);
+
+    /* It comes back, and the watchdog picks it up on the next tick past the
+     * holdoff -- without a child having exited, which is the case that had no
+     * branch at all before. */
+    give_the_phone_a_usb_microphone();
+    when = m->mic_retry_at;
+    nd_modem__watch_audio_proc(m, when);
+    CHECK(m->mic_live);
+    CHECK(m->mic_retry_at == 0.0);
+
+    nd_modem__stop_call_audio(m);
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+    stub_audio_done();
+}
+
+/* Three strikes and it stops, exactly as a pipe that keeps dying does. A mic
+ * that retried for the length of every call would be a log full of the same
+ * line on a phone with no microphone plugged in, which is a normal state on
+ * this hardware rather than a fault. */
+static void test_the_retry_gives_up_after_three(void)
+{
+    fake_modem fm;
+    nd_modem *m;
+    int i;
+
+    use_scratch_settings("system.hw.modem_pcm_port=" MODEM_LINK "\n");
+    if (!stub_audio_tools()) {
+        CHECK(false);
+        return;
+    }
+    if (!fake_start(&fm, NULL, 0u)) {
+        CHECK(false);
+        stub_audio_done();
+        return;
+    }
+
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        stub_audio_done();
+        return;
+    }
+
+    nd_modem__start_mic(m);
+    for (i = 0; i < 5; i++) {
+        if (m->mic_retry_at <= 0.0)
+            break;
+        nd_modem__watch_audio_proc(m, m->mic_retry_at);
+    }
+    CHECK(!m->mic_live);
+    CHECK_INT(m->mic_fails, ND_MIC_GIVE_UP_AFTER);
+    CHECK(m->mic_retry_at == 0.0);
+
+    /* And a deliberate OFF is never retried at all: that one is a decision,
+     * not a fault, and arguing with it would fill the log. */
+    nd_modem__stop_call_audio(m);
+    nd_modem__destroy(m);
+    use_scratch_settings("system.hw.modem_mic_device=OFF\n"
+                         "system.hw.modem_pcm_port=" MODEM_LINK "\n");
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m != NULL) {
+        nd_modem__start_mic(m);
+        CHECK(!m->mic_live);
+        CHECK_INT(m->mic_fails, 0);
+        CHECK(m->mic_retry_at == 0.0);
+        nd_modem__stop_call_audio(m);
+        nd_modem__destroy(m);
+    }
+
+    fake_stop(&fm);
+    stub_audio_done();
+}
+
+/* ------------------------------------------------------------------ *
  * 6. The flock
  * ------------------------------------------------------------------ */
 
@@ -2600,8 +2961,15 @@ static void test_a_mic_that_ran_for_a_while_starts_its_strikes_over(void)
 
     nd_modem__watch_audio_proc(m, now);
     CHECK(!m->mic_live);
-    CHECK_INT(m->mic_fails, 1);         /* the run reset the count; this death is #1 */
-    CHECK(m->next_audio_restart > now); /* so a retry was scheduled, not a give-up */
+    /* The reset is the claim, and it happened: without it the death would
+     * have been strike three and the mic would have been given up on. What
+     * is left is the death (#1) and the immediate restart, which in this
+     * fixture has no /proc/asound to find a capture device in and so is #2 --
+     * a failed START counts now, which is the change that lets a card caught
+     * mid-re-enumeration be tried again instead of costing the whole call. */
+    CHECK_INT(m->mic_fails, 2);
+    CHECK(m->mic_fails < ND_MIC_GIVE_UP_AFTER); /* not given up on */
+    CHECK(m->next_audio_restart > now);         /* and a retry was scheduled */
 
     nd_modem__destroy(m);
 }
@@ -3225,6 +3593,10 @@ int main(void)
     RUN(test_capture_scan_prefers_the_usb_card);
     RUN(test_capture_scan_skips_a_playback_only_usb_card);
     RUN(test_capture_scan_falls_back_when_nothing_is_usb);
+    RUN(test_the_mic_pipe_unmutes_the_card_before_recording);
+    RUN(test_the_mixer_is_re_applied_on_the_next_call);
+    RUN(test_a_missed_capture_device_is_tried_again);
+    RUN(test_the_retry_gives_up_after_three);
     RUN(test_the_lock_keeps_two_holders_apart);
 
     RUN(test_probe_adopts_the_port_and_runs_the_init_sequence);
