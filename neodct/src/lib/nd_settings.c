@@ -239,33 +239,51 @@ static bool settings_dir_blocks_the_write(void)
     return access(dir, W_OK | X_OK) != 0;
 }
 
-/* save_settings(): drop every system.os.* key, then write atomically. All
- * failures are swallowed -- an unwritable user partition must not stop the
- * phone booting, it just means preferences do not stick. */
-static void save_settings(const nd_props *settings)
+/* save_settings(): drop every system.os.* key, then write atomically.
+ *
+ * ============ THE FAILURE IS REPORTED NOW, NOT SWALLOWED ============
+ *
+ * "All failures are swallowed" was the whole contract, and it is right for
+ * the caller that reads a setting -- the flush that keeps settings.prop in
+ * step with the defaults must not stop the phone booting. It is wrong for the
+ * caller that SETS one: nd_settings_set() returned the result of updating the
+ * in-memory map and nothing else, so it answered ND_OK for a write that had
+ * been refused outright (a user partition root would orphan the file on) or
+ * had failed with ENOSPC on 8 MB of NAND that had filled up.
+ *
+ * What that costs is a setting the phone believes it saved. Sleepy's
+ * brightness, the Bluetooth pairing, the call-log timer: all written, all
+ * reported as saved, all gone at the next boot, with one line in a log the
+ * owner cannot read. Every screen that says "Saved" is saying it on the
+ * strength of this return value.
+ *
+ * So the errors travel and the FLUSH path is the one that ignores them --
+ * which is the way round it should always have been. */
+static nd_err save_settings(const nd_props *settings)
 {
     nd_props *out;
     size_t i;
-    nd_err rc;
+    nd_err rc = ND_OK;
 
     /* The refusal comes BEFORE the allocation. It used to come after it, and
      * the `return` then dropped a whole nd_props on the floor every time the
      * write was declined -- once per setting read, on every boot of a phone
      * with a fresh user partition. */
     if (settings_dir_blocks_the_write())
-        return;
+        return ND_ERR_PERM;
 
     /* owned here; freed on every path out of this function */
     out = nd_props_new();
     if (out == NULL)
-        return;
+        return ND_ERR_NOMEM;
 
     for (i = 0u; i < nd_props_count(settings); i++) {
         const char *key = nd_props_key_at(settings, i);
 
         if (strncmp(key, ND_SETTINGS_SYSTEM_PREFIX, strlen(ND_SETTINGS_SYSTEM_PREFIX)) == 0)
             continue;
-        if (nd_props_set(out, key, nd_props_value_at(settings, i)) != ND_OK)
+        rc = nd_props_set(out, key, nd_props_value_at(settings, i));
+        if (rc != ND_OK)
             goto done;
     }
 
@@ -296,6 +314,7 @@ static void save_settings(const nd_props *settings)
 
 done:
     nd_props_free(out);
+    return rc;
 }
 
 nd_err nd_settings_flush_if_needed(nd_props *effective, const nd_props *stored)
@@ -328,7 +347,11 @@ nd_err nd_settings_flush_if_needed(nd_props *effective, const nd_props *stored)
     }
 
     if (stale || missing || !nd_path_exists(g_settings_path))
-        save_settings(effective);
+        /* Deliberately ignored HERE and nowhere else: this is the flush that
+         * keeps settings.prop in step with the defaults, and an unwritable
+         * user partition must not stop a phone reading a setting. The caller
+         * that SETS one gets the error. */
+        (void)save_settings(effective);
 
     return ND_OK;
 }
@@ -436,7 +459,7 @@ nd_err nd_settings_set(const char *key, const char *value)
      * as in the Python -- set_setting() has no idea the prefix is special. */
     rc = nd_props_set(eff, key, value);
     if (rc == ND_OK)
-        save_settings(eff);
+        rc = save_settings(eff);
 
     nd_props_free(eff);
     return rc;

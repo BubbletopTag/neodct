@@ -77,6 +77,32 @@ const char *const ND_SCHEMA_CALLS =
     "            timestamp INTEGER,\n"
     "            duration INTEGER DEFAULT 0)";
 
+/* ============ SQLITE_BUSY IS NOT AN ANSWER ON THIS PHONE ============
+ *
+ * There was no busy handler anywhere in the tree, and sqlite's default with
+ * none is to fail IMMEDIATELY: a writer that finds the lock held gets
+ * SQLITE_BUSY back on the first attempt rather than waiting for it.
+ *
+ * The databases on this phone are shared between PROCESSES -- one per app,
+ * plus nd-core -- so contention is ordinary rather than exceptional. The case
+ * that costs data: the owner opens a message, which makes the Messages app
+ * take the write lock on sms_inbox.db to mark it read, and in the same
+ * instant a text arrives; the core's modem thread has already told the SIM to
+ * delete it, so its INSERT is the only copy left. Without a handler that
+ * INSERT fails at once and the message is simply gone.
+ *
+ * Five seconds is far longer than any statement here takes and far shorter
+ * than a person waits before deciding the phone is broken. It is set on every
+ * handle, read-only ones included: a reader that gives up instantly is a list
+ * that comes back empty while something else is writing. */
+#define ND_DB_BUSY_MS 5000
+
+static void set_busy_timeout(sqlite3 *db)
+{
+    if (db != NULL)
+        (void)sqlite3_busy_timeout(db, ND_DB_BUSY_MS);
+}
+
 nd_err nd_db_open(const char *path, struct sqlite3 **out)
 {
     char resolved[ND_PATH_MAX];
@@ -101,6 +127,7 @@ nd_err nd_db_open(const char *path, struct sqlite3 **out)
         return ND_ERR_IO;
     }
 
+    set_busy_timeout(db);
     *out = db;
     return ND_OK;
 }
@@ -132,6 +159,7 @@ static nd_err open_existing(const char *path, sqlite3 **out)
         sqlite3_close(db);
         return ND_ERR_IO;
     }
+    set_busy_timeout(db);
     *out = db;
     return ND_OK;
 }

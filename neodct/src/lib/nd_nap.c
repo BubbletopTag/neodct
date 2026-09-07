@@ -1171,11 +1171,31 @@ nd_err nd_nap_install(const char *path, const char *apps_dir, const char *arch, 
             rc = ND_ERR_TOOLONG;
             goto fail;
         }
+        /* Three tests, not one `||` chain. The chain had fclose(mf) as its
+         * last arm and `if (mf != NULL) (void)fclose(mf);` in the body, so
+         * the case it was written for -- a write that only fails at flush
+         * time -- closed the same FILE* twice. And that is the LIKELY
+         * failure here, not an exotic one: fwrite() fills a stdio buffer and
+         * returns the count it was given, so a full card or a pulled one
+         * surfaces as ENOSPC or EIO out of fclose() and nowhere else. A
+         * double fclose is undefined behaviour on a freed FILE, and glibc
+         * aborts on it outright.
+         *
+         * The card being nearly full is the case this whole branch exists
+         * for, which is what makes it worth spelling out. */
         mf = fopen(full, "wb");
-        if (mf == NULL || fwrite(c.manifest, 1u, c.manifest_len, mf) != c.manifest_len ||
-            fclose(mf) != 0) {
-            if (mf != NULL)
-                (void)fclose(mf);
+        if (mf == NULL) {
+            say(why, why_sz, "Could not write to the card.\nIt may be full.");
+            rc = ND_ERR_IO;
+            goto fail;
+        }
+        if (fwrite(c.manifest, 1u, c.manifest_len, mf) != c.manifest_len) {
+            (void)fclose(mf);
+            say(why, why_sz, "Could not write to the card.\nIt may be full.");
+            rc = ND_ERR_IO;
+            goto fail;
+        }
+        if (fclose(mf) != 0) {
             say(why, why_sz, "Could not write to the card.\nIt may be full.");
             rc = ND_ERR_IO;
             goto fail;

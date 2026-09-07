@@ -31,6 +31,7 @@
 #include <unistd.h>
 
 #include "nd_input.h"
+#include "nd_keypad.h"
 #include "nd_log.h"
 #include "nd_paths.h"
 #include "nd_proc.h"
@@ -224,7 +225,7 @@ nd_err nd_uinput_open(nd_uinput_kbd *k, const char *path, const char *name)
     if (path == NULL)
         path = "/dev/uinput";
     if (name == NULL)
-        name = "neodct-t9-keypad";
+        name = ND_UINPUT_KBD_NAME;
 
     if (nd_path_resolve(resolved, sizeof resolved, path) != ND_OK)
         return ND_ERR_TOOLONG;

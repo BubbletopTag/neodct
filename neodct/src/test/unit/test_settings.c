@@ -147,6 +147,22 @@ static void test_a_read_only_settings_path_still_reads(void)
     CHECK_STR(nd_settings_get(ND_SET_OS_VERSIONNUMBER, NULL), "0.3.2a");
     CHECK_STR(nd_settings_get(ND_SET_UI_ENGINEERING, NULL), "ON");
     CHECK(!nd_path_exists("/blocked/settings.prop"));
+
+    /* ============ AND SETTING ONE SAYS SO ============
+     *
+     * Reads must survive an unwritable partition -- that is what the rest of
+     * this case is about -- but nd_settings_set() returned ND_OK regardless,
+     * because it answered with the result of updating the in-memory map and
+     * save_settings() returned void. So the phone reported a setting saved
+     * that it had not saved, and every screen that says "Saved" says it on
+     * this return value. Sleepy's brightness, a Bluetooth pairing and the
+     * call-log timer all go through here.
+     *
+     * Not an artificial state either: /NeoDCT/User is 8 MB of NAND, and
+     * ENOSPC out of nd_props_write_atomic() reaches the caller by exactly the
+     * same path this file-standing-in-for-a-directory does. */
+    CHECK(nd_settings_set(ND_SET_UI_WALLPAPER, "/NeoDCT/User/w.jpg") != ND_OK);
+    CHECK(!nd_path_exists("/blocked/settings.prop"));
 }
 
 /* The boot splash had the number typed into it, so it drifted a release

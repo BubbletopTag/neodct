@@ -370,9 +370,27 @@ static bool fd_poll_into_queue(nd_input *in, double wait_s)
         uint16_t type = 0u;
         uint16_t code = 0u;
         int32_t value = 0;
+        bool hung_up = false;
 
-        if (!nd_evdev_read_record(in->fd, got_any ? 0.0 : wait_s, &type, &code, &value))
+        if (!nd_evdev_read_record(in->fd, got_any ? 0.0 : wait_s, &type, &code, &value, &hung_up)) {
+            /* ============ A DESCRIPTOR THAT HAS FINISHED IS LET GO ============
+             *
+             * Without this the caller's wait loop asks again, ppoll() answers
+             * POLLHUP at once because it always does, and the whole thing
+             * becomes a busy-wait on the one core this phone has -- with no
+             * sleep anywhere in it and, for a wait with no timeout, no way
+             * out. Closing it drops the loop into the "no backend at all"
+             * branch below, which sleeps out its timeout rather than
+             * spinning; on the core, where may_reopen is true, the ordinary
+             * once-a-second retry then picks the device back up if it comes
+             * back. */
+            if (hung_up) {
+                nd_log(ND_LOG_INPUT, "input: the key descriptor has gone; closing it");
+                (void)close(in->fd);
+                in->fd = -1;
+            }
             break;
+        }
         got_any = true;
 
         if (type != ND_EV_KEY)
