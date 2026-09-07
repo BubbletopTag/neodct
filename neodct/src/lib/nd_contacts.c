@@ -145,8 +145,8 @@ bool nd_contacts_pick(nd_ui *ui, const char *title, const char *btn_text, const 
                           true);
 
         sel = nd_vlist_show(&list);
-        if (sel == ND_WIDGET_BACK)
-            break; /* Back pressed -> None */
+        if (sel == ND_WIDGET_BACK || sel == ND_VLIST_RINGING)
+            break; /* Back pressed, or the phone is ringing -> None */
 
         if (sel >= 0 && (size_t)sel < n) {
             *out = contacts[sel];

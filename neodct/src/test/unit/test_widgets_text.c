@@ -741,6 +741,57 @@ static void test_textinput_multitap(void)
     fx->ui.has_matrix_keypad = false;
 }
 
+/* ============ A REFUSED TAP MUST NOT ARM THE NEXT ONE ============
+ *
+ * At the cap the widget ignores an APPEND rather than truncating (C-2). The
+ * ENGINE, though, had already advanced its multi-tap cycle to produce that
+ * APPEND, and nothing told it otherwise -- so the next press of the same key
+ * inside the tap window came back as a REPLACE, which backs up one character
+ * before writing. That is one byte shorter than the append just refused, so
+ * it fits: the last character the owner really typed is silently overwritten
+ * with the second letter of a key they were only trying to add.
+ *
+ * Nothing is drawn for the refusal, so the field looks unchanged and then one
+ * character of it quietly changes -- a full-length password in Fetch loses
+ * its last letter and the login fails with nothing on screen to say why. And
+ * none of it is reachable under QEMU: multi-tap runs only on the i2c matrix
+ * keypad. */
+static void test_textinput_a_refused_tap_does_not_replace_the_last_character(void)
+{
+    fixture *fx = &g_fx;
+    char buf[4]; /* three characters plus the NUL */
+    nd_textinput t;
+
+    fx->ui.has_matrix_keypad = true;
+    CHECK_INT(nd_textinput_init(&t, &fx->ui, "T", "P", buf, sizeof buf, "", ND_T9_FILTER_ANY),
+              ND_OK);
+
+    CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_4), ND_WIDGET_RESULT_TYPED);
+    CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_5), ND_WIDGET_RESULT_TYPED);
+    CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_6), ND_WIDGET_RESULT_TYPED);
+    CHECK_STR(t.text, "gjm"); /* full: three characters in a four-byte buffer */
+
+    /* One press too many: refused, and the field is untouched. */
+    CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_2), ND_WIDGET_RESULT_NONE);
+    CHECK_STR(t.text, "gjm");
+
+    /* The SAME key again, inside the tap window. It must be refused as
+     * another append, not honoured as a replace of the 'm'. */
+    CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_2), ND_WIDGET_RESULT_NONE);
+    CHECK_STR(t.text, "gjm");
+    CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_2), ND_WIDGET_RESULT_NONE);
+    CHECK_STR(t.text, "gjm");
+
+    /* And the field still behaves: a backspace makes room and the next tap
+     * starts a fresh cycle rather than continuing the refused one. */
+    CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_CLEAR), ND_WIDGET_RESULT_BACKSPACE);
+    CHECK_STR(t.text, "gj");
+    CHECK_INT(nd_textinput_handle_key(&t, ND_KEY_2), ND_WIDGET_RESULT_TYPED);
+    CHECK_STR(t.text, "gja");
+
+    fx->ui.has_matrix_keypad = false;
+}
+
 /* ------------------------------------------------------------------ *
  * 6. Predictive text
  * ------------------------------------------------------------------ */
@@ -1185,6 +1236,7 @@ int main(void)
     test_input_filters();
     test_textinput_cap();
     test_textinput_multitap();
+    test_textinput_a_refused_tap_does_not_replace_the_last_character();
     test_predictive();
     test_predictive_underline_survives_wrap();
     test_textlong_editing();

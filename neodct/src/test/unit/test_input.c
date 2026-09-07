@@ -441,6 +441,63 @@ static void test_the_app_channel_carries_presses_and_releases(void)
     nd_input_channel_close(&ch);
 }
 
+/* ============ MORE THAN ONE RECORD IN THE PIPE AT ONCE ============
+ *
+ * The ordinary case, not an edge one: nd_proc.c's pump sends a press and its
+ * release, and an app that was mid-frame finds all four records (each press
+ * is a KEY and a SYN) waiting when it next reads. The channel is a PIPE, so
+ * unlike a character device it hands back whatever it has rather than whole
+ * records -- and nd_evdev_read_record() asked for sizeof(buf), which is 24:
+ * the size of the record on a 64-bit build and NOT its size on the phone,
+ * where `long` is four bytes and the record is 16.
+ *
+ * So on the Luckfox the first read took one record and half of the next, the
+ * leftover eight bytes were dropped, and from the second read on the type,
+ * code and value came out of the middle of a timestamp. Every app, on the one
+ * path by which an app receives a key.
+ *
+ * THIS TEST CANNOT FAIL ON THIS MACHINE, and it is here anyway. x86-64 and
+ * QEMU aarch64 are both LP64, so 24 IS the record size and the old code lined
+ * up by accident; the failure needs ILP32. It was reproduced standalone under
+ * `gcc -m32` -- old: one garbage record out of two presses, new: none -- and
+ * what this pins is the property that reproduction is about: everything put
+ * into the channel comes back out of it, in order, however much of it is
+ * queued at once. */
+static void test_everything_queued_in_the_channel_comes_back(void)
+{
+    nd_input_channel ch;
+    nd_input *child = NULL;
+    nd_key_event ev;
+    static const int32_t SENT[] = {ND_KEY_1, ND_KEY_2, ND_KEY_3, ND_KEY_4};
+    size_t i;
+
+    CHECK_INT(nd_input_channel_open(&ch), ND_OK);
+
+    /* All of them before the reader exists, so they are certainly all in the
+     * pipe together rather than being read one at a time as they arrive. */
+    for (i = 0u; i < ND_ARRAY_LEN(SENT); i++) {
+        CHECK_INT(nd_input_channel_send(&ch, SENT[i], true), ND_OK);
+        CHECK_INT(nd_input_channel_send(&ch, SENT[i], false), ND_OK);
+    }
+
+    CHECK_INT(nd_input_open_pipe(&child, ch.read_fd), ND_OK);
+    for (i = 0u; i < ND_ARRAY_LEN(SENT); i++) {
+        CHECK(nd_input_read_event(child, 0.5, &ev));
+        CHECK_INT(ev.code, SENT[i]);
+        CHECK(ev.pressed);
+        CHECK(nd_input_read_event(child, 0.5, &ev));
+        CHECK_INT(ev.code, SENT[i]);
+        CHECK(!ev.pressed);
+    }
+    /* And nothing else: a desynchronised stream shows up here as an extra
+     * event decoded out of somebody's timestamp. */
+    CHECK(!nd_input_read_event(child, 0.05, &ev));
+
+    ch.read_fd = -1; /* nd_input_open_pipe took it */
+    nd_input_close(child);
+    nd_input_channel_close(&ch);
+}
+
 static void test_a_dead_child_is_an_io_error_not_a_hang(void)
 {
     nd_input_channel ch;
@@ -758,6 +815,7 @@ int main(void)
     RUN(test_the_repeat_set_can_be_widened_and_disabled);
     RUN(test_the_defaults_are_the_documented_ones);
     RUN(test_the_app_channel_carries_presses_and_releases);
+    RUN(test_everything_queued_in_the_channel_comes_back);
     RUN(test_a_dead_child_is_an_io_error_not_a_hang);
     RUN(test_discovery_falls_back_to_event0);
     RUN(test_a_by_path_kbd_symlink_wins_over_event0);

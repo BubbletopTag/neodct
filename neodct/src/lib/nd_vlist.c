@@ -201,6 +201,12 @@ int32_t nd_vlist_handle_key(nd_vlist *l, int32_t key)
     if (l == NULL)
         return ND_WIDGET_BACK;
 
+    /* Before every other test, exactly as nd_appsel_show() checks it before
+     * its own empty-list guard: a list is not a screen the phone can ring on.
+     * See ND_VLIST_RINGING. */
+    if (key == ND_KEY_INCOMING_CALL)
+        return ND_VLIST_RINGING;
+
     if (key == ND_KEY_DOWN) {
         if (l->n_items > 0u && l->selected_index < l->n_items - 1u) {
             l->selected_index++;

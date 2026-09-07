@@ -330,7 +330,23 @@ nd_err nd_fb_open(nd_fb **out, const char *path)
         return rc;
 
     fb->backend = ND_FB_BACKEND_DEVICE;
-    fb->fd = open(resolved, O_RDWR);
+    /* O_CLOEXEC, like every other device open in the tree (nd_pcf8575.c,
+     * nd_evdev.c, nd_uinput.c, nd_modem_at.c, nd_modem_audio.c, nd_log.c) --
+     * and unlike this one, until now. nd_proc.c's spawn already SAYS so:
+     * "Each still has to survive the exec, and O_CLOEXEC is set on all of
+     * them, so the flag is cleared here" -- which was true of every
+     * descriptor it lists except the framebuffer.
+     *
+     * The core opens /dev/fb0 as root before it drops, so without the flag
+     * every fork+exec from the core handed the panel out for free: an aplay
+     * per DTMF tone, the modem's PCM bridge, ssh-keygen, and the sshd and
+     * tunnel that nd_remoteshell.c starts with setsid and that OUTLIVE the
+     * core. A writable framebuffer in a long-lived daemon reachable from the
+     * network is not a leak that stays cosmetic.
+     *
+     * The app path is unaffected: nd_proc_spawn's child clears FD_CLOEXEC
+     * deliberately for every descriptor named in spec.fds. */
+    fb->fd = open(resolved, O_RDWR | O_CLOEXEC);
     if (fb->fd < 0) {
         nd_log_err(ND_LOG_FB, "cannot open %s: %s", resolved, strerror(errno));
         rc = ND_ERR_IO;

@@ -841,6 +841,18 @@ static void test_vlist_keys(void)
     CHECK_INT(nd_vlist_handle_key(&list, ND_KEY_0), ND_VLIST_CONTINUE);
     CHECK_INT(nd_vlist_handle_key(&list, ND_KEY_STAR), ND_VLIST_CONTINUE);
 
+    /* ============ AND THE ONE KEY THAT IS NOT A KEY ============
+     *
+     * ND_KEY_INCOMING_CALL is negative and had no branch at all, so it fell
+     * through to ND_VLIST_CONTINUE -- and nd_vlist_show()'s loop then asked
+     * for another key, which ring_tick() answered with the same thing
+     * immediately, for as long as the phone rang. A busy-wait on the one core
+     * this device has, in the CORE's contact picker, which is what Up or Down
+     * from the home screen opens. nd_appsel has answered this since the
+     * Engineering submenu landed; this is the same answer for the other
+     * selector. */
+    CHECK_INT(nd_vlist_handle_key(&list, ND_KEY_INCOMING_CALL), ND_VLIST_RINGING);
+
     /* An empty list cannot move and cannot be modulo'd by zero. */
     nd_vlist_init(&list, &fx.ui, "Nothing", PHONEBOOK, 0u, 1);
     CHECK_INT(nd_vlist_handle_key(&list, ND_KEY_DOWN), ND_VLIST_CONTINUE);
@@ -849,6 +861,8 @@ static void test_vlist_keys(void)
     CHECK_INT(list.selected_index, 0);
     CHECK_INT(nd_vlist_handle_key(&list, ND_KEY_1), ND_VLIST_CONTINUE);
     CHECK_INT(nd_vlist_handle_key(&list, ND_KEY_CLEAR), ND_WIDGET_BACK);
+    /* ...and an empty one is not a screen the phone can ring on either. */
+    CHECK_INT(nd_vlist_handle_key(&list, ND_KEY_INCOMING_CALL), ND_VLIST_RINGING);
     nd_vlist_draw(&list); /* must not read items[0] */
 
     fx_free(&fx);

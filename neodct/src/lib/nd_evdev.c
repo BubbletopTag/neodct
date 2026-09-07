@@ -358,6 +358,9 @@ int nd_evdev_open(const char *path)
  * Shared with nd_input.c, which needs releases as well as presses. */
 bool nd_evdev_read_record(int fd, double timeout_s, uint16_t *type, uint16_t *code, int32_t *value)
 {
+    /* The larger of the two layouts, so the compat branch below has somewhere
+     * to land whichever build this is; only sizeof(evdev_record) is ever
+     * asked for. */
     uint8_t buf[24];
     struct timespec ts;
     struct timespec *tsp = &ts;
@@ -393,8 +396,32 @@ bool nd_evdev_read_record(int fd, double timeout_s, uint16_t *type, uint16_t *co
     if (rc <= 0)
         return false; /* any poll error reads as "nothing", as in the Python */
 
-    got = read(fd, buf, sizeof buf);
-    if (got == 24) {
+    /* ============ ONE RECORD, NOT "AS MUCH AS 64-BIT WOULD BE" ============
+     *
+     * This asked for `sizeof buf`, which is 24 -- the size of evdev_record on
+     * a 64-bit build and NOT its size on the phone, where `long` is four
+     * bytes and the record is 16. A character device only ever hands back
+     * whole events, so on a real /dev/input/eventN that asked for 24 and got
+     * 16 and took the compat branch below, which happens to be the right
+     * layout. THE APP KEY CHANNEL IS A PIPE (nd_input.c
+     * nd_input_channel_open), and a pipe is a byte stream that returns
+     * whatever it has.
+     *
+     * So on the Luckfox, with a key press and its SYN waiting -- 32 bytes --
+     * the read returned 24: one whole record and half of the next. The first
+     * decoded correctly, the leftover eight bytes were DISCARDED, and the
+     * stream was left one record out of step. With two presses queued the
+     * second read starts mid-record and the type, code and value come out of
+     * a timestamp. That is every app on the phone, on the one path by which
+     * an app receives a key at all, and it cannot happen under QEMU: aarch64
+     * is LP64, so there sizeof buf IS the record size and everything lines up.
+     *
+     * A torn record cannot arrive on the pipe: nd_input_channel_send() writes
+     * both records in a single write() of 32 or 48 bytes, and a write of at
+     * most PIPE_BUF is atomic, so the reader sees all of it or none of it. A
+     * short read is therefore still "nothing usable", as it was. */
+    got = read(fd, buf, sizeof ev);
+    if (got == (ssize_t)sizeof ev) {
         memcpy(&ev, buf, sizeof ev);
     } else if (got == 16) {
         /* 32-bit timeval: two 32-bit words, then the same tail. */

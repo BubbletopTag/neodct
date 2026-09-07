@@ -1606,10 +1606,19 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
      * as asking. */
     int32_t perf_saved_khz = -1;
     nd_proc_spec spec;
+    /* Zeroed at the declaration. The wait loop below breaks out on a broker
+     * that has died WITHOUT `st` having been written -- nd_broker_wait()
+     * returns ND_ERR_IO on a lost channel and leaves *out untouched -- and
+     * everything after that loop reads it. An uninitialised exit status
+     * decides whether the crash screen goes up, and with what: a stack word
+     * that happened to look like a fatal signal puts a modal dialog on the
+     * phone for an app that exited cleanly. */
     nd_proc_status st;
     nd_crash_info info;
     pid_t pid = -1;
     nd_err rc = ND_OK;
+
+    memset(&st, 0, sizeof st);
 
     if (ui == NULL || app == NULL)
         return ND_ERR_INVAL;

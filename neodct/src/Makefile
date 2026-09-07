@@ -342,9 +342,15 @@ $(BINDIR)/nd-apprun: $(APPRUN_OBJS) $(LIB)
 # so this changes no code today; it is the next edit it is for. -D_GNU_SOURCE
 # comes with -std=c11, which defines __STRICT_ANSI__ and would otherwise hide
 # most of POSIX.
-DISPLAYD_CFLAGS := $(filter-out -Wconversion -Wsign-conversion,$(WARNINGS)) \
-	$(OPTFLAGS) $(SANFLAGS) -D_GNU_SOURCE -MMD -MP \
-	$(NEODCT_CFLAGS) $(CFLAGS)
+# The filter is over the WHOLE assembled set and not over $(WARNINGS) alone.
+# Buildroot hands the same warning list in again through NEODCT_CFLAGS
+# (buildroot/package/neodct/neodct.mk), so filtering only our copy leaves
+# -Wconversion on for the cross build -- which is the one that matters and the
+# one a host `make` does not exercise. That is not hypothetical: it is how this
+# change first broke the image build.
+DISPLAYD_CFLAGS := $(filter-out -Wconversion -Wsign-conversion, \
+	$(WARNINGS) $(OPTFLAGS) $(SANFLAGS) $(NEODCT_CFLAGS) $(CFLAGS)) \
+	-D_GNU_SOURCE -MMD -MP
 
 $(OBJDIR)/displayd/%.o: displayd/%.c
 	$(Q)mkdir -p $(dir $@)

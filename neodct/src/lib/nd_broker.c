@@ -603,7 +603,27 @@ void nd_broker__root_env_filter(const char *const *in, uint32_t n_in, const char
 static void do_spawn(const nd_broker_req *req, int *fds, size_t n_fds, nd_broker_rep *rep)
 {
     const char *argv[8];
-    const char *envp[24];
+    /* ============ AND THE ENVIRONMENT HAS TO FIT ============
+     *
+     * This was `envp[24]`, and blob_take() refuses when count + 1 exceeds the
+     * array -- so a spawn whose environment had more than 23 entries came
+     * back ND_ERR_PARSE, with no log line, and EVERY APP LAUNCH FAILED from
+     * that boot on. nd_proc.c's build_envp() has a comment about exactly this
+     * class of bug one layer up ("Dropping part of a caller's environment
+     * because it did not fit is the kind of failure that shows up later as an
+     * app that cannot find $HOME") and allocates to fit; the cliff had simply
+     * moved down here, where it refuses instead of truncating.
+     *
+     * The phone's own environment is around eighteen entries with the ten
+     * nd_proc adds, so it sits just under the old bound -- and AGENTS.md tells
+     * a developer to put exports in /NeoDCT/User/env.sh, which is the
+     * documented way over it.
+     *
+     * 128 pointers is 1 KB on the broker's stack and the blob is capped at
+     * ND_BROKER_BLOB_MAX (8 KB) regardless, so this cannot be made to
+     * allocate. Past it the refusal is explicit and LOUD rather than a parse
+     * error indistinguishable from a corrupt record. */
+    const char *envp[ND_BROKER_MAX_ENVP + 1];
     const char *root_envp[8];
     const char *hide[ND_PROC_MAX_HIDE + 1];
     nd_proc_spec spec;
@@ -626,6 +646,14 @@ static void do_spawn(const nd_broker_req *req, int *fds, size_t n_fds, nd_broker
      * dup2()s onto them (which for a negative or absurd number is an error
      * the child dies on rather than a slot). A child descriptor above
      * ND_BROKER_CHILD_FD_MAX is not a launch anyone is attempting. */
+    if (req->n_envp > (uint32_t)ND_BROKER_MAX_ENVP) {
+        nd_log_err(ND_LOG_OS,
+                   "broker: REFUSING a spawn carrying %lu environment entries (the limit is %d). "
+                   "Nothing would launch; trim /NeoDCT/User/env.sh.",
+                   (unsigned long)req->n_envp, ND_BROKER_MAX_ENVP);
+        rep->err = ND_ERR_INVAL;
+        return;
+    }
     for (i = 0u; i < n_fds; i++) {
         if (req->child_fd[i] < 0 || req->child_fd[i] > ND_BROKER_CHILD_FD_MAX) {
             nd_log_err(ND_LOG_OS, "broker: REFUSING a spawn asking for child fd %ld",
@@ -738,9 +766,17 @@ static void do_spawn(const nd_broker_req *req, int *fds, size_t n_fds, nd_broker
 
             if (fds[i] > highest)
                 continue; /* already clear of every target */
-            moved = fcntl(fds[i], F_DUPFD, highest + 1);
+            /* F_DUPFD_CLOEXEC, not F_DUPFD. The plain form returns a
+             * descriptor with FD_CLOEXEC CLEAR, so every descriptor the
+             * broker had to move -- the framebuffer, the key channel, the
+             * crash pipe, the service socket -- survived the execve as a
+             * SECOND copy that nothing owned and nothing closed. The child
+             * keeps the copy it is meant to have either way, because
+             * nd_proc_spawn's child dup2()s onto the target number and dup2
+             * clears the flag on the result. */
+            moved = fcntl(fds[i], F_DUPFD_CLOEXEC, highest + 1);
             if (moved < 0) {
-                nd_log_err(ND_LOG_OS, "broker: F_DUPFD: %s", strerror(errno));
+                nd_log_err(ND_LOG_OS, "broker: F_DUPFD_CLOEXEC: %s", strerror(errno));
                 rep->err = ND_ERR_IO;
                 return;
             }

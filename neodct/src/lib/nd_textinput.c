@@ -283,8 +283,32 @@ nd_widget_result nd_textinput_handle_key(nd_textinput *t, int32_t key)
         len = strlen(t->text);
         switch (op.kind) {
         case ND_T9_OP_APPEND:
-            if (len + 2u > t->cap)
-                return ND_WIDGET_RESULT_NONE; /* C-2: ignore, do not truncate */
+            if (len + 2u > t->cap) {
+                /* ============ AND THE ENGINE HAS TO BE TOLD ============
+                 *
+                 * C-2: ignore, do not truncate. But the engine has already
+                 * advanced its multi-tap cycle to produce this APPEND, and
+                 * simply returning left it armed -- so the NEXT press of the
+                 * same key inside the tap window came back as a REPLACE, and
+                 * REPLACE backs up one character before writing. With the
+                 * field full that is one byte SHORTER than the append that
+                 * was just refused, so it fits, and it overwrites the last
+                 * character the owner actually typed with the second letter
+                 * of a key they were only trying to add.
+                 *
+                 * Silent: nothing is drawn for the refusal, so the field looks
+                 * unchanged and then one character of it quietly changes. A
+                 * 64-character password in Fetch loses its last letter and
+                 * the login fails with nothing on screen to explain it.
+                 *
+                 * Resetting puts the engine back to "no key is part-way
+                 * through", so the next press is another APPEND and is
+                 * refused the same way. None of this runs on QEMU: multi-tap
+                 * exists only on the i2c matrix keypad (AGENTS.md), and a
+                 * QWERTY dev keyboard takes a different path with no modes. */
+                nd_t9_engine_reset(&t->t9);
+                return ND_WIDGET_RESULT_NONE;
+            }
             t->text[len] = op.ch;
             t->text[len + 1u] = '\0';
             return ND_WIDGET_RESULT_TYPED;
@@ -293,8 +317,10 @@ nd_widget_result nd_textinput_handle_key(nd_textinput *t, int32_t key)
              * REPLACE there behaves as an APPEND -- which is what the Python
              * does and is only reachable after a reset mid-cycle. */
             len = utf8_back(t->text, len);
-            if (len + 2u > t->cap)
+            if (len + 2u > t->cap) {
+                nd_t9_engine_reset(&t->t9);
                 return ND_WIDGET_RESULT_NONE;
+            }
             t->text[len] = op.ch;
             t->text[len + 1u] = '\0';
             return ND_WIDGET_RESULT_TYPED;
