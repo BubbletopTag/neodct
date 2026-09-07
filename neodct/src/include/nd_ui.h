@@ -129,6 +129,9 @@ typedef enum {
  *
  * 972 puts it immediately after Power (971) and before the 9xx engineering
  * block, so no stock app's menu index moves. */
+/* state|device|label|counter -- see apps_generation() in nd_ui.c. */
+#define ND_UI_APPS_GEN_MAX 160
+
 #define ND_UI_ENG_TILE_ID   972
 #define ND_UI_ENG_TILE_NAME "Engineering"
 
@@ -224,6 +227,8 @@ typedef struct nd_ui {
         bool home_layout_ready;
         bool eng_mode_ready;
         bool apps_ready;
+        /* What the app list was scanned against; see apps_generation(). */
+        char apps_gen[ND_UI_APPS_GEN_MAX];
         bool unread_sms_ready;
 
         /* --- the animated wallpaper, when the setting names a .gif --- *

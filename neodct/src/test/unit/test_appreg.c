@@ -792,6 +792,112 @@ static void test_engineering_off_geometry(nd_capture *cap, nd_ui *ui)
     (void)nd_capture_save(cap, "appreg-stock-only", nd_capture_recent(cap, 0u));
 }
 
+/* ------------------------------------------------------------------ *
+ * The app list is cached until something could have changed it
+ * ------------------------------------------------------------------ */
+
+/* VIRTUAL paths, exactly as the code under test uses them: nd_path_resolve()
+ * prepends the staged root, so prefixing g_stage here as well would write to
+ * <stage><stage>/... -- see the block at the top of this file. System is a
+ * symlink to the real overlay and is never touched; User and /run are real
+ * directories under the stage. */
+static bool stage_write(const char *virtual_path, const char *text)
+{
+    char path[ND_PATH_MAX];
+    FILE *f;
+
+    if (nd_path_resolve(path, sizeof path, virtual_path) != ND_OK)
+        return false;
+    f = fopen(path, "w");
+    if (f == NULL)
+        return false;
+    (void)fputs(text, f);
+    return fclose(f) == 0;
+}
+
+static bool stage_mkdir_p(const char *virtual_path)
+{
+    return nd_mkdir_p(virtual_path, 0755u) == ND_OK;
+}
+
+/* One app directory on the "card", with the minimal manifest the scanner
+ * accepts. Ids are in the .nap band so they sort after everything shipped and
+ * cannot collide with a stock app. */
+static bool stage_card_app(const char *dir, int32_t id)
+{
+    char rel[ND_PATH_MAX];
+    char json[192];
+
+    if (nd_snprintf(rel, sizeof rel, "%s/%s", ND_PATH_USER_APPS_DIR, dir) != ND_OK)
+        return false;
+    if (!stage_mkdir_p(rel))
+        return false;
+    if (nd_snprintf(rel, sizeof rel, "%s/%s/manifest.json", ND_PATH_USER_APPS_DIR, dir) != ND_OK)
+        return false;
+    if (nd_snprintf(json, sizeof json, "{\"name\": \"%s\", \"id\": %d}", dir, (int)id) != ND_OK)
+        return false;
+    return stage_write(rel, json);
+}
+
+/* ============ WHAT THIS IS ACTUALLY ABOUT ============
+ *
+ * The core used to re-walk all three app directories after EVERY app exit,
+ * because an app that exited might have been Settings installing something.
+ * One of those directories is the SD card, the walk happens before the menu
+ * draws its first frame, and a card that is slow to answer cannot be
+ * interrupted while it answers -- so the phone sat on a frozen home screen for
+ * as long as the card took. It was reported as the menu hanging for a few
+ * seconds, intermittently.
+ *
+ * So the walk is now conditional, and these three steps are the contract:
+ * a card arriving is noticed, an app merely EXITING is not, and the
+ * installer's note is. The middle one is the fix; the other two are what the
+ * fix must not break. */
+static void test_app_list_is_cached_until_something_changes(nd_ui *ui)
+{
+    size_t base = nd_ui_app_count(ui);
+
+    /* 1. A card appears, carrying one app. The card's own state moved, so the
+     *    list is rebuilt. */
+    if (!stage_mkdir_p("/run/neodct") || !stage_card_app("ZZOne", 501)) {
+        CHECK(false, "staged a card app");
+        return;
+    }
+    if (!stage_write(ND_PATH_SDCARD_STATE,
+                     "state=legacy\ndevice=/dev/zz0\nfstype=vfat\nlabel=ZZ\n")) {
+        CHECK(false, "staged the card state file");
+        return;
+    }
+    nd_ui_refresh_after_app(ui);
+    CHECK_INT(nd_ui_app_count(ui), base + 1u, "a card appearing is noticed");
+
+    /* 2. A second app appears with nothing announcing it, and an app exits.
+     *    THE CARD IS NOT READ AGAIN -- which is the whole point. Nothing on
+     *    the phone can reach this state (only nd_nap_install() adds a
+     *    directory here, and it leaves a note), so the staleness is not
+     *    reachable; the assertion is that the walk did not happen. */
+    if (!stage_card_app("ZZTwo", 502)) {
+        CHECK(false, "staged a second card app");
+        return;
+    }
+    nd_ui_refresh_after_app(ui);
+    CHECK_INT(nd_ui_app_count(ui), base + 1u, "an app exiting does not re-read the card");
+
+    /* 3. The installer leaves its note, and the list is rebuilt. */
+    if (!stage_write(ND_PATH_APPGEN, "1\n")) {
+        CHECK(false, "staged the installer's note");
+        return;
+    }
+    nd_ui_refresh_after_app(ui);
+    CHECK_INT(nd_ui_app_count(ui), base + 2u, "the installer's note is noticed");
+
+    /* And the card going away is noticed too, which also puts the staged root
+     * back for anything that runs after this. */
+    (void)stage_write(ND_PATH_SDCARD_STATE, "state=absent\n");
+    nd_ui_refresh_after_app(ui);
+    CHECK_INT(nd_ui_app_count(ui), base, "a card leaving is noticed");
+}
+
 static void run_overlay_half(void)
 {
     nd_capture *cap = NULL;
@@ -823,6 +929,9 @@ static void run_overlay_half(void)
     test_icon_geometry(&ui);
     test_scrollbar_every_index(cap, &ui);
     test_engineering_off_geometry(cap, &ui);
+    /* LAST: it stages a card and extra apps, so it must not run before the
+     * tests that count the shipped app list. */
+    test_app_list_is_cached_until_something_changes(&ui);
 
     nd_ui_teardown(&ui);
     nd_ui_sim_clear(&ui);

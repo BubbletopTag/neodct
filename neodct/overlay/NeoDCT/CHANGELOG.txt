@@ -1,5 +1,36 @@
 # NeoDCT OS Changelog
 
+0.5.13a
+The menu opens straight away.
+
+Opening the menu could freeze the phone for a few seconds. It looked like a
+crash rather than a slow menu, and there were three reasons for that.
+
+The phone re-counted every app it owns before drawing the menu, and part of
+that count means reading the memory card. It did the re-count after every app
+you had used -- so it happened the first time you opened the menu after using
+something and not the second time, which is why it seemed to come and go. And
+because nothing had been drawn yet, what you were looking at while it waited
+was the home screen, sitting there answering nothing.
+
+Waiting on a card is not something the phone can be interrupted out of. If the
+card takes a moment to answer, everything stops until it does.
+
+It re-counted so often for one honest reason: installing an app changes the
+list, and the phone had no way of knowing whether the app you just closed was
+the one that installs things. So it assumed the worst every time.
+
+It does not have to assume any more. Installing an app now leaves a note, and
+the phone reads that note -- and whether a card has been put in or taken out
+-- instead of reading the card itself. Both of those are on the phone's own
+storage, so opening the menu no longer touches the card at all unless
+something really has changed. Putting a card in, taking one out, and
+installing an app are all still noticed immediately.
+
+0.5.12a's change helped only a phone with no usable card in it. This one is
+the fix for a card that is present and simply slow.
+
+
 0.5.12a
 Bluetooth switches on again, and the menu stops freezing.
 

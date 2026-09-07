@@ -71,6 +71,22 @@ extern "C" {
 #define ND_PATH_CARD_DIR      "/NeoDCT/User/sdcard"
 #define ND_PATH_USER_APPS_DIR "/NeoDCT/User/sdcard/apps"
 
+/* ============ THE NOTE THE INSTALLER LEAVES ============
+ *
+ * A counter, bumped by nd_nap_install(), that says "the set of installed apps
+ * changed". It lives on the USER PARTITION and deliberately not on the card:
+ * the whole point is to answer "do I need to read the card?" without reading
+ * the card.
+ *
+ * The core used to answer that question by re-walking every app directory
+ * after EVERY app exit, because an app exiting might have been Settings
+ * installing something and nothing told it otherwise. That walk includes the
+ * SD card, it happens before the menu draws its first frame, and a card that
+ * is slow to answer cannot be interrupted while it answers -- so the phone sat
+ * on a frozen home screen for as long as the card took. This file is the
+ * "otherwise". */
+#define ND_PATH_APPGEN "/NeoDCT/User/.appgen"
+
 /* The one directory on the card that ndusr_ut may WRITE: the browser's and
  * the media player's own state, and where a download lands. Deliberately not
  * inside apps/ -- it is shared, and app storage is not.

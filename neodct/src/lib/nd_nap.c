@@ -944,6 +944,40 @@ static nd_err install_entry(FILE *f, const tar_entry *e, void *ctx, char *why, s
     }
 }
 
+/* Say that the installed set changed, so the core knows to look again.
+ *
+ * Best effort and deliberately silent: a counter that cannot be written costs
+ * a menu open its cached app list, which is exactly the behaviour that existed
+ * before this file wrote anything at all. Failing an install over it would be
+ * the wrong trade entirely.
+ *
+ * The value is a counter rather than a timestamp because the phone's clock is
+ * not reliable -- nd_clock.h's boot floor exists precisely because it can come
+ * up in 1970, and a "newer" token that goes backwards would cache a stale list
+ * until the next install. */
+static void bump_app_generation(void)
+{
+    char resolved[ND_PATH_MAX];
+    unsigned long value = 0ul;
+    FILE *f;
+
+    if (nd_path_resolve(resolved, sizeof resolved, ND_PATH_APPGEN) != ND_OK)
+        return;
+
+    f = fopen(resolved, "rb");
+    if (f != NULL) {
+        if (fscanf(f, "%lu", &value) != 1)
+            value = 0ul;
+        (void)fclose(f);
+    }
+
+    f = fopen(resolved, "wb");
+    if (f == NULL)
+        return;
+    (void)fprintf(f, "%lu\n", value + 1ul);
+    (void)fclose(f);
+}
+
 bool nd_nap_is_installed(const char *apps_dir, const char *dir)
 {
     char manifest[ND_PATH_MAX];
@@ -1191,6 +1225,12 @@ nd_err nd_nap_install(const char *path, const char *apps_dir, const char *arch, 
 
     nd_log(ND_LOG_OS, "nap: installed %s (id %d, %s) from %s%s", c.info.name, (int)c.info.id, arch,
            path, have_old ? ", replacing the earlier version" : "");
+    /* After the rename, so the note is only left once the app really is there.
+     * This is the one place in the tree that changes which directories carry a
+     * manifest.json -- Fetch writes into apps/PSX/ and into untrusted/, and a
+     * confined app may write only its own data/ -- so this is the only place
+     * that has to say so. See ND_PATH_APPGEN. */
+    bump_app_generation();
     if (out != NULL)
         *out = c.info;
     rc = ND_OK;

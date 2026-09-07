@@ -898,6 +898,54 @@ static void sort_apps_by_id(nd_app_entry *apps, size_t n)
     }
 }
 
+/* ============ "DO I NEED TO READ THE CARD?" ============
+ *
+ * A short string that changes when, and only when, the set of installed apps
+ * could have changed. Two sources, and NEITHER of them touches the card:
+ *
+ *   the card's identity and state   nd_storage_card() parses the state file
+ *                                   the card daemon publishes on tmpfs. A
+ *                                   card arriving, leaving, or being swapped
+ *                                   for a different one moves this.
+ *   ND_PATH_APPGEN                  a counter on the user partition that
+ *                                   nd_nap_install() bumps. An app being
+ *                                   installed moves this.
+ *
+ * That is the whole list of things that can add or remove an
+ * apps/<x>/manifest.json. Fetch writes into apps/PSX/ and into untrusted/, so
+ * it changes files without changing the SET; an installed app runs as
+ * ndusr_ut in a private mount namespace and may write only its own data/.
+ *
+ * Before this existed the question was answered by re-walking all three
+ * directories after every app exit -- because an app that exited MIGHT have
+ * been Settings installing something, and nothing said otherwise. One of those
+ * directories is the SD card, the walk runs before the menu draws its first
+ * frame, and a slow card cannot be interrupted while it answers. That is the
+ * frozen home screen an owner reported. */
+static void apps_generation(char *out, size_t out_sz)
+{
+    char resolved[ND_PATH_MAX];
+    nd_card card;
+    unsigned long gen = 0ul;
+    FILE *f;
+
+    memset(&card, 0, sizeof card);
+    nd_storage_card(&card);
+
+    if (nd_path_resolve(resolved, sizeof resolved, ND_PATH_APPGEN) == ND_OK) {
+        f = fopen(resolved, "rb");
+        if (f != NULL) {
+            if (fscanf(f, "%lu", &gen) != 1)
+                gen = 0ul;
+            (void)fclose(f);
+        }
+    }
+
+    /* The label and the device both, because a card can be swapped for another
+     * that mounts at the same place with the same state. */
+    (void)nd_snprintf(out, out_sz, "%d|%s|%s|%lu", (int)card.state, card.device, card.label, gen);
+}
+
 static void rescan_apps(nd_ui *ui)
 {
     /* Three directory walks, one of them ON THE SD CARD, each opening and
@@ -966,6 +1014,9 @@ static void rescan_apps(nd_ui *ui)
         ui->home_.n_apps += n;
     }
     sort_apps_by_id(ui->home_.apps, ui->home_.n_apps);
+    /* Stamped AFTER the walk, so a scan interrupted by anything is not
+     * recorded as having covered the state it was interrupted in. */
+    apps_generation(ui->home_.apps_gen, sizeof ui->home_.apps_gen);
     nd_ui_watch_end(saved);
 }
 
@@ -3248,7 +3299,18 @@ void nd_ui_refresh_after_app(nd_ui *ui)
     ui->home_.wallpaper = NULL;
     ui->home_.wallpaper_ready = false;
     ui->home_.eng_mode_ready = false;
-    ui->home_.apps_ready = false;
+
+    /* ONLY when something could actually have changed the app list. This used
+     * to be an unconditional `apps_ready = false`, which made the next menu
+     * open re-walk the SD card -- see apps_generation() for what that cost and
+     * why the answer is now two reads that never leave the NAND. */
+    {
+        char now[ND_UI_APPS_GEN_MAX];
+
+        apps_generation(now, sizeof now);
+        if (strcmp(now, ui->home_.apps_gen) != 0)
+            ui->home_.apps_ready = false;
+    }
 
     /* Settings is an app. Turning wallpaper-everywhere off, or moving the
      * dim, must show on the very next screen the core draws. */

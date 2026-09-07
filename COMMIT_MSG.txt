@@ -3705,3 +3705,81 @@ Suite green, MAKE_TEST_EXIT=0, 85 binaries.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df
+
+================================================================================
+
+0.5.13a: the menu stops reading the card to find out nothing changed
+
+0.5.12a gated the SD-card app walk on nd_storage_media_available(), and that
+was only half an answer. That predicate is true whenever a card is MOUNTED and
+readable -- so it skips the walk for a phone with no usable card, and does
+nothing at all for the case that was actually reported: a card that is present,
+mounted, and slow to answer. Said plainly because it was shipped as if it were
+the fix.
+
+============ WHAT THE FREEZE ACTUALLY WAS ============
+
+Three things, and only the first is about the card.
+
+  1. rescan_apps() walks three app directories and the third is the card.
+     Discovering an unusable card meant letting opendir() FAIL, which on a
+     card that is present but slow means the mmc layer's retries first, in
+     TASK_UNINTERRUPTIBLE. Not interruptible, not signallable.
+
+  2. Nothing is drawn while it happens. The Menu keypress only sets
+     ui->state; the scan runs on the NEXT core-loop turn, before the menu's
+     first frame. So the owner is watching the HOME screen answer nothing,
+     which is why it reads as a crash rather than a slow menu.
+
+  3. nd_ui_refresh_after_app() cleared apps_ready after EVERY app exit, so
+     the walk ran on the first menu open after using anything -- and not on
+     the second, which is exactly the intermittency that was described.
+
+============ WHY IT RE-COUNTED SO OFTEN ============
+
+Not gratuitously. Installing an app changes the set of directories carrying a
+manifest.json, and the core cannot tell WHICH app just exited or what it did,
+so it assumed the worst every time. The question was right; the way of asking
+it read a block device.
+
+The set of things that can change that list is smaller than it looks, and it
+was worth checking rather than asserting -- the owner asked whether Fetch or an
+app writing its data/ could do it, which is the right question:
+
+  Fetch          routes to music/, apps/PSX/games/, apps/PSX/bios/ and
+                 untrusted/. The PSX paths write INSIDE an app directory that
+                 must already exist; a .nap lands in untrusted/, deliberately,
+                 so Settings can find it. Files change, the SET does not.
+  a card app     runs as ndusr_ut in a private mount namespace and may write
+                 only its own data/. It cannot create a sibling.
+  nd_nap_install the only thing that adds or replaces apps/<x>/manifest.json,
+                 and it has exactly one caller: Settings/main.c:2003.
+
+============ SO THE INSTALLER LEAVES A NOTE ============
+
+ND_PATH_APPGEN -- a counter at /NeoDCT/User/.appgen, on the USER PARTITION and
+deliberately not on the card, because the entire point is to answer "must I
+read the card?" without reading the card. bump_app_generation() writes it after
+the final rename, so the note only appears once the app really is installed.
+A counter and not a timestamp: nd_clock.h's boot floor exists because this
+phone can come up believing it is 1970, and a token that goes backwards would
+pin a stale list until the next install.
+
+apps_generation() in nd_ui.c fingerprints that counter together with the card's
+state, device and label from nd_storage_card() -- which parses the daemon's
+state file on tmpfs and never touches the block device. rescan_apps() stamps
+the fingerprint after the walk; nd_ui_refresh_after_app() compares it instead
+of clearing apps_ready outright. Steady state on the menu path is now two reads
+that never leave the NAND, and zero card I/O.
+
+test_appreg gains the contract as four assertions: a card appearing is noticed,
+an app merely EXITING is not, the installer's note is, and a card leaving is.
+The middle one is the fix and the other three are what it must not break. Its
+helpers take VIRTUAL paths -- nd_path_resolve() prepends the staged root, and
+prefixing g_stage as well writes to <stage><stage>/..., which is how the first
+version of the test failed.
+
+Suite green, MAKE_TEST_EXIT=0, 85 binaries.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df
