@@ -1,5 +1,77 @@
 # NeoDCT OS Changelog
 
+0.5.15a
+The microphone, the apps you download, and the keys on the keypad.
+
+The microphone is louder, and you can set it yourself. It was fixed at eighty
+percent with no way to change it. It now starts at full, and the Mic Test app
+adjusts it with the up and down keys, showing the level and the sound coming in
+as you go. The setting is remembered. It is written once when you leave the
+app rather than on every press, because every write goes to the same storage
+the rest of the phone lives on.
+
+The microphone no longer goes dead for a whole call. The sound card was
+switched on once, at startup, and nothing ever switched it on again -- so a
+card that reset itself while the phone was running came back muted and stayed
+that way until the next restart, recording perfect silence with nothing
+reporting a fault. It is now switched on and set before every call.
+
+Apps you download install again. A package arrived on the card owned by the
+part of the phone that fetched it and readable by nothing else, so the
+installer could list the file and then refuse to open it: "Cannot read the
+package", for a package sitting right there and perfectly good. Downloads are
+now handed to whoever has to read them, the folders they go into as well, and a
+card that already carries a package in the old state is repaired when you put
+it in.
+
+A disc image says where it went. Fetch keeps a game aside when the PlayStation
+app is not installed, because there is nowhere to play it yet -- but it did
+that silently, so the file simply was not where you expected. It now says so
+before it downloads.
+
+A game folder you made yourself is readable by the emulator. Folders made from
+the shell belong to the superuser and shut out the app that has to read them,
+so a disc could sit in exactly the right place under a folder the emulator was
+not allowed to open, and the shelf said "No discs". Putting the card in now
+puts an installed app's own folders back the way that app can read them.
+
+The keypad reads the right keys. On the phone -- and only on the phone, never
+in the emulator, which is why it lasted so long -- the key channel was read in
+the wrong size, so every other key event was assembled from the wrong bytes.
+The phone also picked up its own keyboard as though it were a second one, and
+a disconnected input device could spin the phone instead of being let go of.
+
+Recovery can write the phone's storage. The repair that reinstalls the system
+used a method this phone's flash does not accept, so the one way out that does
+not need the phone opened up and wired to a computer did not work. Seven
+notices in Settings had no button that dismissed them and could not be left at
+all. A phone call arriving while one was on screen is now answered rather than
+ignored.
+
+Settings that fail to save say so, instead of reporting success and forgetting.
+The note an installed app leaves for the rest of the phone is written in a way
+that survives the battery coming out mid-write. And three timers that a change
+in the clock could stop -- the phone has no clock of its own until the network
+gives it one, so the time jumps on every startup -- now use a clock that only
+counts forwards.
+
+Two ways in that should never have been open are closed. Both needed a
+deliberately hostile app or web page rather than an accident, and neither is
+known to have been used. Downloading a file ran as the superuser and wrote to a
+name that a confined app was allowed to replace in the moment between the two,
+which let it be pointed at any file on the phone; and the repair above, in its
+first form, could be aimed the same way. Neither operation trusts a name any
+more.
+
+Underneath, the phone now knows which machine it is running on rather than
+guessing from whether a particular piece of hardware happens to be present.
+Every guess was wrong in both directions: crash reports from the phone were
+filed as though they came from the emulator, and a phone built without the
+debug console skipped waiting for the keypad's connection and came up with no
+keys at all. That fact is written in when the system is built, and the places
+that used to guess now ask.
+
+
 0.5.14a
 The menu fix from 0.5.13a, actually finished.
 
