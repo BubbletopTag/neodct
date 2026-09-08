@@ -39,12 +39,41 @@ make                            # full image set
 neodct/tools/run_qemu.sh        # from the repo root
 ```
 
+**The emulator is the phone's part now.** `qemu-system-arm -M virt -cpu
+cortex-a7 -smp 1 -m 64`, one ABI on both machines: same instruction set, same
+musl, same hard-float NEON-VFPv4, same Thumb-2, same 32-bit `time_t`,
+`size_t`, pointers and alignment. It was aarch64 on a Cortex-A53, and that
+machine agreed with the Pico Mini about everything except the things that
+break -- so those bugs passed here and failed on the bench. Measured on the
+kernel this tree builds: `uname -m` = `armv7l`, CPU part 0xc07, MemTotal
+53,824 kB of the 64 MB machine against the phone's ~54 MB.
+
+The identity did NOT collapse with the ABI. The QEMU image is `qemu-armv7`
+and the phone is `luckfox-armv7`; `nd_manifest_check_compatible()` still
+compares that key byte for byte, so a package built here still refuses to
+install on hardware. `qemu-aarch64` is retired: it survives as an accepted
+alias for one ordered pair (an image saying `qemu-aarch64` takes an armv7
+package, never the reverse) and as a name `mknap.py` and `nd_nap_install()`
+refuse by.
+
+**That alias does not by itself rescue an image flashed before the rename.**
+The comparison runs in the libneodct of the image that is *running*, and an
+older image is running the older code, which has no table. Reaching it takes
+one transitional build --
+`BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS="... qemu-aarch64"` on
+`neodct_qemu_defconfig`, which `platform-id.sh` still maps, giving an armv7
+image stamped with the old key that the old strcmp accepts. The argument, and
+why the pair is ordered, is above `platform_alias_accepts()` in
+`neodct/src/lib/nd_manifest.c`.
+
 `.config` IS GENERATED FROM THE DEFCONFIG ONCE. It used to say "first time
 only" here, and that was the bug: a tree whose `output/` predates a defconfig
 change keeps its old `.config` through every rebuild and `make` never mentions
 it. That is how images came to be built with no `ndusr` in them, so
 `nd_priv_lookup()` found nothing and every app ran as root -- found with `top`
-on a real build, not by anything in the tree.
+on a real build, not by anything in the tree. It is also how a tree keeps
+building aarch64 after the change above: the giveaway is an `Image` in
+`output/images/` where `run_qemu.sh` now wants a `zImage`.
 
 The users specifically are now also declared in `package/neodct/neodct.mk`,
 which reaches a stale `.config` because PACKAGES_USERS is collected whatever
@@ -62,6 +91,25 @@ NEODCT_SIGN_KEY=$PWD/../neodct/tools/devkey/neodct-dev.key make update
 `NEODCT_VERITY`, `NEODCT_SD`, `NEODCT_RECOVERY`, `NEODCT_MODEM`, `NEODCT_NET`,
 `NEODCT_DEBUG` and more. Read its header before adding a flag; the one you want
 probably exists.
+
+Several of them **refuse** on the armv7 kernel and say what is missing:
+`NEODCT_NET`, `NEODCT_MODEM`, `NEODCT_BT`, `NEODCT_AUDIO` and
+`NEODCT_SD=share`. The kernel is the proven floor for memory parity and has
+no PCI (so no xhci, so no USB at all), no `NETDEVICES`, no `VIRTIO_FS` and no
+`VFAT_FS` — a card still attaches and nothing in the guest can mount it. The
+absences and what each costs are listed in the header of
+`buildroot/board/qemu/armv7-virt/linux.config`; adding one back means booting
+the kernel again and writing down the new MemTotal.
+
+**There is no picture yet, and that is the next stage.** `/dev/fb0` is vfb —
+the phone's own driver rather than a DRM device pretending to be one — which
+is the arrangement worth having, but two things are unfinished. vfb comes up
+640×480 at 8 bpp and is put into 240×175×32 by a userspace
+`FBIOPUT_VSCREENINFO`; on the phone `neodct_displayd` does that and under
+QEMU nothing does it yet. And vfb has no scanout, so the QEMU window is not
+showing the phone whatever the mode is. The window is still where keystrokes
+come from; with no display at all the way in is `NEODCT_MONITOR` and the
+monitor's `sendkey`.
 
 Version comes from one place: `VERSION_ID` in `neodct/overlay/etc/os-release`.
 An update built without bumping it installs but shows no change on screen.
@@ -104,10 +152,12 @@ rather than falling back to a bare run.
 python3 -m pytest neodct/tests/ -q      # from the repo root
 ```
 
-510 tests, ~20s. They import the real overlay code — `conftest.py` puts
-`neodct/overlay/NeoDCT` on `sys.path` so `System.ui...` imports resolve exactly
-as they do on the device. Run them before and after any overlay change; they
-are fast enough that there is no excuse not to.
+1,961 passing and 14 skipped, ~105s. (It said "510 tests, ~20s" here for a
+long time, and that is the number agents calibrated on — `spec-build-test.md`
+risk R-15 is about exactly this.) They import the real overlay code —
+`conftest.py` puts `neodct/overlay/NeoDCT` on `sys.path` so `System.ui...`
+imports resolve exactly as they do on the device. Run them before and after
+any overlay change; they are fast enough that there is no excuse not to.
 
 `neodct/tools/uistub.py` drives the *real* UI headlessly, capturing frames as
 PIL images instead of writing to the framebuffer. Docs screenshots come from
@@ -159,7 +209,14 @@ described at the top of this section. It includes the golden frames in
 **Neither suite can see the confinement.** Every security test in the tree
 checks what the image was *built* to do; none can check what the kernel
 *decides*, because a build host has no `ndusr`, no `/dev/i2c-3`, a writable
-root and possibly no `CONFIG_MNT_NS`. That half is `nd-selftest`, which ships
+root and possibly no mount namespaces. (The symbol to grep a kernel config
+for is `CONFIG_NAMESPACES`, and the thing to look at on a running system is
+`/proc/self/ns/mnt`. `CONFIG_MNT_NS` does not exist -- there is no such
+symbol anywhere in the kernel tree, mount namespaces are unconditional
+wherever `NAMESPACES` is set, and the `CONFIG_MNT_NS=y` line in
+`buildroot/board/qemu/aarch64-virt/linux.config` has been silently discarded
+by `olddefconfig` for as long as it has been there.) That half is
+`nd-selftest`, which ships
 in `/NeoDCT/System/bin` and runs on the phone or in QEMU:
 
 ```sh
@@ -265,11 +322,22 @@ path on purpose.
 ## Hardware access
 
 Serial console: `/dev/ttyUSB0`, 115200 8N1, root login with no password.
-Flash rootfs only, leaving boot alone:
+Flash the system partition only, leaving boot alone:
 
 ```sh
-sudo ./upgrade_tool di -rootfs rootfs.ubifs   # luckfox-pico/tools/linux/Linux_Upgrade_Tool/
+sudo ./upgrade_tool di -rootfs system.ubi   # luckfox-pico/tools/linux/Linux_Upgrade_Tool/
 ```
+
+**`-rootfs` names the PARTITION, and the image that belongs in it is
+`system.ubi`.** Not `rootfs.ubi` or `rootfs.ubifs`, which the build still
+produces — the UBIFS/UBI block in the luckfox defconfig is the only thing
+that pulls `host-mtd`, and `mknand.sh` needs its `ubinize` and `mkfs.ubifs`,
+so the files exist, look right, and are the pre-verity layout. Flashing one
+gives a UBI image with a `rootfs` ubifs volume where the cmdline expects a
+static `system` volume, so `ubi.block=0,system` matches nothing, the
+initramfs finds no system image and drops into recovery. Getting back needs
+maskrom mode and a cable. `docs/HARDWARE_NOTES.md` and `docs/FLASHING.md`
+have the full procedure.
 
 The board has a working SD/MMC controller (`mmc1` binds on the running kernel,
 and an `SD_CARD` board config exists for the Mini), so SD is a genuine option
@@ -294,7 +362,19 @@ with no changelog section is refused before it is tagged.
 Tags carry no leading `v` (`0.3.7a`); the workflow accepts the older `v0.1.5a`
 form too. Releases are marked pre-release, as every release so far has been.
 
-**No `.ndsw` is attached yet.** Building one means building the whole
-buildroot tree and needs the signing key, and publishing an unsigned package
-would be worse than publishing none -- the phone shows "BAD SIGNATURE! UPDATE
-MAY BE CORRUPT!!" to anyone who installs it. Attach one by hand for now.
+**The workflow attaches no `.ndsw`, and that is not the same as a release
+having none.** Building one means building the whole buildroot tree and needs
+the signing key, and publishing an unsigned package would be worse than
+publishing none -- the phone shows "BAD SIGNATURE! UPDATE MAY BE CORRUPT!!"
+to anyone who installs it. So `release.sh` builds nothing either: it waits
+for the workflow to create the release, then uploads whatever signed,
+version-matching packages it finds in `buildroot/output/images` and
+`build-luckfox/images`, one asset per platform. 0.3.13a and 0.3.14a each
+carry two.
+
+The asset name is `UPDATE-<platform>.ndsw` and the phone downloads by exactly
+that name, with no fallback -- so releases cut before the emulator moved to
+armv7 hold `UPDATE-qemu-aarch64.ndsw`, and a `qemu-armv7` image looking
+online finds nothing until the first release after it. That is the design
+working: a fallback would pull ~58 MB over a bearer that can take an hour
+before anything got a chance to refuse it.

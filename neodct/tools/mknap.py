@@ -3,7 +3,7 @@
 from its memory card.
 
     mknap.py --app-dir Bible/ --so luckfox-armv7=build/luckfox/app.so -o Bible.nap
-    mknap.py --app-dir Bible/ --so luckfox-armv7=a.so --so qemu-aarch64=b.so -o Bible.nap
+    mknap.py --app-dir Bible/ --so luckfox-armv7=a.so --so host-x86_64=b.so -o Bible.nap
     mknap.py --list Bible.nap
 
 A .nap is a plain, uncompressed POSIX ustar archive. The phone's reader is
@@ -38,7 +38,64 @@ import stat
 import sys
 import tarfile
 
-ARCH_TAGS = ("luckfox-armv7", "qemu-aarch64", "host-x86_64")
+ARCH_TAGS = ("luckfox-armv7", "host-x86_64")
+
+# Tags that were once real and are refused by name. luckfox-armv7 now covers
+# the emulator as well -- one armv7 ABI, one app.so -- so a qemu-aarch64
+# package is machine code neither machine this tree builds can load. It is
+# refused rather than warned about because the warning is what let the two
+# Bible packages exist: mknap.py said something, the build kept going, and the
+# result was an archive whose app.so nothing could dlopen. The message names
+# the remedy, since a hard failure with no explanation is worse than the old
+# silence.
+#
+# nd_nap.h's ND_NAP_ARCH_RETIRED_QEMU_AARCH64 is the same list on the phone's
+# side, where the tag survives so that an existing package can be refused with
+# a sentence that tells its owner to ask the author for a rebuild.
+RETIRED_ARCH_TAGS = {
+    "qemu-aarch64":
+        "that machine is no longer built; one armv7 package now serves both",
+}
+
+# ============ THE TAG IS A LABEL; THIS IS THE FILE ============
+#
+# What each live tag's app.so must actually BE, read out of the ELF header:
+# (e_machine, EI_CLASS, EI_DATA, required e_flags bits).
+#
+# The refusal above guards the TAG, and until this branch that was enough by
+# accident: the two live tags named two different e_machines, so mislabelling
+# an app.so produced an archive the phone could refuse. One armv7 ABI now
+# serves both machines, `neodct/contrib/Bible/qemu-aarch64/app.so` is still
+# sitting in the tree next to its armv7 sibling, and the retirement message
+# reads as an instruction to pass the tag that serves both -- so
+#
+#     mknap.py --so luckfox-armv7=<an aarch64 app.so>
+#
+# produced a package whose manifest said luckfox-armv7, which
+# nd_nap_info_has_arch() matched, which nd_nap_install() wrote, which appeared
+# in the menu, and which failed in dlopen() at first launch. That is verbatim
+# the failure nd_nap.h says the retired tag exists to prevent, reached by
+# renaming instead of by aliasing, and four bytes of ELF magic could not see
+# it. Eighteen more can.
+#
+# EF_ARM_ABI_FLOAT_HARD is in the table because it is the only thing in an ELF
+# header separating this ABI from a soft-float armv7 one: same machine, same
+# class, same endianness, and a shared object the phone's loader cannot use.
+# An unknown tag is warned about rather than refused, above, and gets no row
+# here -- there is nothing to check it against, and inventing one would refuse
+# a machine somebody is bringing up.
+EM_ARM = 0x28
+EM_X86_64 = 0x3e
+EF_ARM_ABI_FLOAT_HARD = 0x400
+ELF_ABI = {
+    "luckfox-armv7": (EM_ARM, 1, 1, EF_ARM_ABI_FLOAT_HARD),
+    "host-x86_64": (EM_X86_64, 2, 1, 0),
+}
+ELF_MACHINE_NAMES = {
+    EM_ARM: "32-bit ARM",
+    EM_X86_64: "x86-64",
+    0xb7: "aarch64",
+}
 TAG_RE = re.compile(r"^[A-Za-z0-9_-]{1,31}$")
 DATA_DIR = "data"
 LIB_DIR = "lib"
@@ -56,6 +113,53 @@ def die(msg):
 
 def warn(msg):
     print("mknap: warning: " + msg, file=sys.stderr)
+
+
+def machine_name(machine, is64):
+    """A name a package author can act on, rather than a number."""
+    return ELF_MACHINE_NAMES.get(machine, "e_machine 0x%x" % machine) + \
+        (" (64-bit)" if is64 else "")
+
+
+def read_elf_abi(path):
+    """(e_machine, EI_CLASS, EI_DATA, e_flags), or None if it is not an ELF.
+
+    e_flags moves with the class -- offset 36 in an ELF32 header and 48 in an
+    ELF64 one -- which is why the class is read first rather than assumed.
+    """
+    with open(path, "rb") as f:
+        head = f.read(64)
+    if len(head) < 20 or head[:4] != b"\x7fELF":
+        return None
+    ei_class, ei_data = head[4], head[5]
+    order = "little" if ei_data == 1 else "big"
+    machine = int.from_bytes(head[18:20], order)
+    off = 48 if ei_class == 2 else 36
+    flags = int.from_bytes(head[off:off + 4], order) if len(head) >= off + 4 else 0
+    return machine, ei_class, ei_data, flags
+
+
+def check_so(tag, path):
+    """Refuse an app.so that is not the machine code its tag claims."""
+    abi = read_elf_abi(path)
+    if abi is None:
+        die("--so %s=%s: not an ELF object" % (tag, path))
+    machine, ei_class, ei_data, flags = abi
+    want = ELF_ABI.get(tag)
+    if want is None:
+        return
+    want_machine, want_class, want_data, want_flags = want
+    if (machine, ei_class, ei_data) != (want_machine, want_class, want_data):
+        die("--so %s=%s: that file is %s, and %s wants %s. Renaming an app.so "
+            "does not port it -- the phone would install this and fail in "
+            "dlopen() the first time somebody opened the app."
+            % (tag, path, machine_name(machine, ei_class == 2), tag,
+               machine_name(want_machine, want_class == 2)))
+    if want_flags and not (flags & want_flags):
+        die("--so %s=%s: %s is hard-float (EF_ARM_ABI_FLOAT_HARD), and this "
+            "object does not say it is. A soft-float or soft-float-ABI build "
+            "loads on nothing this tree ships."
+            % (tag, path, tag))
 
 
 def dir_from_name(name):
@@ -173,14 +277,14 @@ def build(app_dir, sos, out):
     for tag, path in sos:
         if not TAG_RE.match(tag):
             die("--so %s: not a phone tag (letters, digits, '-' and '_')" % tag)
+        if tag in RETIRED_ARCH_TAGS:
+            die("--so %s: %s" % (tag, RETIRED_ARCH_TAGS[tag]))
         if tag not in ARCH_TAGS:
             warn("--so %s: not one of the phones this tree builds for (%s)"
                  % (tag, ", ".join(ARCH_TAGS)))
         if not os.path.isfile(path):
             die("--so %s=%s: no such file" % (tag, path))
-        with open(path, "rb") as f:
-            if f.read(4) != b"\x7fELF":
-                die("--so %s=%s: not an ELF object" % (tag, path))
+        check_so(tag, path)
     tags = [t for t, _ in sos]
     if len(set(tags)) != len(tags):
         die("the same --so tag was given twice")
@@ -272,6 +376,19 @@ def list_package(path):
             ", ".join(arches) if arches else "NO PHONE AT ALL"))
         if not arches:
             problems.append("no app.so for any phone")
+        # --list is documented as saying whether the phone would accept it,
+        # and this is the half that was missing: build() refuses a retired
+        # tag and nd_nap_install() refuses it on the phone, but --list
+        # printed the tag and exited 0, so the check made BEFORE the card
+        # trip was the one that said a dead package was fine. Read out of the
+        # same dict build() refuses from, so the two halves cannot drift into
+        # disagreeing about which machines are gone.
+        for arch in arches:
+            if arch in RETIRED_ARCH_TAGS:
+                problems.append(
+                    "%s: %s -- no machine this tree builds can load it, so "
+                    "the phone will answer \"This package is for an older "
+                    "build\"" % (arch, RETIRED_ARCH_TAGS[arch]))
     for p in problems:
         print("PROBLEM: " + p)
     return 1 if problems else 0
@@ -285,7 +402,7 @@ def main(argv):
                                           "and the app's files")
     parser.add_argument("--so", action="append", default=[], metavar="TAG=PATH",
                         help="the app.so for one phone: luckfox-armv7=..., "
-                             "qemu-aarch64=...; repeat for a universal package")
+                             "host-x86_64=...; repeat for a universal package")
     parser.add_argument("-o", "--output", help="the .nap to write")
     parser.add_argument("--list", metavar="NAP", help="show what is in a .nap and "
                                                        "whether the phone would accept it")

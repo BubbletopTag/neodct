@@ -1,8 +1,52 @@
-BR2_aarch64=y
-# run_qemu.sh emulates -cpu cortex-a53, so tune for it rather than for
-# generic ARMv8. Costs nothing: the image only ever runs under that -cpu.
-BR2_cortex_a53=y
-BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_12=y
+BR2_arm=y
+# THE EMULATOR IS THE PHONE'S PART NOW, and that is what this defconfig is
+# for. run_qemu.sh runs -M virt -cpu cortex-a7 -m 64, and 6.12.47 was booted
+# on it here: uname -m = armv7l, CPU part 0xc07, features neon vfpv3 vfpv4
+# idiva idivt thumbee, MemTotal 53,824 kB of 64 MB against the phone's ~54 MB.
+# So the two ARM lines below -- copied from luckfox_pico_mini_defconfig, and
+# carrying its reasoning with them -- are exercised under emulation rather
+# than merely asserted, and a thing that fits in the emulator fits on the
+# phone.
+#
+# What stood here said tuning for cortex-a53 "costs nothing". True, and it
+# bought nothing either. An aarch64 emulator has 64-bit time_t, size_t and
+# pointers and forgiving alignment, so every bug that turns on any of those
+# passed here and waited for the bench -- which is the one place in this
+# project where a failure is expensive to see. They fail here now. That is the
+# whole trade: one ABI, one app.so, one .nap arch tag, and the 32-bit
+# arithmetic under test on every run.
+#
+# The identity does NOT collapse with the ABI. This image is qemu-armv7 and
+# the phone is luckfox-armv7 (see the post-build args below); an .ndsw built
+# here still refuses to install on hardware, byte-for-byte, because after this
+# change nothing else can tell the two apart.
+BR2_cortex_a7=y
+# The RV1103's Cortex-A7 really does have VFPv4 and NEON with Fused-MAC:
+# the displayd binary that ran on the board reports Tag_FP_arch VFPv4 and
+# Tag_Advanced_SIMD_arch "NEONv1 with Fused-MAC". Plain -mfpu=neon is the
+# VFPv3-era setting and leaves both unused.
+BR2_ARM_FPU_NEON_VFPV4=y
+# Thumb-2 is roughly 30% denser than ARM for the same code. On a part with
+# 32 KB of L1 instruction cache that density buys more than the occasional
+# extra instruction costs.
+BR2_ARM_INSTRUCTIONS_THUMB2=y
+# The UAPI this userland compiles against is the PHONE'S kernel version, not
+# the one QEMU boots.
+#
+# Left alone this target takes BR2_KERNEL_HEADERS_AS_KERNEL -- the choice
+# default whenever BR2_LINUX_KERNEL is set -- and builds against 6.12's UAPI
+# while the Luckfox runs 5.10.110. That would leave the two images with the
+# same instruction set, the same libc and the same float ABI and a DIFFERENT
+# kernel interface, which is exactly the divergence this file was converted to
+# end, and it is the invisible kind: a package that reaches for a post-5.10
+# ioctl builds and runs perfectly here and fails on the bench. SECURITY-PLAN.md
+# has the worked example -- 6.12 headers define the Landlock UAPI that a 5.10
+# vendor kernel cannot honour, so a build-time #ifdef is a lie on hardware.
+#
+# It costs nothing at runtime, because the safe direction is this one: a 6.12
+# kernel runs a userland built against 5.10 headers. QEMU still builds its own
+# 6.12.47 kernel below; it just stops compiling the image against 6.12.
+BR2_KERNEL_HEADERS_5_10=y
 BR2_JLEVEL=8
 BR2_GLOBAL_PATCH_DIR="board/qemu/patches"
 BR2_DOWNLOAD_FORCE_CHECK_HASHES=y
@@ -55,13 +99,13 @@ BR2_ROOTFS_USERS_TABLES="../neodct/configs/users-table.txt"
 # post-image-neodct.sh ends by running check-users.sh, so it is not listed twice.
 BR2_ROOTFS_POST_IMAGE_SCRIPT="board/qemu/post-image.sh ../neodct/scripts/post-image-neodct.sh"
 BR2_ROOTFS_POST_BUILD_SCRIPT="../neodct/scripts/post-build-prune-tests.sh ../neodct/scripts/post-build-system-metadata.sh ../neodct/scripts/post-build-nonfree-firmware.sh ../neodct/scripts/post-build-bt-on-demand.sh ../neodct/scripts/post-build-devenv-marker.sh"
-BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS="qemu-aarch64"
+BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS="qemu-armv7"
 BR2_ROOTFS_POST_SCRIPT_ARGS="$(BR2_DEFCONFIG)"
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_CUSTOM_VERSION=y
 BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.12.47"
 BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
-BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="board/qemu/aarch64-virt/linux.config"
+BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="board/qemu/armv7-virt/linux.config"
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
 BR2_PACKAGE_DEJAVU=y
 BR2_PACKAGE_FREETYPE=y

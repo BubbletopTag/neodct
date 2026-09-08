@@ -9,6 +9,19 @@ still triggers its specific error in the same `UpdateService` code the phone
 runs. What it cannot check is what appears on the screen, which is what this
 document is for.
 
+> **Most of this cannot be run under QEMU at the moment.** Every route a
+> package takes into the phone is closed on the armv7 kernel: the card image
+> is FAT32 and there is no `VFAT_FS`, the virtiofs share needs `VIRTIO_FS` +
+> `FUSE_FS`, and *Look online* needs a NIC — none of the three is built. The
+> card still attaches, and `run_qemu.sh` says so on the way up. So the
+> procedures below are, for now, the **hardware** procedure plus the record
+> of what each refusal looks like; the parts still exercised in the emulator
+> are `neodct/tools/test_update_ubi.sh` (which is why it delivers the applier
+> over a raw disk instead of the card) and the host suites. Restoring any of
+> it is one kernel symbol and a re-boot for a fresh MemTotal — the header of
+> `buildroot/board/qemu/armv7-virt/linux.config` lists them and what each
+> costs.
+
 ---
 
 ## 1. Build a good update
@@ -58,9 +71,10 @@ NEODCT_SD=share neodct/tools/run_qemu.sh
 # then just copy into ~/neodct-sdcard/update/
 ```
 
-Note the card *detection* and *format* flows cannot be tested this way — a
-virtiofs share is not a block device and has no FAT label. Use option A for
-those.
+`NEODCT_SD=share` refuses on the armv7 kernel and names the two symbols it
+would need. When it worked, the card *detection* and *format* flows still
+could not be tested this way — a virtiofs share is not a block device and has
+no FAT label — so option A was already the one for those.
 
 **On real hardware:** a FAT32 card with `wallpapers/ tones/ backup_db/
 music/ update/` at the top level; drop the file in `update/`.
@@ -136,11 +150,35 @@ key those variants are skipped rather than written misleadingly.
 | `not-a-zip` | same | No |
 | `corrupt-image` | installs as far as the **progress bar**, then `INVALID UPDATE! UPDATE MAY BE CORRUPT!!` | No |
 | `truncated-image` | same as `corrupt-image` | No |
-| `wrong-platform` | `WRONG UPDATE FOR THIS PHONE!` + `update is for luckfox-armv7, this is qemu-aarch64` | No |
+| `wrong-platform` | `WRONG UPDATE FOR THIS PHONE!` + `update is for <other>, this is <yours>` — on a QEMU build today, `update is for qemu-aarch64, this is qemu-armv7` | No |
 | `future-kernel` | `WRONG UPDATE FOR THIS PHONE!` + `update needs kernel 99.0.0, running 6.12.47` | No |
 | `bad-root-hash` | **installs with no complaint**, then fails to boot — see below | No |
 
-Two things worth understanding from that table:
+Three things worth understanding from that table:
+
+**`wrong-platform` no longer names the phone.** `mkbadupdate.py` flips the
+manifest's platform to `qemu-aarch64` unless it is already that, so on a QEMU
+build the refusal now reads `update is for qemu-aarch64, this is qemu-armv7`
+— a retired platform rather than the Luckfox. The refusal is the one that
+matters and it is unchanged, but the case is weaker than it looks, because
+the pair it exercises is not the pair that would brick a phone. The pair that
+would is a `qemu-*` package on a `luckfox-armv7` image, and nothing in the
+matrix produces it; `test_manifest.c`'s cross-product is what pins that, over
+every platform combination rather than one. Worth knowing too:
+`nd_manifest_check_compatible()` has exactly one accepted off-diagonal pair —
+an image saying `qemu-aarch64` accepts a `qemu-armv7` package — and it is
+ordered. That pair is the *second* half of a migration, not a rescue on its
+own: the check runs in the running image's libneodct, so an image flashed
+before the rename is running the older bare `strcmp` and refuses the armv7
+package however it arrives. The first half is a transitional build stamped
+with the retired tag (`BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS="... qemu-aarch64"`
+on `neodct_qemu_defconfig`), which the old `strcmp` does accept and which
+brings the alias with it. The reverse, a `qemu-aarch64` package on a
+`qemu-armv7` image, is refused,
+because an `.ndsw` carries no kernel: the armv7 kernel already on the machine
+would `switch_root` into a rootfs of aarch64 binaries and find no `init` it
+can run. That is also the direction *Downgrade* reaches from the network,
+which is why it is a table of ordered pairs and not a family.
 
 **`corrupt-image` gets past the signature check.** The signature covers
 `manifest.json`, and the manifest's `sha256` covers the image — so a flipped

@@ -165,12 +165,22 @@
  *
  * ============ WHAT THIS IS NOT ============
  *
- * It is not system.os.platform. That value ("qemu-aarch64",
- * "luckfox-armv7") is the update system's compatibility key -- see
+ * It is not system.os.platform. That value ("qemu-armv7", "luckfox-armv7")
+ * is the update system's compatibility key -- see
  * nd_manifest_check_compatible() and nd_remote_asset_name() -- and its format
  * is load-bearing for every .ndsw ever built. This is a sibling of it, carried
  * in the same generated block, in a file cheap enough to read from a boot
  * script; the image= key holds that same tag for anything that wants it.
+ *
+ * It is not the .nap arch tag either, and after D1 the two no longer even
+ * COINCIDE. On the emulator a package is tagged luckfox-armv7 while this
+ * image is qemu-armv7; on the phone both say luckfox-armv7. They are two keys
+ * in two namespaces that happened to agree on both images until the ABI
+ * collapsed, and the coincidence ending is what proves they were always
+ * separate. The first reader to see both strings will take one of them for a
+ * typo: unifying them either strands every armv7 package or deletes the
+ * update discriminator this whole file exists to be. nd_nap.h carries the
+ * same paragraph from the package side.
  *
  * And it is not a device probe. The modem's SIM-vs-UNREACHABLE gate
  * (nd_modem.h) and the battery's SIM-vs-UNREADABLE gate (nd_battery.h) turn
@@ -189,6 +199,12 @@
  * host-x86_64 answer this file will never have, and an UNKNOWN there would
  * turn a missing flag into a phone that can install nothing. Both headers
  * carry the long version at the call site.
+ *
+ * That last one is worth a second sentence now, because D1 changed what it
+ * MEANS without changing a line of it. uname(2) no longer separates the two
+ * images -- both are armv7l -- which is exactly why this flag is the only
+ * discriminator left, and exactly why the package answer must not be routed
+ * through it. One fact, read as an argument in both directions.
  */
 
 #ifndef ND_PLATFORM_H_INCLUDED

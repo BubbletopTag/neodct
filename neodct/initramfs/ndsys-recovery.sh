@@ -5,10 +5,13 @@
 # install an update from an SD card without a working system, which is the
 # one thing a rescue shell cannot talk a non-developer through.
 #
-# The UI is plain text on /dev/tty1 so it appears on the phone's screen (the
-# kernel has CONFIG_FRAMEBUFFER_CONSOLE), falling back to /dev/console. The
-# panel is 240x175, which is 30 columns by 10 rows in the 8x16 font, so
-# every string here is written to fit in 30 columns.
+# The UI is plain text on /dev/tty1 where a framebuffer console is really
+# there, falling back to /dev/console. "Really there" is asked rather than
+# assumed -- see recovery_tty() -- because CONFIG_VT alone gives /dev/tty1 a
+# writable dummy VT with nothing behind it, and the emulator's armv7 kernel
+# is now exactly that machine. The panel is 240x175, which is 30 columns by
+# 10 rows in the 8x16 font, so every string here is written to fit in 30
+# columns.
 #
 # Menu structure follows the prototype in rec.py. Written in shell rather
 # than python because there is no python in the initramfs -- adding one would
@@ -48,6 +51,11 @@ CR=$(printf '\r')
 # partition except .ndsys, INCLUDING keymap.json, so a later read would lose
 # the keypad on the screen that says the data is gone.
 : "${RECOVERY_KEYMAP:=$MNT_USER/keymap.json}"
+# Where fbcon says it exists. A variable for the same reason RECUI_BIN is one:
+# the host tests can point it at a directory they make and unmake, and the
+# selector below is the whole difference between recovery drawing on the
+# phone's screen and recovery drawing into a dummy VT.
+: "${RECOVERY_FBCON:=/sys/class/graphics/fbcon}"
 # Latched when nd-recui reports it has no usable input device. There is no
 # point re-execing it once per screen to be told the same thing, and doing so
 # would leave the panel showing a menu while the tty draws another.
@@ -120,7 +128,31 @@ recovery_tty() {
     fi
     # tty1 is the framebuffer console: the phone's own screen. Without it
     # (headless, or no VT) fall back to whatever /dev/console is.
-    if [ -c /dev/tty1 ] && [ -w /dev/tty1 ]; then
+    #
+    # ============ AND "IS IT A CHARDEV" IS NOT THE QUESTION ============
+    #
+    # It used to be, on the stated premise that the kernel has
+    # CONFIG_FRAMEBUFFER_CONSOLE. That premise was true by accident of
+    # architecture: FRAMEBUFFER_CONSOLE is `default DRM_FBDEV_EMULATION`, the
+    # aarch64 QEMU kernel had DRM_VIRTIO_GPU, and the phone's SDK kernel has
+    # a real fbcon. The armv7 kernel drops DRM deliberately -- /dev/fb0 is
+    # vfb, the phone's own driver -- and FRAMEBUFFER_CONSOLE went with it,
+    # while CONFIG_VT and DUMMY_CONSOLE stayed on and keep /dev/tty1 present
+    # and writable.
+    #
+    # Measured on this branch's own zImage (-M virt -cpu cortex-a7 -m 64,
+    # video=vfb:on): /dev/tty1 is a writable character device, writing to it
+    # succeeds, /proc/consoles lists ttyAMA0 alone and
+    # /sys/class/graphics/fbcon does not exist. So the old test passed and
+    # the whole recovery menu went into a dummy VT: nothing on the emulated
+    # screen, nothing on the serial console but log() lines, and the keystroke
+    # reader on the same dead tty -- indistinguishable from a hung boot.
+    #
+    # fbcon registers itself under /sys/class/graphics, so its directory IS
+    # the answer to "is anything painting this VT onto a screen". Asking costs
+    # one test and is true on the phone, true on the old kernel, and false
+    # exactly where it should be.
+    if [ -c /dev/tty1 ] && [ -w /dev/tty1 ] && [ -d "$RECOVERY_FBCON" ]; then
         echo /dev/tty1
     else
         echo /dev/console
@@ -457,6 +489,70 @@ recovery_package_is_signed() {   # recovery_package_is_signed NDSW
         > /dev/null 2>&1
 }
 
+# --- which machine is this, and which machine is the package for? ---------
+#
+# ============ THE ABI COLLAPSE DELETED THE ACCIDENTAL GATE ============
+#
+# recovery_install_package() has never compared the manifest's platform with
+# the machine it is running on. It reads the field and records it into
+# installed.prop, and that was survivable only because the two images were
+# different architectures: a QEMU package sideloaded onto a phone produced a
+# filesystem whose init the phone's kernel could not exec, so the mistake
+# announced itself on the first boot after it.
+#
+# DECISIONS.md D1 gave the emulator the phone's ABI. A qemu-armv7 rootfs is
+# armv7 musl hard-float built against the same headers, so it BOOTS on the
+# phone. Worse, it is self-consistent: /NeoDCT/platform and ND_BUILD_PLATFORM
+# both come out of the same platform-id.sh row, so they agree, nd_platform()
+# reports QEMU with no MIS-ASSEMBLED IMAGE warning, and nd_modem__may_simulate()
+# -- which keys on nd_platform_is_hw() -- starts returning true on a phone with
+# a real SIM7600 in it. Every call and every SMS is then simulated, silently.
+# That is D3's failure exactly, reached through the one install path that has
+# no platform check, and it is reachable by copying a file into update/ on a
+# card: the two packages are named UPDATE-<platform>.ndsw and sit side by side
+# in buildroot/output/images.
+#
+# ============ WHY THIS ASKS RATHER THAN REFUSES ============
+#
+# Recovery's premise is a person standing in front of a phone that will not
+# boot, which is why it checks the release signature and declines to refuse
+# over it. A wrong-platform image is a different question from an unsigned
+# one -- it is the brick the automatic applier is never allowed to take -- but
+# the answer here is still a question, for the same reason: the one path back
+# from a phone with nothing bootable on it must not be closed by a record that
+# might itself be stale. What it must not do is stay silent, and that is what
+# changed.
+#
+# ============ AND WHERE THE DEVICE'S OWN NAME COMES FROM ============
+#
+# installed.prop, which recovery itself writes at the end of every install and
+# ndsys-apply.sh writes at the end of every boot-time one -- so this asks the
+# same question the booted phone asks (nd_manifest_check_compatible() against
+# the running image's own platform) with the same data. It is not read from
+# /NeoDCT/platform or version.prop because neither is mounted here: the system
+# image is a squashfs this code may have just been told is unbootable.
+#
+# Both sides unknown-or-empty means no comparison, not a refusal. A first
+# flash has no installed.prop and a person at a bench with a fresh board must
+# still be able to put something on it.
+recovery_device_platform() {   # recovery_device_platform [STATEDIR]
+    getprop platform "${1:-$STATE_DIR}/installed.prop" 2>/dev/null
+}
+
+recovery_package_platform() {   # recovery_package_platform NDSW
+    unzip -p "$1" manifest.json 2>/dev/null | recovery_manifest_field platform
+}
+
+# True when both names are known AND they differ. The two strings themselves
+# go on the screen, because "wrong platform" without them tells an owner
+# nothing they can act on.
+recovery_platform_mismatch() {   # recovery_platform_mismatch NDSW [STATEDIR]
+    _dev="$(recovery_device_platform "${2:-$STATE_DIR}")"
+    _pkg="$(recovery_package_platform "$1")"
+    [ -n "$_dev" ] && [ -n "$_pkg" ] || return 1
+    [ "$_dev" != "$_pkg" ]
+}
+
 # The size of a member, from the zip's own listing.
 recovery_member_size() {
     unzip -l "$1" "$2" 2>/dev/null | awk -v want="$2" '$NF == want {print $1; exit}'
@@ -642,6 +738,20 @@ recovery_action_update() {
             current=$((current + 1))
             [ "$current" = "$index" ] && chosen="$path"
         done
+    fi
+
+    # Asked first, because it decides whether the package belongs on this
+    # machine at all -- the signature question below is about where it came
+    # from. Both strings are named: since the ABI collapse a wrong-platform
+    # image boots, agrees with itself about which machine it is on, and
+    # simulates the radio, so "is this the right one" is no longer a question
+    # the next boot answers for you.
+    if recovery_platform_mismatch "$chosen"; then
+        if ! recovery_confirm "$(basename "$chosen") is for \
+$(recovery_package_platform "$chosen"), this is \
+$(recovery_device_platform). Install it anyway?"; then
+            return
+        fi
     fi
 
     # Two different questions, because they carry two different risks and a

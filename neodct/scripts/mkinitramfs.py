@@ -68,12 +68,42 @@ def _read_exact(handle, offset, size):
     return data
 
 
+EM_ARM = 0x28
+# EF_ARM_ABI_FLOAT_HARD | EF_ARM_ABI_FLOAT_SOFT. Only the two float-ABI bits
+# are compared: the rest of e_flags carries the EABI version and per-object
+# flags that can differ between two objects of the same ABI.
+EF_ARM_ABI_FLOAT_MASK = 0x600
+
+
 def elf_machine(path):
-    """(e_machine, is64, endian) for an ELF file.
+    """(e_machine, is64, endian, arm_float_abi) for an ELF file.
 
     The panel daemon is a prebuilt binary carried in the overlay, so it is
     present in every target tree -- including ones it cannot run on. Ship it
     only when it matches the architecture of the rest of the initramfs.
+
+    ============ WHAT THE FOURTH FIELD IS FOR ============
+
+    The first three used to be the whole tuple, and the comments at the three
+    call sites said the check would catch "a stale target/ left over from a
+    build for another board". That stopped being true the day the emulator
+    became armv7: both boards are now EM_ARM, ELFCLASS32, little-endian, so
+    the tuple is identical and the guard cannot tell a QEMU build from a
+    Luckfox one. Nothing in the tests noticed, because all three fabricate
+    their mismatch by patching a host x86_64 binary's e_machine to EM_ARM.
+
+    The float-ABI bits are what is left that still discriminates, and they
+    discriminate against the residue that is actually plausible now: an
+    nd-recui, nd-bootbar or neodct_displayd built with a distro
+    arm-linux-gnueabi cross compiler is EM_ARM/32/LE and would otherwise be
+    packed into the initramfs to fail at exec.
+
+    IT IS STILL NOT A BOARD CHECK, and no comment here should imply one. Two
+    hard-float armv7 musl builds are indistinguishable in an ELF header, which
+    is the point of the ABI collapse. PT_INTERP would separate musl from
+    glibc, and is deliberately NOT read: busybox may be static, so comparing
+    interpreters would drop a perfectly good nd-recui on a difference that
+    means nothing.
     """
     with open(str(path), "rb") as handle:
         ident = handle.read(16)
@@ -81,7 +111,14 @@ def elf_machine(path):
             raise ValueError("%s is not an ELF file" % path)
         endian = "<" if ident[5] == 1 else ">"
         machine = struct.unpack(endian + "H", _read_exact(handle, 18, 2))[0]
-        return machine, ident[4] == 2, endian
+        is64 = ident[4] == 2
+        float_abi = 0
+        if machine == EM_ARM:
+            # e_flags sits at 36 in an ELF32 header and 48 in an ELF64 one.
+            flags = struct.unpack(endian + "I",
+                                  _read_exact(handle, 48 if is64 else 36, 4))[0]
+            float_abi = flags & EF_ARM_ABI_FLOAT_MASK
+        return machine, is64, endian, float_abi
 
 
 def bmp_to_xrgb8888(path, width, height):
@@ -437,9 +474,12 @@ def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None,
                   "installing at boot will show the logo and nothing else"
                   % ", ".join(BOOTBAR_CANDIDATES), file=sys.stderr)
         else:
-            # Same architecture check the panel daemon gets, and for the same
-            # reason: shipping a binary the kernel cannot exec is the failure
-            # this whole file exists to avoid.
+            # Same ABI check the panel daemon gets, and for the same reason:
+            # shipping a binary the kernel cannot exec is the failure this
+            # whole file exists to avoid. What it catches is a host build and
+            # an ARM build of the wrong float ABI -- NOT a build for the other
+            # board, which since the ABI collapse is the same ELF header. See
+            # elf_machine().
             try:
                 if elf_machine(found) == elf_machine(busybox):
                     binaries["bin/nd-bootbar"] = found
@@ -464,12 +504,14 @@ def build(target_dir, init_script, output, extra_binaries=None, lib_dirs=None,
                 print("mkinitramfs: %s unreadable (%s); skipping"
                       % (PANEL_DAEMON, exc), file=sys.stderr)
 
-        # The recovery UI, gated on the SAME architecture check the panel
-        # daemon gets. install-boot writes into BINARIES_DIR, which is not
-        # architecture-tagged, so a stale cross build left over from another
-        # board is a real way to ship a binary the kernel cannot exec -- and
-        # this one is reached from the screen a person is standing in front
-        # of, where "nothing happened" is the whole failure report.
+        # The recovery UI, gated on the SAME ABI check the panel daemon
+        # gets. install-boot writes into BINARIES_DIR, which is not
+        # architecture-tagged, so a stale build left over from another
+        # toolchain is a real way to ship a binary the kernel cannot exec --
+        # and this one is reached from the screen a person is standing in
+        # front of, where "nothing happened" is the whole failure report.
+        # "Another BOARD" is no longer among the things this can see: one
+        # armv7 ABI now serves both, and elf_machine() says what is left.
         found = find_recui(target_dir, recui)
         if found is None:
             print("mkinitramfs: no nd-recui (looked at %s%s); recovery will "

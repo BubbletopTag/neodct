@@ -2,7 +2,19 @@
 """End-to-end cellular data test: boot the QEMU image headless with the
 SIM7600 passed through and prove the modem alone provides internet.
 
-What it does:
+IT CANNOT RUN ON THE KERNEL THIS TREE BUILDS, AND IT REFUSES RATHER THAN
+TRIES. The emulator is armv7 on -M virt now, and that kernel has no PCI, so
+no xhci, so no USB host controller at all -- and no USB_NET_QMI_WWAN for the
+data path either. Every device this script asks QEMU for is accepted by QEMU
+and invisible to the guest. It also still describes an aarch64 machine below,
+which is the shape it will need to be rewritten from; it is left intact for
+that, the way run_qemu.sh leaves its USB wiring intact behind a refusal.
+Bringing it back means the kernel symbols first: CONFIG_PCI +
+CONFIG_PCI_HOST_GENERIC for the xhci (PCI alone leaves the bridge unprobed --
+see buildroot/board/qemu/armv7-virt/linux.config) and CONFIG_USB_NET_QMI_WWAN
+for wwan0, then a re-boot for a fresh MemTotal, then this script's machine.
+
+What it did:
   1. finds the modem on the host USB bus (1e0e:9001) and checks access
   2. boots qemu-system-aarch64 with -snapshot (rootfs.ext4 stays pristine),
      no display, serial console on a unix socket
@@ -107,12 +119,40 @@ def main():
         os.path.dirname(os.path.abspath(__file__)),
         "..", "..", "buildroot", "output", "images")
     ap.add_argument("--images", default=default_images,
-                    help="dir with Image + rootfs.ext4")
+                    help="dir with the kernel + rootfs.ext4")
     ap.add_argument("--timeout", type=int, default=300,
                     help="max seconds to wait for S45modem's verdict")
     args = ap.parse_args()
 
-    kernel = os.path.join(args.images, "Image")
+    # Refused before anything is looked for, because the missing file would
+    # have sent the reader off to rebuild the tree for hours to produce an
+    # `Image` that will never exist again: an arm kernel builds a zImage. The
+    # real reason is a kernel symbol, and naming it is the whole difference
+    # between this and "build the image first".
+    sys.exit(
+        "qemu_modem_data_test: this cannot work on the kernel this tree "
+        "builds.\n"
+        "  The emulator is armv7 on -M virt: no CONFIG_PCI and no "
+        "CONFIG_PCI_HOST_GENERIC,\n"
+        "  so no xhci and no USB bus for `-device usb-host` to attach to, and "
+        "no\n"
+        "  CONFIG_USB_NET_QMI_WWAN for wwan0. QEMU accepts every device below "
+        "and the\n"
+        "  guest sees none of them -- and on a QEMU build no AT port at all is "
+        "still\n"
+        "  simulation, so what you would be watching is the phone placing "
+        "pretend calls.\n"
+        "  buildroot/board/qemu/armv7-virt/linux.config lists what each "
+        "absence costs;\n"
+        "  adding a symbol back means booting the kernel again for a fresh "
+        "MemTotal.\n"
+        "  This script also still boots qemu-system-aarch64 against an "
+        "`Image`, which\n"
+        "  this tree no longer produces (BR2_LINUX_KERNEL_ZIMAGE); its machine "
+        "needs\n"
+        "  rewriting with the rest.")
+
+    kernel = os.path.join(args.images, "zImage")
     rootfs = os.path.join(args.images, "rootfs.ext4")
     for f in (kernel, rootfs):
         if not os.path.exists(f):

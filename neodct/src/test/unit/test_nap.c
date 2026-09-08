@@ -37,6 +37,7 @@
 #include <unistd.h>
 
 #include "nd_nap.h"
+#include "nd_platform.h"
 #include "nd_storage.h"
 
 #include "platform_test.h"
@@ -137,6 +138,11 @@ static void tw_write(tw *t, const char *path)
 #define MANIFEST_LUCKFOX \
     "{\"name\": \"Demo App\", \"id\": \"13\", \"icon\": \"icon.png\", \"arch\": \"luckfox-armv7\"}"
 #define MANIFEST_PLAIN "{\"name\": \"Demo App\", \"id\": 13, \"icon\": \"icon.png\"}"
+/* The one-phone shape naming a machine this tree has retired. Two of these
+ * were published before the ABI collapsed, so it is a real archive rather
+ * than an invented one. */
+#define MANIFEST_RETIRED \
+    "{\"name\": \"Demo App\", \"id\": \"13\", \"icon\": \"icon.png\", \"arch\": \"qemu-aarch64\"}"
 
 /* A complete one-phone package: manifest, icon, code, one data file. */
 static void write_single(const char *path)
@@ -152,7 +158,13 @@ static void write_single(const char *path)
     tw_free(&t);
 }
 
-/* A universal package, with a subdirectory of the app's own. */
+/* A universal package, with a subdirectory of the app's own.
+ *
+ * The second tag is host-x86_64 and not qemu-aarch64, which it was until the
+ * ABI collapsed. Two-arch coverage is the point of this fixture and both tags
+ * it names have to be ones a package can still be built for; a retired tag
+ * here would make every install case below assert on the refusal path by
+ * accident. The retired tag gets its own cases, further down. */
 static void write_universal(const char *path)
 {
     tw t;
@@ -164,8 +176,8 @@ static void write_universal(const char *path)
     tw_dir(&t, "./lib/");
     tw_dir(&t, "./lib/luckfox-armv7/");
     tw_file(&t, "./lib/luckfox-armv7/app.so", "SO-LUCKFOX");
-    tw_dir(&t, "./lib/qemu-aarch64/");
-    tw_file(&t, "./lib/qemu-aarch64/app.so", "SO-QEMU");
+    tw_dir(&t, "./lib/host-x86_64/");
+    tw_file(&t, "./lib/host-x86_64/app.so", "SO-HOST");
     tw_dir(&t, "./art/");
     tw_file(&t, "./art/big.png", "PNG2");
     tw_write(&t, path);
@@ -191,22 +203,153 @@ static unsigned mode_of(const char *path)
  * 0. The pure functions
  * ------------------------------------------------------------------ */
 
+/* ============ THE HOLE THIS REPLACES ============
+ *
+ * What used to be here asserted that nd_nap_phone_arch() was one of four
+ * legal strings. That is true before AND after the day every .nap in the
+ * world silently re-labels, which is precisely what DECISIONS.md D1 does to
+ * this function: the emulator stopped being aarch64, so the aarch64 row of
+ * the mapping stopped describing any machine, and nothing failed. A test that
+ * cannot fail on the one change it is about is a test of the string set.
+ *
+ * So the mapping is pinned as a TABLE, negatives included. The aarch64 row is
+ * the one that fails if anyone restores the old answer. */
 static void test_machine_to_arch(void)
 {
     CHECK_STR(nd_nap_arch_for_machine("armv7l"), ND_NAP_ARCH_LUCKFOX);
-    CHECK_STR(nd_nap_arch_for_machine("aarch64"), ND_NAP_ARCH_QEMU);
+    CHECK_STR(nd_nap_arch_for_machine("armv7"), ND_NAP_ARCH_LUCKFOX);
     CHECK_STR(nd_nap_arch_for_machine("x86_64"), ND_NAP_ARCH_HOST);
+    /* Was ND_NAP_ARCH_QEMU. An arm64 box is a host build with no app.so tag. */
+    CHECK_STR(nd_nap_arch_for_machine("aarch64"), "");
+    /* aarch32 on an arm64 kernel: a rootfs/kernel pairing, not a machine. */
+    CHECK_STR(nd_nap_arch_for_machine("armv8l"), "");
+    /* The compare is case-sensitive, and uname(2) is lower case. */
+    CHECK_STR(nd_nap_arch_for_machine("ARMV7L"), "");
     CHECK_STR(nd_nap_arch_for_machine("mips"), "");
+    CHECK_STR(nd_nap_arch_for_machine(""), "");
     CHECK_STR(nd_nap_arch_for_machine(NULL), "");
-    /* Whatever this host is, the answer is one of the three or nothing --
-     * never a string a package could not have named. */
-    {
-        const char *mine = nd_nap_phone_arch();
+}
 
-        CHECK(mine != NULL);
-        CHECK(strcmp(mine, "") == 0 || strcmp(mine, ND_NAP_ARCH_LUCKFOX) == 0 ||
-              strcmp(mine, ND_NAP_ARCH_QEMU) == 0 || strcmp(mine, ND_NAP_ARCH_HOST) == 0);
+/* The retired tag is UNPRODUCIBLE, not merely absent from the table above. An
+ * install alias is the one thing that would turn a refused package into an
+ * EM_AARCH64 app.so in the menu failing at dlopen(), so "no machine string
+ * can reach it" is worth asserting over the whole input space this tree can
+ * meet rather than over the rows somebody remembered to write. */
+static void test_no_machine_string_produces_a_retired_tag(void)
+{
+    static const char *const MACHINES[] = {
+        "armv7l", "armv7",   "armv8l",  "aarch64", "x86_64", "i686",
+        "mips",   "riscv64", "ppc64le", "sparc64", "",       "arm",
+    };
+    size_t i;
+
+    for (i = 0u; i < sizeof MACHINES / sizeof MACHINES[0]; i++) {
+        const char *got = nd_nap_arch_for_machine(MACHINES[i]);
+
+        CHECK(got != NULL);
+        CHECK(strcmp(got, ND_NAP_ARCH_RETIRED_QEMU_AARCH64) != 0);
     }
+    CHECK(strcmp(nd_nap_arch_for_machine(NULL), ND_NAP_ARCH_RETIRED_QEMU_AARCH64) != 0);
+}
+
+/* nd_nap__set_machine() itself: it decides the answer, and putting it back
+ * really does put it back. The second half matters more than the first --
+ * an override that leaked would make every case after this one assert against
+ * a machine nobody is running. */
+static void test_the_machine_can_be_faked_and_put_back(void)
+{
+    char real[ND_NAP_ARCH_MAX];
+
+    (void)nd_strlcpy(real, nd_nap_phone_arch(), sizeof real);
+
+    nd_nap__set_machine("armv7l");
+    CHECK_STR(nd_nap_phone_arch(), ND_NAP_ARCH_LUCKFOX);
+    nd_nap__set_machine("x86_64");
+    CHECK_STR(nd_nap_phone_arch(), ND_NAP_ARCH_HOST);
+    /* The arm64 developer host, which used to answer qemu-aarch64 -- a host
+     * build claiming to be the QEMU phone. It can now install nothing, and
+     * that is the honest answer rather than a regression. */
+    nd_nap__set_machine("aarch64");
+    CHECK_STR(nd_nap_phone_arch(), "");
+
+    nd_nap__set_machine(NULL);
+    CHECK_STR(nd_nap_phone_arch(), real);
+    /* And whatever this host is, it is still one a package could have named
+     * -- or nothing at all. Never a tag no package may carry. */
+    CHECK(strcmp(real, "") == 0 || strcmp(real, ND_NAP_ARCH_LUCKFOX) == 0 ||
+          strcmp(real, ND_NAP_ARCH_HOST) == 0);
+    CHECK(strcmp(real, ND_NAP_ARCH_RETIRED_QEMU_AARCH64) != 0);
+}
+
+/* ============ ONE ABI, TWO IDENTITIES ============
+ *
+ * The single case that machine-checks what this whole stage is: uname(2) can
+ * no longer tell the phone from the emulator, and something else must.
+ *
+ * With the machine string held identical on both sides -- which is the real
+ * state of the two images now -- the platform flag still separates them and
+ * the package tag still does not. It fails in both directions:
+ *
+ *   if the arch answer is ever routed back through nd_platform(), the two
+ *   tags stop being equal and the CHECK_STR below breaks;
+ *
+ *   if the platform flag ever stops discriminating on identical uname, the
+ *   two identities collapse and the predicates above break.
+ *
+ * Those are the two ways this comes quietly undone, and neither of them makes
+ * anything else in the suite fail. */
+static void test_one_abi_two_identities(void)
+{
+    char hw_tag[ND_NAP_ARCH_MAX];
+    char qemu_tag[ND_NAP_ARCH_MAX];
+
+    nd_nap__set_machine("armv7l"); /* the same machine on both sides */
+
+    nd_platform__set_build(ND_PLATFORM_HW);
+    CHECK(nd_platform_is_hw());
+    CHECK(!nd_platform_is_qemu());
+    (void)nd_strlcpy(hw_tag, nd_nap_phone_arch(), sizeof hw_tag);
+
+    nd_platform__set_build(ND_PLATFORM_QEMU);
+    CHECK(nd_platform_is_qemu());
+    CHECK(!nd_platform_is_hw());
+    (void)nd_strlcpy(qemu_tag, nd_nap_phone_arch(), sizeof qemu_tag);
+
+    CHECK_STR(qemu_tag, hw_tag);            /* the ABI collapsed ...        */
+    CHECK_STR(hw_tag, ND_NAP_ARCH_LUCKFOX); /* ... onto this one tag        */
+
+    /* Both file-statics put back: the build constant outlives the per-case
+     * scratch root, and so does the machine override. */
+    nd_platform__set_build(ND_PLATFORM_UNKNOWN);
+    nd_nap__set_machine(NULL);
+}
+
+/* The wording, which is the whole reason the retired tag kept a name. Asked
+ * of the helper both call sites use, so the two of them cannot drift. */
+static void test_why_no_arch_names_a_retired_machine(void)
+{
+    nd_nap_info info;
+
+    memset(&info, 0, sizeof info);
+
+    /* Nothing known about the package: the generic sentence, which is the
+     * safe one -- it sends nobody anywhere. */
+    CHECK_STR(nd_nap_why_no_arch(NULL, ND_NAP_ARCH_LUCKFOX), ND_NAP_WHY_WRONG_PHONE);
+    CHECK_STR(nd_nap_why_no_arch(&info, ""), ND_NAP_WHY_WRONG_PHONE);
+
+    /* A package whose only program is for a machine that is gone. */
+    (void)nd_strlcpy(info.arches[0], ND_NAP_ARCH_RETIRED_QEMU_AARCH64, ND_NAP_ARCH_MAX);
+    info.n_arches = 1u;
+    CHECK_STR(nd_nap_why_no_arch(&info, ND_NAP_ARCH_LUCKFOX), ND_NAP_WHY_RETIRED_ARCH);
+
+    /* ...but one that ALSO carries a live tag is the wrong package rather
+     * than an old one: its author has already done the rebuild. */
+    (void)nd_strlcpy(info.arches[1], ND_NAP_ARCH_HOST, ND_NAP_ARCH_MAX);
+    info.n_arches = 2u;
+    CHECK_STR(nd_nap_why_no_arch(&info, ND_NAP_ARCH_LUCKFOX), ND_NAP_WHY_WRONG_PHONE);
+
+    /* And a caller that asked for a machine this tree no longer builds. */
+    CHECK_STR(nd_nap_why_no_arch(&info, ND_NAP_ARCH_RETIRED_QEMU_AARCH64), ND_NAP_WHY_RETIRED_ARCH);
 }
 
 static void test_dir_from_name(void)
@@ -259,7 +402,7 @@ static void test_inspect_single(void)
     CHECK_INT(info.n_arches, 1);
     CHECK_STR(info.arches[0], ND_NAP_ARCH_LUCKFOX);
     CHECK(nd_nap_info_has_arch(&info, ND_NAP_ARCH_LUCKFOX));
-    CHECK(!nd_nap_info_has_arch(&info, ND_NAP_ARCH_QEMU));
+    CHECK(!nd_nap_info_has_arch(&info, ND_NAP_ARCH_HOST));
     CHECK(info.has_icon);
     CHECK_INT(info.n_files, 4);
     CHECK_INT(info.bytes, strlen(MANIFEST_LUCKFOX) + 3u + 10u + 8u);
@@ -275,15 +418,22 @@ static void test_inspect_universal(void)
     CHECK_INT(info.id, 13);
     CHECK_INT(info.n_arches, 2);
     CHECK(nd_nap_info_has_arch(&info, ND_NAP_ARCH_LUCKFOX));
-    CHECK(nd_nap_info_has_arch(&info, ND_NAP_ARCH_QEMU));
-    CHECK(!nd_nap_info_has_arch(&info, ND_NAP_ARCH_HOST));
+    CHECK(nd_nap_info_has_arch(&info, ND_NAP_ARCH_HOST));
+    CHECK(!nd_nap_info_has_arch(&info, ND_NAP_ARCH_RETIRED_QEMU_AARCH64));
     CHECK(info.has_icon);
     CHECK_INT(info.n_files, 5);
 }
 
 /* The prefix field: a ustar writer splits a long path across prefix and
  * name, and a reader that ignores the prefix installs "app.so" where
- * "lib/qemu-aarch64/app.so" was meant. */
+ * "lib/qemu-aarch64/app.so" was meant.
+ *
+ * The tag is the retired one deliberately, and this is where the second half
+ * of that rule is pinned: INSPECTION STILL REPORTS IT. Reporting what a
+ * package says is not the same job as deciding whether to install it, and the
+ * install screen has to be able to name what it is looking at -- an owner
+ * reading "this package is for an older build" is owed the chance to see
+ * which build. Refusing is nd_nap_install()'s job, below. */
 static void test_inspect_joins_the_prefix(void)
 {
     nd_nap_info info;
@@ -297,7 +447,7 @@ static void test_inspect_joins_the_prefix(void)
 
     CHECK_INT(nd_nap_inspect("/card/P.nap", &info, NULL, 0u), ND_OK);
     CHECK_INT(info.n_arches, 1);
-    CHECK_STR(info.arches[0], ND_NAP_ARCH_QEMU);
+    CHECK_STR(info.arches[0], ND_NAP_ARCH_RETIRED_QEMU_AARCH64);
     CHECK(!info.has_icon);
 }
 
@@ -711,12 +861,12 @@ static void test_install_single(void)
     CHECK(!nd_path_exists("/card/apps/.DemoApp.replaced"));
     CHECK(!nd_path_exists("/card/apps/DemoApp/data"));
 
-    /* Another phone's package is refused, and the phone is named. */
+    /* Another machine's package is refused, and the machine is named. */
     why[0] = '\0';
     CHECK_INT(
-        nd_nap_install("/card/Demo.nap", "/card/apps", ND_NAP_ARCH_QEMU, &info, why, sizeof why),
+        nd_nap_install("/card/Demo.nap", "/card/apps", ND_NAP_ARCH_HOST, &info, why, sizeof why),
         ND_ERR_UNSUPPORTED);
-    CHECK(strstr(why, "not for") != NULL);
+    CHECK_STR(why, ND_NAP_WHY_WRONG_PHONE);
     /* ...and the install that was there is untouched by the refusal. */
     CHECK(read_file("/card/apps/DemoApp/app.so", text, sizeof text) == 10u);
 
@@ -736,27 +886,106 @@ static void test_install_universal_picks_this_phone(void)
     pt_mkdir("/card/apps");
 
     CHECK_INT(
-        nd_nap_install("/card/Uni.nap", "/card/apps", ND_NAP_ARCH_QEMU, NULL, why, sizeof why),
+        nd_nap_install("/card/Uni.nap", "/card/apps", ND_NAP_ARCH_HOST, NULL, why, sizeof why),
         ND_OK);
     CHECK(read_file("/card/apps/DemoApp/app.so", text, sizeof text) == 7u);
-    CHECK_STR(text, "SO-QEMU");
+    CHECK_STR(text, "SO-HOST");
     /* lib/ is the package's, not the app's. */
     CHECK(!nd_path_exists("/card/apps/DemoApp/lib"));
     /* The app's own subdirectory came across, with its mode. */
     CHECK(read_file("/card/apps/DemoApp/art/big.png", text, sizeof text) == 4u);
     CHECK_INT(mode_of("/card/apps/DemoApp/art"), 0755u);
 
-    /* The same package, for the other phone, replaces it. */
+    /* The same package, for the other machine, replaces it. */
     CHECK_INT(
         nd_nap_install("/card/Uni.nap", "/card/apps", ND_NAP_ARCH_LUCKFOX, NULL, why, sizeof why),
         ND_OK);
     CHECK(read_file("/card/apps/DemoApp/app.so", text, sizeof text) == 10u);
     CHECK_STR(text, "SO-LUCKFOX");
 
-    /* And the host tag, which this package does not carry. */
+    /* And a live tag this package does not carry. */
     CHECK_INT(
-        nd_nap_install("/card/Uni.nap", "/card/apps", ND_NAP_ARCH_HOST, NULL, why, sizeof why),
+        nd_nap_install("/card/Uni.nap", "/card/apps", "riscv64-nowhere", NULL, why, sizeof why),
         ND_ERR_UNSUPPORTED);
+    CHECK_STR(why, ND_NAP_WHY_WRONG_PHONE);
+}
+
+/* ============ A PACKAGE FOR A MACHINE THAT NO LONGER EXISTS ============
+ *
+ * Both layouts, because a special case in one of them is a special case that
+ * drifts. What is asserted is the sentence and the absence: refused means
+ * NOTHING HAPPENED, so there is no staging directory, no app directory, and
+ * nothing in the menu to fail at dlopen() one launch later -- which is the
+ * failure an install alias would have produced instead.
+ *
+ * The inspect() beside each install is the other half of the rule: the
+ * package is still perfectly readable and still reports what it is for. Only
+ * installing it is refused. */
+static void test_a_retired_arch_is_refused_by_name(void)
+{
+    nd_nap_info info;
+    char why[ND_NAP_WHY_MAX];
+    tw t;
+
+    pt_mkdir("/card/apps");
+
+    /* The universal shape, carrying only the retired tag. */
+    tw_init(&t);
+    tw_file(&t, "manifest.json", MANIFEST_PLAIN);
+    tw_file(&t, "icon.png", "PNG");
+    tw_file(&t, "lib/qemu-aarch64/app.so", "SO-QEMU");
+    tw_write(&t, "/card/Old.nap");
+    tw_free(&t);
+
+    CHECK_INT(nd_nap_inspect("/card/Old.nap", &info, NULL, 0u), ND_OK);
+    CHECK_INT(info.n_arches, 1);
+    CHECK_STR(info.arches[0], ND_NAP_ARCH_RETIRED_QEMU_AARCH64);
+
+    why[0] = '\0';
+    CHECK_INT(
+        nd_nap_install("/card/Old.nap", "/card/apps", ND_NAP_ARCH_LUCKFOX, &info, why, sizeof why),
+        ND_ERR_UNSUPPORTED);
+    CHECK_STR(why, ND_NAP_WHY_RETIRED_ARCH);
+    CHECK(!nd_path_is_dir("/card/apps/DemoApp"));
+    CHECK(!nd_path_exists("/card/apps/.DemoApp.installing"));
+
+    /* The one-phone shape, saying the same thing in the manifest instead. */
+    tw_init(&t);
+    tw_file(&t, "manifest.json", MANIFEST_RETIRED);
+    tw_file(&t, "icon.png", "PNG");
+    tw_file(&t, "app.so", "SO-QEMU");
+    tw_write(&t, "/card/Old1.nap");
+    tw_free(&t);
+
+    CHECK_INT(nd_nap_inspect("/card/Old1.nap", &info, NULL, 0u), ND_OK);
+    CHECK_STR(info.arches[0], ND_NAP_ARCH_RETIRED_QEMU_AARCH64);
+
+    why[0] = '\0';
+    CHECK_INT(
+        nd_nap_install("/card/Old1.nap", "/card/apps", ND_NAP_ARCH_LUCKFOX, &info, why, sizeof why),
+        ND_ERR_UNSUPPORTED);
+    CHECK_STR(why, ND_NAP_WHY_RETIRED_ARCH);
+    CHECK(!nd_path_is_dir("/card/apps/DemoApp"));
+}
+
+/* The other direction: a caller that hard-codes a machine this tree no longer
+ * builds. Nothing in the tree can do it -- nd_nap_phone_arch() cannot return
+ * a retired tag -- so this pins the guard rather than a reachable path, and
+ * the package it is handed is a perfectly good luckfox one to prove the
+ * refusal is about the ARGUMENT and not about the archive. */
+static void test_installing_FOR_a_retired_machine_is_refused(void)
+{
+    char why[ND_NAP_WHY_MAX];
+
+    write_single("/card/Demo.nap");
+    pt_mkdir("/card/apps");
+
+    why[0] = '\0';
+    CHECK_INT(nd_nap_install("/card/Demo.nap", "/card/apps", ND_NAP_ARCH_RETIRED_QEMU_AARCH64, NULL,
+                             why, sizeof why),
+              ND_ERR_UNSUPPORTED);
+    CHECK_STR(why, ND_NAP_WHY_RETIRED_ARCH);
+    CHECK(!nd_path_is_dir("/card/apps/DemoApp"));
 }
 
 /* ------------------------------------------------------------------ *
@@ -1064,6 +1293,10 @@ static void test_id_conflicts(void)
 int main(void)
 {
     RUN(test_machine_to_arch);
+    RUN(test_no_machine_string_produces_a_retired_tag);
+    RUN(test_the_machine_can_be_faked_and_put_back);
+    RUN(test_one_abi_two_identities);
+    RUN(test_why_no_arch_names_a_retired_machine);
     RUN(test_dir_from_name);
     RUN(test_display_name);
     RUN(test_inspect_single);
@@ -1075,6 +1308,8 @@ int main(void)
     RUN(test_refusals);
     RUN(test_install_single);
     RUN(test_install_universal_picks_this_phone);
+    RUN(test_a_retired_arch_is_refused_by_name);
+    RUN(test_installing_FOR_a_retired_machine_is_refused);
     RUN(test_replace_keeps_data);
     RUN(test_a_failed_replacement_puts_the_old_app_back);
     RUN(test_a_dead_install_is_replaced_quietly);

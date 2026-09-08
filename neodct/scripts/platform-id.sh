@@ -28,7 +28,34 @@
 # hand-assembled or tampered image, which is what it is for.
 #
 # So adding an image tag is one line here and every reader gets it at once.
-# qemu-armv7 is already listed against the day QEMU stops being aarch64;
+#
+# qemu-armv7 is what the emulator IS now -- neodct_qemu_defconfig builds armv7
+# cortex-a7, so the two images share one ABI and `uname -m` can no longer tell
+# them apart. This table is the discriminator that replaces it.
+#
+# qemu-aarch64 STAYS, and the reason is one build, not sentiment. It is the
+# update-compatibility key stamped into every QEMU image ever flashed, and
+# nd_manifest_check_compatible() runs in the RUNNING image's libneodct -- so
+# the D1 alias that lets such an image take a qemu-armv7 package can only ever
+# execute on an image that both carries the new code AND still calls itself
+# qemu-aarch64. This row is the only thing that lets one be built:
+#
+#   BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS="... qemu-aarch64"
+#
+# on the armv7 defconfig maps to word=qemu, board=qemu-virt, ND_PLATFORM_QEMU,
+# so the image is self-consistent -- an armv7 rootfs under the retired key,
+# which the old image's bare strcmp accepts and whose new libneodct then
+# carries the alias. Delete the row and that hop cannot be built, which
+# strands every flashed qemu-aarch64 image for good. nd_manifest.c's alias
+# block spells the whole migration out.
+#
+# It is NOT kept for the C fixtures. Nothing under neodct/src reads this file:
+# the only callers are buildroot/package/neodct/neodct.mk,
+# post-build-system-metadata.sh, post-build-prune-tests.sh and
+# neodct/tests/test_post_build_prune.py, and `make -C neodct/src test` is
+# green with the row gone. A justification that a reader can disprove in one
+# grep is worse than none, because it is the row itself that gets deleted.
+#
 # luckfox-armv7 is untouched, because a field phone that stops recognising its
 # own image stops taking updates.
 #

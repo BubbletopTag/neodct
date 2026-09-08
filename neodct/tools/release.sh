@@ -99,6 +99,31 @@ say "pushed $TAG -- the workflow is creating the release"
 # The asset name carries the platform: the phone downloads by that name
 # (UpdateService/remote.py asset_name), and one release holds a package
 # for each platform that was built.
+#
+# THE EMULATOR'S PLATFORM CHANGED, AND THE NAME WITH IT. QEMU builds are
+# qemu-armv7 now that the emulator is the phone's ISA; qemu-aarch64 is
+# retired. Nothing aliases on the download side -- nd_remote_asset_name()
+# builds one name from one platform string and never looks for the other's,
+# deliberately, because a fallback there would pull ~58 MB over a bearer that
+# can take an hour before the manifest got a chance to refuse it. So every
+# release published before this change holds UPDATE-qemu-aarch64.ndsw, a
+# qemu-armv7 image asks for UPDATE-qemu-armv7.ndsw, and it finds nothing
+# until the first release cut after this one.
+#
+# AND A RELEASE CUT FROM HERE CARRIES NOTHING AN OLDER QEMU IMAGE CAN TAKE.
+# The attach() calls below name qemu-armv7 and luckfox-armv7, so no asset an
+# image stamped qemu-aarch64 asks for is ever published again; and that image
+# is running the pre-rename libneodct, whose platform check is a bare strcmp
+# with no alias in it, so copying a qemu-armv7 package over by hand does not
+# get past it either. The D1 alias is real but it lives in code that image
+# has no way to reach. Moving one takes a deliberate TRANSITIONAL release --
+# an armv7 build stamped with the retired tag
+# (BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS="... qemu-aarch64"), uploaded here as
+# UPDATE-qemu-aarch64.ndsw by adding a third attach line for that build --
+# after which the image carries the alias and one qemu-armv7 package
+# finishes the move. Until somebody cuts that release, those images stay
+# where they are, and saying so is worth more than implying otherwise.
+# nd_manifest.c's alias block has the whole argument.
 attach() {   # attach <images-dir>
     # Prefer the archived copy for this exact version: UPDATE.ndsw is a
     # fixed path that the next build overwrites, so it may already be a
@@ -136,7 +161,7 @@ if command -v gh > /dev/null 2>&1; then
         sleep 4; tries=$((tries + 1))
     done
     if gh release view "$TAG" > /dev/null 2>&1; then
-        attach buildroot/output/images qemu-aarch64
+        attach buildroot/output/images qemu-armv7
         attach build-luckfox/images luckfox-armv7
         say "assets: $(gh release view "$TAG" --json assets \
                        -q '[.assets[].name] | join(", ")' 2>/dev/null)"

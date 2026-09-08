@@ -470,6 +470,96 @@ uint64_t nd_manifest_hash_offset(const nd_manifest *m)
  * check_compatible()
  * ------------------------------------------------------------------ */
 
+/* ============ THE ONE ALIAS, AND WHY IT IS SHAPED LIKE THIS ============
+ *
+ * DECISIONS.md D1 renamed the emulator's compatibility key from qemu-aarch64
+ * to qemu-armv7, and every QEMU image ever flashed carries the old one. This
+ * table is what stops those images being stranded on their own update line.
+ *
+ * It is a list of ORDERED PAIRS and it must never become anything else. Not a
+ * platform "family", not a prefix compare, not a canonicalising lookup with a
+ * fallback bucket -- the last of those is the worst, because a bucket makes
+ * two platforms that are BOTH unrecognised compare equal, and
+ * ND_SET_OS_PLATFORM_DFLT is "unknown" on any image whose version.prop did
+ * not survive. An image that knows nothing about itself must match nothing.
+ *
+ * Ordered, because the two directions are not the same question:
+ *
+ *   image qemu-aarch64 + package qemu-armv7 is the one entry. It works only
+ *   because that kernel is built with CONFIG_COMPAT, so an armv7 userland
+ *   runs on it. What it produces is not pretty -- uname reports armv8l, which
+ *   nd_nap_arch_for_machine() maps to "", so the image can install no .nap at
+ *   all -- but it BOOTS, and it is a step the owner asked for onto the line
+ *   that is still being published.
+ *
+ *   image qemu-armv7 + package qemu-aarch64 is the reverse and is a BRICK.
+ *   There is no kernel in an .ndsw (AGENTS.md; manifest.py only checks
+ *   min_kernel), so an armv7 kernel would switch_root into an aarch64
+ *   filesystem with no runnable init in it. Nothing in it executes. The
+ *   Downgrade app reaches that direction from the network, which is exactly
+ *   why the pair is ordered and not symmetric.
+ *
+ * And luckfox-armv7 is not in the table, in either column, ever. A phone that
+ * accepts a QEMU package is unrecoverable without a bench, a cable and
+ * upgrade_tool; the whole point of keeping two platform ids after the ABI
+ * collapsed is that this comparison still refuses. test_manifest.c walks the
+ * full cross-product with only the diagonal and this one pair accepted, and
+ * carries three rows -- luckfox-armv7 vs luckfox-armv7x, vs luckfox, and the
+ * reverse -- whose only job is to fail the day this becomes a strncmp or a
+ * split on '-'.
+ *
+ * ============ AND THE ONE BUILD THAT MAKES IT REACHABLE ============
+ *
+ * READ THIS BEFORE BELIEVING THE PAIR RESCUES ANYTHING BY ITSELF. This
+ * function runs in the libneodct of the image that is RUNNING. An image
+ * flashed before the rename is running the code as it stood then -- a bare
+ * strcmp with no table -- so it refuses a qemu-armv7 package however the
+ * package reaches it, and nd_remote_asset_name() on it still asks for
+ * UPDATE-qemu-aarch64.ndsw, which no release cut after the rename carries.
+ * The alias is in the rootfs it cannot reach. Left there, it would widen the
+ * one comparison standing between a machine and an unbootable install for a
+ * path nothing can take.
+ *
+ * What makes it reachable is a TRANSITIONAL BUILD, and it is buildable from
+ * this tree today because neodct/scripts/platform-id.sh still maps the
+ * retired tag:
+ *
+ *     BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS="... qemu-aarch64"
+ *
+ * on neodct_qemu_defconfig produces an armv7 image stamped, consistently,
+ * with the old key: /NeoDCT/platform says qemu, ND_BUILD_PLATFORM is
+ * ND_PLATFORM_QEMU, version.prop says qemu-aarch64. The old image's bare
+ * strcmp accepts that package, the aarch64 kernel it is still booting runs
+ * the armv7 userland because that kernel has CONFIG_COMPAT, and what comes
+ * up carries THIS code while still calling itself qemu-aarch64. That is the
+ * one image on which the pair below fires, and from it one qemu-armv7
+ * package finishes the move.
+ *
+ * So the pair is not the migration; it is the second half of one. The first
+ * half is a release built under the retired tag, and a release that does not
+ * carry one leaves those images where they were. AGENTS.md, release.sh and
+ * docs/TESTING_UPDATES.md say the same thing rather than promising a rescue
+ * that needs a build nobody made.
+ *
+ * `image` is what this machine says it is; `package` is what the manifest was
+ * built for. Both are whole strings. */
+static bool platform_alias_accepts(const char *image, const char *package)
+{
+    static const struct {
+        const char *image;
+        const char *package;
+    } PAIRS[] = {
+        {"qemu-aarch64", "qemu-armv7"},
+    };
+    size_t i;
+
+    for (i = 0u; i < sizeof PAIRS / sizeof PAIRS[0]; i++) {
+        if (strcmp(image, PAIRS[i].image) == 0 && strcmp(package, PAIRS[i].package) == 0)
+            return true;
+    }
+    return false;
+}
+
 nd_update_err nd_manifest_check_compatible(const nd_manifest *m, const char *platform,
                                            const char *kernel, char *why, size_t why_sz)
 {
@@ -481,10 +571,19 @@ nd_update_err nd_manifest_check_compatible(const nd_manifest *m, const char *pla
     if (platform == NULL)
         platform = "";
 
-    /* An exact byte comparison, deliberately. The Luckfox and QEMU images
-     * share a filename and installing the wrong one is unrecoverable without
-     * a reflash. */
-    if (strcmp(m->platform, platform) != 0) {
+    /* An exact byte comparison, deliberately, and then one named exception.
+     * The Luckfox and QEMU images share a filename and installing the wrong
+     * one is unrecoverable without a reflash -- which is why the exception is
+     * a single ordered pair with the reasoning above it rather than any kind
+     * of matching rule. The refusal SENTENCE is unchanged and pinned
+     * byte-for-byte by test_manifest.c and test_c_manifest_matches_python.py:
+     * it names both sides, which is what a developer needs.
+     *
+     * NOTHING ON THE DOWNLOAD SIDE KNOWS ABOUT THIS. nd_remote_asset_name()
+     * builds one name from one platform string and never looks for the
+     * other's; a fallback there would pull 58 MB over a bearer that can take
+     * an hour before this function got a chance to say no. */
+    if (strcmp(m->platform, platform) != 0 && !platform_alias_accepts(platform, m->platform)) {
         say(why, why_sz, "update is for %s, this is %s", m->platform, platform);
         return ND_UPD_ERR_INCOMPATIBLE;
     }

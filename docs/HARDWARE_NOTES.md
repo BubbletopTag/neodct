@@ -175,15 +175,21 @@ order.
   vfb_setup() stomps the enable flag at boot regardless of cmdline.
   Patched drivers/video/fbdev/vfb.c line ~399 to force-enable.
   See patches/luckfox-sdk/0001-vfb-force-enable.patch
+  (The QEMU kernel reaches the same place unpatched: vfb_setup() only zeroes
+  the flag when the option string is EMPTY, so `video=vfb:on` is enough. Same
+  driver, same /dev/fb0, no patch -- the patch here exists because the SDK's
+  bootargs are awkward to change, not because the cmdline form does not work.)
 - Real kernel cmdline comes from U-Boot env (.env.txt in SDK output),
   NOT from the DTS bootargs node. DTS bootargs are effectively ignored
   on this board.
-- Flash rootfs only, without touching boot partition:
-  sudo ./upgrade_tool di -rootfs rootfs.ubifs
+
 ## Flashing a NeoDCT rootfs
 
-The SDK flashes whatever is in `luckfox-pico/output/image/`. NeoDCT's own
-Buildroot produces the UBI image; the link between them is a copy:
+**The image that goes into the `rootfs` partition is `system.ubi`.** Not
+`rootfs.ubi`, and not `rootfs.ubifs`, even though the build still produces
+both and the partition is still called rootfs. See "The immutable layout on
+NAND" below for what the partition holds and `docs/FLASHING.md` for the whole
+procedure; the short version is:
 
 ```sh
 # 1. build the luckfox rootfs (build-luckfox/ is stale -- it points at a
@@ -192,17 +198,43 @@ make -C buildroot O=../build-lf \
   BR2_DEFCONFIG=../neodct/configs/luckfox_pico_mini_defconfig defconfig
 make -C buildroot O=../build-lf
 
-# 2. hand it to the SDK
-cp ../build-lf/images/rootfs.ubi ../luckfox-pico/output/image/rootfs.img
+# 2. build the initramfs and turn the build into the NAND images
+neodct/scripts/mkinitramfs.py --target-dir ../build-lf/target \
+    --init neodct/initramfs --output ../build-lf/images/initramfs.cpio.gz
+neodct/tools/mknand.sh ../build-lf/images ../build-lf/target ../build-lf/host
 
-# 3. flash just that partition (device in maskrom/loader mode)
+# 3. hand them to the SDK -- note the rename: the partition is called
+#    rootfs, the image in it is the system image
+cp ../build-lf/images/system.ubi   ../luckfox-pico/output/image/rootfs.img
+cp ../build-lf/images/userdata.ubi ../luckfox-pico/output/image/userdata.img
+
+# 4. flash just those partitions (device in maskrom/loader mode)
 cd ../luckfox-pico && sudo ./rkflash.sh rootfs
 ```
 
 `rkflash.sh` with no argument flashes everything (loader, uboot, boot, oem,
 userdata, rootfs) and will wipe user data. `rkflash.sh rootfs` is the one to
-use day to day. `sudo ./upgrade_tool di -rootfs rootfs.ubifs` is the
-lower-level equivalent.
+use day to day. `sudo ./upgrade_tool di -rootfs <image>` is the lower-level
+equivalent, and it takes the same image -- `system.ubi`.
+
+### Why `rootfs.ubi` is still built, and what happens if you flash it
+
+Buildroot's own `rootfs.ubifs`/`rootfs.ubi` are a leftover of the layout that
+came before dm-verity, and the UBIFS/UBI block in
+`neodct/configs/luckfox_pico_mini_defconfig` is deliberately kept: it is the
+only thing that pulls `host-mtd`, which is where `mknand.sh` gets `ubinize`
+and `mkfs.ubifs`. Delete it and the image assembler stops working. So the
+files are there, they look right, and they are not the system image.
+
+Flashing one is not recoverable from the phone. `mknand.sh` builds
+`system.ubi` as a UBI **static** volume named `system` holding a squashfs
+with a dm-verity hash tree appended; the boot cmdline attaches that partition
+first (so it is ubi0) and says `ubi.block=0,system`, and the initramfs mounts
+`/dev/ubiblock0_0` and checks it against the root hash. `rootfs.ubi` holds a
+single ubifs volume named `rootfs`, so `ubi.block=0,system` finds no such
+volume, no `/dev/ubiblock0_0` is created, the initramfs reports "no system
+image found" and drops into recovery -- with no card in the slot, that is a
+phone that needs maskrom mode, a cable and `upgrade_tool` to get back.
 
 ## Kernel cmdline lives in the U-Boot env, not the DTS
 

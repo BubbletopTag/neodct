@@ -413,6 +413,12 @@ static void test_asset_name(void)
     CHECK_STR(out, "UPDATE-luckfox-armv7.ndsw", "the asset name carries the platform");
     (void)nd_remote_asset_name("qemu-aarch64", out, sizeof out);
     CHECK_STR(out, "UPDATE-qemu-aarch64.ndsw", "and the other platform too");
+    /* The emulator's key after DECISIONS.md D1. There is no C change behind
+     * this: the name is built from system.os.platform, which the defconfig
+     * writes, so renaming the platform renames the asset and nothing else
+     * had to be told. */
+    (void)nd_remote_asset_name("qemu-armv7", out, sizeof out);
+    CHECK_STR(out, "UPDATE-qemu-armv7.ndsw", "and the emulator's, after the armv7 rename");
 
     (void)nd_remote_asset_name(NULL, out, sizeof out);
     CHECK_STR(out, "UPDATE-.ndsw", "a missing platform is the empty string, matching nothing");
@@ -664,6 +670,48 @@ static void test_the_real_listing_parses_for_both_platforms(void)
         CHECK(list[0].prerelease, "the real releases are prereleases");
         CHECK(list[0].notes[0] != '\0', "and the notes came through");
     }
+}
+
+/* ============ THE DOWNLOAD SIDE DOES NOT ALIAS ============
+ *
+ * nd_manifest_check_compatible() carries one ordered pair so that an already
+ * flashed qemu-aarch64 image can accept a qemu-armv7 package. Nothing here
+ * knows about it, and this is the case that says so against the bytes GitHub
+ * really sent: the same captured listing that answers for qemu-aarch64
+ * answers NOTHING for qemu-armv7.
+ *
+ * That empty answer is the correct one and not a regression. Every qemu asset
+ * in these two releases is an aarch64 rootfs -- 58,828,100 bytes of it in
+ * 0.3.14a -- and none of them can boot on an armv7 kernel. A fallback that
+ * went looking for the other platform's asset would spend that download over
+ * a bearer that can take an hour before the brick check got a word in. */
+static void test_the_download_side_never_aliases(void)
+{
+    nd_release rel;
+    char why[ND_REMOTE_WHY_MAX];
+
+    scenario_reset();
+    ctl_body("releases-live.json");
+    why[0] = '\0';
+    CHECK_INT(nd_remote_latest("qemu-armv7", &rel, why, sizeof why), ND_UPD_ERR_NO_PACKAGE,
+              "the armv7 emulator finds nothing in the releases published today");
+    CHECK(strstr(why, "UPDATE-qemu-armv7.ndsw") != NULL, "and says which asset it wanted");
+    CHECK_STR(rel.version, "", "with nothing handed back to install");
+
+    /* And the old image's line is untouched: the releases it has already
+     * seen still resolve. That is the PAST, and it is all this can show --
+     * nothing here says a release cut after the rename carries an asset it
+     * can ask for, because none does. Moving one of those images takes a
+     * transitional build under the retired tag (nd_manifest.c's alias
+     * block), not a fallback here, which would pull ~58 MB over a bearer
+     * that can take an hour before the manifest got a chance to refuse it. */
+    scenario_reset();
+    ctl_body("releases-live.json");
+    why[0] = '\0';
+    CHECK_INT(nd_remote_latest("qemu-aarch64", &rel, why, sizeof why), ND_UPD_OK,
+              "while the aarch64 image still finds its own");
+    CHECK_STR(rel.version, "0.3.14a", "the newest one it can take");
+    CHECK(strstr(rel.url, "UPDATE-qemu-aarch64.ndsw") != NULL, "and its own asset");
 }
 
 static void test_a_release_without_this_platform_is_skipped(void)
@@ -1220,6 +1268,7 @@ int main(void)
     test_the_endpoint_the_phone_asks_for();
     test_newest_version_not_newest_publication();
     test_the_real_listing_parses_for_both_platforms();
+    test_the_download_side_never_aliases();
     test_a_release_without_this_platform_is_skipped();
     test_garbage_and_the_wrong_shape();
     test_http_statuses();

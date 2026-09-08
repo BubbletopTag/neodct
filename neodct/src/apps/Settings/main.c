@@ -1996,7 +1996,11 @@ static bool confirm_install(nd_ui *ui, const char *path, const nd_nap_info *info
 
 /* Inspect, confirm, install, and say what happened. The app never names the
  * card's apps directory itself beyond the one constant nd_paths.h owns, and
- * never chooses which phone it is: nd_nap_phone_arch() reads the kernel.
+ * never chooses which phone it is: nd_nap_phone_arch() reads the kernel,
+ * because after DECISIONS.md D1 that is an ABI question about the CPU running
+ * now and not a question about which image this is. The two images share one
+ * ABI and one tag; what separates them is nd_platform(), and nothing on this
+ * path asks it.
  *
  * Returns true when something was installed, which is the caller's cue to
  * rescan -- the .nap is still there, and so, now, is the app. */
@@ -2012,8 +2016,13 @@ static bool install_one(nd_ui *ui, const char *path)
         install_notice(ui, why[0] != '\0' ? why : "Cannot read this package.");
         return false;
     }
+    /* The refusal an owner actually reads: this one fires first, so
+     * nd_nap_install()'s copy of the sentence is the one nobody sees. Both
+     * ask nd_nap_why_no_arch() so that a package for a machine this tree has
+     * retired cannot say the right thing in one of them and the wrong thing
+     * in the other. */
     if (arch[0] == '\0' || !nd_nap_info_has_arch(&info, arch)) {
-        install_notice(ui, "This package is not for\nthis phone.");
+        install_notice(ui, nd_nap_why_no_arch(&info, arch));
         return false;
     }
 

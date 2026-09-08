@@ -121,9 +121,16 @@ Anything built on top of this inherits that obligation.
 - **Sleepy is not verified on real hardware.** It was built and driven end to
   end against a scratch sysfs tree — the pin lands on both files, the panel
   goes dark and comes back, and both "nothing there" paths report honestly —
-  but no Luckfox has run it. QEMU's kernel has no `CONFIG_CPU_FREQ` and no
-  backlight, so on the emulator both screens correctly report that there is
-  nothing there, which is the one thing the emulator *can* confirm.
+  but no Luckfox has run it. The aarch64 emulator's kernel had no
+  `CONFIG_CPU_FREQ` and no backlight, so both screens correctly reported that
+  there was nothing there, which was the one thing it *could* confirm. The
+  armv7 kernel that replaced it sets `CPU_FREQ`, `CPU_FREQ_GOV_ONDEMAND`,
+  `CPUFREQ_DT`, `BACKLIGHT_CLASS_DEVICE` and `BACKLIGHT_PWM` — measured, the
+  `/sys/class/backlight` and `/sys/class/power_supply` directories exist and
+  are **empty**, because `-M virt` provides no such devices. So the subsystems
+  are there and the devices are not: still "nothing there", but for a
+  different reason, and now one that a device model rather than a kernel
+  rebuild would fix.
 - **There is still no idle screen-off.** `Screen off` is a row somebody
   presses, not a timeout. A real blanker belongs beside `battery_tick()` in
   `nd_ui.c`, and needs the same call in `nd_proc.c`'s key pump or it will

@@ -27,6 +27,19 @@ Port map at the stock PID `1e0e:9001`:
 
 ## QEMU passthrough recap
 
+**This does not work on the current emulator, and `NEODCT_MODEM=1` refuses
+rather than pretending.** `qemu-xhci` is a PCI device, `-M virt` offers no
+other USB host controller, and the armv7 kernel has neither `CONFIG_PCI` nor
+`CONFIG_PCI_HOST_GENERIC` — and both are needed, since `CONFIG_PCI` on its own
+leaves `-M virt`'s ECAM bridge unprobed and the bus still empty (measured:
+`scripts/config -e PCI` plus `olddefconfig` brings `USB_PCI` and
+`USB_XHCI_PCI` along for free and leaves `PCI_HOST_GENERIC` off). So the
+modem would attach to a bus the guest cannot see, and the phone would then
+*simulate* a radio at somebody who thought they were testing a real one.
+`run_qemu.sh` keeps the wiring below verbatim so that restoring the symbol
+restores the feature; everything in this section is the record of how it
+works and is unchanged for hardware.
+
 ```
 -device qemu-xhci,id=xhci
 -device usb-host,bus=xhci.0,vendorid=0x1e0e,productid=0x9001
@@ -270,6 +283,15 @@ probe-or-simulate pattern as BatteryService):
   of bailing out.
 
 ## Stage 4 — proving the full stack (modem = the internet)
+
+**Stage 4 does not run today, for the reason in the passthrough recap above,
+and `scripts/qemu_modem_data_test.py` now refuses and says so.** It needs
+`CONFIG_PCI` + `CONFIG_PCI_HOST_GENERIC` for the xhci and
+`CONFIG_USB_NET_QMI_WWAN` for the data path; it also still boots
+`qemu-system-aarch64` against an `Image` that this tree no longer produces, so
+its machine needs rewriting along with the kernel symbols. What follows is the
+record of the proof, kept intact so that restoring the symbols restores the
+test rather than requiring it to be reinvented.
 
 `scripts/qemu_modem_data_test.py` is the one-command end-to-end proof.
 It boots the image headless (`-snapshot`, so rootfs.ext4 is untouched)

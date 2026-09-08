@@ -73,12 +73,17 @@ Constants that live in headers we cannot include (`ND_KEY_ENTER` 28, `ND_KEY_CLE
 
 The single most useful finding: **there is no output difference to detect.**
 
-- QEMU: `video=Virtual-1:240x175M` on the cmdline, so `/dev/fb0` is already 240×175 and *is* the screen.
+- QEMU: `/dev/fb0` is vfb too, now that the emulator is armv7 and its kernel has no DRM. It comes up **640×480 at 8 bpp** and something in userspace has to set the mode; until that is wired up, "already 240×175" is not true there. It used to be: `video=Virtual-1:240x175M` named a DRM connector on a virtio-gpu, and that device is gone.
 - Phone: `/dev/fb0` is vfb; `panel_start` in the shell has already launched `neodct_displayd`, which forces 240×175 @ 32bpp (16bpp fallback) and mirrors fb0 to the ST7789 at 30 fps by diffing.
+
+The finding survives the change and is stronger for it: it is now the same
+*driver* on both sides, put into the same mode by the same ioctl, rather than
+two drivers that happened to agree. What it costs is that the mode-setting
+step is no longer free on the emulator side.
 
 So `nd-recui` opens `/dev/fb0`, `FBIOGET_VSCREENINFO` + `FBIOGET_FSCREENINFO`, honours `line_length` and `bits_per_pixel` (32 and 16 only; anything else → exit 2), mmaps, and draws. That is the same interface `panel_show`'s `cat > /dev/fb0` already uses. `nd_fb.h`'s `line_length == 0 → xres * bpp / 8` fallback is load-bearing on the Rockchip driver and gets copied.
 
-**Colour is not a problem here and must not be made into one.** The two framebuffers genuinely disagree about red's offset (QEMU B G R x, vfb R G B x — `nd_fb.h` documents it at length). Recovery draws only `000000` and `ffffff`, which are identical under any channel permutation, exactly as the two existing splashes are. **The recovery UI is one bit deep, on purpose.** That is a design constraint to write down, not an accident: it deletes the whole class of bug and matches the two assets already in the image.
+**Colour is not a problem here and must not be made into one.** The two framebuffers used to genuinely disagree about red's offset (QEMU B G R x, vfb R G B x — `nd_fb.h` documents it at length); they no longer do, because QEMU's framebuffer is vfb as well and a probe doing exactly what `force_mode()` does measured `red.offset 0, green 8, blue 16` there — the phone's order. `nd_fb_set_channel_order()` stays anyway: it is driven by what the driver reports rather than by which machine this is, so it costs nothing and it is what would catch the next divergence. Recovery draws only `000000` and `ffffff`, which are identical under any channel permutation, exactly as the two existing splashes are. **The recovery UI is one bit deep, on purpose.** That is a design constraint to write down, not an accident: it deletes the whole class of bug and matches the two assets already in the image.
 
 **`KDSETMODE`/`KD_GRAPHICS` is required, not optional.** With the VT left in its default mode, any key pressed while `nd-recui` is running is *echoed by the kernel onto tty1*, and fbcon paints that text over our framebuffer. So on entry: open `/dev/tty0` (falling back to `/dev/tty1`), `ioctl(KDSETMODE, KD_GRAPHICS)`; on exit, and from a `SIGTERM`/`SIGINT` handler, `KD_TEXT`. Failure is ignored — a build with no VT loses nothing.
 

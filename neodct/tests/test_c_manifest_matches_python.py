@@ -10,13 +10,27 @@ field name inside it -- so this compares not just the verdict but the message.
 The driver is a test binary, so it runs the only way one may: inside the
 test harness's sandbox, through c_driver.run().
 
-`DIVERGENT` below is the complete list of inputs where the two deliberately
-disagree, each with the reason. Every one of them is a manifest Python
-ACCEPTS and the C REFUSES: the C reads an SD card that arrived from
+`DIVERGENT` below is the complete list of PARSE inputs where the two
+deliberately disagree, each with the reason. Every one of them is a manifest
+Python ACCEPTS and the C REFUSES: the C reads an SD card that arrived from
 who-knows-where and has no arbitrary-precision integers or unbounded strings
 to fall back on. If a case ever moves the other way -- the C accepting
 something Python refuses -- that is a bug, and this test says so out loud
 rather than letting it hide in a list of expected differences.
+
+`PLATFORM_DIVERGENT` is the one place that rule is suspended, and it is
+suspended for exactly one ordered pair rather than relaxed. DECISIONS.md D1
+renamed the emulator's compatibility key and nd_manifest.c carries an alias
+so an image still saying `qemu-aarch64` can take a `qemu-armv7` package;
+manifest.py's check_compatible is a bare `!=` and refuses it. So this IS the
+C accepting what Python refuses -- the first such case in the file -- and it
+is safe only because of its direction: the pair is ordered, the reverse
+(an armv7 image taking an aarch64 package, which is the brick) is refused by
+both, and `luckfox-armv7` is in neither column. Anything else that reaches
+this table is the bug the docstring above describes, and the COMPAT matrix
+now varies the PACKAGE's platform as well as the image's so that it can be
+seen at all: with only the image varying, the divergent pair was
+unconstructible here and a second alias would have passed unnoticed.
 """
 
 import copy
@@ -322,28 +336,67 @@ def test_the_derived_size_saturates_where_python_grows(tmp_path):
     assert c_value["image_bytes"] == 2 ** 64 - 1, c_value
 
 
+# (image platform, package platform, kernel, min_kernel). A package platform
+# of None means GOOD's, which is what every row here used to leave it at --
+# and leaving it there is what hid the alias, since a divergence needs the two
+# sides to differ.
 COMPAT = [
-    ("qemu-aarch64", None, None),
-    ("luckfox-armv7", None, None),
-    ("qemu-aarch64", "6.12.47", "6.20.0"),
-    ("qemu-aarch64", "6.12.47", "6.12.0"),
-    ("qemu-aarch64", "6.12.47", "6.12.47"),
-    ("qemu-aarch64", "6.12", "6.12.47"),
-    ("qemu-aarch64", "6.12.47-rt", "6.12.47"),
-    ("qemu-aarch64", "6.x.3", "6.12"),
-    ("qemu-aarch64", "", "6.20.0"),
-    ("qemu-aarch64", None, "99.0.0"),
-    ("qemu-aarch64", "7", "6.99.99"),
-    ("qemu-aarch64", "6.99.99", "7"),
+    ("qemu-aarch64", None, None, None),
+    ("luckfox-armv7", None, None, None),
+    ("qemu-aarch64", None, "6.12.47", "6.20.0"),
+    ("qemu-aarch64", None, "6.12.47", "6.12.0"),
+    ("qemu-aarch64", None, "6.12.47", "6.12.47"),
+    ("qemu-aarch64", None, "6.12", "6.12.47"),
+    ("qemu-aarch64", None, "6.12.47-rt", "6.12.47"),
+    ("qemu-aarch64", None, "6.x.3", "6.12"),
+    ("qemu-aarch64", None, "", "6.20.0"),
+    ("qemu-aarch64", None, None, "99.0.0"),
+    ("qemu-aarch64", None, "7", "6.99.99"),
+    ("qemu-aarch64", None, "6.99.99", "7"),
+    # The pair the alias accepts, and its reverse -- the brick direction,
+    # which both sides refuse.
+    ("qemu-aarch64", "qemu-armv7", None, None),
+    ("qemu-armv7", "qemu-aarch64", None, None),
+    # The diagonal on the new key, and the field phone in both columns
+    # against both emulator keys.
+    ("qemu-armv7", "qemu-armv7", None, None),
+    ("luckfox-armv7", "qemu-armv7", None, None),
+    ("luckfox-armv7", "qemu-aarch64", None, None),
+    ("qemu-armv7", "luckfox-armv7", None, None),
+    ("qemu-aarch64", "luckfox-armv7", None, None),
+    # Two images that know nothing about themselves. They match, because the
+    # strings are equal and nothing buckets them -- nd_manifest.h says so in
+    # those words, and this row is what stops it drifting back to a claim the
+    # code does not make.
+    ("unknown", "unknown", None, None),
+    ("unknown", "qemu-armv7", None, None),
 ]
 
+# The ordered (image, package) pairs where the C accepts and Python refuses.
+# See the module docstring: this is the file's stated invariant suspended on
+# purpose, for one pair, with the reason written down beside it.
+PLATFORM_DIVERGENT = {
+    ("qemu-aarch64", "qemu-armv7"):
+        "DECISIONS.md D1's rename. nd_manifest.c carries one ordered alias so "
+        "an image still calling itself qemu-aarch64 can take the armv7 "
+        "package that replaced its line; manifest.py is a bare != and has no "
+        "table. The reverse pair is the brick and is refused by both, which "
+        "is the whole reason this direction is tolerable.",
+}
 
-@pytest.mark.parametrize("platform,kernel,min_kernel", COMPAT)
-def test_check_compatible_agrees_including_its_wording(tmp_path, platform, kernel, min_kernel):
+
+@pytest.mark.parametrize("platform,package_platform,kernel,min_kernel", COMPAT)
+def test_check_compatible_agrees_including_its_wording(
+        tmp_path, platform, package_platform, kernel, min_kernel):
     """THE BRICK CASE, and the only refusal in the subsystem that is never
     overridable. Compared down to the sentence, because the app pastes it
     straight after "WRONG UPDATE FOR THIS PHONE!"."""
-    raw = body() if min_kernel is None else body(min_kernel=min_kernel)
+    over = {}
+    if package_platform is not None:
+        over["platform"] = package_platform
+    if min_kernel is not None:
+        over["min_kernel"] = min_kernel
+    raw = body(**over)
     args = ["--compat", platform] if kernel is None else ["--compat", platform, kernel]
     c_verdict, c_fields = c_run(tmp_path, raw, *args)
 
@@ -354,5 +407,42 @@ def test_check_compatible_agrees_including_its_wording(tmp_path, platform, kerne
     except IncompatibleUpdate as exc:
         p_verdict, p_why = "ERR", str(exc)
 
-    assert c_verdict == p_verdict, (platform, kernel, min_kernel, p_why)
+    pair = (platform, package_platform or GOOD["platform"])
+    if pair in PLATFORM_DIVERGENT:
+        assert (c_verdict, p_verdict) == ("OK", "ERR"), (
+            pair, PLATFORM_DIVERGENT[pair], c_verdict, p_verdict)
+        return
+
+    assert c_verdict == p_verdict, (pair, kernel, min_kernel, p_why)
     assert c_fields.get("why", "") == p_why
+
+
+def test_the_alias_is_the_only_place_the_c_is_looser_than_python(tmp_path):
+    """Every ordered pair over every platform name the tree uses, so a second
+    alias -- or this one made symmetric, which is the brick direction --
+    cannot be added without this file naming it.
+
+    The C-side cross-product in test_manifest.c pins the same table; what
+    this adds is the comparison against the spec of record, which is the
+    thing the module docstring is about.
+    """
+    # "" is an image that reports no platform at all -- nd_manifest.h maps a
+    # NULL one onto it -- but not a package: a manifest with an empty
+    # platform is a parse error on both sides, before any of this is reached.
+    images = ("luckfox-armv7", "qemu-armv7", "qemu-aarch64", "unknown", "")
+    packages = ("luckfox-armv7", "qemu-armv7", "qemu-aarch64", "unknown")
+    looser = set()
+    for image in images:
+        for package in packages:
+            raw = body(platform=package)
+            c_verdict, _ = c_run(tmp_path, raw, "--compat", image)
+            try:
+                manifest_mod.parse(raw).check_compatible(platform=image)
+                p_verdict = "OK"
+            except IncompatibleUpdate:
+                p_verdict = "ERR"
+            if (c_verdict, p_verdict) == ("OK", "ERR"):
+                looser.add((image, package))
+            else:
+                assert c_verdict == p_verdict, (image, package)
+    assert looser == set(PLATFORM_DIVERGENT), looser

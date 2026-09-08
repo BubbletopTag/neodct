@@ -174,7 +174,25 @@ const char *nd_remote_repo(void);
  * nd_manifest_check_compatible() anyway, but downloading 60 MB to find that
  * out would be a poor way to learn it. ND_ERR_TOOLONG rather than a
  * truncated name, which would match no asset and read as "nothing
- * published". */
+ * published".
+ *
+ * ============ THE NAME IS NEVER ALIASED, AND THAT IS THE DESIGN ============
+ *
+ * One platform string in, one name out. nd_manifest_check_compatible() has a
+ * single ordered pair letting an old qemu-aarch64 image accept a qemu-armv7
+ * package; NOTHING HERE KNOWS ABOUT IT, and nothing here ever should. A
+ * fallback that also went looking for the other platform's asset would spend
+ * 58 MB -- the real size of UPDATE-qemu-aarch64.ndsw in 0.3.14a -- over a
+ * bearer that can take an hour, and hand the result to the brick check. The
+ * refusal belongs at the far cheaper end.
+ *
+ * The measured consequence of D1's rename, so it is not read as a
+ * regression: a qemu-armv7 image finds NOTHING in the releases published
+ * today. Every qemu asset in them is an aarch64 rootfs, none of which can
+ * boot on an armv7 kernel, so Update showing ND_UPD_ERR_NO_PACKAGE and
+ * Downgrade showing its empty page are the correct answers until the first
+ * armv7 release is cut. test_remote.c pins that against the captured bytes
+ * GitHub actually sent. */
 nd_err nd_remote_asset_name(const char *platform, char *out, size_t out_sz);
 
 /* ------------------------------------------------------------------ *

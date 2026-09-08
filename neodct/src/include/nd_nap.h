@@ -40,7 +40,7 @@
  *   manifest.json                       manifest.json
  *   icon.png                            icon.png
  *   app.so                              lib/luckfox-armv7/app.so
- *   web.ndb ...                         lib/qemu-aarch64/app.so
+ *   web.ndb ...                         lib/host-x86_64/app.so
  *                                       web.ndb ...
  *
  * In the first shape manifest.json MUST carry "arch": "<tag>" naming the
@@ -48,13 +48,20 @@
  * per phone the package supports and the installer copies the one matching
  * this phone to app.so; the lib/ tree itself is never installed. A package
  * with no app.so for this phone is refused before anything is written --
- * that is the whole point of the tag: a QEMU image trying an armv7 package
- * gets "not for this phone" rather than a dlopen error at first launch.
+ * that is the whole point of the tag: a package built for an ABI this
+ * machine does not have gets "not for this phone" rather than a dlopen
+ * error at first launch.
  *
- * The tags are ND_NAP_ARCH_* below. They name the TARGET rather than the
- * bare ISA because "armv7" alone would not say hard-float, Thumb-2 or which
- * libc, and the two builds this tree makes are already called luckfox and
- * qemu everywhere else.
+ * The tags are ND_NAP_ARCH_* below. They name an ABI rather than the bare
+ * ISA, because "armv7" alone would not say hard-float, Thumb-2 or which
+ * libc.
+ *
+ * The universal shape survives the two images collapsing onto one ABI, and
+ * it is worth saying why rather than leaving it looking vestigial. There is
+ * one PHONE tag now, but there has always been a second live tag --
+ * host-x86_64, which nd-shoot and the unit suite are in every day -- and the
+ * shape is what a future board plugs into: a new machine is a new lib/<tag>/
+ * entry in packages that already exist, not a new package format.
  *
  * ============ WHAT IS REFUSED, AND WHY ============
  *
@@ -125,11 +132,56 @@ extern "C" {
 
 #define ND_NAP_SUFFIX ".nap"
 
-/* The phones. nd_nap_arch_for_machine() maps uname(2)'s machine field onto
- * one of these; a package names them in lib/<tag>/ or in "arch". */
-#define ND_NAP_ARCH_LUCKFOX "luckfox-armv7" /* armv7l: the Luckfox Pico */
-#define ND_NAP_ARCH_QEMU    "qemu-aarch64"  /* aarch64: the QEMU image  */
-#define ND_NAP_ARCH_HOST    "host-x86_64"   /* x86_64: a host build     */
+/* The ABIs. nd_nap_arch_for_machine() maps uname(2)'s machine field onto one
+ * of these; a package names them in lib/<tag>/ or in "arch".
+ *
+ * ============ THE TAG NAMES AN ABI, AND NO LONGER A BOX ============
+ *
+ * It used to name the target, and there were two targets: the phone was
+ * armv7l and the emulator was aarch64. DECISIONS.md D1 made the emulator
+ * armv7 Cortex-A7 carrying the phone's musl / hard-float / NEON-VFPv4 /
+ * Thumb-2 ABI, so there is now ONE ABI, one app.so per app, and one tag on
+ * both machines. That is the prize and not a tidying: a 32-bit time_t, a
+ * pointer that no longer holds a size_t or an unaligned NEON load now
+ * surfaces in the emulator instead of on the bench.
+ *
+ * It is still SPELLED luckfox-armv7, deliberately. The tag is a wire format:
+ * it is the "arch" key in every manifest ever written, the lib/<tag>/ path in
+ * every universal package, mknap.py's --list output and the table in
+ * docs/NAP-PACKAGES.md. Renaming it to neodct-armv7 would strand every
+ * package built to the published spec, and the only way to un-strand them
+ * would be an install-time alias -- the exact mechanism the retired tag below
+ * exists to refuse, in the same change that refuses it. So it names an ABI
+ * and is spelled after the machine that ABI was chosen for, the way x86_64 is
+ * spelled after a chip nobody's laptop contains any more.
+ *
+ * ============ AND WHY THE RETIRED ONE IS STILL WRITTEN DOWN ============
+ *
+ * qemu-aarch64 is not an ABI this tree builds, and will not be one again. It
+ * is kept as a NAMED REFUSAL. Packages carrying it exist -- one of them is in
+ * this repository, which makes it the package a developer is most likely to
+ * try first -- and without the constant such a package falls into the generic
+ * "not for this phone", which sends its owner looking for a different phone.
+ * The truth is that the machine is gone and one rebuild now serves both, and
+ * nd_nap_why_no_arch() can only say so if the tag has a name to be keyed on.
+ * Naming it is also what gives mknap.py something to refuse, which is what
+ * stops a third such package being made.
+ *
+ * Accepting it as an INSTALL ALIAS for luckfox-armv7 is the one thing that
+ * must never happen. The app.so inside such a package is an EM_AARCH64 ELF
+ * (measured, in neodct/packages/), so an alias would unpack machine code the
+ * loader cannot run, carry the old app's data/ across, put the app in the
+ * menu and fail in dlopen() one launch later -- verbatim the failure this tag
+ * exists to prevent, moved one step further from its cause. An .ndsw platform
+ * key is an identity string and can in principle be aliased; a .nap tag is a
+ * claim about a file INSIDE the archive and cannot be.
+ *
+ * It is never produced: nd_nap_arch_for_machine() cannot return it, and
+ * test_nap.c walks every machine string this tree can meet to say so. */
+#define ND_NAP_ARCH_LUCKFOX "luckfox-armv7" /* armv7l: the phone and the emulator */
+#define ND_NAP_ARCH_HOST    "host-x86_64"   /* x86_64: a host build               */
+/* Not a machine any more. Named so it can be refused BY NAME; never made. */
+#define ND_NAP_ARCH_RETIRED_QEMU_AARCH64 "qemu-aarch64"
 
 #define ND_NAP_ARCH_MAX   32
 #define ND_NAP_ARCHES_MAX 8
@@ -177,6 +229,29 @@ extern "C" {
 #define ND_NAP_WHY_UNREADABLE \
     "Not allowed to read\nthe package.\nTake the card out and\nput it back in."
 
+/* The two ways a package can be for a machine this is not. Hoisted for the
+ * same reason and measured by the same test, and there are TWO of them
+ * because they send the reader to two different places.
+ *
+ * "Not for this phone" is true of a package built for hardware that exists,
+ * and the cure is to go and find the right package. A retired tag is not
+ * that: the machine it names is gone, no package for it will ever be
+ * published again, and the only cure is its author rebuilding once -- after
+ * which the one package serves both machines. Saying "not for this phone"
+ * there sends its owner hunting for a phone that would take it, and there is
+ * none.
+ *
+ * Neither sentence says "QEMU" or "64-bit". A qemu-aarch64 .nap lands on a
+ * phone's card as easily as on an emulator's -- the browser puts downloads in
+ * untrusted/ either way -- so both have to read true in both hands.
+ *
+ * Four lines, longest 19 characters, inside the shape ND_NAP_WHY_UNREADABLE
+ * already proved at four and 21. nd_msgdialog clips silently, so the width is
+ * not a guess: test_widgets_dialogs.c measures both of these. */
+#define ND_NAP_WHY_WRONG_PHONE "This package is not for\nthis phone."
+#define ND_NAP_WHY_RETIRED_ARCH \
+    "This package is for\nan older build.\nAsk its author for\na new one."
+
 /* How many .nap files a scan of the card reports. */
 #define ND_NAP_MAX_FOUND 64
 
@@ -204,9 +279,21 @@ typedef struct {
 /* uname(2)'s machine field as a package tag, or "" for a machine no package
  * can name. Cached on first use.
  *
+ * ============ uname(2) NO LONGER SEPARATES THE TWO IMAGES ============
+ *
+ * It used to: the phone said armv7l, the emulator said aarch64, and every
+ * .nap was labelled by that difference. Both say armv7l now, so this returns
+ * luckfox-armv7 on both -- which is correct, and is the entire point of
+ * collapsing the ABI. The consequence is worth stating in one sentence
+ * because nothing else in the tree will: nd_platform() is now the ONLY thing
+ * that can tell a phone from an emulator. test_nap.c's "one ABI, two
+ * identities" case is what stops either half of that coming quietly undone --
+ * the day the ABI stops being shared, or the day the platform flag stops
+ * discriminating.
+ *
  * DELIBERATELY NOT nd_platform.h, although /NeoDCT/platform's image= key
- * carries two of these three strings and the duplication is real. Two reasons
- * it must stay uname(2):
+ * carries one of these strings and the duplication is real. Three reasons it
+ * must stay uname(2), and the collapse strengthens each of them:
  *
  *   The question is an ABI question. A .nap carries native app.so files, so
  *   what decides which of them can be loaded is the machine executing this
@@ -214,16 +301,61 @@ typedef struct {
  *   proof: it is a legitimate answer here, nd-shoot and the unit tests are in
  *   it every day, and no image= will ever say it.
  *
- *   And UNKNOWN has no safe meaning in a package path. A phone whose flag was
+ *   UNKNOWN has no safe meaning in a package path. A phone whose flag was
  *   missing would resolve to "" and every install and every arch match would
  *   fail -- so a cheap-looking substitution turns a missing four-line file
  *   into a phone that cannot install anything. uname(2) does not have a
- *   missing case. */
+ *   missing case.
+ *
+ *   And a MISMATCH is worse than a missing flag. Two build artefacts that
+ *   name different machines make nd_platform() UNKNOWN for the life of the
+ *   process; routing the ABI answer through it would take a phone that is
+ *   still a perfectly ordinary armv7l and stop it installing packages it can
+ *   certainly run, over a disagreement about which image it is.
+ *
+ * ============ THE TAG AND system.os.platform NOW DIVERGE ============
+ *
+ * Said out loud because the first reader to see both strings will assume one
+ * of them is a typo. On the emulator the .nap tag is luckfox-armv7 and
+ * system.os.platform is qemu-armv7. They are two keys in two namespaces -- an
+ * ABI claim about a file inside an archive, and the update system's
+ * compatibility key -- which happened to coincide on both images until now,
+ * and the coincidence ending is what proves they were always separate.
+ * Unifying them either strands every armv7 package or deletes the update
+ * discriminator D1 exists to keep. nd_platform.h's "What this is not" block
+ * carries the same sentence from the other side. */
 const char *nd_nap_phone_arch(void);
 
-/* The mapping itself, exposed so a test can pin it: "armv7l" -> luckfox,
- * "aarch64" -> qemu, "x86_64" -> host, anything else -> "". Never NULL. */
+/* The mapping itself, exposed so a test can pin it: "armv7l" and "armv7" ->
+ * luckfox-armv7, "x86_64" -> host-x86_64, anything else -> "". Never NULL.
+ *
+ * "aarch64" is in that "anything else" now, and that is a behaviour change on
+ * an arm64 developer box: it used to answer qemu-aarch64 -- a host build
+ * claiming to be the QEMU phone -- and now answers "", so Settings on such a
+ * machine refuses every package. That is the honest answer. It is a host
+ * build, and there has never been a host-aarch64 app.so tag; adding one would
+ * put a fourth ABI into a tree that just spent a stage collapsing to one. */
 const char *nd_nap_arch_for_machine(const char *machine);
+
+/* Tests only, the sibling of nd_platform__set_build(): pretend uname(2) said
+ * that. NULL restores the real reading. Drops the cache as part of the call,
+ * so a case cannot forget.
+ *
+ * It exists because the hole this stage closes was unfakeable. All test_nap.c
+ * could say about nd_nap_phone_arch() was that the answer was one of the
+ * legal strings, which is true before AND after the day every .nap silently
+ * re-labels -- so the one change that could quietly break every package in
+ * the world was the one change no test could see.
+ *
+ * An environment variable was the cheaper seam and is refused for the reason
+ * nd_platform.h spells out at length: NEODCT_PLATFORM can arrive from
+ * /NeoDCT/User/env.sh, which is arbitrary shell run as root from the only
+ * writable partition and survives updates because an update replaces only the
+ * rootfs. After D1 the ABI answer is worth flipping for exactly the same
+ * reasons the platform answer is. Code already linked into the test's own
+ * address space is the honest framing, and like nd_platform__set_build() this
+ * is a symbol worth grepping for in review. */
+void nd_nap__set_machine(const char *machine);
 
 /* ---- names ------------------------------------------------------------ */
 
@@ -237,6 +369,22 @@ const char *nd_nap_display_name(const char *path, char *out, size_t out_sz);
 
 /* True when `arch` is one of info->arches. */
 bool nd_nap_info_has_arch(const nd_nap_info *info, const char *arch);
+
+/* Why a package has no app.so this machine can load, in the words the phone
+ * shows: ND_NAP_WHY_RETIRED_ARCH when the only machines it names are ones
+ * this tree has retired -- or when `arch` itself is one -- and
+ * ND_NAP_WHY_WRONG_PHONE otherwise. Never NULL, never allocated; `info` may
+ * be NULL and `arch` may be "".
+ *
+ * A package that names a retired tag AND a live one is the wrong package
+ * rather than an old one, so it gets the generic sentence: its author has
+ * already done the rebuild, and this owner is holding the wrong file.
+ *
+ * It exists because that sentence had two copies -- nd_nap_install()'s, and
+ * Settings' pre-install check, which refuses FIRST and is therefore the one
+ * an owner actually reads. A special case in one copy is a special case
+ * nobody sees. */
+const char *nd_nap_why_no_arch(const nd_nap_info *info, const char *arch);
 
 /* ---- the archive -------------------------------------------------------- */
 

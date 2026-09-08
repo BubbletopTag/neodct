@@ -44,19 +44,42 @@ mirror 403s on plain HTTP, fetching the tarball yourself over HTTPS into
 `buildroot/dl/<package>/` and re-running `make` is enough — the hash is checked
 either way, so a hand-fetched file is no less safe.
 
+**One of them is new since the ABI change.** Both defconfigs now set
+`BR2_KERNEL_HEADERS_5_10`, so the first build after pulling it fetches
+`linux-5.10.247.tar.xz` (~120 MB) at the very start of the toolchain step —
+a package neither target downloaded before, so an existing `BR2_DL_DIR` cache
+does not have it and an offline or restricted build stops there. The hash is
+in `package/linux-headers/linux-headers.hash`, so
+`BR2_DOWNLOAD_FORCE_CHECK_HASHES=y` is satisfied; it is a cache gap, not a
+correctness problem. Prime it first if the build box is not on an open
+network:
+
+```sh
+make BR2_DL_DIR=/path/to/cache linux-headers-source
+```
+
 ### NetSurf
 
 The browser is built from the vendored fork in `netsurf-neodct/`, which is in
 the repository — `buildroot/package/netsurf/netsurf.mk:21` rsyncs `netsurf/`
 and `libnsfb/` over the extracted upstream tarball.
 
-Verified building from a clean checkout on this branch:
+Verified building from a clean checkout, on the aarch64 QEMU target that
+preceded the ABI change:
 
 ```
 /usr/bin/netsurf-fb    3,275,568 bytes
 ELF 64-bit, ARM aarch64
 interpreter: /lib/ld-musl-aarch64.so.1
 ```
+
+Both targets are 32-bit ARM now, so the same check reads `ELF 32-bit LSB
+executable, ARM, EABI5` against musl's hard-float arm interpreter, and the
+size will differ. Whatever it says, it should say the SAME thing for a
+luckfox build and a QEMU build -- that is the point of the change, and `file`
+on the two `netsurf-fb` binaries is the cheapest way to see it. The browser
+also has nowhere to go under QEMU until the kernel has a NIC again; see the
+QEMU section below.
 
 If you ever see the browser fail with
 
@@ -219,10 +242,17 @@ neodct/tools/run_qemu.sh
 `run_qemu.sh` is driven entirely by environment variables — `NEODCT_SNAPSHOT`,
 `NEODCT_VERITY`, `NEODCT_SD`, `NEODCT_MODEM`, `NEODCT_NET`, `NEODCT_DEBUG` and
 more. Read its header before adding a flag; the one you want probably exists.
+Several of them refuse on the armv7 kernel and name the symbol they need:
+`NEODCT_NET`, `NEODCT_MODEM`, `NEODCT_BT`, `NEODCT_AUDIO`, `NEODCT_SD=share`.
 
-**Give the VM 72 MB.** That lands around 55 MB of usable memory, which is what
-the 32-bit Luckfox actually has after the kernel and CMA take their share. A VM
-with more RAM will happily run things the phone cannot.
+**The machine is `-M virt -cpu cortex-a7 -smp 1 -m 64`, and 64 is the whole
+story.** It emulated an aarch64 Cortex-A53 with 72 MB until the ABI change:
+72 was a fudge that landed near the phone's usable memory on a kernel fat
+enough that 64 would have been *harsher* than the hardware. The armv7 kernel
+is built up from a minimal base instead, and `-m 64` measures MemTotal
+53,824 kB against the phone's ~54 MB. So the emulator now has the phone's RAM
+rather than a number chosen to approximate its effects, and `NEODCT_MEM` is
+for the rare harness that genuinely needs more.
 
 ### Rebuilding after a code change
 

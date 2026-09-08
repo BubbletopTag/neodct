@@ -383,6 +383,193 @@ static void test_refuses_an_update_built_for_another_platform(void)
     nd_manifest_free(m);
 }
 
+/* ============ THE CROSS-PRODUCT ============
+ *
+ * The two cases above assert one acceptance and one refusal. That was enough
+ * while the comparison was a bare strcmp; it is not enough now that there is
+ * an exception in it, because "a phone can never accept a QEMU package" is a
+ * PROPERTY of the whole table and not of the row somebody remembered to test.
+ *
+ * So every platform is checked against every platform. The diagonal is
+ * compatible; ALIASES below is the complete list of off-diagonal pairs that
+ * are, and it is deliberately a second copy of the table in nd_manifest.c --
+ * adding a pair there without writing it here fails, which is the review this
+ * particular exception has to have.
+ *
+ * The list carries three near-misses whose only job is to fail if the compare
+ * is ever loosened: luckfox-armv7x, which fails a strncmp; and luckfox both
+ * ways round, which fails a split on '-' or a platform "family". "unknown" is
+ * in it because ND_SET_OS_PLATFORM_DFLT is "unknown", so two images that know
+ * nothing about themselves must not match each other -- they match only
+ * because the strings are equal, which is the diagonal, and never as a
+ * bucket.
+ */
+static const char *const PLATFORMS[] = {
+    "luckfox-armv7", "qemu-armv7", "qemu-aarch64", "unknown", "luckfox", "luckfox-armv7x",
+};
+
+static bool alias_accepts(const char *image, const char *package)
+{
+    static const struct {
+        const char *image;
+        const char *package;
+    } ALIASES[] = {
+        /* D1's rename. This fires only on an image that carries this code
+         * AND still calls itself qemu-aarch64 -- a transitional build under
+         * the retired tag; nd_manifest.c's block has the whole migration.
+         * The REVERSE of this pair is the brick and is not here. */
+        {"qemu-aarch64", "qemu-armv7"},
+    };
+    size_t i;
+
+    for (i = 0u; i < sizeof ALIASES / sizeof ALIASES[0]; i++) {
+        if (strcmp(image, ALIASES[i].image) == 0 && strcmp(package, ALIASES[i].package) == 0)
+            return true;
+    }
+    return false;
+}
+
+static void test_the_platform_cross_product(void)
+{
+    size_t pi;
+    size_t ii;
+
+    for (pi = 0u; pi < sizeof PLATFORMS / sizeof PLATFORMS[0]; pi++) {
+        mf f = mf_good();
+        char quoted[64];
+        char buf[4096];
+        nd_manifest *m;
+
+        (void)snprintf(quoted, sizeof quoted, "\"%s\"", PLATFORMS[pi]);
+        f.platform = quoted;
+        (void)mf_json(buf, sizeof buf, &f);
+        m = parse_ok(buf);
+        if (m == NULL)
+            continue;
+
+        for (ii = 0u; ii < sizeof PLATFORMS / sizeof PLATFORMS[0]; ii++) {
+            const char *image = PLATFORMS[ii];
+            bool want_ok = strcmp(image, PLATFORMS[pi]) == 0 || alias_accepts(image, PLATFORMS[pi]);
+            char why[ND_MANIFEST_WHY_MAX];
+            char want_why[ND_MANIFEST_WHY_MAX];
+            nd_update_err got;
+
+            why[0] = '\0';
+            got = nd_manifest_check_compatible(m, image, NULL, why, sizeof why);
+            if (want_ok) {
+                CHECK_INT(got, ND_UPD_OK);
+            } else {
+                CHECK_INT(got, ND_UPD_ERR_INCOMPATIBLE);
+                (void)snprintf(want_why, sizeof want_why, "update is for %s, this is %s",
+                               PLATFORMS[pi], image);
+                CHECK_STR(why, want_why);
+            }
+        }
+
+        /* No platform at all is not a wildcard. An image whose version.prop
+         * did not survive matches nothing rather than everything. */
+        CHECK_INT(nd_manifest_check_compatible(m, "", NULL, NULL, 0u), ND_UPD_ERR_INCOMPATIBLE);
+        CHECK_INT(nd_manifest_check_compatible(m, NULL, NULL, NULL, 0u), ND_UPD_ERR_INCOMPATIBLE);
+        nd_manifest_free(m);
+    }
+}
+
+/* The rows the cross-product exists for, spelled out on their own so that a
+ * failure names the property rather than a loop index. This is the whole
+ * reason two platform ids survived the ABI collapsing onto one. */
+static void test_a_phone_never_accepts_a_qemu_package(void)
+{
+    static const char *const QEMU_PACKAGES[] = {"qemu-armv7", "qemu-aarch64"};
+    size_t i;
+
+    for (i = 0u; i < sizeof QEMU_PACKAGES / sizeof QEMU_PACKAGES[0]; i++) {
+        mf f = mf_good();
+        char quoted[64];
+        char buf[4096];
+        char why[ND_MANIFEST_WHY_MAX];
+        char want[ND_MANIFEST_WHY_MAX];
+        nd_manifest *m;
+
+        (void)snprintf(quoted, sizeof quoted, "\"%s\"", QEMU_PACKAGES[i]);
+        f.platform = quoted;
+        (void)mf_json(buf, sizeof buf, &f);
+        m = parse_ok(buf);
+        if (m == NULL)
+            continue;
+
+        why[0] = '\0';
+        CHECK_INT(nd_manifest_check_compatible(m, "luckfox-armv7", NULL, why, sizeof why),
+                  ND_UPD_ERR_INCOMPATIBLE);
+        (void)snprintf(want, sizeof want, "update is for %s, this is luckfox-armv7",
+                       QEMU_PACKAGES[i]);
+        CHECK_STR(why, want);
+        nd_manifest_free(m);
+    }
+}
+
+/* The alias is ONE ORDERED PAIR, and this is the ordering.
+ *
+ * Accepted: an image still carrying the old qemu-aarch64 key takes a
+ * qemu-armv7 package. That kernel is built with CONFIG_COMPAT, so an armv7
+ * userland runs on it.
+ *
+ * Refused: the reverse. There is no kernel in an .ndsw, so an armv7 kernel
+ * handed an aarch64 rootfs switch_roots into a filesystem with no runnable
+ * init -- and the Downgrade app can reach that direction from the network,
+ * which is why symmetry here would be a brick and not a convenience. */
+static void test_the_alias_is_one_ordered_pair(void)
+{
+    mf f = mf_good();
+    char buf[4096];
+    char why[ND_MANIFEST_WHY_MAX];
+    nd_manifest *m;
+
+    f.platform = "\"qemu-armv7\"";
+    (void)mf_json(buf, sizeof buf, &f);
+    m = parse_ok(buf);
+    if (m == NULL)
+        return;
+    why[0] = '\0';
+    CHECK_INT(nd_manifest_check_compatible(m, "qemu-aarch64", NULL, why, sizeof why), ND_UPD_OK);
+    CHECK_STR(why, "");
+    nd_manifest_free(m);
+
+    f.platform = "\"qemu-aarch64\"";
+    (void)mf_json(buf, sizeof buf, &f);
+    m = parse_ok(buf);
+    if (m == NULL)
+        return;
+    why[0] = '\0';
+    CHECK_INT(nd_manifest_check_compatible(m, "qemu-armv7", NULL, why, sizeof why),
+              ND_UPD_ERR_INCOMPATIBLE);
+    CHECK_STR(why, "update is for qemu-aarch64, this is qemu-armv7");
+    nd_manifest_free(m);
+}
+
+/* The alias never reaches the kernel gate, and never softens it. A package
+ * taken through the alias is still refused if it needs a newer kernel --
+ * which is the gate that matters most in exactly that direction, because the
+ * old QEMU image runs a kernel the new one does not. */
+static void test_the_alias_does_not_skip_the_kernel_gate(void)
+{
+    mf f = mf_good();
+    char buf[4096];
+    char why[ND_MANIFEST_WHY_MAX];
+    nd_manifest *m;
+
+    f.platform = "\"qemu-armv7\"";
+    f.min_kernel = "\"6.20.0\"";
+    (void)mf_json(buf, sizeof buf, &f);
+    m = parse_ok(buf);
+    if (m == NULL)
+        return;
+    why[0] = '\0';
+    CHECK_INT(nd_manifest_check_compatible(m, "qemu-aarch64", "6.12.47", why, sizeof why),
+              ND_UPD_ERR_INCOMPATIBLE);
+    CHECK_STR(why, "update needs kernel 6.20.0, running 6.12.47");
+    nd_manifest_free(m);
+}
+
 static void test_refuses_an_update_that_needs_a_newer_kernel(void)
 {
     mf f = mf_good();
@@ -973,6 +1160,10 @@ int main(int argc, char **argv)
     RUN(test_rejects_a_json_document_that_is_not_an_object);
     RUN(test_accepts_a_matching_platform);
     RUN(test_refuses_an_update_built_for_another_platform);
+    RUN(test_the_platform_cross_product);
+    RUN(test_a_phone_never_accepts_a_qemu_package);
+    RUN(test_the_alias_is_one_ordered_pair);
+    RUN(test_the_alias_does_not_skip_the_kernel_gate);
     RUN(test_refuses_an_update_that_needs_a_newer_kernel);
     RUN(test_accepts_an_update_whose_kernel_requirement_is_met);
     RUN(test_kernel_requirement_is_ignored_when_absent);

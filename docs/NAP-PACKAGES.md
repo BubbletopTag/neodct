@@ -26,10 +26,13 @@ specification and this page is the human-readable version of it.
 # one phone: app.so at the root, "arch" in the manifest
 neodct/tools/mknap.py --app-dir Bible/ --so luckfox-armv7=luckfox-armv7/app.so -o Bible.nap
 
-# any phone: lib/<tag>/app.so per phone, and the phone picks its own
+# more than one target: lib/<tag>/app.so each, and the phone picks its own.
+# There is one PHONE tag today -- the emulator runs the same ABI -- so this
+# shape is the format keeping room for a second machine, and what the unit
+# tests exercise.
 neodct/tools/mknap.py --app-dir Bible/ \
     --so luckfox-armv7=luckfox-armv7/app.so \
-    --so qemu-aarch64=qemu-aarch64/app.so -o Bible.nap
+    --so host-x86_64=host/app.so -o Bible.nap
 
 # what the phone would see, and whether it would accept it
 neodct/tools/mknap.py --list Bible.nap
@@ -56,12 +59,12 @@ Every entry is relative to the app's directory; there is no top-level folder.
 Two shapes are accepted and both come out the same on the card:
 
 ```
-ONE PHONE                       ANY PHONE (universal)
+ONE TARGET                      ANY TARGET (universal)
 
 manifest.json                   manifest.json
 icon.png                        icon.png
 app.so                          lib/luckfox-armv7/app.so
-web.ndb ...                     lib/qemu-aarch64/app.so
+web.ndb ...                     lib/host-x86_64/app.so
                                 web.ndb ...
 ```
 
@@ -72,20 +75,57 @@ to `app.so` and never installs `lib/` itself.
 
 The tags:
 
-| tag | `uname -m` | phone |
+| tag | `uname -m` | target |
 | --- | --- | --- |
-| `luckfox-armv7` | `armv7l` | the Luckfox Pico Mini B: Cortex-A7, hard float, musl |
-| `qemu-aarch64` | `aarch64` | the QEMU development image |
+| `luckfox-armv7` | `armv7l` | the Luckfox Pico Mini B **and the QEMU image**: Cortex-A7, hard float, musl |
 | `host-x86_64` | `x86_64` | a host build; only the unit tests use it |
 
-They name the *target* rather than the bare ISA because "armv7" alone does
-not say hard-float, Thumb-2 or which libc, and the two builds this tree makes
-are already called luckfox and qemu everywhere else.
+A tag names an ABI, not a machine, because "armv7" alone does not say
+hard-float, Thumb-2 or which libc. **One tag now covers both phone and
+emulator**: DECISIONS.md D1 moved QEMU to armv7 Cortex-A7 carrying the
+phone's musl / hard-float / NEON-VFPv4 / Thumb-2 ABI, so there is one
+`app.so` per app and one package for both. That is the prize rather than
+tidying -- a 32-bit `time_t`, a pointer that no longer holds a `size_t`, an
+unaligned NEON load now fail in the emulator instead of on the bench.
+
+It is still *spelled* `luckfox-armv7` because the tag is a wire format: it is
+the `"arch"` key in every manifest ever written, the `lib/<tag>/` path in
+every universal package, and this table. Renaming it would strand every
+package built to the published spec, and the only way to un-strand them would
+be an install-time alias -- which is precisely what the retired tag below
+exists to refuse. So it names an ABI and is spelled after the machine that
+ABI was chosen for, the way `x86_64` is spelled after a chip nobody's laptop
+contains any more. The update system's platform key is a different string
+with a different job: that one still tells the two images apart, and on QEMU
+it reads `qemu-armv7` while the `.nap` tag reads `luckfox-armv7`. They are
+allowed to disagree because they answer different questions.
+
+`qemu-aarch64` is **retired**. It is not an ABI this tree builds and will not
+be one again, but it is still written down -- as a name to refuse by.
+Packages carrying it exist, `mknap.py` now exits rather than making another,
+and a phone offered one says so in as many words instead of falling into the
+generic refusal:
+
+```
+This package is for
+an older build.
+Ask its author for
+a new one.
+```
+
+A package that names a retired tag *and* a live one gets the generic refusal
+instead: its author has already done the rebuild, so that owner is holding
+the wrong file rather than an old one.
+
+Accepting it as an alias for `luckfox-armv7` is the one thing that must never
+happen: the `app.so` inside such a package is an EM_AARCH64 ELF, so an alias
+would unpack machine code the loader cannot run, put the app in the menu and
+fail in `dlopen()` one launch later -- the same failure the tag exists to
+prevent, moved one step further from its cause.
 
 A package with no `app.so` for this phone is refused before anything is
-written. That is the whole point of the tag: a QEMU image offered an armv7
-package says "This package is not for this phone" rather than failing in
-`dlopen()` at first launch.
+written, which is the whole point of the tag: the refusal happens on the
+install screen rather than in `dlopen()` at first launch.
 
 The install directory is derived from the manifest's `"name"` by keeping
 letters, digits, `_` and `-` and dropping everything else, so "Phone Book"
@@ -288,10 +328,41 @@ freetype, libpng, sqlite or libcrypto needs the real Buildroot toolchain.
 ## The first package
 
 `neodct/packages/Bible-lf.nap` is the Bible app (`neodct/contrib/Bible`),
-built for the Luckfox only; `neodct/packages/Bible-qemu-aarch64.nap` is the
-same app for the development image. Each is about 1.8 MB, most of which is the
-World English Bible in the app's own per-chapter zlib pack. Copy one onto a
-card, put the card in the phone, and install it from Settings.
+built for `luckfox-armv7` -- which since the emulator moved to armv7 means
+**both** machines, so it is the one to install either place. About 1.8 MB,
+most of which is the World English Bible in the app's own per-chapter zlib
+pack. Copy it onto a card, put the card in the phone, and install it from
+Settings.
+
+`neodct/packages/Bible-qemu-aarch64.nap` is the same app for the machine that
+no longer exists, and it is exactly the package a developer is most likely to
+reach for first. Installing it now gets the retirement message above. It is
+kept for the moment because refusing a real package by name is worth more
+than refusing a hypothetical one. Nothing can make another:
+`mknap.py --so qemu-aarch64=...` now exits instead of writing a file, and
+`mknap.py --list` on this package now reports the retired tag as a PROBLEM
+and exits non-zero, so the check made before a card trip and the answer from
+the phone agree.
+
+**And the tag is not the only thing checked any more.** `mknap.py` reads
+`e_machine`, `EI_CLASS`, `EI_DATA` and the ARM float-ABI bit out of every
+`--so`, because one armv7 tag now serves both machines: before this, passing
+`--so luckfox-armv7=<an aarch64 app.so>` built a package the phone installed
+and could not `dlopen`, which is exactly what the retired tag exists to
+prevent, reached by renaming instead of by aliasing.
+
+Three loose ends followed from the retirement and all three are now closed.
+`neodct/contrib/Bible/src/tools/build-bible-cross.sh` no longer cross-builds
+an aarch64 `app.so` nothing can package; `neodct/contrib/Bible/README.md` no
+longer says to add `--so qemu-aarch64=...` "for a package either phone can
+install", which one `--so luckfox-armv7=...` does by itself; and
+`neodct/contrib/Bible/install.sh` -- which was the dangerous one, because it
+copies straight into `neodct/overlay/` and so meets neither `mknap.py` nor
+`nd_nap_install()` -- refuses the retired target by name instead of baking an
+aarch64 `app.so` into the verity-covered squashfs.
+`neodct/contrib/Bible/qemu-aarch64/app.so` itself stays, for the same reason
+the `.nap` above does: it is the specimen those refusals are demonstrated
+against.
 
 (The Luckfox package was called `Bible-luckfox-armv7.nap` until it was renamed
 to match the sibling PlayStation repo's `-lf` convention. If a script of yours

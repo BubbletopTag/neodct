@@ -622,6 +622,36 @@ static void test_run_nothing_published(void)
         CHECK_STR(got, want, "and the page is 'Nothing published' for this platform");
 }
 
+/* The same page, reached by the tag that will actually hit it first.
+ *
+ * releases.json carries UPDATE-luckfox-armv7.ndsw and UPDATE-qemu-aarch64.ndsw
+ * and nothing else, which is the shape of every release published to date.
+ * After DECISIONS.md D1 renamed the emulator's key, a qemu-armv7 image can
+ * see none of them -- every qemu asset in them is an aarch64 rootfs that
+ * cannot boot on an armv7 kernel -- so this page is the ANSWER and not a
+ * fault, and it stays until two armv7 releases exist. Pinned here so that the
+ * first person to see an empty Downgrade on the new emulator finds a test
+ * saying it was expected.
+ *
+ * The case above reaches the same page with no version.prop at all; this one
+ * reaches it with a perfectly good one, which is a different claim. */
+static void test_run_nothing_published_for_the_armv7_emulator(void)
+{
+    const int32_t keys[] = {ND_KEY_CLEAR};
+    char got[DG_DIGEST_MAX];
+    char want[DG_DIGEST_MAX];
+    int rc = -1;
+
+    scenario_reset();
+    ctl_body("releases.json");
+    write_version_prop("qemu-armv7", "0.5.15a");
+    (void)run_scan(keys, 1u, &rc, got, sizeof got, NULL, 0u);
+
+    CHECK_INT(rc, 0, "app_run returns 0");
+    if (page_digest(want, sizeof want, *api.nothing_title, "for qemu-armv7", *api.nothing_body))
+        CHECK_STR(got, want, "the armv7 emulator is offered nothing, and is told so");
+}
+
 /* remote.NetworkError: curl's exit 6, "Could not resolve host". */
 static void test_run_no_connection(void)
 {
@@ -763,6 +793,7 @@ int main(void)
     RUN(test_progress);
     if (g_curl_ready) {
         RUN(test_run_nothing_published);
+        RUN(test_run_nothing_published_for_the_armv7_emulator);
         RUN(test_run_no_connection);
         RUN(test_run_lists_releases);
         RUN(test_run_already_running);

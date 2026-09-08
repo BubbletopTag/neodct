@@ -8,7 +8,7 @@ if [ -z "$TARGET_DIR" ] || [ ! -d "$TARGET_DIR" ]; then
 fi
 shift
 
-# Platform id, e.g. luckfox-armv7 / qemu-aarch64.
+# Platform id, e.g. luckfox-armv7 / qemu-armv7.
 #
 # Buildroot calls post-build scripts as
 #
@@ -16,9 +16,9 @@ shift
 #
 # and both defconfigs put the defconfig PATH in POST_SCRIPT_ARGS, because the
 # qemu board's post-image script needs it. So $2 is a build-machine path and
-# the platform id is LAST, not second. Reading $2 meant
-# "${PLATFORM%%-*}" = "luckfox" never matched and etc/inittab.luckfox was
-# never installed -- real hardware silently shipped the generic inittab.
+# the platform id is LAST, not second. Reading $2 meant the luckfox test far
+# below never matched and etc/inittab.luckfox was never installed -- real
+# hardware silently shipped the generic inittab for several releases.
 # post-build-system-metadata.sh already takes the last argument; this now
 # agrees with it.
 PLATFORM="unknown"
@@ -28,6 +28,34 @@ done
 case "$PLATFORM" in
     ""|*/*) PLATFORM="unknown" ;;
 esac
+
+# And an id this tree has never heard of stops the build, exactly as it does
+# in post-build-system-metadata.sh.
+#
+# This script is the reason that refusal was written, so it is a poor place
+# for the last fail-open: reading $2 instead of the last argument made the
+# luckfox test below silently false, and real hardware shipped the generic
+# inittab for several releases with nothing in the build saying so. Falling
+# through on an unrecognised tag has the same shape and the same cost -- the
+# image is assembled, it looks finished, and the console config is the wrong
+# one. There is nothing to rescue by carrying on: an image whose platform is
+# unknown is one no update can ever be built for.
+#
+# The answer is also what the inittab decision below reads, so a tag that
+# reaches this far has been through the table once and only once.
+PLATFORM_ID="$(dirname "$0")/platform-id.sh"
+PLATFORM_BOARD="$("$PLATFORM_ID" "$PLATFORM" board 2>/dev/null || echo "")"
+if [ -z "$PLATFORM_BOARD" ]; then
+    echo "[post-build] Unknown platform id \"$PLATFORM\"" >&2
+    echo "[post-build]   expected the last argument to be one of:" >&2
+    # Asked rather than spelled out, so this cannot name a stale set the day
+    # somebody adds a tag -- see platform-id.sh's own note on --tags.
+    "$PLATFORM_ID" --tags | sed 's/^/[post-build]     /' >&2
+    echo "[post-build]   -- see BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS in the" >&2
+    echo "[post-build]   defconfig. Refusing to prune an image whose console" >&2
+    echo "[post-build]   config would be chosen by falling through." >&2
+    exit 1
+fi
 
 rm -rf "$TARGET_DIR/tests"
 
@@ -301,10 +329,24 @@ if [ "${NEODCT_SKIP_STRIP:-0}" != "1" ] && [ -d "$TARGET_DIR/NeoDCT" ]; then
     fi
 fi
 
-# Luckfox-specific console config: replace generic inittab
-# only when called with a luckfox platform id.
+# Luckfox-specific console config: replace the generic inittab only on the
+# board that has the console it names.
+#
+# This used to be a string-prefix test on the tag -- "${PLATFORM%%-*}" =
+# "luckfox" -- which is a second, private copy of a mapping platform-id.sh
+# exists to be the only copy of. Its own header argues that at length: a
+# derived answer cannot drift from the table, and a prefix rule can, silently,
+# the first time a tag is named in a way the prefix does not anticipate.
+#
+# It asks for the BOARD and not the word, and that is the load-bearing half.
+# inittab.luckfox exists to put a getty on ttyFIQ0, which is a fact about the
+# Pico Mini and not about "hardware in general": a future devkit-x ships as
+# platform=hw and must not inherit a console it does not have. The cost is
+# that a second Luckfox board has to be added here by hand, which is the right
+# way round -- a decision somebody makes, rather than a prefix that matches by
+# accident.
 LUCKFOX_INITTAB="$TARGET_DIR/etc/inittab.luckfox"
-if [ "${PLATFORM%%-*}" = "luckfox" ]; then
+if [ "$PLATFORM_BOARD" = "luckfox-pico-mini-b" ]; then
     if [ -f "$LUCKFOX_INITTAB" ]; then
         cp "$LUCKFOX_INITTAB" "$TARGET_DIR/etc/inittab"
     fi

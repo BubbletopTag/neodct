@@ -2580,7 +2580,8 @@ Buildroot calls a post-build script as
 
 and **both** defconfigs set `BR2_ROOTFS_POST_SCRIPT_ARGS="$(BR2_DEFCONFIG)"` because the
 qemu board's post-image script needs the defconfig path. So `$2` is an absolute path on
-the build machine and the platform id (`luckfox-armv7` / `qemu-aarch64`) is **last**.
+the build machine and the platform id (`luckfox-armv7` / `qemu-armv7`, `qemu-aarch64`
+when this was written) is **last**.
 
 `post-build-prune-tests.sh` read `$2`. `"${PLATFORM%%-*}" = "luckfox"` therefore never
 matched, and `etc/inittab.luckfox` was deleted at the end of the script without ever

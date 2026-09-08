@@ -2,12 +2,23 @@ name: Release
 
 # Cutting a release is pushing a tag. Everything else here is bookkeeping.
 #
-# No .ndsw is attached yet, deliberately. Building one means building the
-# whole buildroot tree, which takes far longer than a runner should hold
-# and needs the signing key -- and an unsigned package published as a
-# release would be worse than no package at all, because the phone would
-# show "BAD SIGNATURE! UPDATE MAY BE CORRUPT!!" to whoever installed it.
-# Attach one by hand for now; wiring the build in is a separate job.
+# THIS JOB ATTACHES NO .ndsw, deliberately, and that is not the same as a
+# release having none. Building a package means building the whole buildroot
+# tree, which takes far longer than a runner should hold, and it needs the
+# signing key -- and an unsigned package published as a release would be
+# worse than no package at all, because the phone shows "BAD SIGNATURE!
+# UPDATE MAY BE CORRUPT!!" to whoever installs it. So the packages are built
+# and uploaded from a developer's machine by neodct/tools/release.sh, which
+# waits for this job to create the release and then uploads one asset per
+# platform it can find a signed, version-matching package for. 0.3.13a and
+# 0.3.14a carry two each; see neodct/tests/remote/releases-live.json, which
+# is a capture of what this repository actually publishes.
+#
+# The names to expect are UPDATE-luckfox-armv7.ndsw and, from the first
+# release cut after the emulator moved to armv7, UPDATE-qemu-armv7.ndsw.
+# UPDATE-qemu-aarch64.ndsw is the retired name and is still what every
+# release published so far carries; nothing aliases on the download side, so
+# an image built from this tree finds nothing until that first release.
 
 on:
   push:

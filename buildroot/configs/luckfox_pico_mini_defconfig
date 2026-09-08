@@ -9,7 +9,33 @@ BR2_ARM_FPU_NEON_VFPV4=y
 # 32 KB of L1 instruction cache that density buys more than the occasional
 # extra instruction costs.
 BR2_ARM_INSTRUCTIONS_THUMB2=y
-BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_12=y
+# The UAPI this userland compiles against: 5.10, because that is what the
+# phone runs -- the SDK's 5.10.110 -- and buildroot's own rule is that the
+# headers must never be newer than the oldest kernel that will run the image.
+#
+# THIS LINE AND THE ABSENT BR2_LINUX_KERNEL BLOCK ARE ONE EDIT. They look
+# unrelated and are not. This target used to build a 6.12.47 kernel out of the
+# QEMU board's arm64 config -- an artefact nothing flashes, since FLASHING.md
+# builds the phone's kernel with ./build.sh kernel inside the SDK distrobox --
+# and through the BR2_KERNEL_HEADERS_AS_KERNEL choice default that dead kernel
+# was choosing the UAPI for the WHOLE image: 6.12 headers for a 5.10 phone.
+# Anything that feature-tests a header at build time then got an answer the
+# hardware cannot honour, and SECURITY-PLAN.md's "the 5.10 vendor kernel has
+# no Landlock" is the worked example -- 6.12 defines that UAPI, so the #ifdef
+# compiles and the syscall does not exist.
+#
+# And removing the kernel alone makes it WORSE, measured rather than reasoned:
+# with BR2_LINUX_KERNEL gone the choice falls through to
+# BR2_KERNEL_HEADERS_6_18, and BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_12 --
+# what stood on this line -- vanishes without a word, because the "custom
+# kernel headers series" choice it belonged to loses its dependency. 6.12 to
+# 6.18 with nothing in the build log saying so. Never do one half of this.
+#
+# The genuinely right answer is one level further and is not reachable from
+# here: BR2_KERNEL_HEADERS_CUSTOM_TARBALL pointed at the Rockchip SDK's own
+# 5.10.110 tree, vendor patches included. That tree is not in this repository
+# (DECISIONS.md D6). Mainline 5.10 is the closest thing this build can check.
+BR2_KERNEL_HEADERS_5_10=y
 BR2_JLEVEL=8
 BR2_GLOBAL_PATCH_DIR="board/qemu/patches"
 BR2_DOWNLOAD_FORCE_CHECK_HASHES=y
@@ -45,12 +71,21 @@ BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS="luckfox-armv7"
 # ndusr runs every app, the browser included, as root.
 BR2_ROOTFS_POST_IMAGE_SCRIPT="board/qemu/post-image.sh ../neodct/scripts/check-users.sh"
 BR2_ROOTFS_POST_SCRIPT_ARGS="$(BR2_DEFCONFIG)"
-BR2_LINUX_KERNEL=y
-BR2_LINUX_KERNEL_CUSTOM_VERSION=y
-BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.12.47"
-BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
-BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="board/qemu/aarch64-virt/linux.config"
-BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
+# NO BR2_LINUX_KERNEL HERE, AND THE ABSENCE IS THE DECISION.
+#
+# There was one, and it pointed a BR2_arm build at the QEMU board's arm64
+# config. It compiled -- olddefconfig drops the arm64 symbols and fills in arm
+# defaults -- and it produced a kernel that is never flashed, so it was several
+# minutes of every build spent on an output with no consumer. Checked before
+# deleting it, so that nobody re-adds it assuming it was load-bearing:
+# FLASHING.md builds the phone's kernel with ./build.sh kernel inside the SDK
+# distrobox and copies only system.ubi / userdata.ubi out of buildroot;
+# neodct/tools/mknand.sh touches no kernel artefact at all; no .ndsw carries a
+# kernel (AGENTS.md: a kernel-config change needs a full reflash); and
+# manifest min_kernel is read from version.prop, not from anything built here.
+#
+# Re-adding it would also silently recapture the kernel headers through the
+# AS_KERNEL choice default and undo the pin at the top of this file.
 BR2_PACKAGE_DEJAVU=y
 # python3, Pillow, mutagen and miniaudio were here until the last app was
 # ported. Nothing on the phone runs Python any more: /bin/run_neodct.sh
@@ -102,6 +137,23 @@ BR2_PACKAGE_UQMI=y
 # BR2_TARGET_ROOTFS_TAR is not set
 BR2_TARGET_ROOTFS_SQUASHFS=y
 BR2_TARGET_ROOTFS_SQUASHFS4_XZ=y
+# --- UBIFS/UBI: what actually puts ubinize and mkfs.ubifs on the host ------
+#
+# This looks like it builds an unused rootfs.ubifs, because it does -- the
+# phone's root is squashfs under dm-verity on a ubiblock disk now. Do not
+# delete it. It is the ONLY thing in this configuration that pulls host-mtd
+# (fs/ubifs/ubifs.mk: ROOTFS_UBIFS_DEPENDENCIES = host-mtd; the only other
+# route anywhere in fs/ or package/ is jffs2, which is not enabled), and
+# neodct/tools/mknand.sh takes $HOST_DIR/sbin/ubinize and
+# $HOST_DIR/sbin/mkfs.ubifs and dies when either is missing. Removing the
+# block removes the hardware image assembler's tools, several steps away from
+# anything that mentions them.
+#
+# Nor is it interchangeable with a plain BR2_PACKAGE_HOST_MTD=y, which is the
+# obvious tidier substitute: mknand.sh cites the LEB/PEB/subpage numbers below
+# as its authority in as many words -- "the same numbers buildroot uses for
+# rootfs.ubi (see the luckfox defconfig)". Swap the block out and that
+# reference points at nothing and the NAND geometry is owned by nobody.
 BR2_TARGET_ROOTFS_UBIFS=y
 BR2_TARGET_ROOTFS_UBIFS_LEBSIZE=0x1f000
 BR2_TARGET_ROOTFS_UBIFS_MAXLEBCNT=800

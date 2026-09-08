@@ -28,8 +28,16 @@ That is true of **QEMU only**.
 
 | Target | Kernel | Source |
 | --- | --- | --- |
-| QEMU aarch64-virt | **6.12.47** | `buildroot/configs/neodct_qemu_defconfig:57` |
-| Luckfox Pico Mini B (RV1103) | **5.10.110** | Rockchip SDK; `docs/HARDWARE_NOTES.md:235` |
+| QEMU armv7-virt | **6.12.47** | `buildroot/configs/neodct_qemu_defconfig:106` |
+| Luckfox Pico Mini B (RV1103) | **5.10.110** | Rockchip SDK; `docs/HARDWARE_NOTES.md` |
+
+(The emulator was aarch64-virt when this was written. It is armv7 now, on the
+same 6.12.47, so the split below is unchanged — and one thing about it got
+stronger: the userland is compiled against 5.10 headers on **both** targets
+now (`BR2_KERNEL_HEADERS_5_10`, `neodct_qemu_defconfig:49`), so a build-time
+`#ifdef` on a post-5.10 UAPI cannot succeed here and fail on the phone. The
+"passes in QEMU, protects the phone not at all" failure below is now a
+compile error rather than a discovery on the bench.)
 
 **Landlock landed in Linux 5.13.** It does not exist on 5.10 and cannot be
 backported into a vendor BSP kernel by a config option. So a confinement design

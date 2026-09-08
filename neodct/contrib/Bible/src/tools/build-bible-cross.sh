@@ -1,13 +1,18 @@
 #!/bin/sh
-# build-bible-cross.sh -- build apps/Bible/app.so for the two real targets
-# without building the whole of Buildroot.
+# build-bible-cross.sh -- build apps/Bible/app.so for the real target without
+# building the whole of Buildroot.
 #
 #   tools/build-bible-cross.sh [outdir]
 #
 # Produces, under outdir (default build-bible/):
 #
-#   qemu-aarch64/app.so     aarch64 musl, tuned for cortex-a53
 #   luckfox-armv7/app.so    armv7 musl, cortex-a7 + NEON-VFPv4 + Thumb-2, hard float
+#
+# ONE BUILD, TWO MACHINES. This produced an aarch64 app.so as well, for a QEMU
+# that no longer exists: the emulator is armv7 with the phone's ABI now, so
+# that half spent an aarch64 toolchain install and a compile on an output
+# mknap.py refuses to package and install.sh refuses to copy. It is gone, and
+# AARCH64_CC/AARCH64_FLAGS with it.
 #
 # ============ WHY THIS EXISTS ============
 #
@@ -55,16 +60,14 @@ set -e
 SRC=$(cd "$(dirname "$0")/../src" && pwd)
 OUT=${1:-$(cd "$(dirname "$0")/../.." && pwd)/build-bible}
 
-# Toolchains. musl.cc publishes both prebuilt; override to point at
+# The toolchain. musl.cc publishes it prebuilt; override to point at
 # Buildroot's own host/bin if you have already built one.
-AARCH64_CC=${AARCH64_CC:-aarch64-linux-musl-gcc}
 ARMV7_CC=${ARMV7_CC:-armv7l-linux-musleabihf-gcc}
 
 # Matches buildroot/configs/*_defconfig. The arm line is the one that matters:
 # BR2_cortex_a7 + BR2_ARM_FPU_NEON_VFPV4 + BR2_ARM_INSTRUCTIONS_THUMB2, and
 # hard float because Buildroot defaults to EABIHF once an FPU is selected. The
 # result is checked at the end with readelf -A.
-AARCH64_FLAGS=${AARCH64_FLAGS:--mcpu=cortex-a53}
 ARMV7_FLAGS=${ARMV7_FLAGS:--mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard -mthumb}
 
 HOST_LIB=$SRC/build/default/lib/libneodct.so
@@ -186,8 +189,7 @@ build_one() {
     echo "          $(readelf -h "$OUT/$variant/app.so" | sed -n 's/^  Machine: *//p')"
 }
 
-build_one qemu-aarch64  "$AARCH64_CC" "$AARCH64_FLAGS"
-build_one luckfox-armv7 "$ARMV7_CC"   "$ARMV7_FLAGS"
+build_one luckfox-armv7 "$ARMV7_CC" "$ARMV7_FLAGS"
 
 echo "  ARM     attributes:"
 readelf -A "$OUT/luckfox-armv7/app.so" |

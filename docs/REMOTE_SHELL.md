@@ -255,6 +255,12 @@ otherwise.
 
 ## 7. On QEMU
 
+**Not at the moment: the armv7 kernel has no `NETDEVICES`, so the emulator
+has no NIC to reach and `NEODCT_NET=1` refuses.** `/sys/class/net` holds `lo`
+and `sit0`. Restoring it is `CONFIG_NETDEVICES` + `CONFIG_VIRTIO_NET` and a
+re-boot for a fresh MemTotal; the rest of this section is what to do then,
+and is unchanged.
+
 The same thing works, and is easier, because a QEMU phone is not behind
 CGNAT. You still need a relay for the tunnel to make sense — or, if you
 only want a shell into your own QEMU instance, you do not need Remote Shell

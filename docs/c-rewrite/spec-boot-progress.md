@@ -209,11 +209,16 @@ void nd_bootfb_close(nd_bootfb *fb);
 Required properties, all of which matter to both callers:
 
 1. **Geometry is read, never assumed.** `FBIOGET_VSCREENINFO` for `xres`,
-   `yres`, `bits_per_pixel`. QEMU boots with `video=Virtual-1:240x175M` on
-   virtio-gpu (`tools/run_qemu.sh:216`); the phone's fb0 is vfb, forced to
-   240x175 by `neodct_displayd`'s `init_framebuffer()`, which accepts 16 or 32
-   bpp. Both must work. Draw into a 240x175 shadow and blit it top-left, which
-   is what `cat splash.raw > /dev/fb0` effectively does today.
+   `yres`, `bits_per_pixel`. The phone's fb0 is vfb, forced to 240x175 by
+   `neodct_displayd`'s `init_framebuffer()`, which accepts 16 or 32 bpp. QEMU's
+   is vfb as well since the emulator moved to armv7 — its kernel has no DRM, so
+   `video=Virtual-1:240x175M` on a virtio-gpu is gone and `video=vfb:on` takes
+   its place, which comes up **640x480 at 8 bpp** until userspace sets the mode.
+   All of those must work, which is exactly why this property is written as
+   "read, never assumed": the boot bar is the layer most likely to be the first
+   thing that opens fb0, before anything has set a mode at all. Draw into a
+   240x175 shadow and blit it top-left, which is what
+   `cat splash.raw > /dev/fb0` effectively does today.
 2. **Monochrome only.** White and black are byte-order agnostic, so the
    red/blue-order problem `mkinitramfs.py:93` documents for the splash — "ON THE
    PHONE THIS IS THE WRONG WAY ROUND AND IT DOES NOT MATTER YET" — cannot arise.

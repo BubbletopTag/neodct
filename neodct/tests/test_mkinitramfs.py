@@ -360,9 +360,12 @@ def test_the_panel_daemon_ships_when_it_matches_the_target(tmp_path):
 
 
 def test_a_daemon_of_another_architecture_is_left_out(tmp_path):
-    """The daemon is a prebuilt ARM binary carried in the overlay, so it is
-    present in the aarch64 QEMU tree too -- where shipping it would put an
-    unrunnable binary in the image."""
+    """The daemon is a prebuilt binary carried in the overlay, so it is
+    present in every target tree, including one it cannot run in -- where
+    shipping it would put an unrunnable binary in the image. The mismatch
+    here is a host build wearing EM_ARM; the pair of cases beside
+    elf_machine() covers the float-ABI half, which is what is left now that
+    both NeoDCT boards share one ELF header."""
     alien = tmp_path / "alien"
     data = bytearray(open(HOST_BINARY, "rb").read(64))
     data[18:20] = (0x28).to_bytes(2, "little")      # EM_ARM
@@ -375,6 +378,44 @@ def test_a_daemon_of_another_architecture_is_left_out(tmp_path):
     mkinitramfs.build(fake_target, init, out)
 
     assert "bin/neodct_displayd" not in _names_in(out)
+
+
+def _arm_elf(path, float_bits):
+    """A 32-bit little-endian EM_ARM header with one float-ABI setting."""
+    head = bytearray(64)
+    head[0:4] = b"\x7fELF"
+    head[4] = 1                                        # ELFCLASS32
+    head[5] = 1                                        # ELFDATA2LSB
+    head[6] = 1
+    head[16:18] = (2).to_bytes(2, "little")            # ET_EXEC
+    head[18:20] = mkinitramfs.EM_ARM.to_bytes(2, "little")
+    head[36:40] = (0x05000000 | float_bits).to_bytes(4, "little")  # e_flags
+    path.write_bytes(bytes(head))
+    return path
+
+
+def test_two_armv7_builds_of_different_float_abis_do_not_match(tmp_path):
+    """The guard used to be (e_machine, class, endian), and the day the
+    emulator became armv7 that tuple stopped separating anything this tree
+    builds -- both boards are EM_ARM/32/LE. What it still has to catch is a
+    binary from some other arm toolchain, and soft-float is the near miss:
+    same three fields, an object the phone's loader cannot use."""
+    hard = _arm_elf(tmp_path / "hard", 0x400)
+    soft = _arm_elf(tmp_path / "soft", 0x200)
+
+    assert mkinitramfs.elf_machine(hard) != mkinitramfs.elf_machine(soft)
+    assert mkinitramfs.elf_machine(hard)[:3] == mkinitramfs.elf_machine(soft)[:3]
+
+
+def test_two_hard_float_armv7_builds_are_the_same_to_this_check(tmp_path):
+    """Said out loud because a comment used to claim otherwise: this is an
+    ABI check, not a board check. One armv7 ABI serves both machines, so two
+    NeoDCT boards' binaries are identical here and nothing in an ELF header
+    could tell them apart."""
+    one = _arm_elf(tmp_path / "one", 0x400)
+    two = _arm_elf(tmp_path / "two", 0x400)
+
+    assert mkinitramfs.elf_machine(one) == mkinitramfs.elf_machine(two)
 
 
 def test_the_splash_lands_in_the_image_but_the_bitmap_does_not(tmp_path):
@@ -571,10 +612,11 @@ def test_the_recovery_ui_ships_when_it_matches_the_target(tmp_path):
 
 def test_a_recovery_ui_of_another_architecture_is_left_out(tmp_path):
     """install-boot writes into BINARIES_DIR, which is not architecture-tagged,
-    so a stale cross build left over from another board is a real way to ship a
-    binary the kernel cannot exec. This one is reached from the screen a person
-    is standing in front of, where "nothing happened" is the whole failure
-    report."""
+    so a stale build left over from another toolchain is a real way to ship a
+    binary the kernel cannot exec. NOT from another board: since the ABI
+    collapse both are EM_ARM/32/LE hard-float and no ELF header separates
+    them. This one is reached from the screen a person is standing in front
+    of, where "nothing happened" is the whole failure report."""
     alien = tmp_path / "alien"
     data = bytearray(open(HOST_BINARY, "rb").read(64))
     data[18:20] = (0x28).to_bytes(2, "little")      # EM_ARM

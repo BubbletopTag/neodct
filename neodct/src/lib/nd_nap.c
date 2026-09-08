@@ -96,6 +96,31 @@ static void say(char *why, size_t why_sz, const char *text)
         (void)nd_strlcpy(why, text, why_sz);
 }
 
+/* The tags this tree has retired. A tag is listed here rather than deleted
+ * because packages carrying it exist in the world, and a refusal that can
+ * NAME what it is refusing is the difference between "ask the author to
+ * rebuild" and "go and find another phone". Nothing produces one:
+ * nd_nap_arch_for_machine() cannot return one and mknap.py will not build
+ * one. INSPECTION still reports them -- see nd_nap_inspect() -- because
+ * reporting what a package says is not the same job as refusing it, and the
+ * install screen has to be able to name what it is looking at. */
+static const char *const RETIRED_ARCHES[] = {
+    ND_NAP_ARCH_RETIRED_QEMU_AARCH64,
+};
+
+static bool arch_is_retired(const char *tag)
+{
+    size_t i;
+
+    if (tag == NULL || tag[0] == '\0')
+        return false;
+    for (i = 0u; i < sizeof RETIRED_ARCHES / sizeof RETIRED_ARCHES[0]; i++) {
+        if (strcmp(tag, RETIRED_ARCHES[i]) == 0)
+            return true;
+    }
+    return false;
+}
+
 /* An octal field: leading spaces, digits, then NUL or space. Anything else
  * -- including the base-256 form GNU tar uses past 8 GB, which starts with
  * a byte >= 0x80 -- is refused. */
@@ -1097,12 +1122,28 @@ nd_err nd_nap_install(const char *path, const char *apps_dir, const char *arch, 
     if (path == NULL || apps_dir == NULL || arch == NULL || arch[0] == '\0')
         return ND_ERR_INVAL;
 
+    /* A caller that hard-coded a machine this tree no longer builds. Refused
+     * here, before inspect() and long before the staging directory: whatever
+     * the package is, this install would be choosing its app.so by a tag
+     * whose ABI is gone, so "succeeding" means writing code nothing on this
+     * machine can load. Unreachable from Settings -- nd_nap_phone_arch()
+     * cannot return a retired tag -- which is exactly why it earns a log
+     * line if it ever happens. */
+    if (arch_is_retired(arch)) {
+        nd_log_err(ND_LOG_OS,
+                   "nap: asked to install %s for %s, a machine this tree no longer "
+                   "builds; refusing before anything is written",
+                   path, arch);
+        say(why, why_sz, nd_nap_why_no_arch(NULL, arch));
+        return ND_ERR_UNSUPPORTED;
+    }
+
     rc = inspect(path, &c, why, why_sz);
     if (rc != ND_OK)
         goto done;
 
     if (!nd_nap_info_has_arch(&c.info, arch)) {
-        say(why, why_sz, "This package is not for\nthis phone.");
+        say(why, why_sz, nd_nap_why_no_arch(&c.info, arch));
         rc = ND_ERR_UNSUPPORTED;
         goto done;
     }
@@ -1371,36 +1412,98 @@ bool nd_nap_info_has_arch(const nd_nap_info *info, const char *arch)
     return false;
 }
 
+const char *nd_nap_why_no_arch(const nd_nap_info *info, const char *arch)
+{
+    size_t i;
+
+    /* The caller asked for a machine that no longer exists. Only a hard-coded
+     * tag can do that -- nd_nap_phone_arch() cannot return one -- but the
+     * owner still gets a screen, and this is the true sentence for it: what
+     * is old is the pairing, not the package. */
+    if (arch_is_retired(arch))
+        return ND_NAP_WHY_RETIRED_ARCH;
+    if (info == NULL || info->n_arches == 0u)
+        return ND_NAP_WHY_WRONG_PHONE;
+    /* EVERY program in it, not merely one of them. A package that also
+     * carries a live tag is a package for a machine that exists: its author
+     * has already done the rebuild and this owner is holding the wrong file,
+     * which is what the generic sentence says. */
+    for (i = 0u; i < info->n_arches; i++) {
+        if (!arch_is_retired(info->arches[i]))
+            return ND_NAP_WHY_WRONG_PHONE;
+    }
+    return ND_NAP_WHY_RETIRED_ARCH;
+}
+
 const char *nd_nap_arch_for_machine(const char *machine)
 {
     if (machine == NULL)
         return "";
-    /* armv7l is what the RV1103's kernel reports; "armv7" alone would be a
-     * kernel this tree has never met, and is accepted for the day it does. */
+    /* armv7l is what the RV1103's kernel reports and, since DECISIONS.md D1,
+     * what the emulator reports too -- one ABI, so one tag, on both machines.
+     * "armv7" alone would be a kernel this tree has never met, and is
+     * accepted for the day it does. */
     if (strcmp(machine, "armv7l") == 0 || strcmp(machine, "armv7") == 0)
         return ND_NAP_ARCH_LUCKFOX;
-    if (strcmp(machine, "aarch64") == 0)
-        return ND_NAP_ARCH_QEMU;
     if (strcmp(machine, "x86_64") == 0)
         return ND_NAP_ARCH_HOST;
+    /* Two ARM machines with no tag, named although the fall-through answers
+     * the same, because "" reached on purpose and "" reached by accident are
+     * indistinguishable at the call site and only one of them is a decision.
+     *
+     * aarch64 was the QEMU phone until D1 and is now a developer's arm64 box:
+     * a host build, and there has never been a host-aarch64 app.so.
+     *
+     * armv8l is COMPAT_UTS_MACHINE (arch/arm64/include/asm/compat.h), what a
+     * 32-bit process sees on an arm64 kernel built with CONFIG_COMPAT -- so
+     * it is the fingerprint of an armv7 rootfs booted on the OLD aarch64
+     * kernel, which is a rootfs/kernel pairing this tree refuses to create
+     * rather than a machine it builds for. Somebody meeting it will be
+     * staring at "not for this phone" on something unmistakably 32-bit ARM,
+     * and this is the grep hit that ends that afternoon. */
+    if (strcmp(machine, "aarch64") == 0 || strcmp(machine, "armv8l") == 0)
+        return "";
     return "";
+}
+
+/* uname(2)'s answer, cached for the life of the process the same way
+ * nd_platform() and nd_path_root() are, plus the seam nd_nap__set_machine()
+ * opens. On every production build g_machine_is_forced is false and the
+ * uname(2) path below is exactly what it always was. */
+static char g_machine_forced[64];
+static bool g_machine_is_forced;
+static char g_arch_cached[ND_NAP_ARCH_MAX];
+static bool g_arch_known;
+
+void nd_nap__set_machine(const char *machine)
+{
+    g_machine_is_forced = machine != NULL;
+    if (g_machine_is_forced)
+        (void)nd_strlcpy(g_machine_forced, machine, sizeof g_machine_forced);
+    else
+        g_machine_forced[0] = '\0';
+    /* Part of the call, not a second one to remember: a case that set the
+     * machine and then read the previous case's cached answer would pass for
+     * the wrong reason, which is the failure this whole seam exists to stop. */
+    g_arch_known = false;
 }
 
 const char *nd_nap_phone_arch(void)
 {
-    static char cached[ND_NAP_ARCH_MAX];
-    static bool known;
-
-    if (!known) {
+    if (!g_arch_known) {
         struct utsname u;
 
-        if (uname(&u) == 0)
-            (void)nd_strlcpy(cached, nd_nap_arch_for_machine(u.machine), sizeof cached);
+        if (g_machine_is_forced)
+            (void)nd_strlcpy(g_arch_cached, nd_nap_arch_for_machine(g_machine_forced),
+                             sizeof g_arch_cached);
+        else if (uname(&u) == 0)
+            (void)nd_strlcpy(g_arch_cached, nd_nap_arch_for_machine(u.machine),
+                             sizeof g_arch_cached);
         else
-            cached[0] = '\0';
-        known = true;
+            g_arch_cached[0] = '\0';
+        g_arch_known = true;
     }
-    return cached;
+    return g_arch_cached;
 }
 
 /* ------------------------------------------------------------------ *

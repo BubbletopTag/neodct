@@ -1,9 +1,19 @@
 #!/bin/sh
 # install.sh -- drop the Bible app into a NeoDCT tree.
 #
-#   ./install.sh qemu-aarch64  /path/to/neodct/neodct/overlay   # then rebuild the image
+#   ./install.sh luckfox-armv7 /path/to/neodct/neodct/overlay   # then rebuild the image
 #   ./install.sh luckfox-armv7 /mnt/neodct-root                 # a mounted rootfs
 #   ./install.sh luckfox-armv7 --user /mnt/NDUSER               # data only, see below
+#
+# ONE TARGET NOW COVERS BOTH MACHINES. The emulator is armv7 with the phone's
+# musl hard-float NEON-VFPv4 ABI, so luckfox-armv7 is the build to install
+# whichever one you are pointing this at. qemu-aarch64 is refused by name
+# below, and that refusal is the point of this paragraph: the first usage line
+# here used to say to install it into the QEMU overlay, this script's only
+# check was that the directory existed, and nothing downstream would have
+# objected -- the .so goes straight into the verity-covered squashfs, past
+# mknap.py and past nd_nap_install(), so the first complaint would have been
+# dlopen() failing in front of whoever opened the app.
 #
 # WHERE THIS CAN GO
 #
@@ -21,7 +31,21 @@ TARGET=$1
 DEST=$2
 HERE=$(cd "$(dirname "$0")" && pwd)
 
-[ -n "$TARGET" ] && [ -n "$DEST" ] || { sed -n '2,20p' "$0"; exit 1; }
+[ -n "$TARGET" ] && [ -n "$DEST" ] || { sed -n '2,30p' "$0"; exit 1; }
+
+# The same sentence mknap.py's RETIRED_ARCH_TAGS carries, said by name rather
+# than worked out from the file. An ELF check here would be mknap's table
+# written a second time in a second language, and the two copies would drift;
+# what this path needs is the one thing mknap and nd_nap_install() already
+# refuse, refused before the bytes reach an image that has no other gate.
+case "$TARGET" in
+    qemu-aarch64)
+        echo "install.sh: $TARGET is no longer built; one armv7 package now" >&2
+        echo "  serves both machines. Use luckfox-armv7 -- it is the build" >&2
+        echo "  the emulator wants too." >&2
+        exit 1
+        ;;
+esac
 
 if [ "$TARGET" = "--user" ] || [ "$DEST" = "--user" ]; then
     DEST=$3

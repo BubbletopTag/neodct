@@ -1242,9 +1242,13 @@ Helpers:
 
 Header comment states the deliberate constraints: *"No VT ioctls, no KDSETMODE, no
 openvt (avoids common hangs)"* and the requirements *fbcon enabled, `/dev/ttyN` exists,
-`chvt` available*. The kernel command line carries `vt.global_cursor_default=0`
-(`neodct/tools/run_qemu.sh:102`), which is why the app turns the cursor on explicitly
-and off again on the way out.
+`chvt` available*. The kernel command line carries `vt.global_cursor_default=0` (in `run_qemu.sh`'s
+`APPEND`), which is why the app turns the cursor on explicitly and off again on the way
+out. Worth knowing on the emulator now: the armv7 kernel has `VT` and `VT_CONSOLE` but
+**not** `FRAMEBUFFER_CONSOLE`, and `/dev/fb0` is vfb with no scanout — so there is no
+console on the framebuffer for a cursor to be drawn into, and the flag is doing nothing
+there. It is the phone's behaviour it exists for. Anything that *tests* the cursor
+handling has to do it on hardware or by reading the ioctl, not by looking.
 
 #### 10.1 The T9 bridge (`System/hw/t9_uinput.py`, 354 lines)
 

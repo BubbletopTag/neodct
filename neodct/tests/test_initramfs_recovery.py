@@ -353,6 +353,33 @@ def test_recovery_draws_on_the_framebuffer_console_by_default(tmp_path):
     assert result.stdout.strip() in ("/dev/tty1", "/dev/console")
 
 
+def test_a_tty1_with_no_fbcon_behind_it_is_not_chosen(tmp_path):
+    """A writable /dev/tty1 is not evidence that anything paints it onto a
+    screen. CONFIG_VT plus DUMMY_CONSOLE gives one on a kernel with no
+    framebuffer console at all -- which is what the emulator's armv7 kernel
+    now is, measured -- and the whole menu went into it silently."""
+    missing = tmp_path / "no-fbcon"
+
+    result = run(tmp_path, 'RECOVERY_FBCON="%s"; recovery_tty' % missing)
+
+    assert result.stdout.strip() == "/dev/console"
+
+
+def test_tty1_is_chosen_when_fbcon_is_really_there(tmp_path):
+    """The other half, so the check cannot degrade into always answering
+    /dev/console -- which would take the phone's own screen away."""
+    fbcon = tmp_path / "fbcon"
+    fbcon.mkdir()
+
+    result = run(tmp_path, 'RECOVERY_FBCON="%s"; recovery_tty' % fbcon)
+
+    # A build host may have no /dev/tty1 at all; what is being pinned is that
+    # fbcon's presence is no longer the thing standing in the way.
+    assert result.stdout.strip() in ("/dev/tty1", "/dev/console")
+    if os.path.exists("/dev/tty1") and os.access("/dev/tty1", os.W_OK):
+        assert result.stdout.strip() == "/dev/tty1"
+
+
 def test_the_tty_can_be_forced_from_the_cmdline(tmp_path):
     """Insurance: if keys do not reach the VT, drive it over serial instead."""
     result = run(tmp_path, 'RECOVERY_TTY_OVERRIDE=/dev/console; recovery_tty')
@@ -731,6 +758,72 @@ def test_the_panel_no_longer_claims_signatures_are_unchecked():
     assert "Signature is NOT checked here" not in source
     assert "Signed by the release key" in source
     assert "NOT SIGNED" in source
+
+
+# --- the platform gate ---------------------------------------------------
+#
+# Recovery has never compared the manifest's platform with the machine it is
+# running on, and until the ABI collapse the mistake caught itself: a QEMU
+# rootfs on the phone had no init the phone's kernel could exec. One armv7 ABI
+# on both machines takes that away. A qemu-armv7 rootfs boots on a Luckfox,
+# agrees with itself that it is an emulator -- /NeoDCT/platform and
+# ND_BUILD_PLATFORM come out of the same platform-id.sh row -- and
+# nd_modem__may_simulate() then simulates a radio that is physically present.
+#
+# The gate asks rather than refuses, because recovery is the one path back
+# from a phone with nothing bootable on it. What these pin is that it asks at
+# all, and that it stays quiet in the two cases where there is no question:
+# the platforms agree, or one of them is not known.
+
+def install_prop(tmp_path, **fields):
+    state = tmp_path / "state"
+    state.mkdir(exist_ok=True)
+    (state / "installed.prop").write_text(
+        "".join("%s=%s\n" % kv for kv in fields.items()))
+
+
+def ask_mismatch(tmp_path, package):
+    result = run(tmp_path,
+                 'recovery_platform_mismatch "%s" && echo DIFFERENT '
+                 '|| echo SAME' % package)
+    return result.stdout.strip()
+
+
+def test_a_package_for_this_machine_raises_no_question(tmp_path):
+    package, _, _ = make_package(tmp_path, platform="luckfox-armv7")
+    install_prop(tmp_path, platform="luckfox-armv7")
+
+    assert ask_mismatch(tmp_path, package) == "SAME"
+
+
+def test_a_package_for_the_other_machine_is_noticed(tmp_path):
+    """The card-side version of the brick the update app refuses outright:
+    UPDATE-qemu-armv7.ndsw and UPDATE-luckfox-armv7.ndsw are built side by
+    side and differ by one word in the file name."""
+    package, _, _ = make_package(tmp_path, platform="qemu-armv7")
+    install_prop(tmp_path, platform="luckfox-armv7")
+
+    assert ask_mismatch(tmp_path, package) == "DIFFERENT"
+
+
+def test_a_machine_that_has_never_been_installed_asks_nothing(tmp_path):
+    """No installed.prop is a first flash or a wiped system -- a bench, a
+    board with nothing on it, and the one case where refusing would leave
+    somebody with no way forward."""
+    package, _, _ = make_package(tmp_path, platform="qemu-armv7")
+
+    assert ask_mismatch(tmp_path, package) == "SAME"
+
+
+def test_the_device_platform_comes_out_of_installed_prop(tmp_path):
+    """Written by recovery itself at the end of every install and by
+    ndsys-apply.sh at the end of every boot-time one, so this asks the same
+    question the booted phone asks with the same data."""
+    install_prop(tmp_path, platform="luckfox-armv7", version="0.5.16a")
+
+    result = run(tmp_path, "recovery_device_platform")
+
+    assert result.stdout.strip() == "luckfox-armv7"
 
 
 # --- the on-screen UI ----------------------------------------------------

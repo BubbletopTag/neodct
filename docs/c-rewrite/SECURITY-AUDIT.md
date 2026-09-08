@@ -97,6 +97,29 @@ names `CONFIG_DM_VERITY` and no other security option. Nothing enables
 `SECURITY_LANDLOCK`, nothing sets `lsm=`, and `mksquashfs` is not asked for
 xattrs — so even if a policy existed there is nowhere to put a label.
 
+[Two corrections since, neither changing the finding. The emulator's kernel is
+now `buildroot/board/qemu/armv7-virt/linux.config` — a `savedefconfig`, so it
+lists only what differs from the default and its header carries the record of
+what the expansion actually sets: `NAMESPACES`, `USER_NS`, `UTS_NS`, `IPC_NS`,
+`PID_NS`, `NET_NS`, `SECCOMP` and `SECCOMP_FILTER` are all on. `SELINUX` and
+the rest of the LSM machinery are off — and that is a CHANGE, not continuity:
+the aarch64 config this finding was written against carried `CONFIG_SECURITY`,
+`CONFIG_SECURITY_SELINUX`, `CONFIG_SECURITY_SELINUX_BOOTPARAM`,
+`CONFIG_SECURITY_NETWORK` and `CONFIG_AUDIT`, and the armv7 config drops all
+of them as a "free removal" (`linux.config:152-157`, whose argument is that
+the SELinux case is about the phone's SDK 5.10 kernel and not this one).
+Whether or not that is right, it costs `SECURITY-PLAN.md` section 8 — which
+makes SELinux the answer to the core staying root, precisely because 5.10 has
+no Landlock — the only kernel in the tree it could have been developed
+against. Visible only as `nd_selftest.c` moving from "present, but no policy
+is loaded" to "not in this kernel"; both are `R_INFO`, so no suite flags it.
+And **`CONFIG_MNT_NS` is not
+a symbol** — there is no `config MNT_NS` anywhere in the kernel tree, the line
+in the aarch64 file has always been discarded by `olddefconfig`, and mount
+namespaces are unconditional wherever `NAMESPACES` is set. The thing to grep a
+config for is `NAMESPACES`; the thing to check on a running system is
+`/proc/self/ns/mnt`.]
+
 ### 2.2 Everything runs as root, including things that need almost nothing
 
 > **Partly addressed.** netsurf-fb and everything it starts run as `ndusr_ut`,

@@ -336,10 +336,15 @@ else:
         write row_bytes at (dst_y*line_length) + (dst_x*bytes_per_pixel) + row*line_length
 ```
 
-**What actually happens on the shipped devices.** Both QEMU (`video=Virtual-1:240x175M`,
-`neodct/tools/run_qemu.sh:129,140`) and hardware (`neodct_displayd` forces
-`FBIOPUT_VSCREENINFO` to 240×175 @ 32bpp, `System/hw/neodctDisplay.c:328-338`) give a
-**240×175 32bpp framebuffer**. So the live case is: `copy_w=240, copy_h=175, dst_x=0,
+**What actually happens on the shipped devices.** Hardware gives a **240×175 32bpp
+framebuffer**: `neodct_displayd` forces `FBIOPUT_VSCREENINFO` to 240×175 @ 32bpp
+(`System/hw/neodctDisplay.c:328-338`). QEMU gave one too, from
+`video=Virtual-1:240x175M` on a virtio-gpu DRM connector — but the emulator is armv7
+now, its kernel has no DRM, `/dev/fb0` is vfb like the phone's, and vfb comes up
+**640×480 at 8 bpp** with the mode set from userspace afterwards. Same driver, same
+ioctl, same end state; the difference is that the emulator no longer arrives there by
+itself, and until the boot path runs `force_mode()` under QEMU the live case there is
+not the 240×175 one. So the live case is: `copy_w=240, copy_h=175, dst_x=0,
 dst_y=0, row_bytes = 960 = line_length` → one contiguous 168,000-byte write per frame.
 The centring arithmetic exists for a genuine 240×240 framebuffer and must still be
 ported: `dst_y` would then be `(240-175)//2 = 32`, which is the value

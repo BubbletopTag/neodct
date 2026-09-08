@@ -841,6 +841,52 @@ static void test_the_unreadable_package_message_fits(void)
     fx_free(&fx);
 }
 
+/* The two refusals that say a package is for a machine this is not, measured
+ * together because the whole reason there are two of them is that they must
+ * be readable side by side and mean different things.
+ *
+ * The retired-arch one is the taller: four lines whose LAST is the only
+ * actionable thing in it, so clipping it would leave "This package is for an
+ * older build." and throw away the remedy -- the same failure shape as the
+ * unreadable-package message above, and the reason both are constants in
+ * nd_nap.h rather than literals in nd_nap.c. */
+static void test_the_wrong_machine_messages_fit(void)
+{
+    fixture fx;
+    nd_msgdialog dlg;
+    size_t needed = 0u, fits = 0u;
+
+    if (!fx_init(&fx)) {
+        CHECK(false);
+        return;
+    }
+
+    /* Both built the way Settings' install_notice() builds them: no title, no
+     * icon named, the default triangle, an OK button. */
+    nd_msgdialog_init(&dlg, &fx.ui, ND_NAP_WHY_WRONG_PHONE);
+    nd_msgdialog_set_button(&dlg, "OK");
+    nd_msgdialog_measure(&dlg, &needed, &fits);
+    CHECK_INT((int)fits, 5);
+    CHECK_INT((int)needed, 2);
+    CHECK(needed <= fits);
+    CHECK(needed < fits);
+
+    nd_msgdialog_init(&dlg, &fx.ui, ND_NAP_WHY_RETIRED_ARCH);
+    nd_msgdialog_set_button(&dlg, "OK");
+    nd_msgdialog_measure(&dlg, &needed, &fits);
+    CHECK_INT((int)fits, 5);
+    CHECK_INT((int)needed, 4);
+    CHECK(needed <= fits); /* THE INVARIANT */
+    CHECK(needed < fits);  /* a line spare, for the same reason as above */
+
+    /* Drawn as well as measured, so the longer of the two is known to survive
+     * a real render and not only the arithmetic. */
+    nd_msgdialog_render(&dlg);
+    CHECK_INT(count_lit(fx.canvas, ND_RECT(0, 138, 239, 144)), 0);
+
+    fx_free(&fx);
+}
+
 /* And the fourth, added after the disc-image evening. Fetch's confirm dialog
  * now says WHY a PlayStation image is going to Downloads instead of the
  * emulator, and the sentence is the only part of that dialog the owner has not
@@ -1539,6 +1585,7 @@ int main(void)
     test_the_modem_fault_message_fits();
     test_the_cannot_confine_message_fits();
     test_the_unreadable_package_message_fits();
+    test_the_wrong_machine_messages_fit();
     test_the_fetch_no_psx_notice_fits();
     test_msgdialog_keys();
     test_msgdialog_notice_dismisses_on_enter_not_clear();

@@ -110,8 +110,8 @@ That is a five-line change to `goldenframe.py` plus one recapture. Section 3.9.
 | `buildroot/Makefile` lines 830–843 | 14 lines | The **only** NeoDCT modification to upstream Buildroot: a `.PHONY: update` target that shells out to `neodct/tools/mkupdate.py`. Reads `NEODCT_UPDATE_THUMBNAIL ?= $(wildcard $(TOPDIR)/../neodct/release-thumbnail.png)`. | Keep verbatim. Nothing about it is Python-specific. |
 | `buildroot/board/qemu/busybox.fragment` | 4 lines | `CONFIG_PING6=y` — T-Mobile is IPv6-only, `S45modem`'s connectivity check needs `ping6`. | Keep verbatim. |
 | `buildroot/board/qemu/post-image.sh` | upstream | Generates `start-qemu.sh`. Runs *before* `post-image-neodct.sh` in the qemu defconfig's script list. | Keep. |
-| `buildroot/board/qemu/aarch64-virt/linux.config` | upstream | Kernel config used by **both** defconfigs (yes, the ARM luckfox one points at the aarch64-virt config; see Risk R-11). | Untouched by this port. |
-| `buildroot/configs/neodct_qemu_defconfig` | 85 lines | Primary dev target: aarch64, QEMU virt. | Edited (section 5). |
+| `buildroot/board/qemu/aarch64-virt/linux.config` | upstream | Kernel config used by **both** defconfigs at spec time (yes, the ARM luckfox one pointed at the aarch64-virt config; see Risk R-11). **Both halves of that are now false**: the QEMU target builds `board/qemu/armv7-virt/linux.config`, and the luckfox defconfig builds no kernel at all — the phone's comes from the Rockchip SDK. This file is kept only because vendored upstream `qemu_aarch64_virt_defconfig` still reads it. | Untouched by this port. |
+| `buildroot/configs/neodct_qemu_defconfig` | 85 lines | Primary dev target: aarch64, QEMU virt **at spec time**; armv7 Cortex-A7 now, carrying the phone's ABI. | Edited (section 5). |
 | `buildroot/configs/luckfox_pico_mini_defconfig` | 85 lines | Real hardware: `BR2_arm=y`, `BR2_cortex_a7=y`, `BR2_ARM_FPU_NEON=y`. | Edited (section 5). |
 | `neodct/configs/*defconfig` | duplicates | **Second copy of both defconfigs.** Verified byte-identical to the `buildroot/` copies today (`diff` clean). The build uses the `buildroot/` copy; this one is documentation. | Both copies must be edited together. See Risk R-1. |
 | `buildroot/{bg_home.h, composer.py, font.ttf, list.py, uidraw.py, notes.txt, ubinize-rootfs.cfg}` | 456 KB | Stray dev cruft at the Buildroot root from an early prototyping era. `font.ttf` is byte-identical (`md5 440b53b1…`) to the shipped `System/ui/resources/fonts/font.ttf`. Nothing in the build references any of them. | Not part of the port. Leave alone or delete separately; do **not** let a C agent "tidy" them as part of this work. |
@@ -133,7 +133,7 @@ That is a five-line change to `goldenframe.py` plus one recapture. Section 3.9.
 | `neodct/tools/uistub.py` | 474 | The headless fake phone. `CapturingFramebuffer`, `PathRemap`, `KeyScript`, `ScriptExhausted`, `StubUI`, `stage_overlay()`, `run_app()`. | **Stays Python.** It is the *reference* side of the oracle and must keep driving the Python build unchanged for as long as both builds exist. The C side gets an independent equivalent, `nd-shoot` (section 6.4). |
 | `neodct/tools/goldenframe.py` | 376 | Deterministic capture + comparison. `VirtualClock`, `_Frozen`, `instrument()`, `DeterministicUI`, `frame_digest()`, `write_manifest()`, `compare()`, `_describe_pixel_diff()`, `capture()`, CLI. | **Stays Python and becomes the umpire for both builds.** `--compare REF CAND` already works on any two directories, so it judges C output with no changes. Needs the layout-engine pin (3.9). |
 | `neodct/tools/shoot_docs.py` | 357 | Defines *which* 49 screens exist and exactly how each is produced. `shoot_home`, `shoot_app_selector`, `shoot_stock_apps`, `shoot_games`, `shoot_telephony`, `shoot_engineering_apps`, `shoot_widgets`, `shoot_examples`. | **This file is the specification of the shot list.** Section 3.6 transcribes every recipe so the C `nd-shoot` can reproduce them without reading the Python. |
-| `neodct/tools/run_qemu.sh` | 218 | Boots the image set under QEMU. Env-driven: `NEODCT_SNAPSHOT NEODCT_VERITY NEODCT_SD NEODCT_RECOVERY NEODCT_RECTTY NEODCT_MODEM NEODCT_NET NEODCT_DEBUG NEODCT_AUDIO NEODCT_DISPLAY NEODCT_MEM NEODCT_IMAGES NEODCT_SHARE NEODCT_MONITOR NEODCT_QEMU_EXTRA NEODCT_MODEM_VENDOR NEODCT_MODEM_PRODUCT`. Defaults: 72 MB RAM, `cortex-a53`, verity `enforce`, gtk display, PulseAudio. | **Unchanged.** It boots an image; it does not care what is in it. Add nothing. |
+| `neodct/tools/run_qemu.sh` | 218 | Boots the image set under QEMU. Env-driven: `NEODCT_SNAPSHOT NEODCT_VERITY NEODCT_SD NEODCT_RECOVERY NEODCT_RECTTY NEODCT_MODEM NEODCT_NET NEODCT_DEBUG NEODCT_AUDIO NEODCT_DISPLAY NEODCT_MEM NEODCT_IMAGES NEODCT_SHARE NEODCT_MONITOR NEODCT_QEMU_EXTRA NEODCT_MODEM_VENDOR NEODCT_MODEM_PRODUCT`. Defaults at spec time: 72 MB RAM, `cortex-a53`, verity `enforce`, gtk display, PulseAudio. Now: **64 MB, `-M virt -cpu cortex-a7 -smp 1`, `qemu-system-arm`**, virtio-mmio devices rather than `-pci`, `-global virtio-mmio.force-legacy=false` (without it the guest gets no keyboard, silently), verity `enforce`, gtk display, no audio. | **Unchanged in shape.** It boots an image; it does not care what is in it. It does care which machine, and that changed once — see section 5.1. |
 | `neodct/tools/sdcard.sh` | 106 | mtools wrapper: `ls put rm init new` against `sdcard.img` with no root or loop mount. | Unchanged. |
 | `neodct/tools/release.sh` | 124 | Tag from `VERSION_ID`. | Unchanged. |
 | `neodct/tools/mknand.sh` | 136 | Builds the raw-NAND image set for the Luckfox. | Unchanged. |
@@ -201,9 +201,20 @@ Rules that are load-bearing and were each a shipped bug once:
 - `/etc/issue` is rewritten as `printf 'NeoDCT System v%s\n' "$VERSION"`, overriding
   `BR2_TARGET_GENERIC_ISSUE`, which was still advertising 0.3.0a at 0.3.5a.
 
-Platform ids in use: **`qemu-aarch64`** and **`luckfox-armv7`**. These strings are baked
-into `BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS` in the defconfigs and must not change — an
-update package carries the platform id and the phone refuses a mismatch.
+Platform ids in use: **`qemu-armv7`** and **`luckfox-armv7`**. They are baked into
+`BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS` in the defconfigs, and an update package carries the
+id while the phone refuses a mismatch — so changing one is a compatibility break, not a
+rename.
+
+It has happened exactly once. The emulator was `qemu-aarch64` until DECISIONS.md D1 moved
+it to armv7, and that change was made in the knowledge of what it costs: an image already
+flashed with the old id gets a single, ordered alias in
+`nd_manifest_check_compatible()` — which only fires once that image is running code that
+HAS the table, i.e. after a transitional build stamped with the retired tag, since the
+check lives in the image being updated — and nothing on the download side aliases at
+all, so a `qemu-armv7` image finds no asset in any release published before the
+change. **`luckfox-armv7` was left alone precisely because it is on phones in the field.**
+That is the price, and it is why the sentence above is still the rule.
 
 ### 3.2 `post-build-prune-tests.sh` — what must not reach the image
 
@@ -892,12 +903,19 @@ Nothing in the port may change these four lines. They are in `AGENTS.md`, the RE
 
 ### 5.1 What the defconfigs select today
 
-Both defconfigs are 85 lines and identical in the areas below. Differences: qemu is
-`BR2_aarch64` with `BR2_GLOBAL_PATCH_DIR`, `BR2_DOWNLOAD_FORCE_CHECK_HASHES`,
-`BR2_TOOLCHAIN_BUILDROOT_CXX`, ext4 2G rootfs and squashfs-zstd; luckfox is
+Both defconfigs are 85 lines and identical in the areas below. Differences at spec time:
+qemu was `BR2_aarch64` with `BR2_GLOBAL_PATCH_DIR`, `BR2_DOWNLOAD_FORCE_CHECK_HASHES`,
+`BR2_TOOLCHAIN_BUILDROOT_CXX`, ext4 2G rootfs and squashfs-zstd; luckfox was
 `BR2_arm` + `BR2_cortex_a7` + `BR2_ARM_FPU_NEON` with squashfs-xz, ubifs and ubi.
-Both point `BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE` at
-`board/qemu/aarch64-virt/linux.config` and both build kernel 6.12.47.
+Both pointed `BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE` at
+`board/qemu/aarch64-virt/linux.config` and both built kernel 6.12.47.
+
+**The architecture difference is gone.** Both are `BR2_arm` + `BR2_cortex_a7` +
+`BR2_ARM_FPU_NEON_VFPV4` + Thumb-2 + musl against 5.10 headers, so there is one ABI, one
+`app.so` per app and one `.nap` arch tag; `neodct/tests/test_defconfig_abi_parity.py`
+holds them to it. What still differs is the storage and the identity: ext4 + squashfs-zstd
+and `qemu-armv7` against ubi/ubifs + squashfs-xz and `luckfox-armv7`. Only the QEMU
+defconfig builds a kernel now, and it builds `board/qemu/armv7-virt/linux.config`.
 
 Neither defconfig selects a C library, so Buildroot's default applies: **glibc**
 (`toolchain/toolchain-buildroot/Config.in:25`). Neither selects an optimization level, so
@@ -1363,11 +1381,11 @@ spends an afternoon chasing them.
 | R-8 | **`BR2_PACKAGE_SQLITE` is only reachable through `BR2_PACKAGE_PYTHON3_SQLITE`.** Deleting the Python lines without adding it produces an image that builds, boots, and has no phonebook, no messages and no call log. | **high** | Add `BR2_PACKAGE_SQLITE=y` in the **same commit** that removes `BR2_PACKAGE_PYTHON3=y`, never after. Same for `OPENSSL` and `ZLIB`, which survive today only because openssh selects them. |
 | R-9 | **The committed `neodct_displayd` binary.** Prebuilt, committed, not stripped, unknown provenance, present even in target trees of the wrong architecture — `mkinitramfs.py` has a guard specifically for that. | medium | Build it from the `neodct` package (6.5) and delete the committed binary. Keep the architecture guard regardless. |
 | R-10 | **No CI runs the tests.** The only workflow is `release.yml`, which checks a tag against `VERSION_ID` and builds release notes. Nothing enforces that 659 tests pass or that the golden set still matches. | **high** | Add the workflow in 6.7. It is the cheapest high-value change in this whole subsystem and it should land before the port starts, not after. |
-| R-11 | **`luckfox_pico_mini_defconfig` builds its kernel from `board/qemu/aarch64-virt/linux.config`** while declaring `BR2_arm` + `BR2_cortex_a7`. Either it is dead (the real kernel comes from the Rockchip SDK, as `AGENTS.md` implies) or it is wrong. | low | Pre-existing, not caused by the port. Confirm with the owner and either delete the kernel lines from that defconfig or point them at a real ARM config. Raise as an open question. |
+| R-11 | **`luckfox_pico_mini_defconfig` builds its kernel from `board/qemu/aarch64-virt/linux.config`** while declaring `BR2_arm` + `BR2_cortex_a7`. Either it is dead (the real kernel comes from the Rockchip SDK, as `AGENTS.md` implies) or it is wrong. | low | **Settled: it was dead.** The `BR2_LINUX_KERNEL*` lines are gone from that defconfig — the phone's kernel comes from the Rockchip SDK and nothing consumed the one Buildroot was building. The QEMU target now builds `board/qemu/armv7-virt/linux.config`, its own, and the two targets share a toolchain ABI instead of a kernel config. |
 | R-12 | **Two different rounding conventions.** Text compositing rounds (`+127`, 3.8.1); wallpaper dimming truncates (3.8.2). An agent who "unifies" them breaks 30 frames. | medium | Both formulas are in this document with their measured evidence and mismatch counts. Put both in the rasterizer's header comment with a note that they deliberately differ. |
 | R-13 | **`device_frame()` centres at y=32; the hardware bottom-aligns at y=65.** `home-panel` and `menu-panel` are documentation aids, not device output. | low | Documented in 3.7. `nd-shoot` must reproduce y=32 for those two names. Consider marking them informational in a future manifest revision. |
 | R-14 | **`shoot_docs.py` swallows per-shot exceptions** (`except BaseException: print("  !! …"); continue`). A screen that fails to render vanishes from the manifest and shows up only as `missing` in a later compare. `shoot_examples` currently produces nothing at all this way. | low | `nd-shoot` must exit non-zero on a missing frame. Consider making `capture()` fail too, or at least assert the frame count is 49. |
-| R-15 | **`AGENTS.md` says "510 tests"** — it is 659 functions / 676 collected items. Small, but agents calibrate on it. | low | One-line fix in `AGENTS.md` while the port is in flight. |
+| R-15 | **`AGENTS.md` says "510 tests"** — it is 659 functions / 676 collected items. Small, but agents calibrate on it. | low | **Fixed.** It now says what the suite actually reports, which is 1,961 passing and 14 skipped in ~105s. Worth re-checking whenever it drifts again — the number is load-bearing only in that a reader who sees far fewer than they expect has a broken collection, not a fast machine. |
 | R-16 | **`.clang-format` does not exist**, though `CODING-STANDARDS.md` says to run it "with the repo's `.clang-format`". Ten agents will produce ten formattings. | low | Add one before any C lands: 4 spaces, no tabs, 100-column limit, braces on the same line for control flow and on their own line for function bodies. |
 | R-17 | **The test suite is not hermetic.** `test_mkinitramfs.py` reads the host's real `/usr/bin/ls` and `/usr/lib`, so it fails on a host whose libraries live outside its four search dirs (11 failures here). Others need `sshd`, `ssh-keygen`, `cpio`, `figlet`. | low | Pin the toolchain in the CI job (6.7). Do not "fix" the tests to be hermetic — reading real ELF files is the point of them. |
 
@@ -1511,8 +1529,7 @@ To be added to `docs/c-rewrite/OPEN-QUESTIONS.md`:
 2. **JPEG wallpapers** — decode at build time into raw blobs so the target never links
    libjpeg, or keep runtime decode and accept the cross-version bit-exactness risk?
    (R-5; the first is a behaviour change for user-supplied wallpapers.)
-3. **`luckfox_pico_mini_defconfig` kernel lines** — dead, or wrong? They declare
-   `BR2_arm`/`BR2_cortex_a7` and then build from `board/qemu/aarch64-virt/linux.config`.
-   (R-11.)
+3. ~~**`luckfox_pico_mini_defconfig` kernel lines** — dead, or wrong?~~ **Answered:
+   dead, and deleted.** The phone's kernel comes from the Rockchip SDK. (R-11.)
 4. **br2-external** — worth changing the documented build command to get one home for the
    defconfigs, or keep the in-tree package and live with two copies? (6.1/6.3, R-2.)

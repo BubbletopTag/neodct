@@ -37,7 +37,19 @@ device classes and not names.
 
 ## Kernel
 
-`buildroot/board/qemu/aarch64-virt/linux.config`:
+**None of this is in the emulator's kernel any more.** QEMU moved to armv7 to
+match the phone's ABI, and `buildroot/board/qemu/armv7-virt/linux.config` was
+built up from a minimal base to reach memory parity (53,824 kB of 64 MB
+against the phone's ~54 MB) rather than ported across. It carries no `BT` at
+all, and no `PCI` either -- so there is no xhci to plug the dongle into,
+`NEODCT_BT=1` refuses in `run_qemu.sh` and says so, and `CONFIG_BT_HCIVHCI`
+is not there for the dongle-less route below. The reasoning below is intact
+and is what the config needs when Bluetooth comes back; adding it means
+booting the kernel again and writing down the new MemTotal.
+
+The block that follows is the one that is still in
+`buildroot/board/qemu/aarch64-virt/linux.config`, which is where this was
+worked out:
 
 ```
 CONFIG_BT=y
@@ -108,6 +120,13 @@ provides the same two filenames in the same place.
 ---
 
 ## Running it in QEMU
+
+**Not today** -- both routes below need a kernel that has `BT`, and the
+passthrough also needs a USB host controller, which on `-M virt` means PCI.
+The armv7 kernel has neither, `NEODCT_BT=1` refuses, and the wiring described
+here is left in `run_qemu.sh` exactly as it stands so that restoring the
+symbols restores the feature. What follows is therefore the record of how it
+works, and the hardware instructions, which are unaffected.
 
 ### With the real dongle
 

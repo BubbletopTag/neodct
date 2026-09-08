@@ -178,7 +178,27 @@ uint64_t nd_manifest_image_bytes(const nd_manifest *m);
  * means this image is built for other hardware, or needs a kernel newer than
  * the one running. `kernel` may be NULL or "" for the Python's kernel=None,
  * which skips the kernel gate entirely. A NULL `platform` is treated as ""
- * and therefore never matches. */
+ * and therefore never matches.
+ *
+ * THE PLATFORM KEY IS COMPARED WHOLE: strcmp, plus one ordered pair named
+ * below. Never by family, never by prefix, never through a canonicalising
+ * lookup. What a lookup would add is a bucket, and a bucket is how two
+ * DIFFERENT unrecognised platforms come out equal -- ND_SET_OS_PLATFORM_DFLT
+ * is "unknown", so any image whose version.prop did not survive lands in it
+ * and starts matching every other such image. Two identical strings do match,
+ * "unknown" against "unknown" included: that is the diagonal, and it is the
+ * same answer whole-string equality gives every other equal pair.
+ *
+ * There is exactly one exception and it lives in nd_manifest.c beside the
+ * comparison: a single ORDERED pair carrying DECISIONS.md D1's rename of the
+ * emulator's key, so an image still calling itself qemu-aarch64 can take a
+ * qemu-armv7 package. The reverse direction is a brick and stays refused, and
+ * luckfox-armv7 appears in neither column. That pair only ever fires on an
+ * image built under the retired tag -- an already-flashed one is running the
+ * older code, which has no table -- and the comment there has the build that
+ * produces one. Adding a second pair means reading that argument first.
+ * test_manifest.c walks the full cross-product, including three rows whose
+ * only job is to fail if this ever becomes a strncmp or a split on '-'. */
 nd_update_err nd_manifest_check_compatible(const nd_manifest *m, const char *platform,
                                            const char *kernel, char *why, size_t why_sz);
 

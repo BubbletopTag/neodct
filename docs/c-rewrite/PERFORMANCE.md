@@ -303,13 +303,22 @@ That is the honest floor. Everything above it was waste.
 
 ### The measurements
 
-On the phone (aarch64, musl, squashfs, QEMU), warm:
+Measured warm in the **aarch64 emulator** (musl, squashfs), which is what
+this line used to call "the phone (aarch64, musl, squashfs, QEMU)" -- two
+errors in one breath: the phone is a 32-bit Cortex-A7 and never was aarch64,
+and nothing here was timed on hardware.
 
 | | before | after |
 | --- | --- | --- |
 | `/bin/true` | 10 ms | 10 ms |
 | `nd-apprun`, exec + link only | 20 ms | 20 ms |
 | **a real app launch** | **200 ms** | **50 ms** |
+
+These stand until somebody re-takes them, and re-taking them is now worth
+doing: the emulator is armv7 Cortex-A7 with the phone's ABI and its 64 MB, so
+a number from it finally means something about the phone. Expect it to be
+slower -- QEMU emulating a 32-bit ARM guest on an x86-64 host is not the
+phone's silicon either. The ratio is the part that carries over.
 
 The 20 ms floor is `execve` plus the dynamic loader resolving eleven shared
 objects. It is the price of the process boundary and it is not going away

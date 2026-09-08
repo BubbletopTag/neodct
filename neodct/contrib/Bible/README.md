@@ -6,8 +6,9 @@
 >     neodct/tools/mknap.py --app-dir Bible --so luckfox-armv7=luckfox-armv7/app.so \
 >         -o ../../packages/Bible-luckfox-armv7.nap
 >
-> from this directory. Add `--so qemu-aarch64=qemu-aarch64/app.so` for a
-> package either phone can install. Copy the `.nap` onto a memory card and
+> from this directory. That one `--so` covers **both** machines: the emulator
+> is armv7 with the phone's ABI now, so there is no second build to add.
+> Copy the `.nap` onto a memory card and
 > install it from **Settings → Install apps**; `docs/NAP-PACKAGES.md` has the
 > format. Everything below about `install.sh`, the overlay and the golden
 > frames describes the *stock-app* route, which this tree does not take --
@@ -29,10 +30,10 @@ Nothing here is committed. It builds clean under the tree's own
 | `Bible/manifest.json` | app id 13, name "Bible" |
 | `Bible/icon.png` | 120×120 line-art open book, matching the other icons |
 | `Bible/web.ndb` | the text — 1.70 MB, all 81 books |
-| `qemu-aarch64/app.so` | 43 KB, aarch64 musl, cortex-a53 |
-| `luckfox-armv7/app.so` | 26 KB, armv7 musl, cortex-a7 + NEON-VFPv4 + Thumb-2, hard float |
+| `luckfox-armv7/app.so` | 26 KB, armv7 musl, cortex-a7 + NEON-VFPv4 + Thumb-2, hard float — **both machines** |
+| `qemu-aarch64/app.so` | 43 KB, aarch64 musl — the retired build, kept only as the thing `mknap.py` and `install.sh` are shown refusing |
 
-`./install.sh qemu-aarch64 /path/to/neodct/neodct/overlay`, then rebuild.
+`./install.sh luckfox-armv7 /path/to/neodct/neodct/overlay`, then rebuild.
 
 `/` is a read-only squashfs under dm-verity, so the app cannot be copied onto
 a live phone — it has to arrive with an image or an `.ndsw`. The **pack** can,
