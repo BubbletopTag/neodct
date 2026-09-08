@@ -724,10 +724,15 @@ static void section_devices(const nd_priv_id *usr, const nd_priv_id *ut)
             report(R_SKIP, ND_PRIV_USER " can open the i2c bus",
                    "no /dev/i2c-* here, and this image is QEMU, which has no i2c bus "
                    "for the rules to grant");
+        /* A mis-assembled image lands here too, and the both-ways wording is
+         * still the right one: it says the machine cannot be named, which is
+         * exactly the state a disagreement leaves this in. The mismatch
+         * itself is a FAIL of its own at the top of the run, so nothing is
+         * being swallowed. */
         else
             report(R_SKIP, ND_PRIV_USER " can open the i2c bus",
                    "no /dev/i2c-* on this build (expected on QEMU; NOT expected on the "
-                   "phone) -- and this image carries no " ND_PATH_PLATFORM ", so which "
+                   "phone) -- and this image does not say which machine it is, so which "
                    "of the two it is cannot be said here");
         if (have_modem)
             expect_allow(usr, ND_PRIV_USER, P_RDWR, modem, ND_PRIV_USER " can open the modem");
@@ -2492,12 +2497,40 @@ int main(int argc, char **argv)
                (long)geteuid());
     /* Said at the top because several verdicts below now turn on it, and a
      * reader has to be able to see the input to a decision that turned a SKIP
-     * into a FAIL. "unknown" is printed as itself: an image with no
-     * /NeoDCT/platform is exactly the state in which "expected on QEMU; NOT
-     * expected on the phone" is undecidable, and that should be on the page
-     * rather than inferred from the absence of a line. */
-    printf("  platform: %s%s%s\n", nd_platform_name(),
-           nd_platform_board()[0] != '\0' ? ", board " : "", nd_platform_board());
+     * into a FAIL. "unknown" is printed as itself: an image that does not say
+     * which machine it is, is exactly the state in which "expected on QEMU;
+     * NOT expected on the phone" is undecidable, and that should be on the
+     * page rather than inferred from the absence of a line.
+     *
+     * The origin comes with it for the same reason, one step further back.
+     * There are now two ways to be "unknown" -- a build that was told nothing,
+     * and an image whose compiled constant and record disagree -- and they
+     * want completely different responses from whoever is reading this. The
+     * word alone cannot tell them apart; the sentence can. */
+    printf("  platform: %s%s%s (%s)\n", nd_platform_name(),
+           nd_platform_board()[0] != '\0' ? ", board " : "", nd_platform_board(),
+           nd_platform_origin());
+
+    /* ============ AND A CONTESTED IMAGE IS A FAILURE, ALWAYS ============
+     *
+     * OUTSIDE the wanted() gates on purpose. Every other check in this file
+     * belongs to a section a caller can ask for one at a time, and
+     * `nd-selftest boundary` must not be a way to run this tool on a
+     * mis-assembled image and see nothing. This is not a property of the
+     * confinement; it is a property of the image every one of those sections
+     * is reasoning about, so it is reported before any of them and cannot be
+     * deselected.
+     *
+     * It gets its own one-row section so the line is not read as belonging to
+     * whichever section happens to follow. */
+    if (nd_platform_mismatch()) {
+        section("this image");
+        report(R_FAIL, "the image agrees with itself",
+               "%s -- this image was assembled from two builds. libneodct and %s name "
+               "different machines, so nothing here can say which one this is; every "
+               "verdict below that turns on the platform has fallen back to \"unknown\"",
+               nd_platform_origin(), ND_PATH_PLATFORM);
+    }
 
     if (wanted(argc, argv, "users"))
         section_users(&usr, &ut);

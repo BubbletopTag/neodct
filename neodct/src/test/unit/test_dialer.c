@@ -803,6 +803,59 @@ static void wait_for_state(nd_modem *m, nd_call_state want)
     }
 }
 
+/* One ring, written ATOMICALLY, because a real modem thread is watching it.
+ *
+ * The hook is mtime-edge-triggered (nd_modem_sim.c), and a plain
+ * fopen/fputs/fclose gives the file TWO mtimes: one when it is created empty
+ * and one when the data lands. The modem thread polls at ten hertz with no
+ * regard for what this thread is in the middle of, so it can stat the file
+ * inside that window, ring on the empty version and latch the CREATE mtime --
+ * after which the write is a second edge, and the phone rings AGAIN the moment
+ * the test hangs up and the state goes back to IDLE. That is a real 1-in-40
+ * failure of "End hung it up": the state is ND_CALL_RINGING rather than
+ * ND_CALL_IDLE, and it looks exactly like a hangup bug.
+ *
+ * rename(2) is atomic, so the thread either does not see the file at all or
+ * sees it complete with the only mtime it will ever have. The temp name is a
+ * sibling in the same directory because rename cannot cross a filesystem, and
+ * it is safe to leave sitting there because every hook is an EXACT PATH --
+ * ND_MODEM_SIM_CSQ/RING/OPS/SMS/FAULT in nd_modem_priv.h -- and nothing globs
+ * the directory. The name is not what protects it; a rule about prefixes would
+ * be, and there is no such rule to rely on.
+ *
+ * THE PRODUCT HAS THE SAME EDGE and it is not fixed by this helper. Anyone
+ * driving the hooks from a shell writes the file the way this used to, so
+ * nd_modem_sim.c's mtime section and docs/MODEM_BRINGUP.md both carry the
+ * `printf > tmp && mv` recipe. Fixing the fixture alone would leave the
+ * documented bench workflow carrying the bug it was found by.
+ */
+static void ring_file_write(const char *number)
+{
+    char path[ND_PATH_MAX];
+    char tmp[ND_PATH_MAX];
+    FILE *f;
+
+    if (nd_path_resolve(path, sizeof path, DIALER_SIM_RING) != ND_OK)
+        return;
+    if (nd_snprintf(tmp, sizeof tmp, "%s.staging", path) != ND_OK)
+        return;
+    f = fopen(tmp, "wb");
+    if (f == NULL)
+        return;
+    (void)fputs(number, f);
+    (void)fputc('\n', f);
+    if (fclose(f) != 0 || rename(tmp, path) != 0)
+        (void)remove(tmp);
+}
+
+static void ring_file_remove(void)
+{
+    char path[ND_PATH_MAX];
+
+    if (nd_path_resolve(path, sizeof path, DIALER_SIM_RING) == ND_OK)
+        (void)remove(path);
+}
+
 /* show_calling(): the modem is CALLING, End hangs up, and the hangup really
  * reaches the modem -- the state afterwards is IDLE, not CALLING. This is the
  * whole hand-off the work package is about, end to end. */
@@ -923,18 +976,7 @@ static void test_show_incoming_results(void)
 
     /* One write to the sim ring file is one ring; the modem thread picks it
      * up without anybody polling, which is decision 1's whole point. */
-    {
-        char path[ND_PATH_MAX];
-        FILE *f;
-
-        if (nd_path_resolve(path, sizeof path, DIALER_SIM_RING) == ND_OK) {
-            f = fopen(path, "wb");
-            if (f != NULL) {
-                (void)fputs("5559876\n", f);
-                (void)fclose(f);
-            }
-        }
-    }
+    ring_file_write("5559876");
     wait_for_state(m, ND_CALL_RINGING);
     CHECK_INT(nd_modem_state(m), ND_CALL_RINGING, "the sim ring reached the modem");
 
@@ -948,12 +990,7 @@ static void test_show_incoming_results(void)
 
     /* The caller gives up: removing the file drops the modem back to IDLE,
      * and the ring screen leaves with GONE and no keypress. */
-    {
-        char path[ND_PATH_MAX];
-
-        if (nd_path_resolve(path, sizeof path, DIALER_SIM_RING) == ND_OK)
-            (void)remove(path);
-    }
+    ring_file_remove();
     wait_for_state(m, ND_CALL_IDLE);
     r = nd_dialer_show_incoming(&fx.ui, "5559876", NULL);
     CHECK_INT(r, ND_CALL_GONE, "an IDLE modem means the caller gave up");
@@ -1349,7 +1386,6 @@ static void test_answer_call_connects_and_ends_on_end(void)
     fixture fx;
     nd_modem *m = NULL;
     keys k;
-    char path[ND_PATH_MAX];
 
     if (!fx_init(&fx)) {
         g_skips++;
@@ -1372,14 +1408,7 @@ static void test_answer_call_connects_and_ends_on_end(void)
         return;
     }
 
-    if (nd_path_resolve(path, sizeof path, DIALER_SIM_RING) == ND_OK) {
-        FILE *f = fopen(path, "wb");
-
-        if (f != NULL) {
-            (void)fputs("5559876\n", f);
-            (void)fclose(f);
-        }
-    }
+    ring_file_write("5559876");
     wait_for_state(m, ND_CALL_RINGING);
     CHECK_INT(nd_modem_state(m), ND_CALL_RINGING, "the sim ring reached the modem");
 
@@ -1388,8 +1417,7 @@ static void test_answer_call_connects_and_ends_on_end(void)
     CHECK_INT(nd_modem_state(m), ND_CALL_IDLE, "End hung it up");
     CHECK(white(fx.canvas, 8, 12), "the in-call screen was drawn");
 
-    if (nd_path_resolve(path, sizeof path, DIALER_SIM_RING) == ND_OK)
-        (void)remove(path);
+    ring_file_remove();
     wait_for_state(m, ND_CALL_IDLE);
 
     keys_close(&k, &fx.ui);

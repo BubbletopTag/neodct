@@ -79,11 +79,18 @@ typedef struct {
  * the one published name for the fact, and test_platform.c drives it in all
  * three states so a kept API cannot rot unwatched.
  *
+ * "True on QEMU and ONLY on QEMU" now means the BUILD's qemu. Since
+ * DECISIONS.md D2 the answer comes from a constant compiled into libneodct,
+ * which no environment variable and no damaged /NeoDCT/platform can produce or
+ * take away -- so a phone can no longer be talked into filing its crashes as
+ * simulation by one file somebody wrote on the writable partition.
+ *
  * DO NOT NEGATE IT. !nd_crash_is_simulation() reads as "hardware" and is not
- * -- it is also true of an image carrying no /NeoDCT/platform, which is the
- * one case where nothing is known at all. "Nobody is holding a phone, so be
- * chatty" is !nd_platform_is_hw(); "there is a phone here" is
- * nd_platform_is_hw(). The header says why there is no helper for either. */
+ * -- it is also true of an image carrying no /NeoDCT/platform, and now also of
+ * one whose compiled constant and record disagree, which are the two cases
+ * where nothing is known at all. "Nobody is holding a phone, so be chatty" is
+ * !nd_platform_is_hw(); "there is a phone here" is nd_platform_is_hw(). The
+ * header says why there is no helper for either. */
 bool nd_crash_is_simulation(void);
 
 /* Append to the log, rotating first when needed. Returns the log path, or

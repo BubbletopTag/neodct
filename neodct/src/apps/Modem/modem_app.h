@@ -66,15 +66,38 @@ size_t nd_modemapp_data_rows(nd_modemapp_row *out, size_t max);
 /* max(15, (bottom - y - 16) // max(1, n_rows)). */
 int32_t nd_modemapp_line_h(int32_t bottom, int32_t y, size_t n_rows);
 
-/* The bottom-left string: the port when there is hardware, "SIMULATION"
- * otherwise. */
+/* The bottom-left string when the core really is simulating -- and only then.
+ * The port is what it says when there is hardware. */
 #define ND_MODEMAPP_SIMULATION "SIMULATION"
+
+/* And what it says when there is no hardware and the core is NOT simulating.
+ *
+ * "SIMULATION" is a claim about the phone, and on a phone with no radio in it
+ * -- ND_MODEM_LINK_ABSENT, the state whose entire point is that it is not
+ * simulation -- it is the wrong word on the one screen a developer opens to
+ * diagnose a modem, and it is the same word QEMU shows. The inverse of the bug
+ * ND_MODEMAPP_NO_LINK was added for.
+ *
+ * It is decided from the CARRIER NAME rather than from a link state, because
+ * nd_modem_status carries no link field: adding one is a wire change, and this
+ * app is meant to read what the core already publishes. nd_modem.h's
+ * ND_MODEM_ABSENT_CARRIER and ND_MODEM_UNREACHABLE_CARRIER are the two names
+ * the core substitutes for exactly the two states that are not simulation, so
+ * matching them is asking the same question the home screen asks. The header
+ * records that this app depends on those two strings. */
+#define ND_MODEMAPP_NO_RADIO "NO MODEM"
 
 /* The core did not answer. NOT the same thing as "there is no modem", and
  * drawing SIMULATION for it -- which is what this app used to do, because it
  * threw away nd_svc_modem_status()'s return value -- reports a working modem
  * as a missing one. See nd_modemapp_draw_page(). */
 #define ND_MODEMAPP_NO_LINK "NO LINK TO CORE"
+
+/* Which of those four the footer says. Split out of the draw because a nested
+ * ternary over three of them had no room for the fourth and quietly folded it
+ * into "SIMULATION". `linked` is nd_svc_modem_status()'s return value, as in
+ * nd_modemapp_draw_page(). */
+const char *nd_modemapp_footer(const nd_modem_status *st, bool linked);
 
 /* The dialog shown when the core has no ModemService at all. */
 extern const char *const nd_modemapp_no_service_msg;

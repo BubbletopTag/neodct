@@ -88,11 +88,38 @@ extern "C" {
  * the wrong gauge -- it silently switches off the low-battery warning and the
  * <= 3.20 V protective shutdown, and then runs its cell flat.
  *
- *   ND_BATT_SRC_SIM         There is no bus node. QEMU, or a board with no
- *                           battery daughterboard. Simulation is the TRUTH
- *                           here, 3.85 V is the designed answer, and the
- *                           /tmp/neodct_sim_vcell hook drives the whole
- *                           warning and shutdown flow on a desktop.
+ *   ND_BATT_SRC_SIM         There is no bus node. QEMU, a developer's laptop,
+ *                           or a board with no battery daughterboard.
+ *                           Simulation is the TRUTH here, 3.85 V is the
+ *                           designed answer, and the /tmp/neodct_sim_vcell
+ *                           hook drives the whole warning and shutdown flow
+ *                           on a desktop.
+ *
+ *                           IT IS NOT PLATFORM-QUALIFIED AND THE MODEM'S NOW
+ *                           IS. nd_modem.h's SIM used to mean "no modem was
+ *                           ever found" and now means "nothing enumerated AND
+ *                           nothing in this image says one should have": a
+ *                           phone with no radio in it is
+ *                           ND_MODEM_LINK_ABSENT, and it refuses rather than
+ *                           simulating. The argument above borrows that
+ *                           header's, so the borrowed half is now stronger
+ *                           than this one -- a Luckfox with the gauge ribbon
+ *                           unseated has no bus node, lands here, reports
+ *                           3.85 V, draws a full meter, and runs its cell
+ *                           flat with no warning and no protective shutdown,
+ *                           while the modem beside it correctly says "No
+ *                           Modem".
+ *
+ *                           That is deliberately NOT fixed in the same change
+ *                           as the modem: a fourth source changes what
+ *                           BatteryService reports on a phone whose gauge is
+ *                           merely late, and the shutdown path is the one
+ *                           place in this file where being wrong costs the
+ *                           owner their data. It is written down instead --
+ *                           docs/c-rewrite/OPEN-QUESTIONS.md CB-8, per
+ *                           CODING-STANDARDS.md section 10 -- so that the
+ *                           cross-reference above does not silently point at
+ *                           an argument that no longer says what it used to.
  *
  *   ND_BATT_SRC_LIVE        The gauge answered.
  *

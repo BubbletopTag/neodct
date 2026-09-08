@@ -384,6 +384,34 @@ int32_t nd_modemapp_line_h(int32_t bottom, int32_t y, size_t n_rows)
     return h < 15 ? 15 : h;
 }
 
+/* The bottom-left word, and the reason it is a function rather than a nested
+ * ternary in the draw.
+ *
+ * `st->hardware` answers "is the core talking to a modem right now" and there
+ * are three ways for that to be false, not one. Two of them are refusals and
+ * only one is Simulation Mode, so the core substitutes a name into the carrier
+ * slot for each -- ND_MODEM_ABSENT_CARRIER for a phone with no radio in it,
+ * ND_MODEM_UNREACHABLE_CARRIER for one whose radio cannot be opened -- and
+ * that name is already in the snapshot. Matching it asks the same question the
+ * home screen asks and needs no wire change.
+ *
+ * The carrier is compared and never PRINTED here. "Modem ERROR" is the home
+ * screen's eleven-character phrase for a slot beside a signal meter; this
+ * footer sits under a page that already carries an OPER row and a WHY row, so
+ * it says the one thing those two do not, which is which of the three "no
+ * hardware" answers this is. */
+const char *nd_modemapp_footer(const nd_modem_status *st, bool linked)
+{
+    if (!linked || st == NULL)
+        return ND_MODEMAPP_NO_LINK;
+    if (st->hardware)
+        return st->port;
+    if (strcmp(st->operator_name, ND_MODEM_ABSENT_CARRIER) == 0 ||
+        strcmp(st->operator_name, ND_MODEM_UNREACHABLE_CARRIER) == 0)
+        return ND_MODEMAPP_NO_RADIO;
+    return ND_MODEMAPP_SIMULATION;
+}
+
 void nd_modemapp_draw_page(nd_ui *ui, const nd_modem_status *st, bool linked, int32_t page,
                            const nd_modemapp_row *rows, size_t n_rows)
 {
@@ -419,15 +447,15 @@ void nd_modemapp_draw_page(nd_ui *ui, const nd_modem_status *st, bool linked, in
         y += line_h;
     }
 
-    /* Three states, not two. "SIMULATION" is a claim about the phone; making
-     * it when the core never answered says the modem is missing on a phone
-     * whose modem is fine, which is exactly the bug this app was reported
-     * for. */
-    (void)nd_draw_text(ui->draw, 8, bottom - 14,
-                       !linked        ? ND_MODEMAPP_NO_LINK
-                       : st->hardware ? st->port
-                                      : ND_MODEMAPP_SIMULATION,
-                       ui->font_s, ND_GRAY);
+    /* Four states, not two. "SIMULATION" is a claim about the phone; making it
+     * when the core never answered says the modem is missing on a phone whose
+     * modem is fine, which is exactly the bug this app was reported for -- and
+     * making it when the core is REFUSING says a phone with no radio in it is
+     * pretending to have one, which is the same lie pointing the other way and
+     * is the word this app's footer exists to carry. nd_modemapp_footer() has
+     * the reasoning for reading the carrier name to tell them apart. */
+    (void)nd_draw_text(ui->draw, 8, bottom - 14, nd_modemapp_footer(st, linked), ui->font_s,
+                       ND_GRAY);
     (void)nd_snprintf(pos, sizeof pos, "%d/%d", page + 1, ND_MODEMAPP_N_PAGES);
     nd_ui_text_size(ui, pos, ui->font_s, &tw, &th);
     (void)nd_draw_text(ui->draw, screen_w - 5 - tw, bottom - 14, pos, ui->font_s, ND_GRAY);

@@ -51,6 +51,7 @@
 #include "nd_clock.h"
 #include "nd_log.h"
 #include "nd_modem.h"
+#include "nd_platform.h"
 #include "nd_proc.h"
 #include "nd_settings.h"
 
@@ -3181,6 +3182,16 @@ static void test_simulation_is_only_honest_with_no_radio(void)
     CHECK(!nd_modem__may_simulate(ND_MODEM_LINK_FAULT, true));
     CHECK(!nd_modem__may_simulate(ND_MODEM_LINK_FAULT, false));
 
+    /* ABSENT is the third refusing state, and BOTH directions matter. It is
+     * reached with has_radio FALSE -- nothing enumerated is the whole
+     * definition -- so the false row is the one that fires in practice and
+     * the true row is what stops a later reader from "simplifying" this arm
+     * into `return !has_radio` and quietly re-opening the bug. The table stays
+     * pure and two-argument: which of SIM and ABSENT this is was decided in
+     * the classify, where the platform is read. */
+    CHECK(!nd_modem__may_simulate(ND_MODEM_LINK_ABSENT, false));
+    CHECK(!nd_modem__may_simulate(ND_MODEM_LINK_ABSENT, true));
+
     /* A live modem places real calls. allow_calls=OFF is handled at the call
      * site, not here, so this stays false in both directions. */
     CHECK(!nd_modem__may_simulate(ND_MODEM_LINK_LIVE, true));
@@ -3565,8 +3576,712 @@ static void test_a_zero_boot_grace_extends_nothing(void)
     nd_modem__destroy(m);
 }
 
+/* ------------------------------------------------------------------ *
+ * 14. A phone that has no radio at all
+ * ------------------------------------------------------------------ *
+ *
+ * Section 13 fixed "there is a radio and I cannot reach it". This is the other
+ * half of the same lie: a phone whose modem does not enumerate AT ALL has no
+ * candidate port, so `saw_candidates` is false, so it landed in
+ * ND_MODEM_LINK_SIM -- the word "Simulation" in the carrier line, bars drawn
+ * from /proc/net/route, a two-second fake connect for every call and every
+ * text reported as sent. On a phone that is the worst thing this service can
+ * say, and it is the case the owner named in their own words.
+ *
+ * The evidence that separates it from real Simulation Mode is not in this
+ * service: "did anything enumerate" is the candidate count, "SHOULD anything
+ * have" is a claim about the board, and only the image may answer that. So
+ * these cases turn on a /NeoDCT/platform fixture, and the QEMU case sits
+ * immediately below the hardware one because the pair has to be read together
+ * -- simulation mode is deliberately kept, and that is the case that fails if
+ * it regresses.
+ */
+
+/* The image says which machine this is; this is how the fixture says it.
+ * Copied from test_keypadsetup.c, INCLUDING the unsetenv on its first line and
+ * the reason for it. */
+static void given_the_image_says(const char *platform_word)
+{
+    char record[64];
+
+    /* THE ENVIRONMENT FIRST, EVERY TIME. nd_platform.c's resolve() reads
+     * NEODCT_PLATFORM before it ever opens the record, so an ambient one -- a
+     * developer running the suite with it exported, which is exactly how a
+     * platform bug gets reproduced -- would decide every case below and the
+     * fixture underneath would never be consulted. The copies of this pattern
+     * that omitted this line failed four checks under
+     * `NEODCT_PLATFORM=hw make test-one T=test_keypadsetup`. */
+    (void)unsetenv(ND_ENV_PLATFORM);
+    /* AND THE CONSTANT, WHICH THE unsetenv ABOVE CANNOT REACH. Since
+     * DECISIONS.md D2 a build carries its own platform, and it OUTRANKS both
+     * the variable and the record -- so a libneodct compiled with
+     * ND_BUILD_PLATFORM decides every case here and the fixture underneath is
+     * never consulted, or contradicts it and lands on a mismatch. That is not
+     * a hypothetical build either: buildroot's NEODCT_MAKE_ENV passes exactly
+     * this variable to exactly this Makefile, so
+     * `ND_BUILD_PLATFORM=ND_PLATFORM_HW make test` is a real command, and
+     * unlike the environment a constant cannot be unset at runtime.
+     * nd_platform__set_build() is what nd_platform.h offers instead, and
+     * ND_PLATFORM_UNKNOWN is what every test binary in this tree honestly
+     * is. */
+    nd_platform__set_build(ND_PLATFORM_UNKNOWN);
+
+    if (platform_word == NULL) {
+        char resolved[ND_PATH_MAX];
+
+        if (nd_path_resolve(resolved, sizeof resolved, ND_PATH_PLATFORM) == ND_OK)
+            (void)remove(resolved);
+    } else {
+        (void)nd_snprintf(record, sizeof record, "platform=%s\n", platform_word);
+        pt_write_text(ND_PATH_PLATFORM, record);
+    }
+    /* EVERY CASE BELOW PUTS THIS BACK TO NULL ON THE WAY OUT. nd_platform's
+     * cache outlives the per-case scratch root, so an ambient "hw" left behind
+     * here would turn every existing ND_MODEM_LINK_SIM assertion in this file
+     * into an ND_MODEM_LINK_ABSENT failure about the wrong thing. */
+    nd_platform__reset_cache();
+}
+
+/* THE ACCEPTANCE TEST FOR THE WHOLE CHANGE. An image that says it is a phone,
+ * an empty /sys/class/tty, and the grace already spent: the probe fails, no
+ * candidate was ever seen, and the answer is ABSENT rather than SIM. */
+static void test_no_radio_on_a_phone_is_not_simulation(void)
+{
+    nd_modem *m;
+
+    use_scratch_settings(""); /* AUTO, and nothing under /sys/class/tty */
+    given_the_image_says("hw");
+
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL) {
+        given_the_image_says(NULL);
+        return;
+    }
+
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK(!m->saw_candidates);
+    CHECK(strstr(m->last_probe_why, "no candidate AT ports") != NULL);
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_ABSENT);
+    /* Never adopted, so this is NOT drop_hardware()'s fault flag. Borrowing
+     * it would make "no modem" indistinguishable from "the modem died". */
+    CHECK(!m->faulted);
+
+    nd_modem__destroy(m);
+    given_the_image_says(NULL);
+}
+
+/* And the identical fixture on the emulator, which must be untouched.
+ *
+ * This case sits here rather than with the other simulation tests because it
+ * is the one that fails if the change above goes too far: QEMU genuinely has
+ * no modem, simulation is the honest answer there, and it is deliberately
+ * kept. */
+static void test_no_radio_on_qemu_is_still_simulation(void)
+{
+    nd_modem *m;
+
+    use_scratch_settings("");
+    given_the_image_says("qemu");
+
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL) {
+        given_the_image_says(NULL);
+        return;
+    }
+
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_SIM);
+    CHECK_STR(nd_modem_operator_display(m), ND_MODEM_SIM_CARRIER);
+    nd_modem__sim_route_forget();
+    CHECK_INT(nd_modem_signal_level(m),
+              nd_clock_has_route() ? ND_MODEM_SIM_BARS_ONLINE : ND_MODEM_SIM_BARS_OFFLINE);
+    CHECK(nd_modem_dial(m, "5551234"));
+    CHECK(nd_modem_hangup(m));
+
+    nd_modem__destroy(m);
+    given_the_image_says(NULL);
+}
+
+/* UNKNOWN KEEPS SIMULATING, AND THAT IS THE RULE OBEYED RATHER THAN DODGED.
+ *
+ * ABSENT is a positive claim about the board, nd_platform.h says a claim about
+ * hardware is a TRUTH question, and UNKNOWN decides none of those -- so an
+ * image that has never said what it is cannot license the claim and the claim
+ * is not made. The call site keeps the evidence it had (nothing enumerated)
+ * and reaches the verdict it always did.
+ *
+ * Concretely, this is every host build, all 94 test binaries and every
+ * nd-shoot run, so it is also the case that says "not one line of behaviour
+ * moved for anybody who is not building an image". */
+static void test_an_unknown_platform_keeps_simulating_and_claims_nothing(void)
+{
+    nd_modem *m;
+    char detail[ND_MODEM_DETAIL_MAX];
+
+    use_scratch_settings("");
+    given_the_image_says(NULL); /* no record at all */
+
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL)
+        return;
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_SIM);
+    CHECK_STR(nd_modem_operator_display(m), ND_MODEM_SIM_CARRIER);
+    CHECK(nd_modem_dial(m, "5551234"));
+    CHECK(nd_modem_hangup(m));
+    detail[0] = '\0';
+    CHECK(nd_modem_send_sms(m, "5551234", "hello", detail, sizeof detail));
+    CHECK_STR(detail, "simulated");
+    nd_modem__destroy(m);
+
+    /* And a record whose word this build has never heard of gives the SAME
+     * answer, not a lucky one -- mirroring
+     * test_an_image_with_no_platform_record_stays_quiet in
+     * test_keypadsetup.c. Half a record is not a licence either. */
+    given_the_image_says("luckfox");
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL) {
+        given_the_image_says(NULL);
+        return;
+    }
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_SIM);
+    nd_modem__destroy(m);
+
+    given_the_image_says(NULL);
+}
+
+/* What the home screen shows: an EMPTY meter and a carrier line that names the
+ * fact. The same pair UNREACHABLE uses, which nd_ui.c records as the only
+ * thing on the home screen that can tell this apart from a phone in a tunnel.
+ */
+static void test_a_phone_with_no_radio_draws_no_bars_and_names_it(void)
+{
+    nd_modem *m;
+
+    use_scratch_settings("");
+    given_the_image_says("hw");
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL) {
+        given_the_image_says(NULL);
+        return;
+    }
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_ABSENT);
+
+    /* 0 and NOT -1. nd_layout.c renders -1 as the element's sim_val, which in
+     * the shipped ui_home.json is 4 -- a FULL meter on a phone with no radio,
+     * which is the pair this whole enum exists to stop. */
+    nd_modem__sim_route_forget();
+    CHECK_INT(nd_modem_signal_level(m), 0);
+    CHECK_STR(nd_modem_operator_display(m), ND_MODEM_ABSENT_CARRIER);
+
+    /* And a stale hook file cannot paint over either of them: both readouts
+     * check the link before they read /tmp/neodct_sim_*. */
+    pt_write_text(ND_MODEM_SIM_CSQ, "31\n");
+    pt_write_text(ND_MODEM_SIM_OPS, "Tello\n");
+    CHECK_INT(nd_modem_signal_level(m), 0);
+    CHECK_STR(nd_modem_operator_display(m), ND_MODEM_ABSENT_CARRIER);
+
+    nd_modem__destroy(m);
+    given_the_image_says(NULL);
+}
+
+/* And the two the header calls the worst possible failure: a call timer
+ * running for a call that was never placed, and a text marked sent that
+ * nobody will receive. */
+static void test_a_phone_with_no_radio_refuses_to_fake_a_call_or_a_text(void)
+{
+    nd_modem *m;
+    char detail[ND_MODEM_DETAIL_MAX];
+    nd_mev e;
+
+    use_scratch_settings("");
+    given_the_image_says("hw");
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL) {
+        given_the_image_says(NULL);
+        return;
+    }
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_ABSENT);
+    while (nd_modem__take(m, &e))
+        ;
+
+    CHECK(!nd_modem_dial(m, "5551234"));
+    CHECK_INT(nd_modem_state(m), ND_CALL_IDLE);
+    CHECK(!m->sim_connect_armed);
+
+    /* Messages renders `detail` verbatim as "Send failed: <detail>", so it has
+     * to be a sentence somebody can act on. */
+    detail[0] = '\0';
+    CHECK(!nd_modem_send_sms(m, "5551234", "hello", detail, sizeof detail));
+    CHECK(strstr(detail, "no candidate AT ports") != NULL);
+
+    /* Nothing was queued for the UI to celebrate. */
+    CHECK(!nd_modem__take(m, &e));
+
+    nd_modem__destroy(m);
+    given_the_image_says(NULL);
+}
+
+/* The notice is an EDGE, not a state. The probe repeats every
+ * ND_PROBE_RETRY_S for the life of the phone, and a modal six times a minute
+ * is a denial of service rather than a diagnosis. */
+static void test_the_no_radio_notice_fires_once_and_not_per_probe(void)
+{
+    nd_modem *m;
+
+    use_scratch_settings("");
+    given_the_image_says("hw");
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL) {
+        given_the_image_says(NULL);
+        return;
+    }
+
+    CHECK(!nd_modem__probe_hardware(m));
+    {
+        const char *why = nd_modem_take_pending_fault(m);
+
+        CHECK(why != NULL);
+        if (why != NULL)
+            CHECK(strstr(why, "no candidate AT ports") != NULL);
+        CHECK(nd_modem_take_pending_fault(m) == NULL);
+    }
+
+    m->next_probe = 0.0;
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK(nd_modem_take_pending_fault(m) == NULL);
+
+    /* `faulted` stays FALSE: this modem was never adopted, so it did not
+     * "fail" in the sense drop_hardware() means, and every other reader of
+     * that flag has to keep being able to tell the two apart. The same
+     * invariant test_a_modem_that_cannot_be_opened_is_not_simulation asserts.
+     */
+    CHECK(!m->faulted);
+
+    nd_modem__destroy(m);
+    given_the_image_says(NULL);
+}
+
+/* absent_announced's clear rule, which is unreachable_announced's exact
+ * mirror: cleared when candidates APPEAR and on adoption, where the other is
+ * cleared when they GO AWAY.
+ *
+ * It cannot borrow the existing latch, and this case is why: note_candidates()
+ * clears unreachable_announced when the list goes empty, which IS the ABSENT
+ * condition, so a shared latch would re-arm the modal on every probe for ever.
+ */
+static void test_a_modem_that_appears_later_clears_the_no_radio_notice(void)
+{
+    fake_modem fm;
+    nd_modem *m;
+    char link[ND_PATH_MAX];
+    char sysdir[ND_PATH_MAX];
+    char iface[ND_PATH_MAX];
+
+    use_scratch_settings(""); /* AUTO: the candidate list is /sys/class/tty */
+    given_the_image_says("hw");
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL) {
+        given_the_image_says(NULL);
+        return;
+    }
+
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_ABSENT);
+    CHECK(nd_modem_take_pending_fault(m) != NULL);
+
+    /* Now a modem turns up: a sysfs entry so it is a CANDIDATE, and a /dev
+     * node that is really the pty. */
+    if (!fake_start(&fm, SIM7600, ND_ARRAY_LEN(SIM7600))) {
+        nd_modem__destroy(m);
+        fake_stop(&fm);
+        given_the_image_says(NULL);
+        return;
+    }
+    write_tty("ttyUSB2", "02\n");
+    CHECK_INT(nd_path_resolve(link, sizeof link, "/dev/ttyUSB2"), ND_OK);
+    (void)unlink(link);
+    CHECK_INT(symlink(fm.slave, link), 0);
+
+    m->next_probe = 0.0;
+    CHECK(nd_modem__probe_hardware(m));
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_LIVE);
+
+    /* And take it away again. The latch was cleared by the candidate
+     * appearing and by the adoption, so the notice fires AGAIN -- a phone
+     * whose modem falls out twice has to be told twice. */
+    (void)unlink(link);
+    CHECK_INT(nd_path_resolve(iface, sizeof iface, "/sys/class/tty/ttyUSB2/bInterfaceNumber"),
+              ND_OK);
+    (void)remove(iface);
+    CHECK_INT(nd_path_resolve(sysdir, sizeof sysdir, "/sys/class/tty/ttyUSB2/device"), ND_OK);
+    (void)remove(sysdir);
+    CHECK_INT(nd_path_resolve(sysdir, sizeof sysdir, "/sys/class/tty/ttyUSB2"), ND_OK);
+    (void)remove(sysdir);
+
+    nd_modem__drop_hardware(m, "the test unplugged it");
+    /* drop_hardware() sets `faulted`, which is the "we had one and lost it"
+     * state and NOT this one. Adopting cleared it once; clear it here so the
+     * classify reaches the candidate question again. */
+    m->faulted = false;
+    m->next_probe = 0.0;
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK(!m->saw_candidates);
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_ABSENT);
+    CHECK(nd_modem_take_pending_fault(m) != NULL);
+
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+    given_the_image_says(NULL);
+}
+
+/* THE BOOT GRACE STILL WINS, and it matters more here than anywhere.
+ *
+ * `booting` is tested before `radio` in the classify, so ABSENT is unreachable
+ * inside the window: a phone still shows PROBING -- an empty meter, the
+ * layout's own "No Service", no notice -- while its SIM7600 spends thirty
+ * seconds enumerating on the USB bus. A phone that shouted during its own
+ * bring-up would be the 0.5.x "Simulation the instant the home screen came up"
+ * bug wearing the other hat. */
+static void test_the_boot_grace_still_wins_on_a_phone_with_no_radio(void)
+{
+    nd_modem *m;
+    char detail[ND_MODEM_DETAIL_MAX];
+
+    use_scratch_settings("");
+    given_the_image_says("hw");
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL) {
+        given_the_image_says(NULL);
+        return;
+    }
+
+    m->boot_deadline = nd_modem__now() + ND_MODEM_BOOT_GRACE_DEFAULT_S;
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_PROBING);
+    CHECK(nd_modem_operator_display(m) == NULL); /* the layout keeps its own */
+    CHECK_INT(nd_modem_signal_level(m), 0);
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK(nd_modem_take_pending_fault(m) == NULL);
+
+    /* AND IT DOES NOT LICENSE A FAKE CALL WHILE IT WAITS. Quiet and honest are
+     * two decisions, and this is the one that was wrong: the policy table was
+     * handed the candidate count alone, an empty list read as "no radio in
+     * this device, so faking is honest", and a radio-less phone connected
+     * every call after two seconds and reported every text as sent for the
+     * whole grace -- which note_candidates() keeps pushing out to
+     * ND_MODEM_LATE_GRACE_MAX_S while nothing has appeared, so it is up to a
+     * minute of every boot and not the thirty seconds it reads like. That is
+     * this section's failure exactly, arriving before the readouts catch up
+     * with it. */
+    CHECK(!nd_modem_dial(m, "5551234"));
+    CHECK_INT(nd_modem_state(m), ND_CALL_IDLE);
+    detail[0] = '\0';
+    CHECK(!nd_modem_send_sms(m, "5551234", "hello", detail, sizeof detail));
+    CHECK(strstr(detail, "no modem") != NULL);
+
+    /* Time's up, and only now. */
+    m->boot_deadline = 0.0;
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_ABSENT);
+    m->next_probe = 0.0;
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK(nd_modem_take_pending_fault(m) != NULL);
+
+    nd_modem__destroy(m);
+    given_the_image_says(NULL);
+}
+
+/* AND THE MIRROR, WHICH IS THE CASE THAT FAILS IF THE REFUSAL IS WIDENED.
+ *
+ * On QEMU and on every host build the boot grace still simulates, because
+ * nothing there says the board has a radio and PROBING with no candidate is
+ * the ordinary Simulation Mode this suite is written against. If the refusal
+ * above ever becomes "PROBING refuses", this is what says so. */
+static void test_the_boot_grace_still_simulates_where_no_radio_is_claimed(void)
+{
+    nd_modem *m;
+    char detail[ND_MODEM_DETAIL_MAX];
+
+    use_scratch_settings("");
+    given_the_image_says("qemu");
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL) {
+        given_the_image_says(NULL);
+        return;
+    }
+
+    m->boot_deadline = nd_modem__now() + ND_MODEM_BOOT_GRACE_DEFAULT_S;
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_PROBING);
+    CHECK(nd_modem_dial(m, "5551234"));
+    CHECK(nd_modem_hangup(m));
+    detail[0] = '\0';
+    CHECK(nd_modem_send_sms(m, "5551234", "hello", detail, sizeof detail));
+    CHECK_STR(detail, "simulated");
+
+    nd_modem__destroy(m);
+    given_the_image_says(NULL);
+}
+
+/* A MIS-ASSEMBLED IMAGE IS A PHONE, AND THAT IS THE POINT OF FAILING CLOSED.
+ *
+ * The constant says hw and the record says qemu, so nd_platform() names
+ * neither machine and nd_platform_is_hw() is FALSE. A gate written as
+ * "simulate unless is_hw()" therefore hands a phone assembled from two build
+ * steps straight back to the bug this whole section exists to end -- and
+ * nd_platform.h names that gate, in as many words, as the one that must not be
+ * written. nd_platform_mismatch() exists so this call site can fail closed,
+ * and this is the case that proves it does.
+ *
+ * Reachable without tampering: NEODCT_NO_AUTO_REBUILD=y is documented and
+ * invited in BUILDING.md, and with it set a defconfig switch on a built tree
+ * re-runs the post-build script while libneodct keeps the old constant. */
+static void test_a_contested_image_is_a_phone_and_refuses(void)
+{
+    nd_modem *m;
+    char detail[ND_MODEM_DETAIL_MAX];
+
+    use_scratch_settings("");
+    given_the_image_says("qemu");
+    nd_platform__set_build(ND_PLATFORM_HW);
+    CHECK(nd_platform_mismatch());
+    CHECK(!nd_platform_is_hw()); /* the trap: the naive gate reads this */
+
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL) {
+        nd_platform__set_build(ND_PLATFORM_UNKNOWN);
+        given_the_image_says(NULL);
+        return;
+    }
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_ABSENT);
+    CHECK_STR(nd_modem_operator_display(m), ND_MODEM_ABSENT_CARRIER);
+    CHECK_INT(nd_modem_signal_level(m), 0);
+    CHECK(!nd_modem_dial(m, "5551234"));
+    CHECK_INT(nd_modem_state(m), ND_CALL_IDLE);
+    detail[0] = '\0';
+    CHECK(!nd_modem_send_sms(m, "5551234", "hello", detail, sizeof detail));
+    CHECK(strstr(detail, "no modem") != NULL);
+    nd_modem__destroy(m);
+
+    /* And in the other direction too, so this is not "hw wins": a QEMU build
+     * over a phone's record is just as contested and just as refused. */
+    given_the_image_says("hw");
+    nd_platform__set_build(ND_PLATFORM_QEMU);
+    CHECK(nd_platform_mismatch());
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m != NULL) {
+        CHECK(!nd_modem__probe_hardware(m));
+        CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_ABSENT);
+        CHECK(!nd_modem_dial(m, "5551234"));
+        nd_modem__destroy(m);
+    }
+
+    /* The constant outlives the cache, which outlives the case root. */
+    nd_platform__set_build(ND_PLATFORM_UNKNOWN);
+    given_the_image_says(NULL);
+}
+
+/* THE NOTICE FIRES ON THE OTHER WAY OUT OF THE PROBE TOO.
+ *
+ * nd_modem__probe_hardware() returns early when the AT-port lock cannot be
+ * opened -- root's atcmd having created /tmp/neodct-modem.lock 0644 before
+ * ModemService started is the real case -- and that return never reaches
+ * probe_ports(). It used to announce nothing at all, and nd_modem_open()'s
+ * ABSENT arm then latched sim_announced on the strength of a notice that had
+ * never been made, so poll_sim()'s one-shot was suppressed as well: a phone
+ * with no radio fitted showed "No Modem", refused every call, and put NOTHING
+ * on the console and NO modal on the screen. Quieter than the same phone was
+ * before this state existed.
+ *
+ * The candidate scan runs BEFORE the lock is touched, so "nothing enumerated"
+ * is established on this path exactly as it is on the other one, and a lock
+ * file cannot make a phone with no ttyUSB* have one. */
+static void test_a_phone_with_an_unusable_lock_still_says_it_has_no_radio(void)
+{
+    nd_modem *m;
+    char dir[ND_PATH_MAX];
+    const char *slash;
+    char resolved[ND_PATH_MAX];
+
+    if (geteuid() == 0u)
+        return;
+
+    use_scratch_settings(""); /* AUTO, and nothing under /sys/class/tty */
+    given_the_image_says("hw");
+
+    (void)nd_strlcpy(dir, ND_MODEM_LOCK_FILE, sizeof dir);
+    slash = strrchr(dir, '/');
+    CHECK(slash != NULL);
+    if (slash == NULL) {
+        given_the_image_says(NULL);
+        return;
+    }
+    dir[(size_t)(slash - dir)] = '\0';
+    CHECK_INT(nd_mkdir_p(dir, 0755u), ND_OK);
+    CHECK_INT(nd_path_resolve(resolved, sizeof resolved, dir), ND_OK);
+    CHECK_INT(chmod(resolved, 0500u), 0);
+
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL) {
+        (void)chmod(resolved, 0755u);
+        given_the_image_says(NULL);
+        return;
+    }
+    CHECK_INT(m->lock_fd, -1);
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK(m->lock_unusable);
+    CHECK(strstr(m->last_probe_why, "lock unusable") != NULL);
+
+    /* The readouts and the notice agree, which is the whole complaint. */
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_ABSENT);
+    CHECK(nd_modem_take_pending_fault(m) != NULL);
+
+    nd_modem__destroy(m);
+    (void)chmod(resolved, 0755u);
+    given_the_image_says(NULL);
+}
+
+/* The hook policy, pinned in one place. The gate is not "which board is this",
+ * it is "can a leftover file make the phone make a CLAIM ABOUT ITS RADIO" --
+ * so the two readout hooks go quiet in ABSENT (asserted in the draws-no-bars
+ * case above) and the three that STAGE AN EVENT stay live everywhere,
+ * including on a phone. Writing one of those is a deliberate act by somebody
+ * with a shell, and they are the only way to drive the call UI and Messages on
+ * a bench phone with the modem unplugged. */
+static void test_the_sim_hooks_still_work_on_a_phone(void)
+{
+    nd_modem *m;
+    nd_mev e;
+    char resolved[ND_PATH_MAX];
+
+    use_scratch_settings("");
+    given_the_image_says("hw");
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL) {
+        given_the_image_says(NULL);
+        return;
+    }
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_ABSENT);
+    while (nd_modem__take(m, &e))
+        ;
+
+    /* The ring hook still rings. */
+    pt_write_text(ND_MODEM_SIM_RING, "5551234\n");
+    nd_modem_poll(m);
+    CHECK_INT(nd_modem_state(m), ND_CALL_RINGING);
+    CHECK(nd_modem__take(m, &e));
+    CHECK_INT(e.kind, ND_MEV_INCOMING);
+    CHECK_STR(e.text, "5551234");
+    CHECK_INT(nd_path_resolve(resolved, sizeof resolved, ND_MODEM_SIM_RING), ND_OK);
+    (void)unlink(resolved);
+    nd_modem_poll(m);
+    CHECK_INT(nd_modem_state(m), ND_CALL_IDLE);
+    while (nd_modem__take(m, &e))
+        ;
+
+    /* The SMS hook still delivers and is still consumed. */
+    pt_write_text(ND_MODEM_SIM_SMS, "5559999|still here\n");
+    nd_modem_poll(m);
+    CHECK(!nd_path_exists(ND_MODEM_SIM_SMS));
+    CHECK(nd_modem__take(m, &e));
+    CHECK_INT(e.kind, ND_MEV_SMS_SIM);
+    CHECK_STR(e.text, "still here");
+
+    /* And the fault hook still drops to FAULT and still undoes itself, which
+     * is what keeps the fault screen reachable on a bench phone. */
+    pt_write_text(ND_MODEM_SIM_FAULT, "");
+    nd_modem_poll(m);
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_FAULT);
+    CHECK_INT(nd_path_resolve(resolved, sizeof resolved, ND_MODEM_SIM_FAULT), ND_OK);
+    (void)unlink(resolved);
+    nd_modem_poll(m);
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_ABSENT);
+
+    nd_modem__destroy(m);
+    given_the_image_says(NULL);
+}
+
+/* Everything an nd_svc client sees, with no wire change at all. This is why
+ * apps/Modem is deliberately untouched: nd_modem_status carries no link field,
+ * so the engineering app's WHY row already prints the diagnosis and the
+ * carrier row already names the state. */
+static void test_the_probe_reason_survives_into_the_status_snapshot(void)
+{
+    nd_modem *m;
+    nd_modem_status st;
+
+    use_scratch_settings("");
+    given_the_image_says("hw");
+    m = make_modem();
+    CHECK(m != NULL);
+    if (m == NULL) {
+        given_the_image_says(NULL);
+        return;
+    }
+    CHECK(!nd_modem__probe_hardware(m));
+    CHECK_INT(nd_modem_link_state(m), ND_MODEM_LINK_ABSENT);
+
+    nd_modem__sim_route_forget();
+    nd_modem_status_snapshot(m, &st);
+    CHECK(!st.hardware);
+    CHECK(strstr(st.probe_why, "no candidate AT ports") != NULL);
+    CHECK_STR(st.operator_name, ND_MODEM_ABSENT_CARRIER);
+    CHECK_INT(st.signal_level, 0);
+
+    nd_modem__destroy(m);
+    given_the_image_says(NULL);
+}
+
 int main(void)
 {
+    /* THE PLATFORM IS THIS FILE'S OWN FIXTURE, NEVER THE SHELL'S.
+     *
+     * Since nd_modem_link_state() started asking which machine this is, an
+     * exported NEODCT_PLATFORM decides every case below that does not say --
+     * and `NEODCT_PLATFORM=hw make test` is exactly how a platform bug gets
+     * reproduced (test_keypadsetup.c says so where it copies this pattern), so
+     * that is not a hypothetical shell. Thirty-two checks in this file flipped
+     * under it, all of them cases asserting ordinary Simulation Mode, and
+     * every one of those failures would have been about the wrong thing.
+     *
+     * Cleared once, here, rather than in each case: section 14's
+     * given_the_image_says() clears it again on every call for the cases that
+     * DO say, and between the two there is no state a case can inherit. What
+     * is left is the honest description of a host build -- an image that has
+     * never said what it is -- which is what every other case in this file was
+     * written against.
+     *
+     * THE CONSTANT GOES WITH IT, and it is the stronger of the two. Since
+     * DECISIONS.md D2 a build carries its own platform and it outranks both
+     * the variable and the record; buildroot's NEODCT_MAKE_ENV passes
+     * ND_BUILD_PLATFORM to this very Makefile, so
+     * `ND_BUILD_PLATFORM=ND_PLATFORM_HW make test-one T=test_modem` is a real
+     * command a developer reproducing an image build runs -- and it failed 43
+     * checks here, including the case section 14 calls the acceptance test for
+     * the whole change, every one of them about the wrong thing. Unlike the
+     * variable a constant cannot be unset, so nd_platform__set_build() is what
+     * nd_platform.h offers instead; ND_PLATFORM_UNKNOWN is what this binary
+     * honestly is. */
+    (void)unsetenv(ND_ENV_PLATFORM);
+    nd_platform__set_build(ND_PLATFORM_UNKNOWN); /* drops the cache as well */
+
     (void)nd_settings_init();
     nd_log_set_colour(false);
 
@@ -3657,6 +4372,20 @@ int main(void)
     RUN(test_a_held_lock_is_not_ninety_seconds_of_silence);
     RUN(test_the_boot_grace_waits_for_the_bus_to_settle);
     RUN(test_a_zero_boot_grace_extends_nothing);
+
+    RUN(test_no_radio_on_a_phone_is_not_simulation);
+    RUN(test_no_radio_on_qemu_is_still_simulation);
+    RUN(test_an_unknown_platform_keeps_simulating_and_claims_nothing);
+    RUN(test_a_phone_with_no_radio_draws_no_bars_and_names_it);
+    RUN(test_a_phone_with_no_radio_refuses_to_fake_a_call_or_a_text);
+    RUN(test_the_no_radio_notice_fires_once_and_not_per_probe);
+    RUN(test_a_modem_that_appears_later_clears_the_no_radio_notice);
+    RUN(test_the_boot_grace_still_wins_on_a_phone_with_no_radio);
+    RUN(test_the_boot_grace_still_simulates_where_no_radio_is_claimed);
+    RUN(test_a_contested_image_is_a_phone_and_refuses);
+    RUN(test_a_phone_with_an_unusable_lock_still_says_it_has_no_radio);
+    RUN(test_the_sim_hooks_still_work_on_a_phone);
+    RUN(test_the_probe_reason_survives_into_the_status_snapshot);
 
     RUN(test_the_thread_runs_and_stops_cleanly);
     RUN(test_requeue_puts_an_event_back_at_the_front);

@@ -890,6 +890,19 @@ static void given_the_image_says(const char *platform_word)
      * test_platform.c's own given_* helpers have always cleared it; these
      * copies of the pattern did not. */
     (void)unsetenv(ND_ENV_PLATFORM);
+    /* AND THE CONSTANT, WHICH THE unsetenv ABOVE CANNOT REACH. Since
+     * DECISIONS.md D2 a build carries its own platform, and it OUTRANKS both
+     * the variable and the record -- so a libneodct compiled with
+     * ND_BUILD_PLATFORM decides every case here and the fixture underneath is
+     * never consulted, or contradicts it and lands on a mismatch. That is not
+     * a hypothetical build either: buildroot's NEODCT_MAKE_ENV passes exactly
+     * this variable to exactly this Makefile, so
+     * `ND_BUILD_PLATFORM=ND_PLATFORM_HW make test` is a real command, and
+     * unlike the environment a constant cannot be unset at runtime.
+     * nd_platform__set_build() is what nd_platform.h offers instead, and
+     * ND_PLATFORM_UNKNOWN is what every test binary in this tree honestly
+     * is. */
+    nd_platform__set_build(ND_PLATFORM_UNKNOWN);
 
     if (platform_word == NULL) {
         char resolved[ND_PATH_MAX];
@@ -958,6 +971,37 @@ static void test_an_image_with_no_platform_record_stays_quiet(void)
     nd_platform__reset_cache();
     CHECK_INT(nd_kpsetup_gate_check(3), ND_KPSETUP_GATE_QUIET);
 
+    given_the_image_says(NULL);
+}
+
+/* The cost/truth split has to survive the compiled constant IN BOTH
+ * DIRECTIONS, and this is the case the constant was introduced for.
+ *
+ * A phone whose /NeoDCT/platform is damaged or missing used to read as a dev
+ * box and skip the coldplug grace -- the same shape of failure as the
+ * /dev/ttyFIQ0 heuristic before it, arriving through a lost file instead of a
+ * kernel option, and ending the same way: a phone that came up with no keys.
+ * With the constant inside libneodct there is nothing left to lose.
+ *
+ * A CONTESTED image goes the other way and stays QUIET, and that is the rule
+ * rather than an omission: a mismatch is UNKNOWN, waiting for a bus is a COST
+ * question, and UNKNOWN takes the cheap branch. Nothing is claimed about a
+ * machine whose identity two build artefacts disagree about. */
+static void test_a_hardware_build_waits_and_a_contested_image_does_not(void)
+{
+    given_the_image_says(NULL);
+    nd_platform__set_build(ND_PLATFORM_HW);
+    CHECK(!nd_path_exists(ND_PATH_PLATFORM));
+    CHECK_INT(nd_kpsetup_gate_check(3), ND_KPSETUP_GATE_WAIT_FOR_BUS);
+
+    given_the_image_says("qemu");
+    nd_platform__set_build(ND_PLATFORM_HW);
+    CHECK(nd_platform_mismatch());
+    CHECK_INT(nd_kpsetup_gate_check(3), ND_KPSETUP_GATE_QUIET);
+
+    /* The constant outlives the cache, which outlives the case root. Both go
+     * back or every case after this one is a phone. */
+    nd_platform__set_build(ND_PLATFORM_UNKNOWN);
     given_the_image_says(NULL);
 }
 
@@ -1248,6 +1292,7 @@ int main(void)
 
     RUN(test_gate_check);
     RUN(test_an_image_with_no_platform_record_stays_quiet);
+    RUN(test_a_hardware_build_waits_and_a_contested_image_does_not);
     RUN(test_maybe_run_skips_a_phone_that_already_works);
     RUN(test_maybe_run_is_quiet_on_a_dev_box);
     RUN(test_a_nonsense_bus_override_disables_setup);

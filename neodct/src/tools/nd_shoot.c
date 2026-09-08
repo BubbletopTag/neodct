@@ -86,6 +86,7 @@
 #include "nd_keypad.h"
 #include "nd_log.h"
 #include "nd_paths.h"
+#include "nd_platform.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_ui_sim.h"
@@ -2128,6 +2129,27 @@ int main(int argc, char **argv)
         (void)fprintf(stderr, "nd-shoot: cannot stage a /NeoDCT root\n");
         return 1;
     }
+
+    /* THE PLATFORM IS PINNED, for the same reason the clock is.
+     *
+     * The staged root carries no /NeoDCT/platform, so this tool renders an
+     * image that has never said what machine it is -- which is the truth about
+     * a build host and is what every reference frame was captured against.
+     * NEODCT_PLATFORM would override that from the environment, and since
+     * nd_modem_link_state() started asking, an exported NEODCT_PLATFORM=hw
+     * makes the home screen draw "No Modem" and an empty meter instead of
+     * "Simulation" and its route-derived bars. Two frames really do move
+     * (home-simulation, eng-modem), so a developer who had the variable set to
+     * reproduce something else would get a reference set that silently
+     * disagrees with the committed one.
+     *
+     * A reference renderer must not depend on the shell it was started from.
+     * Cleared here rather than at each group, beside stage_root(), because
+     * every group inherits it and there is one place a reader has to look.
+     * The cache goes with it: nd_platform() resolves once per process and
+     * stage_root() has already run. */
+    (void)unsetenv(ND_ENV_PLATFORM);
+    nd_platform__reset_cache();
 
     printf("[shoot] overlay: %s\n", g_overlay);
     printf("[shoot] root:    %s\n", g_stage);

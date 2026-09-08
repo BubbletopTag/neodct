@@ -76,6 +76,7 @@
 #include "nd_mic.h"
 #include "nd_modem_priv.h"
 #include "nd_paths.h"
+#include "nd_platform.h"
 #include "nd_settings.h"
 #include "nd_types.h"
 
@@ -352,10 +353,10 @@ static void set_state(nd_modem *m, nd_call_state s)
     unlock_state(m);
 }
 
-/* Did the last probe see a candidate AT port? The one input to
- * nd_modem__may_simulate() that is not the link state, and the reason a dial
- * on a desktop is still faked while a dial on a phone with an unopenable
- * SIM7600 is refused. */
+/* Did the last probe see a candidate AT port? Half of the input to
+ * nd_modem__may_simulate() that is not the link state -- device_has_a_radio()
+ * below is the whole of it -- and the reason a dial on a desktop is still
+ * faked while a dial on a phone with an unopenable SIM7600 is refused. */
 static bool saw_radio(nd_modem *m)
 {
     bool v;
@@ -364,6 +365,84 @@ static bool saw_radio(nd_modem *m)
     v = m->saw_candidates;
     unlock_state(m);
     return v;
+}
+
+/* Does the IMAGE say this board has a radio in it? The other half of the pair
+ * saw_radio() starts: that one answers "did anything enumerate", this one
+ * answers "should anything have", and the two together are what separate
+ * ND_MODEM_LINK_SIM from ND_MODEM_LINK_ABSENT.
+ *
+ * THIS IS THE ONE PLACE THE PLATFORM IS READ. Five call sites ask it -- the
+ * classify, the NO MODEM announcement, nd_modem_open()'s startup branch, the
+ * policy input, and nd_modem_sim.c's Simulation Mode one-shot -- and every one
+ * of them has to move together, which is why they all go through one predicate
+ * instead of each spelling out a platform test of its own. nd_modem_priv.h
+ * lists them beside the declaration. A second spelling is a second decision
+ * point, and this service has been fixed twice already for the console and the
+ * carrier line saying different things about the same radio.
+ *
+ * nd_platform_is_hw() and DELIBERATELY NOT !nd_platform_is_qemu(). This is a
+ * TRUTH question in nd_platform.h's sense -- it is a claim about a piece of
+ * hardware -- and UNKNOWN is allowed to decide none of those, so an image that
+ * has never said what it is falls to SIM and claims nothing. The header says
+ * in as many words that the day somebody writes the negation the phone starts
+ * making claims about hardware it has never been told it has; here that day
+ * would arrive as every developer's laptop and all 94 test binaries refusing
+ * to place a simulated call. nd_modem.h's WHY ABSENT HAD TO EXIST is the long
+ * version, including why UNKNOWN falling to SIM is the rule obeyed rather
+ * than evaded.
+ *
+ * ---- AND WHY A CONTESTED IMAGE COUNTS AS A PHONE ----
+ *
+ * nd_platform_mismatch() is the second arm and it is not a widening of the
+ * first. UNKNOWN covers two states that could not be further apart: a build
+ * that was told NOTHING (a laptop, this suite, nd-shoot) and an image whose
+ * two halves name DIFFERENT machines. nd_platform.h grew that predicate so a
+ * caller could fail closed on the second without arming the first, and names
+ * "simulate unless is_hw()" as the gate that must not be written -- because a
+ * phone assembled from two build steps would take the emulator's branch and go
+ * straight back to "Simulation" beside four bars, a two-second fake connect
+ * and every text reported as sent. That is the failure this whole change
+ * exists to end, and it must not be reachable by mis-assembling an image.
+ *
+ * The trade is deliberately asymmetric, because the two errors are not the
+ * same size. A contested EMULATOR image refuses calls that could have been
+ * faked: a developer loses Simulation Mode on an image that is already
+ * shouting MIS-ASSEMBLED IMAGE at every process start. A contested PHONE that
+ * simulated would tell its owner their calls connected and their texts went
+ * out. The cheap mistake is the one to make.
+ *
+ * It reads nd_platform() and nothing else -- never a device proxy, never
+ * ND_BUILD_PLATFORM directly -- so DECISIONS.md D2's compiled-in constant is
+ * inherited here for free and the two cannot drift apart. */
+bool nd_modem__board_should_have_a_radio(void)
+{
+    return nd_platform_is_hw() || nd_platform_mismatch();
+}
+
+/* "Is there a radio in this device", which is the question
+ * nd_modem__may_simulate()'s second argument has always been NAMED after and
+ * not the one it was being fed.
+ *
+ * It was fed saw_radio() alone, which answers only "did anything enumerate" --
+ * and during the boot grace, on a phone whose modem has not appeared yet, that
+ * is false. The classify answers ND_MODEM_LINK_PROBING there (correctly: the
+ * bus may still settle, and a phone that shouted during its own bring-up would
+ * be the old bug wearing the other hat), and the PROBING arm of the policy
+ * table then read "no radio, so faking is honest" and faked. So for up to
+ * ND_MODEM_LATE_GRACE_MAX_S after every boot -- note_candidates() keeps pushing
+ * the deadline out while the candidate list is empty -- a radio-less phone
+ * connected every call after two seconds and reported every text as sent,
+ * which is exactly the failure ABSENT was added to end, just earlier.
+ *
+ * The readouts are deliberately NOT changed with it: PROBING still shows the
+ * layout's own carrier line and an empty meter, because "not yet" is the
+ * truthful thing to display while the bus settles. It is only the offer to
+ * FAKE that the board's claim withdraws, and the two halves of the truth --
+ * do not shout yet, do not lie yet -- are different decisions. */
+static bool device_has_a_radio(nd_modem *m)
+{
+    return saw_radio(m) || nd_modem__board_should_have_a_radio();
 }
 
 /* One short phrase for "why can this phone not use its radio", for the two
@@ -966,9 +1045,11 @@ void nd_modem__init_modem(nd_modem *m)
     m->faulted = false;
     m->fault_pending = false;
     m->fault_why[0] = '\0';
-    /* And the same for "unreachable": we just reached it. A modem that goes
-     * unreachable again after this must be free to say so again. */
+    /* And the same for "unreachable" and "absent": we just reached one. A
+     * modem that goes unreachable or disappears again after this must be free
+     * to say so again. */
     m->unreachable_announced = false;
+    m->absent_announced = false;
     /* Stamped here, not left at 0.0, so the watchdog measures "quiet since we
      * adopted it" rather than "quiet since the epoch" -- a modem that goes
      * silent the instant it is adopted still gets its full grace period. */
@@ -1157,6 +1238,15 @@ static void note_candidates(nd_modem *m, size_t n)
          * unreachable one is stale, and a modem plugged back in later must
          * be able to announce itself again. */
         m->unreachable_announced = false;
+    } else {
+        /* And the mirror. A radio that has appeared is not a missing one, so
+         * whatever was announced about it being absent is stale and a modem
+         * that goes away AGAIN must be free to say so again.
+         *
+         * This is why absent_announced cannot borrow unreachable_announced:
+         * the clear above fires on exactly the ABSENT condition, so a shared
+         * latch would re-arm the notice on every probe for ever. */
+        m->absent_announced = false;
     }
     if (m->boot_grace > 0.0 && (n == 0u || appeared)) {
         double want = now + m->boot_grace;
@@ -1169,7 +1259,7 @@ static void note_candidates(nd_modem *m, size_t n)
     unlock_state(m);
 }
 
-/* Arm the one-shot notice for "there is a radio here and I cannot reach it".
+/* Arm the one-shot notice for a radio the phone cannot use.
  *
  * The same latch nd_modem__drop_hardware() uses for a modem that died, and
  * armed on the EDGE for the same reason: the probe repeats for the life of
@@ -1177,23 +1267,72 @@ static void note_candidates(nd_modem *m, size_t n)
  * than a diagnosis. `faulted` is deliberately NOT set -- that flag means "we
  * had one and lost it" and clearing it is nd_modem__init_modem()'s job, so
  * borrowing it here would make an unreachable modem indistinguishable from a
- * dropped one in every other place that reads it. */
-static void announce_unreachable(nd_modem *m, const char *why)
+ * dropped one in every other place that reads it.
+ *
+ * Two callers, two latches, one body: the `!m->faulted` guard and the
+ * fault_pending handoff are the parts that must not drift between them, so
+ * they exist once. The headline differs because the two situations are
+ * opposite facts about the same phone, and the console is where a developer
+ * finds out which. */
+static void announce_once(nd_modem *m, bool *latch, const char *why, const char *headline)
 {
     bool first;
 
     lock_state(m);
-    first = !m->unreachable_announced && !m->faulted;
+    first = !*latch && !m->faulted;
     if (first) {
-        m->unreachable_announced = true;
+        *latch = true;
         m->fault_pending = true;
         (void)nd_strlcpy(m->fault_why, (why != NULL) ? why : "", sizeof m->fault_why);
     }
     unlock_state(m);
     if (first)
-        nd_log_err(ND_LOG_MODEM, "MODEM UNREACHABLE: a modem is enumerated and none of its "
-                                 "ports could be used (%s).",
+        nd_log_err(ND_LOG_MODEM, "%s (%s).", headline,
                    (why != NULL && why[0] != '\0') ? why : "no reason recorded");
+}
+
+static void announce_unreachable(nd_modem *m, const char *why)
+{
+    announce_once(m, &m->unreachable_announced, why,
+                  "MODEM UNREACHABLE: a modem is enumerated and none of its ports could be used");
+}
+
+/* And the mirror: nothing enumerated at all, on an image that says it is a
+ * phone. The line says out loud what the readouts show, because "HARDWARE NOT
+ * FOUND: Running in Simulation Mode" -- which is what this used to print --
+ * is the console agreeing with a carrier line about something neither of them
+ * knew. Naming the refusal matters as much as naming the fault: an owner
+ * whose calls stop working deserves to find the reason in the log rather than
+ * deduce it. */
+static void announce_absent(nd_modem *m, const char *why)
+{
+    announce_once(m, &m->absent_announced, why,
+                  "NO MODEM: this image says it is a phone and no candidate AT port enumerated "
+                  "at all. Calls and texts are REFUSED, not simulated");
+}
+
+/* The ABSENT guard, in one place, because nd_modem__probe_hardware() has TWO
+ * ways out and both of them are this state.
+ *
+ * The condition is nd_modem_link_state()'s ABSENT arm written out -- nothing
+ * enumerated, the grace spent, the image saying this board has a radio -- and
+ * it is spelled once so the console cannot say something the carrier line
+ * disagrees with. That was the whole complaint this state was added for.
+ *
+ * The early return on a failed nd_modem__acquire() is why this exists rather
+ * than one call at the bottom. That path never reaches probe_ports(), so it
+ * used to announce nothing at all: a phone with no modem fitted whose
+ * /tmp/neodct-modem.lock root's atcmd had already created 0644 got the correct
+ * "No Modem" and empty meter and refused every call, with NO console line and
+ * NO modal ever -- quieter than the same phone was before this state existed.
+ * `n_cand` is the candidate scan's own answer and note_candidates() has
+ * already recorded it, so the lock has nothing to do with it: the evidence for
+ * ABSENT was complete before acquire() was called. */
+static void maybe_announce_absent(nd_modem *m, size_t n_cand, const char *why)
+{
+    if (n_cand == 0u && nd_modem__now() >= m->boot_deadline &&
+        nd_modem__board_should_have_a_radio())
+        announce_absent(m, why);
 }
 
 bool nd_modem__probe_hardware(nd_modem *m)
@@ -1238,12 +1377,23 @@ bool nd_modem__probe_hardware(nd_modem *m)
                              sizeof note);
         }
         probe_note(m, note);
-        /* Only the unusable case is a verdict. A lock somebody else is
-         * holding is a modem being talked to, and saying "unreachable" for
-         * that would fire a notice at every phone whose data connection is
-         * coming up normally. */
+        /* Only the unusable case is an UNREACHABLE verdict. A lock somebody
+         * else is holding is a modem being talked to, and saying "unreachable"
+         * for that would fire a notice at every phone whose data connection is
+         * coming up normally.
+         *
+         * ABSENT is not gated on the lock at all, and the asymmetry is the
+         * point. UNREACHABLE would be inventing a claim about a RADIO out of a
+         * fact about a LOCK FILE -- the probe never got as far as looking at a
+         * port -- which is the whole class of mistake this service keeps being
+         * fixed for. ABSENT rests on the candidate scan, which ran above this
+         * branch and answered zero, and a lock file cannot make a phone that
+         * has no ttyUSB* have one. Announcing it here is therefore reporting
+         * what nd_modem_link_state() is already telling the home screen. */
         if (m->lock_unusable && n_cand > 0u && nd_modem__now() >= m->boot_deadline)
             announce_unreachable(m, note);
+        else
+            maybe_announce_absent(m, n_cand, note);
         return false;
     }
     why[0] = '\0';
@@ -1260,6 +1410,16 @@ bool nd_modem__probe_hardware(nd_modem *m)
          * reach, and it says so out loud exactly once. */
         if (n_cand > 0u && nd_modem__now() >= m->boot_deadline)
             announce_unreachable(m, why);
+        /* And nothing enumerated at all, on an image that says it is a phone.
+         * Same shape, opposite fact, its own latch.
+         *
+         * The boot grace guard inside it matters more here than anywhere: a
+         * SIM7600 takes seconds just to appear on the USB bus, and
+         * note_candidates() keeps pushing the deadline out while there is
+         * nothing to probe, so a phone gets its full window before it shouts.
+         * A bench demonstration of this wants system.modem.boot_grace_s=0. */
+        else
+            maybe_announce_absent(m, n_cand, why);
     }
     return ok;
 }
@@ -1668,7 +1828,7 @@ static bool do_dial(nd_modem *m, const char *raw)
             /* A live modem with system.modem.allow_calls=OFF. A deliberate
              * development switch, and the log line has always said so. */
             nd_log(ND_LOG_MODEM, "Calls not enabled yet; simulating this dial.");
-        } else if (!nd_modem__may_simulate(nd_modem_link_state(m), saw_radio(m))) {
+        } else if (!nd_modem__may_simulate(nd_modem_link_state(m), device_has_a_radio(m))) {
             char reason[ND_MODEM_PROBE_WHY_MAX];
 
             /* THE PHONE MUST NOT PRETEND IT PLACED A CALL.
@@ -1871,7 +2031,7 @@ static bool do_send_sms(nd_modem *m, const char *raw_number, const char *raw_tex
     nd_log(ND_LOG_MODEM, "Sending SMS to %s (%u chars)", number, (unsigned)utf8_chars(text));
 
     if (!m->hardware) {
-        if (!nd_modem__may_simulate(nd_modem_link_state(m), saw_radio(m))) {
+        if (!nd_modem__may_simulate(nd_modem_link_state(m), device_has_a_radio(m))) {
             char reason[ND_MODEM_PROBE_WHY_MAX];
 
             /* Reported as sent, never transmitted, no way for the owner to
@@ -2413,6 +2573,18 @@ nd_err nd_modem__create(nd_modem **out)
     if (m->lock_fd < 0)
         nd_log_err(ND_LOG_MODEM, "cannot open the AT port lock: %s", m->lock_why);
 
+    /* Resolve the platform HERE, before the thread exists.
+     *
+     * nd_modem_link_state() asks it, and the two readouts reach the classify
+     * about ten times a second from the UI thread while the modem thread is
+     * asking as well. After resolution that is two loads and costs nothing;
+     * the only exposure is the FIRST call, which opens a file. nd_platform.c
+     * documents that race as benign -- two threads parse the same small file
+     * and write the same values -- but doing it once, single-threaded, before
+     * anything can contend, costs one fopen at startup and removes the
+     * question entirely. */
+    (void)nd_platform();
+
     *out = m;
     return ND_OK;
 }
@@ -2462,8 +2634,19 @@ nd_err nd_modem_open(nd_modem **out)
              * exists to stop. sim_announced is set so poll_sim() does not say
              * it later either. */
             m->sim_announced = true;
+        } else if (nd_modem__board_should_have_a_radio()) {
+            /* And the mirror: nothing enumerated at all, on an image that says
+             * it is a phone. maybe_announce_absent() has just said so on both
+             * of nd_modem__probe_hardware()'s ways out, in the words that fit,
+             * and this is the site that matters most for it -- whenever the
+             * boot grace is 0 (QEMU, and every fixture in the suite) this
+             * branch is reached instead of poll_sim()'s, so leaving it
+             * printing "Running in Simulation Mode" would put the lie on the
+             * console at startup, which is where somebody diagnosing a dead
+             * radio actually looks. */
+            m->sim_announced = true;
         } else {
-            nd_log(ND_LOG_MODEM, "HARDWARE NOT FOUND: Running in Simulation Mode.");
+            nd_modem__announce_simulation();
             m->sim_announced = true;
         }
         nd_log(ND_LOG_MODEM, "Will re-probe every %ds; sim hooks: %s / %s.", (int)ND_PROBE_RETRY_S,
@@ -2793,7 +2976,27 @@ nd_modem_link nd_modem_link_state(nd_modem *m)
      * it true means every one of those ports failed -- permissions, EBUSY, a
      * held lock, no OK inside a second -- and reporting that as Simulation
      * is a phone telling its owner that a broken radio is fine. */
-    return radio ? ND_MODEM_LINK_UNREACHABLE : ND_MODEM_LINK_SIM;
+    if (radio)
+        return ND_MODEM_LINK_UNREACHABLE;
+
+    /* AND THE OTHER HALF OF THE SAME LIE. Nothing enumerated at all: on a
+     * laptop or under QEMU that really is Simulation Mode and always was, and
+     * on a phone it is a radio that is supposed to be here and is not.
+     *
+     * THE PLATFORM IS READ ONLY THROUGH nd_modem__board_should_have_a_radio(),
+     * here and at the four other sites nd_modem_priv.h lists beside it. This
+     * is the one that turns facts into a STATE, so the readouts, the notice
+     * and the UI all read the link and cannot disagree with it; the others
+     * decide what to announce and whether faking is on offer, and they have to
+     * move with this one, which is why none of them spells out a platform test
+     * of its own.
+     *
+     * And it is asked AFTER unlock_state(m), never with st_mu held: the first
+     * nd_platform() in a process does one fopen, and this file's whole rule is
+     * that the state mutex is never held across a syscall.
+     * nd_modem__create() warms the cache before the thread exists, so on the
+     * phone this is two loads. */
+    return nd_modem__board_should_have_a_radio() ? ND_MODEM_LINK_ABSENT : ND_MODEM_LINK_SIM;
 }
 
 /* The simulate-or-refuse policy, as a table, because it is the decision and
@@ -2808,12 +3011,23 @@ bool nd_modem__may_simulate(nd_modem_link link, bool has_radio)
         return false;
     case ND_MODEM_LINK_SIM:
     case ND_MODEM_LINK_PROBING:
-        /* Simulation is honest only on a device with no radio in it. During
-         * the boot grace on a phone whose ports HAVE appeared, "not yet" is
-         * the truthful answer to a dial, not a two-second fake connect. */
+        /* Simulation is honest only on a device with no radio in it, and
+         * `has_radio` is device_has_a_radio() -- "one enumerated, OR the image
+         * says one should have". During the boot grace on a phone, "not yet"
+         * is the truthful answer to a dial whether the ports have appeared or
+         * not: an empty candidate list a second into the bring-up of a board
+         * that is SUPPOSED to have a SIM7600 is a bus that has not settled,
+         * never a licence to fake a connect. */
         return !has_radio;
     case ND_MODEM_LINK_FAULT:
     case ND_MODEM_LINK_UNREACHABLE:
+    case ND_MODEM_LINK_ABSENT:
+        /* ABSENT groups with the two broken states and not with SIM, because
+         * `has_radio` cannot tell it apart from Simulation Mode -- both have
+         * a candidate count of zero. What separates them is the image, and
+         * that was decided in the classify. Refusing here in both directions
+         * is what makes the phone's dialer and its status bar say the same
+         * thing. */
     default:
         return false;
     }
@@ -2867,8 +3081,20 @@ int32_t nd_modem_signal_level(nd_modem *m)
          * of this function drew FOUR FULL BARS next to it whenever
          * /proc/net/route had a default route -- which S45modem's data call
          * puts there. A full meter on a phone whose radio the UI cannot open
-         * is worse than no meter at all. */
-        if (link == ND_MODEM_LINK_FAULT || link == ND_MODEM_LINK_UNREACHABLE)
+         * is worse than no meter at all.
+         *
+         * ABSENT is the strongest case of the same thing, so it joins them
+         * here rather than below: a phone with NO radio at all is exactly
+         * where a stale /tmp/neodct_sim_csq painting four bars would be the
+         * furthest from the truth it can get.
+         *
+         * 0 and not -1, and the difference is the whole point. -1 means
+         * "unknown", which nd_layout.c renders as the element's sim_val -- 4
+         * in the shipped ui_home.json, a FULL meter. 0 selects sig-0.png.
+         * "NO SIGNAL IS NOT ZERO BARS", used in the direction that draws
+         * nothing. */
+        if (link == ND_MODEM_LINK_FAULT || link == ND_MODEM_LINK_UNREACHABLE ||
+            link == ND_MODEM_LINK_ABSENT)
             return 0;
 
         /* Read outside the state lock: one open/read/close per rendered
@@ -2949,10 +3175,21 @@ const char *nd_modem_operator_display(nd_modem *m)
          *
          * Checked BEFORE the /tmp/neodct_sim_operator hook for the same
          * reason the meter is: a leftover hook file must not be able to
-         * paint a carrier name onto a radio nothing can reach. */
-        if (link == ND_MODEM_LINK_UNREACHABLE) {
+         * paint a carrier name onto a radio nothing can reach.
+         *
+         * ABSENT shares the arm and DIFFERS ONLY IN THE WORD, because every
+         * word of the reasoning above transfers: it is a steady state, reached
+         * on a phone whose owner may never see the modal, and two words in the
+         * carrier slot beside an empty meter are the only thing on the home
+         * screen that can tell it from a phone in a tunnel. Dropping the line
+         * the way FAULT does would leave the layout's authored "No Service"
+         * standing, which is the most misleading option available. */
+        if (link == ND_MODEM_LINK_UNREACHABLE || link == ND_MODEM_LINK_ABSENT) {
+            const char *name = (link == ND_MODEM_LINK_ABSENT) ? ND_MODEM_ABSENT_CARRIER
+                                                              : ND_MODEM_UNREACHABLE_CARRIER;
+
             lock_state(m);
-            (void)nd_strlcpy(m->op_display, ND_MODEM_UNREACHABLE_CARRIER, sizeof m->op_display);
+            (void)nd_strlcpy(m->op_display, name, sizeof m->op_display);
             unlock_state(m);
             return m->op_display;
         }

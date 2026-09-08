@@ -59,6 +59,7 @@
 #include "nd_layout.h"
 #include "nd_modem.h"
 #include "nd_paths.h"
+#include "nd_platform.h"
 #include "nd_settings.h"
 #include "nd_types.h"
 #include "nd_ui.h"
@@ -1378,6 +1379,31 @@ static void shoot_home_frames(nd_capture *cap, const nd_json_doc *golden)
     write_settings("Palestine.jpg");
     nd_vclock_enable();
     nd_ui_sim_clear(&ui);
+    /* THIS CASE IS ONLY CORRECT WHILE THE PLATFORM IS UNKNOWN, and since
+     * nd_modem_link_state() started asking, that has to be arranged rather
+     * than assumed. It builds a real modem with no AT port anywhere, and on an
+     * image that says it is a phone that is ND_MODEM_LINK_ABSENT -- "No Modem"
+     * and an empty meter, not ND_MODEM_SIM_CARRIER and route-derived bars.
+     * The home-simulation golden frame draws the same thing, so an ambient
+     * NEODCT_PLATFORM=hw would turn this case AND its frame red about the
+     * wrong thing entirely. That is not hypothetical: running the suite with
+     * the variable exported is exactly how a platform bug gets reproduced
+     * (test_keypadsetup.c says so where it copies this pattern).
+     *
+     * The cache is dropped as well as the variable, because nd_platform()
+     * resolves once per process and something earlier in this binary has
+     * already asked.
+     *
+     * AND THE BUILD CONSTANT, which the unsetenv cannot reach. Since
+     * DECISIONS.md D2 a build carries its own platform and it outranks both
+     * the variable and the record; buildroot's NEODCT_MAKE_ENV passes
+     * ND_BUILD_PLATFORM to this very Makefile, so
+     * `ND_BUILD_PLATFORM=ND_PLATFORM_HW make test-one T=test_ui` is a real
+     * command -- and it moved this group's whole reference frame, failing the
+     * two checks below and the home-simulation golden frame with them.
+     * ND_PLATFORM_UNKNOWN is what this binary honestly is. */
+    (void)unsetenv(ND_ENV_PLATFORM);
+    nd_platform__set_build(ND_PLATFORM_UNKNOWN); /* drops the cache as well */
     if (nd_ui_init(&ui, fb) != ND_OK) {
         CHECK(false, "nd_ui_init (group C)");
         return;

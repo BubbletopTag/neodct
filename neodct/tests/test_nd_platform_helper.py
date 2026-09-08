@@ -133,7 +133,12 @@ def test_get_on_a_missing_file_fails(tmp_path):
     assert result.stdout == ""
 
 
-# --- the environment override, as in the C ----------------------------------
+# --- the environment override, which the C no longer has on an image --------
+#
+# It still wins HERE, and the script's own header says why: since DECISIONS.md
+# D2 nd_platform() lets the compiled-in constant outrank NEODCT_PLATFORM, and
+# this script has no constant to lose to. These cases pin the shell behaviour
+# as it is, not as a mirror of the C.
 
 def test_the_environment_beats_the_file(tmp_path):
     result = run(tmp_path, record=HW_RECORD, env_platform="qemu")

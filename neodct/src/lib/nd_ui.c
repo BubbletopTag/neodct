@@ -2645,7 +2645,15 @@ void nd_ui_render_home(nd_ui *ui)
              * empty meter nd_modem_signal_level() returns for the same state.
              * That pair is the only thing on the home screen that can tell
              * this apart from a phone in a tunnel -- and it is what replaced
-             * the word "Simulation" beside four full bars. */
+             * the word "Simulation" beside four full bars.
+             *
+             * ND_MODEM_LINK_ABSENT keeps the line for the same reason and
+             * fills it with ND_MODEM_ABSENT_CARRIER ("No Modem"): a phone with
+             * no radio in it at all is the steadiest state of the three, the
+             * owner may never see a modal, and dropping the line would leave
+             * the layout's authored "No Service" standing -- which nd_modem.h
+             * calls the most misleading option available. Two states named
+             * here, three reaching this code, and only FAULT drops. */
             if (el->type == ND_EL_TEXT && strcmp(el->text, "No Service") == 0 &&
                 nd_ui_status_modem_faulted(ui))
                 continue;

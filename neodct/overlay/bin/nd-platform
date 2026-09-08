@@ -35,14 +35,63 @@
 # a value that is not one is a file we do not understand rather than one to
 # pass on to a caller.
 #
-# NEODCT_PLATFORM overrides the file with a platform word, exactly as it does
-# in the C -- and, exactly as in the C, it carries no board: a board name is a
-# claim about a piece of hardware and an environment variable is not evidence
-# of one.
+# NEODCT_PLATFORM overrides the file with a platform word, and it carries no
+# board: a board name is a claim about a piece of hardware and an environment
+# variable is not evidence of one.
+#
+# IT NO LONGER MATCHES THE C, AND THAT IS WORTH SAYING PLAINLY. Since
+# DECISIONS.md D2 the environment loses to the compiled-in constant on an image
+# build -- nd_platform.h has the reasoning, which is that NEODCT_PLATFORM can
+# come from /NeoDCT/User/env.sh and an update-proof way to make a phone
+# simulate its radio is not a discriminator. Here it still wins, because this
+# script has no constant to lose to and its remaining override is a host-test
+# hook (neodct/tests/test_nd_platform_helper.py drives it). So on a devenv
+# image an exported NEODCT_PLATFORM makes `nd-platform is hw` true while
+# libneodct answers qemu, with no diagnostic anywhere: nd_platform_mismatch()
+# compares the constant against the FILE and knows nothing about this. Somebody
+# chasing a divergence between the two answers should check the environment
+# first.
 #
 # NEODCT_PLATFORM_FILE is the host tests' hook, in the shape ndsys-apply.sh
 # uses for the same purpose: the default is the real absolute path, and a test
 # points it at an ordinary file.
+#
+# ============ AND WHAT THIS SCRIPT CANNOT SEE ============
+#
+# Since DECISIONS.md D2 the C answer has a SECOND source that outranks this
+# file: ND_BUILD_PLATFORM, compiled into libneodct. nd_platform() treats a
+# disagreement between the two as a mis-assembled image and names neither
+# machine. This script cannot see the constant at all, so it cannot detect
+# that, and it will happily answer "hw" on an image the C has already refused
+# to call anything.
+#
+# That gap is accepted rather than papered over. It cannot be closed here:
+# busybox sh cannot read a symbol out of a shared library, and delegating to a
+# C binary would put a process spawn in the boot path. And it cannot arise for
+# any image this tree builds: /NeoDCT/platform and the compiled constant both
+# come out of neodct/scripts/platform-id.sh, one table with one entry per image
+# tag, so they agree by construction. What is left for the C check to catch is
+# a hand-assembled or tampered image, and a shell script on that image is not
+# the instrument that should be finding it -- nd-selftest is, and it fails on
+# it before it runs anything else.
+#
+# TWO INIT SCRIPTS ASK, AND THEY DO NOT COST THE SAME. S17audio does not ask at
+# all; its only mention is a comment about settings.prop parsing.
+#
+#   S10udevd   whether to wait for a ttyUSB to enumerate. A COST question in
+#              nd_platform.h's sense: on a contested image the worst answer
+#              costs a wait nobody needed.
+#
+#   S90display `is qemu` and then `exit 0`, which is a TRUTH question about a
+#              panel and is NOT free to get wrong. A contested phone whose
+#              /NeoDCT/platform says qemu exits before starting neodct_displayd
+#              and before granting the gpio53 backlight, so the owner gets a
+#              dark screen with nothing to light it -- the exact failure
+#              S90display's own header says it was rewritten to end. If that
+#              stops being hypothetical, the fix is in S90display and not here:
+#              fall through to the `[ -e /dev/spidev0.0 ]` evidence for
+#              anything that is not a positive `is hw`, which costs a genuine
+#              QEMU image nothing (there is no spidev node to find).
 : "${NEODCT_PLATFORM_FILE:=/NeoDCT/platform}"
 
 usage() {

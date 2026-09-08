@@ -1,5 +1,5 @@
-/* test_platform.c -- the three-valued answer, and the one that must not
- * collapse into either of the others.
+/* test_platform.c -- the three-valued answer, the PRECEDENCE that produces it,
+ * and the one value that must not collapse into either of the others.
  *
  * nd_platform.h's rule is the whole subject of this file: a missing or
  * unreadable /NeoDCT/platform is ND_PLATFORM_UNKNOWN, and UNKNOWN is a real
@@ -8,6 +8,21 @@
  * silent -- the first arms hardware waits in every unit test, the second is
  * the 0.5.9a regression class in reverse -- so the case that most needs a
  * test is the one where the file is not there at all.
+ *
+ * ============ AND SINCE THE CONSTANT, A SECOND ONE ============
+ *
+ * DECISIONS.md D2 compiles the platform into libneodct, so there are now two
+ * sources that can name a machine and they can DISAGREE. That case is the one
+ * that most needs a test in this file, for a reason the missing-record case
+ * does not share: no image this tree builds can produce it. Both values come
+ * out of one table in neodct/scripts/platform-id.sh, so a disagreement means a
+ * hand-assembled or tampered image -- which is exactly why the runtime check
+ * is allowed to be a hard refusal, and exactly why nothing but a test will
+ * ever exercise the branch that implements it.
+ *
+ * given_the_build_says() is how the fixture supplies it. The environment could
+ * never construct these states: it cannot make a constant, and it cannot make
+ * two sources disagree.
  *
  * The fixture is the case root. nd_platform.c reads through
  * nd_props_parse_settings(), which resolves through ND_ROOT, so writing
@@ -78,6 +93,17 @@ static void given_the_environment_says(const char *word, const char *record)
     else
         (void)unsetenv(ND_ENV_PLATFORM);
     nd_platform__reset_cache();
+}
+
+/* What this binary was compiled for. ND_PLATFORM_UNKNOWN is what every test
+ * binary in the tree really is, and it is what every case using this helper
+ * puts back on the way out -- for the same reason the given_* helpers above
+ * all drop the cache. The constant is a file-static in the library, so it
+ * outlives the per-case scratch root and would otherwise decide every case
+ * after the one that set it. */
+static void given_the_build_says(nd_platform_t built_for)
+{
+    nd_platform__set_build(built_for); /* drops the cache as part of the call */
 }
 
 /* ------------------------------------------------------------------ *
@@ -261,6 +287,235 @@ static void test_the_answer_is_resolved_once_and_the_reset_is_what_re_reads(void
 }
 
 /* ------------------------------------------------------------------ *
+ * The compile-time constant, and what a disagreement does
+ * ------------------------------------------------------------------ */
+
+/* The ordinary hardware image, and nothing about it moves. This case exists so
+ * that "the constant now decides" cannot quietly change what a well-formed
+ * phone reports. */
+static void test_a_build_that_agrees_with_its_record_behaves_as_before(void)
+{
+    given_a_platform_record(HW_RECORD);
+    given_the_build_says(ND_PLATFORM_HW);
+
+    CHECK_INT(nd_platform(), ND_PLATFORM_HW);
+    CHECK_STR(nd_platform_name(), "hw");
+    CHECK_STR(nd_platform_board(), "luckfox-pico-mini-b");
+    CHECK(nd_platform_is_hw());
+    CHECK(!nd_platform_is_qemu());
+    CHECK(!nd_platform_mismatch());
+
+    given_the_build_says(ND_PLATFORM_UNKNOWN);
+}
+
+/* THE CORE NEW BEHAVIOUR. Two sources naming different machines is a
+ * mis-assembled image, and the phone claims NEITHER -- it does not pick the
+ * one we happen to trust more today, because nothing at runtime can know which
+ * build step was wrong. */
+static void test_a_build_that_disagrees_with_its_record_claims_neither(void)
+{
+    given_a_platform_record(QEMU_RECORD);
+    given_the_build_says(ND_PLATFORM_HW);
+
+    CHECK_INT(nd_platform(), ND_PLATFORM_UNKNOWN);
+    CHECK_STR(nd_platform_name(), "unknown");
+    /* Half a record we cannot trust is not a board to quote either. */
+    CHECK_STR(nd_platform_board(), "");
+    CHECK(!nd_platform_is_hw());
+    CHECK(!nd_platform_is_qemu());
+    CHECK(nd_platform_mismatch());
+    /* Both sides on the page, because a reader has to be able to tell this
+     * from a build that was simply told nothing. */
+    CHECK(strstr(nd_platform_origin(), "hw") != NULL);
+    CHECK(strstr(nd_platform_origin(), "qemu") != NULL);
+
+    given_the_build_says(ND_PLATFORM_UNKNOWN);
+}
+
+/* And mirrored, because the constant is not merely PREFERRED. If it were, this
+ * direction would quietly answer "qemu" and the check would have no teeth in
+ * the case that matters -- a QEMU build somehow shipped over a phone's record. */
+static void test_the_disagreement_is_a_refusal_in_both_directions(void)
+{
+    given_a_platform_record(HW_RECORD);
+    given_the_build_says(ND_PLATFORM_QEMU);
+
+    CHECK_INT(nd_platform(), ND_PLATFORM_UNKNOWN);
+    CHECK_STR(nd_platform_board(), "");
+    CHECK(!nd_platform_is_hw());
+    CHECK(!nd_platform_is_qemu());
+    CHECK(nd_platform_mismatch());
+
+    given_the_build_says(ND_PLATFORM_UNKNOWN);
+}
+
+/* A phone whose record was lost still knows it is a phone. This is the
+ * property D3's modem gate depends on: "no radio at all is a FAULT" has to be
+ * reachable on a hardware image with nothing readable in /NeoDCT at all. */
+static void test_a_hardware_build_with_no_record_is_still_hardware(void)
+{
+    given_no_platform_record();
+    given_the_build_says(ND_PLATFORM_HW);
+
+    CHECK_INT(nd_platform(), ND_PLATFORM_HW);
+    CHECK(nd_platform_is_hw());
+    /* An absent record contradicts nothing, so this is not a mismatch -- and
+     * it names no board, so there is none to report. */
+    CHECK(!nd_platform_mismatch());
+    CHECK_STR(nd_platform_board(), "");
+
+    given_the_build_says(ND_PLATFORM_UNKNOWN);
+}
+
+/* A record that names no machine WITHHOLDS a claim; it does not make a
+ * competing one. Same rule nd_platform.c already applies to board=, and the
+ * reason a truncated or half-written record is not an accusation. */
+static void test_a_record_this_build_cannot_read_is_not_a_contradiction(void)
+{
+    given_a_platform_record("platform=luckfox\nboard=luckfox-pico-mini-b\n");
+    given_the_build_says(ND_PLATFORM_HW);
+
+    CHECK_INT(nd_platform(), ND_PLATFORM_HW);
+    CHECK(!nd_platform_mismatch());
+    /* The record's board is not quoted either: the word it came with did not
+     * parse, so none of that record is a fact. */
+    CHECK_STR(nd_platform_board(), "");
+
+    given_the_build_says(ND_PLATFORM_UNKNOWN);
+}
+
+/* AN IMAGE CANNOT BE TALKED OUT OF ITS IDENTITY BY env.sh.
+ *
+ * This is the whole reason the environment stopped winning. NEODCT_PLATFORM
+ * can be written once into /NeoDCT/User/env.sh -- root shell, on the only
+ * writable partition, surviving every update -- and before the constant that
+ * was a permanent way to make a phone file its crashes as QEMU and simulate
+ * its radio. */
+static void test_an_image_ignores_the_environment_in_both_directions(void)
+{
+    given_the_environment_says("qemu", HW_RECORD);
+    given_the_build_says(ND_PLATFORM_HW);
+
+    CHECK_INT(nd_platform(), ND_PLATFORM_HW);
+    CHECK(nd_platform_is_hw());
+    CHECK(!nd_platform_mismatch());
+    CHECK(strstr(nd_platform_origin(), "ignored") != NULL);
+
+    /* And the mirror, so this is not just "hw wins". */
+    given_the_environment_says("hw", QEMU_RECORD);
+    given_the_build_says(ND_PLATFORM_QEMU);
+
+    CHECK_INT(nd_platform(), ND_PLATFORM_QEMU);
+    CHECK(!nd_platform_mismatch());
+
+    given_the_build_says(ND_PLATFORM_UNKNOWN);
+    (void)unsetenv(ND_ENV_PLATFORM);
+    nd_platform__reset_cache();
+}
+
+/* The origin is a diagnostic line that gets printed to consoles and written
+ * into crash reports, and NEODCT_PLATFORM can carry whatever somebody wrote in
+ * env.sh. So the recognised word is reported and the raw value never is. */
+static void test_the_environments_raw_value_is_never_echoed(void)
+{
+    given_the_environment_says("<script>not-a-platform", HW_RECORD);
+    given_the_build_says(ND_PLATFORM_HW);
+
+    CHECK(nd_platform_is_hw());
+    CHECK(strstr(nd_platform_origin(), "not-a-platform") == NULL);
+    CHECK(strstr(nd_platform_origin(), "ignored") != NULL);
+
+    /* And on the host build, where the override still decides, an
+     * unrecognised word is still never quoted back. */
+    given_the_build_says(ND_PLATFORM_UNKNOWN);
+    given_the_environment_says("<script>not-a-platform", HW_RECORD);
+    CHECK_INT(nd_platform(), ND_PLATFORM_UNKNOWN);
+    CHECK(strstr(nd_platform_origin(), "not-a-platform") == NULL);
+
+    (void)unsetenv(ND_ENV_PLATFORM);
+    nd_platform__reset_cache();
+}
+
+/* The host build's three answers, byte for byte what they were before the
+ * constant existed -- and three origins that can tell them apart, which is
+ * what stops "unknown" from being one undifferentiated heap in a bug report. */
+static void test_the_host_builds_answers_are_unchanged_and_tell_themselves_apart(void)
+{
+    char from_env[ND_PLATFORM_ORIGIN_MAX];
+    char from_record[ND_PLATFORM_ORIGIN_MAX];
+    char from_nothing[ND_PLATFORM_ORIGIN_MAX];
+
+    given_the_environment_says("hw", QEMU_RECORD);
+    CHECK_INT(nd_platform(), ND_PLATFORM_HW);
+    CHECK_STR(nd_platform_board(), ""); /* the override carries no board */
+    (void)nd_strlcpy(from_env, nd_platform_origin(), sizeof from_env);
+
+    given_a_platform_record(QEMU_RECORD);
+    CHECK_INT(nd_platform(), ND_PLATFORM_QEMU);
+    CHECK_STR(nd_platform_board(), "qemu-virt");
+    (void)nd_strlcpy(from_record, nd_platform_origin(), sizeof from_record);
+
+    given_no_platform_record();
+    CHECK_INT(nd_platform(), ND_PLATFORM_UNKNOWN);
+    (void)nd_strlcpy(from_nothing, nd_platform_origin(), sizeof from_nothing);
+
+    CHECK(strcmp(from_env, from_record) != 0);
+    CHECK(strcmp(from_env, from_nothing) != 0);
+    CHECK(strcmp(from_record, from_nothing) != 0);
+    /* None of the three is a mismatch: a build that was told nothing has
+     * nothing to disagree with. That distinction is the one D3 fails closed
+     * on, so it is worth spelling out. */
+    CHECK(!nd_platform_mismatch());
+}
+
+/* A mismatch is an answer like any other: cached for the life of the process,
+ * so a phone cannot see its own identity settle halfway through a frame. And
+ * the reset drops the READING, never the constant -- a test that forgot that
+ * would silently be asserting about a build it did not ask for. */
+static void test_a_mismatch_is_sticky_and_the_reset_keeps_the_build(void)
+{
+    given_a_platform_record(QEMU_RECORD);
+    given_the_build_says(ND_PLATFORM_HW);
+
+    CHECK(nd_platform_mismatch());
+    CHECK_INT(nd_platform(), ND_PLATFORM_UNKNOWN);
+    /* Asked again, and again: the same answer, with no second look at the
+     * file and no second log line. */
+    CHECK(nd_platform_mismatch());
+    CHECK_INT(nd_platform(), ND_PLATFORM_UNKNOWN);
+
+    /* Take the record away and drop the cache. The build constant survives,
+     * so this is now the agreeing case rather than the host build. */
+    given_no_platform_record();
+    CHECK_INT(nd_platform(), ND_PLATFORM_HW);
+    CHECK(!nd_platform_mismatch());
+
+    given_the_build_says(ND_PLATFORM_UNKNOWN);
+    CHECK_INT(nd_platform(), ND_PLATFORM_UNKNOWN);
+}
+
+/* nd_platform_board()'s contract, applied to the new accessor: never NULL, a
+ * valid C string in every state, including the ones nothing else asked for. */
+static void test_the_origin_is_never_null_in_any_state(void)
+{
+    given_no_platform_record();
+    CHECK(nd_platform_origin() != NULL);
+    CHECK(nd_platform_origin()[0] != '\0');
+
+    given_a_platform_record(HW_RECORD);
+    CHECK(nd_platform_origin() != NULL);
+    CHECK(nd_platform_origin()[0] != '\0');
+
+    given_the_build_says(ND_PLATFORM_QEMU); /* a mismatch against HW_RECORD */
+    CHECK(nd_platform_mismatch());
+    CHECK(nd_platform_origin() != NULL);
+    CHECK(nd_platform_origin()[0] != '\0');
+    CHECK(strlen(nd_platform_origin()) < ND_PLATFORM_ORIGIN_MAX);
+
+    given_the_build_says(ND_PLATFORM_UNKNOWN);
+}
+
+/* ------------------------------------------------------------------ *
  * The one published alias
  * ------------------------------------------------------------------ */
 
@@ -282,10 +537,48 @@ static void test_the_crash_handlers_published_alias_still_agrees(void)
     /* Spelled out, because this is the trap the header warns about: the
      * negation is true here and hardware is not. */
     CHECK(!nd_platform_is_hw());
+
+    /* And the two states the constant added, because the alias is a name for
+     * "this is the emulator" and the resolution order underneath it has just
+     * changed. A QEMU BUILD is simulation with no record at all, a HARDWARE
+     * BUILD is not simulation even with a record saying qemu, and a contested
+     * image is not simulation either -- it is not anything. */
+    given_no_platform_record();
+    given_the_build_says(ND_PLATFORM_QEMU);
+    CHECK(nd_crash_is_simulation());
+
+    given_a_platform_record(QEMU_RECORD);
+    given_the_build_says(ND_PLATFORM_HW);
+    CHECK(!nd_crash_is_simulation());
+    CHECK(nd_platform_mismatch());
+
+    given_a_platform_record(HW_RECORD);
+    given_the_build_says(ND_PLATFORM_HW);
+    CHECK(!nd_crash_is_simulation());
+
+    given_the_build_says(ND_PLATFORM_UNKNOWN);
 }
 
 int main(void)
 {
+    /* THE CONSTANT IS CLEARED BEFORE THE FIRST CASE, not only after the last.
+     *
+     * Every case above given_the_build_says() was written against a build that
+     * was told nothing, which is what this binary is when it is built the
+     * ordinary way -- and is NOT what it is when somebody reproduces an image
+     * build, because buildroot's NEODCT_MAKE_ENV passes ND_BUILD_PLATFORM to
+     * this very Makefile. `ND_BUILD_PLATFORM=ND_PLATFORM_HW make test-one
+     * T=test_platform` failed 21 of 117 checks for that reason alone, all of
+     * them about the wrong thing.
+     *
+     * Cleared HERE and not inside the given_* helpers, because
+     * test_a_mismatch_is_sticky_and_the_reset_keeps_the_build() deliberately
+     * walks from a written record to no record WITHOUT losing the constant,
+     * and a helper that reset it would quietly delete that case's point. Each
+     * case that sets a constant puts it back on the way out; this is the
+     * starting state those restores restore to. */
+    nd_platform__set_build(ND_PLATFORM_UNKNOWN);
+
     RUN(test_hw_is_hardware_and_nothing_else);
     RUN(test_qemu_is_the_emulator_and_nothing_else);
     RUN(test_a_missing_record_is_unknown_and_not_either_default);
@@ -300,12 +593,25 @@ int main(void)
     RUN(test_an_unknown_override_is_unknown_and_does_not_fall_through);
     RUN(test_an_empty_override_is_ignored);
     RUN(test_the_answer_is_resolved_once_and_the_reset_is_what_re_reads);
+
+    RUN(test_a_build_that_agrees_with_its_record_behaves_as_before);
+    RUN(test_a_build_that_disagrees_with_its_record_claims_neither);
+    RUN(test_the_disagreement_is_a_refusal_in_both_directions);
+    RUN(test_a_hardware_build_with_no_record_is_still_hardware);
+    RUN(test_a_record_this_build_cannot_read_is_not_a_contradiction);
+    RUN(test_an_image_ignores_the_environment_in_both_directions);
+    RUN(test_the_environments_raw_value_is_never_echoed);
+    RUN(test_the_host_builds_answers_are_unchanged_and_tell_themselves_apart);
+    RUN(test_a_mismatch_is_sticky_and_the_reset_keeps_the_build);
+    RUN(test_the_origin_is_never_null_in_any_state);
+
     RUN(test_the_crash_handlers_published_alias_still_agrees);
 
     /* Left set by the last case would leak into nothing -- this is the end of
      * the process -- but the cache reset is the habit the module asks for and
-     * the environment is part of what it caches. */
+     * the environment is part of what it caches. The build constant is put
+     * back for the same reason, one habit further on: it outlives the cache. */
     (void)unsetenv(ND_ENV_PLATFORM);
-    nd_platform__reset_cache();
+    nd_platform__set_build(ND_PLATFORM_UNKNOWN);
     return pt_report("test_platform");
 }

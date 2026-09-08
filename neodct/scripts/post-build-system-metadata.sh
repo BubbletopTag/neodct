@@ -63,11 +63,21 @@ esac
 # ships as platform=hw board=devkit-x and every existing "is this hardware"
 # branch keeps working; a third value of a single word would have broken all
 # of them at once.
-case "$PLATFORM" in
-    qemu-aarch64)  FLAG_PLATFORM="qemu"; FLAG_BOARD="qemu-virt" ;;
-    luckfox-armv7) FLAG_PLATFORM="hw";   FLAG_BOARD="luckfox-pico-mini-b" ;;
-    *)             FLAG_PLATFORM="unknown"; FLAG_BOARD="" ;;
-esac
+#
+# ============ AND THE TABLE ITSELF NOW LIVES IN ONE FILE ============
+#
+# The `case` that used to be here is platform-id.sh, because this script is no
+# longer its only reader: buildroot/package/neodct/neodct.mk asks the same
+# helper for the C enumerator and compiles it into libneodct as
+# ND_BUILD_PLATFORM. nd_platform.c treats a disagreement between the compiled
+# constant and the file written below as a mis-assembled image and refuses to
+# name either machine -- and a check that hard is only defensible because both
+# values come out of one table, so an ordinary editing slip cannot produce the
+# disagreement it fires on. See platform-id.sh's own header.
+PLATFORM_ID="$(dirname "$0")/platform-id.sh"
+FLAG_PLATFORM="$("$PLATFORM_ID" "$PLATFORM" word 2>/dev/null || echo unknown)"
+FLAG_BOARD="$("$PLATFORM_ID" "$PLATFORM" board 2>/dev/null || echo "")"
+FLAG_CDEFINE="$("$PLATFORM_ID" "$PLATFORM" cdefine 2>/dev/null || echo "")"
 
 # And an unknown platform stops the build, exactly as a missing VERSION_ID
 # does below.
@@ -82,10 +92,16 @@ esac
 # rescuing.
 if [ "$FLAG_PLATFORM" = "unknown" ]; then
     echo "[post-build] Unknown platform id \"$PLATFORM\"" >&2
-    echo "[post-build]   expected the last argument to be qemu-aarch64 or" >&2
-    echo "[post-build]   luckfox-armv7 -- see BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS" >&2
-    echo "[post-build]   in the defconfig. Refusing to write /NeoDCT/platform" >&2
-    echo "[post-build]   with nothing in it: see this script's own comment." >&2
+    echo "[post-build]   expected the last argument to be one of:" >&2
+    # Asked rather than spelled out, so this cannot name a stale set the day
+    # somebody adds a tag -- see platform-id.sh's own note on --tags.
+    "$PLATFORM_ID" --tags | sed 's/^/[post-build]     /' >&2
+    echo "[post-build]   -- see BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS in the" >&2
+    echo "[post-build]   defconfig. Refusing to write /NeoDCT/platform with" >&2
+    echo "[post-build]   nothing in it: see this script's own comment." >&2
+    echo "[post-build]   neodct.mk reads the same helper and refuses the same" >&2
+    echo "[post-build]   tag, so a libneodct with no ND_BUILD_PLATFORM in it" >&2
+    echo "[post-build]   cannot be reached from here either." >&2
     exit 1
 fi
 
@@ -156,7 +172,10 @@ EOF
 mkdir -p "$TARGET_DIR/NeoDCT/User"
 
 echo "[post-build] $PLATFORM v$VERSION ($BUILD_TIME)"
-echo "[post-build] /NeoDCT/platform: platform=$FLAG_PLATFORM board=$FLAG_BOARD"
+# The compiled constant is echoed beside the file so that one line of a build
+# log shows both halves of the pair nd_platform.c cross-checks at runtime.
+echo "[post-build] /NeoDCT/platform: platform=$FLAG_PLATFORM board=$FLAG_BOARD" \
+     "(libneodct: $FLAG_CDEFINE)"
 
 # --- boot banner ----------------------------------------------------------
 # Rendered here, on the build host, rather than on the phone: figlet is a

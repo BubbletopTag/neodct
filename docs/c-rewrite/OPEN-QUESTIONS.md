@@ -1530,6 +1530,43 @@ board, when `poweroff` returns non-zero).
   branch is three lines and shares the `gmt_string` helper with the branch beside it,
   which is tested.
 
+### CB-8. Should `ND_BATT_SRC_SIM` be platform-qualified the way the modem's now is?
+
+**Needs a ruling. Nothing is broken today that was not broken before; the argument
+underneath it changed and this is the half that did not move with it.**
+
+`nd_battery.h`'s three-source section cites `nd_modem.h` as its authority — *"the same
+lie nd_modem.h grew `ND_MODEM_LINK_UNREACHABLE` to stop telling, on the same bus, on
+the same phone, in the same second"*. DECISIONS.md D3 has since changed what the modem's
+SIM state means. It used to be "no modem was ever found"; it is now "nothing enumerated
+**and nothing in this image says one should have**", with `ND_MODEM_LINK_ABSENT` for a
+board that claims a radio and has none — carrier line "No Modem", empty meter, calls and
+texts refused.
+
+`ND_BATT_SRC_SIM` still reads "there is no bus node, so simulation is the TRUTH here",
+with no platform qualification at all; `nd_battery.c` never calls `nd_platform` (checked
+across `lib/`, `core/`, `apps/` and `tools/`). So a Luckfox with the gauge daughterboard
+ribbon unseated has no bus node, lands in SIM, reports the designed 3.85 V — **above
+every threshold in this file** — draws a full meter, and by this header's own words
+"silently switches off the low-battery warning and the ≤ 3.20 V protective shutdown",
+then runs the cell flat. The modem beside it, on the same phone in the same second,
+now says "No Modem" and refuses. One phone, two opposite stories about the same class
+of failure.
+
+Not fixed in D3's change, deliberately, and the reason is asymmetric risk rather than
+scope. The modem's refusal costs a call. A fourth battery source changes what happens on
+a phone whose gauge is merely *late* — the reprobe ladder (`ND_BATT_REPROBE_FAST_TRIES`,
+then SLOW for ever) exists because a battery board plugged in later must start working —
+and the failure mode on the wrong side of that is a phone that shuts itself down or
+warns on a gauge that was about to answer. That is the one place in this file where
+being wrong costs the owner their session.
+
+The shape if it is wanted: a fourth `nd_battery_source` (or `ND_BATT_SRC_SIM` gated on
+`nd_modem__board_should_have_a_radio()`'s equivalent, `nd_platform_is_hw() ||
+nd_platform_mismatch()`) that reports no voltage rather than 3.85 V, exactly as
+`ND_BATT_SRC_UNREADABLE` already does, and leaves the reprobe ladder alone so a late
+board still recovers.
+
 ---
 
 ## ModemService: the AT engine and the state machine (WP modem)

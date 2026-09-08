@@ -30,7 +30,7 @@
  *
  * ============ AND "NO MODEM" IS NOT "A BROKEN MODEM" ============
  *
- * There are FOUR link states, not two, and the two that are not "yes" and
+ * There are SIX link states, not two, and the four that are not "yes" and
  * "no" are why this header grew a section. See nd_modem_link.
  */
 
@@ -137,6 +137,24 @@ extern "C" {
  * phone is not in a tunnel, its radio is unreachable. Eleven characters, one
  * more than "Simulation", so it fits the same slot in the home layout. */
 #define ND_MODEM_UNREACHABLE_CARRIER "Modem ERROR"
+
+/* And what a phone that HAS NO RADIO IN IT AT ALL puts there.
+ *
+ * Deliberately none of the other three things this line can say, because each
+ * of them would be a different phone:
+ *
+ *   "No Service"   is a working phone in a tunnel. The layout's own authored
+ *                  placeholder, and the most misleading thing available here.
+ *   "Modem ERROR"  is a radio that IS enumerated and cannot be opened
+ *                  (ND_MODEM_LINK_UNREACHABLE). This phone has no radio to
+ *                  fail to open.
+ *   "Simulation"   is a pretend service that really does place pretend calls.
+ *                  This one refuses them.
+ *
+ * It states the one fact there is: nothing that could be a modem is in this
+ * phone. Eight characters against "Simulation"'s ten and "Modem ERROR"'s
+ * eleven, so it cannot overflow a slot already proven at eleven. */
+#define ND_MODEM_ABSENT_CARRIER    "No Modem"
 #define ND_MODEM_SIM_ROUTE_TTL_S   2.0
 #define ND_CLCC_POLL_S             2.0
 #define ND_AUDIO_RESTART_HOLDOFF_S 3.0
@@ -225,7 +243,11 @@ typedef struct nd_modem nd_modem;
  * with no hardware AT ALL it runs in simulation mode, driven by the
  * /tmp/neodct_sim_* files, which is how the whole UI is testable on a
  * desktop. A modem that is present and cannot be opened is NOT that; it is
- * ND_MODEM_LINK_UNREACHABLE and it says so. */
+ * ND_MODEM_LINK_UNREACHABLE and it says so.
+ *
+ * "With no hardware at all it runs in simulation mode" is true only on an
+ * image that does not claim to have a radio. On one that does, no hardware at
+ * all is ND_MODEM_LINK_ABSENT and calls and texts are REFUSED. */
 nd_err nd_modem_open(nd_modem **out);
 void nd_modem_close(nd_modem *m);
 
@@ -242,11 +264,12 @@ void nd_modem_close(nd_modem *m);
  * see ND_MODEM_LINK_UNREACHABLE.
  *
  * The gate is now the LINK STATE, and it is simulation only when this
- * device genuinely has no radio: ND_MODEM_LINK_SIM, or ND_MODEM_LINK_PROBING
- * with no candidate AT port seen yet. UNREACHABLE and FAULT both refuse, and
- * send_sms() puts the probe's reason in `detail` so the failure names itself
- * on screen. (A LIVE modem with system.modem.allow_calls=OFF still
- * simulates: that is a deliberate development switch, not a failure.) */
+ * device genuinely has no radio AND NOTHING SAYS IT SHOULD HAVE ONE:
+ * ND_MODEM_LINK_SIM, or ND_MODEM_LINK_PROBING with no candidate AT port seen
+ * yet. UNREACHABLE, FAULT and ABSENT all refuse, and send_sms() puts the
+ * probe's reason in `detail` so the failure names itself on screen. (A LIVE
+ * modem with system.modem.allow_calls=OFF still simulates: that is a
+ * deliberate development switch, not a failure.) */
 bool nd_modem_dial(nd_modem *m, const char *number);
 bool nd_modem_answer(nd_modem *m);
 bool nd_modem_hangup(nd_modem *m);
@@ -345,19 +368,31 @@ const char *nd_modem_caller_id(nd_modem *m); /* NULL when none */
 bool nd_modem_has_hardware(nd_modem *m);
 
 /* ------------------------------------------------------------------ *
- * The link: four states, because two was a lie and three was not enough
+ * The link: six states, because two was a lie and three was not enough
  * ------------------------------------------------------------------ *
  *
  * nd_modem_has_hardware() answers "am I talking to a modem right now", and
  * for years the service had nothing else -- so both ways of answering "no"
  * came out as Simulation Mode:
  *
- *   ND_MODEM_LINK_SIM     No modem was ever found. On QEMU, or on a phone
- *                         with nothing plugged in, this is CORRECT and the
- *                         phone should say so plainly. Calls and texts are
- *                         still simulated end to end, so the right thing to
- *                         show is "Simulation", not "No Service" -- there IS
- *                         a service, it is just a pretend one.
+ *   ND_MODEM_LINK_SIM     Nothing enumerated, and nothing in this image says
+ *                         one should have. On QEMU, on a developer's laptop,
+ *                         or on a phone with nothing plugged in and no record
+ *                         of what it is, this is CORRECT and the phone should
+ *                         say so plainly. Calls and texts are still simulated
+ *                         end to end, so the right thing to show is
+ *                         "Simulation", not "No Service" -- there IS a
+ *                         service, it is just a pretend one.
+ *
+ *                         THAT WORDING IS LOAD-BEARING and it is not what it
+ *                         used to say. It used to read "No modem was ever
+ *                         found", which is a claim about the BOARD, and a
+ *                         claim about the board is exactly what this state is
+ *                         no longer allowed to make -- see WHY ABSENT HAD TO
+ *                         EXIST. As written it is a statement about what this
+ *                         service is doing and what evidence exists, and an
+ *                         image that says nothing about itself can land here
+ *                         asserting nothing at all.
  *
  *   ND_MODEM_LINK_LIVE    A modem answered AT and is being talked to.
  *
@@ -382,6 +417,14 @@ bool nd_modem_has_hardware(nd_modem *m);
  *                         port and NOT ONE of them could be talked to, with
  *                         the boot grace already spent. There is a radio in
  *                         this phone; the service cannot reach it.
+ *
+ *   ND_MODEM_LINK_ABSENT  Nothing enumerated at all, on an image that says it
+ *                         is a phone. There is SUPPOSED to be a radio here
+ *                         and there is not one. An empty meter, the carrier
+ *                         line ND_MODEM_ABSENT_CARRIER, the one-shot notice,
+ *                         and calls and texts REFUSED rather than simulated.
+ *                         Appended after UNREACHABLE, so no existing value
+ *                         moves.
  *
  * A NULL modem is ND_MODEM_LINK_SIM: a core with no ModemService is not a
  * core with a broken one.
@@ -416,13 +459,110 @@ bool nd_modem_has_hardware(nd_modem *m);
  * Appended after PROBING, so no existing value moves and a UI that has never
  * heard of it simply does not match its FAULT check. That is deliberate: the
  * two readouts below already say the right thing for this state on their
- * own, so a status bar needs no change at all to stop lying. */
+ * own, so a status bar needs no change at all to stop lying.
+ *
+ * ============ AND WHY ABSENT HAD TO EXIST ============
+ *
+ * UNREACHABLE fixed "a radio that cannot be opened". It left the OTHER half
+ * of the same lie standing: a phone whose modem does not enumerate AT ALL --
+ * a SIM7600 that never came up on the USB bus, a ribbon that came loose, a
+ * board built without one -- has no candidate port, so `radio` is false, so
+ * it landed in SIM. Which meant the phone said "Simulation" beside one or
+ * four route-derived bars, faked a two-second connect for every call, and
+ * reported every text as sent. That is the failure the owner named in their
+ * own words, and it is the acceptance test for this whole change.
+ *
+ * The evidence that separates the two is not in this service at all. "Did
+ * anything enumerate" is the candidate count, and it is answered. "SHOULD
+ * anything have" is a question about the board, and only the image can answer
+ * it: nd_platform.h. So the classify asks nd_platform_is_hw(), and ABSENT is
+ * the answer when the image says this is a phone.
+ *
+ * ---- AND WHY THE PREDICATE IS is_hw() AND NOT !is_qemu() ----
+ *
+ * ABSENT is a POSITIVE CLAIM about the board -- "there is supposed to be a
+ * radio here and there is not one" -- and nd_platform.h names "is there a
+ * radio on this board?" as a TRUTH question, which ND_PLATFORM_UNKNOWN is
+ * allowed to decide none of. So an unlabelled image cannot license the claim
+ * and the claim is therefore NOT MADE: it falls to SIM, which under the
+ * wording above asserts nothing about the board at all. That is the rule
+ * obeyed rather than dodged -- UNKNOWN does not answer the question, it fails
+ * to license one of the two answers, and the answer that needed licensing is
+ * withheld. The call site keeps the evidence it already had (nothing
+ * enumerated) and reaches the verdict it always did.
+ *
+ * !nd_platform_is_qemu() would be the opposite: an image that has never said
+ * what it is would start refusing calls on every developer's laptop, in all
+ * 94 test binaries and across nd-shoot's reference screens -- which is
+ * nd_platform.h's "defaulting to HW arms every hardware wait" failure,
+ * verbatim.
+ *
+ * ---- AND WHY A CONTESTED IMAGE IS A PHONE ANYWAY ----
+ *
+ * UNKNOWN is two states wearing one name, and only one of them is benign. A
+ * build that was told NOTHING is the laptop and the suite. An image whose
+ * compiled-in constant and /NeoDCT/platform name DIFFERENT machines is a
+ * mis-assembled phone, and "is_hw() is false there, so simulate" would hand
+ * that phone straight back to the bug: "Simulation" beside four route-derived
+ * bars, a two-second fake connect, every text reported as sent. nd_platform.h
+ * grew nd_platform_mismatch() so a caller could FAIL CLOSED on exactly that
+ * without arming the benign case, and names "simulate unless is_hw()" as the
+ * gate that must not be written. So the gate is
+ * `is_hw() || mismatch()`, and a contested image is ABSENT.
+ *
+ * The two errors are not the same size and the trade follows that. A contested
+ * EMULATOR image loses simulated calls on an image that is already printing
+ * MIS-ASSEMBLED IMAGE at every process start. A contested PHONE that simulated
+ * would tell its owner their calls connected. It is not hypothetical either:
+ * NEODCT_NO_AUTO_REBUILD=y is documented and invited in BUILDING.md, and with
+ * it set a defconfig switch on a built tree re-runs the post-build script while
+ * libneodct keeps the old constant.
+ *
+ * ---- AND WHAT THE BOOT GRACE IS AND IS NOT ALLOWED TO DO ----
+ *
+ * The refusal is NOT deferred until the grace expires, and the readouts ARE.
+ * They are separate decisions and both directions have been wrong here.
+ *
+ * A phone whose SIM7600 is still enumerating is ND_MODEM_LINK_PROBING, keeps
+ * the layout's own carrier line and draws an empty meter -- shouting "No
+ * Modem" during a phone's own bring-up would be the 0.5.x "Simulation the
+ * instant the home screen came up" bug wearing the other hat. But PROBING used
+ * to SIMULATE there, because the policy table was handed the candidate count
+ * alone and an empty list read as "no radio in this device, so faking is
+ * honest". So for up to ND_MODEM_LATE_GRACE_MAX_S after every boot -- the
+ * deadline is pushed out on every probe while nothing has appeared -- a
+ * radio-less phone faked a connected call with a running timer and reported
+ * every text as sent, which is this section's failure exactly, an hour earlier
+ * in the boot. The policy's input is now "one enumerated, OR the image says one
+ * should have", so the phone is quiet AND honest during its own grace.
+ *
+ * A shipped phone cannot be UNKNOWN by accident: the record is in the
+ * verity-covered squashfs and DECISIONS.md D2 also compiles the platform into
+ * libneodct with a loud disagreement check. So the residual population is host
+ * builds and hand-assembled images, and the second is the mismatch arm above.
+ * The design constraint that follows: this service reads nd_platform() and
+ * NOTHING ELSE -- never ND_BUILD_PLATFORM, never a device proxy -- through one
+ * predicate, nd_modem__board_should_have_a_radio(), which nd_modem_priv.h
+ * declares with the list of every site that asks it. So whatever D2 does to
+ * nd_platform() is inherited here for free and the two cannot drift.
+ *
+ * ---- ONE SURFACE IS STILL WRONG, DELIBERATELY, AND IT IS NAMED HERE ----
+ *
+ * apps/Modem (engineering app 9005) draws its footer from `st->hardware`
+ * alone, so a phone in ABSENT labels page 1 "SIMULATION" -- the one word that
+ * screen exists to carry, and the same word QEMU shows. nd_modem_status has no
+ * link field and adding one is a wire change, so the app reads the carrier
+ * name instead: ND_MODEM_ABSENT_CARRIER and ND_MODEM_UNREACHABLE_CARRIER are
+ * the two values that mean "not simulation", and those two strings are
+ * therefore load-bearing for a caller outside this file. Anything that changes
+ * them changes what that footer says. */
 typedef enum {
     ND_MODEM_LINK_SIM = 0,
     ND_MODEM_LINK_LIVE,
     ND_MODEM_LINK_FAULT,
     ND_MODEM_LINK_PROBING,
-    ND_MODEM_LINK_UNREACHABLE
+    ND_MODEM_LINK_UNREACHABLE,
+    ND_MODEM_LINK_ABSENT
 } nd_modem_link;
 
 nd_modem_link nd_modem_link_state(nd_modem *m);

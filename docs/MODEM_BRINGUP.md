@@ -214,6 +214,33 @@ probe-or-simulate pattern as BatteryService):
   the bars; `echo 5551234 > /tmp/neodct_sim_ring` fakes an incoming call
   (`rm` it to "hang up"); `echo Tello > /tmp/neodct_sim_operator` fakes
   the carrier line; dialing auto-"connects" after 2 s.
+  **On a hardware image with no AT port, half of that goes quiet on
+  purpose.** That state is `ND_MODEM_LINK_ABSENT` — the image says this
+  is a phone and nothing enumerated — so the carrier line reads "No
+  Modem" beside an empty meter, and a dial or a send is REFUSED rather
+  than faked. `neodct_sim_csq` and `neodct_sim_operator` are read *after*
+  the link check, so a leftover file cannot paint bars or a carrier name
+  onto a phone that has no radio. `neodct_sim_ring`, `neodct_sim_sms` and
+  `neodct_sim_fault` still work there: they stage an event somebody
+  deliberately created, so the call UI and Messages are still drivable on
+  a bench phone with the modem unplugged.
+  **There is no way to turn the rest back on for that image**, and that
+  is deliberate. `NEODCT_PLATFORM=qemu` used to be the escape and stopped
+  being one when the platform became a compile-time constant
+  (DECISIONS.md D2): it is baked into `libneodct`, because the same
+  variable in `/NeoDCT/User/env.sh` is an update-proof way to make a
+  shipped phone simulate its radio. Use the host build or a QEMU image
+  for whole-of-Simulation-Mode work.
+  **Write the ring and SMS hooks atomically**, because they are
+  mtime-edge-triggered and `echo x > f` gives the file two mtimes — one
+  when the shell creates it empty and one when the data lands. The modem
+  thread polls at 10 Hz and can land between them, ring on the empty
+  file with caller `5550000`, and then ring a second time the moment you
+  hang up. Use a rename instead:
+
+  ```sh
+  printf '5551234\n' > /tmp/f && mv /tmp/f /tmp/neodct_sim_ring
+  ```
 * **SMS sending is LIVE** (the first real telephony): Messages → Write
   Message → Options → Send prompts for a number (arrow keys open the
   PhoneBook contact picker) and sends via `ModemService.send_sms()` —

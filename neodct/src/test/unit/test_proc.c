@@ -1041,6 +1041,19 @@ static void given_the_image_says(const char *platform_word)
      * fixture underneath was never consulted. test_platform.c's own given_*
      * helpers have always cleared it; these copies of the pattern did not. */
     (void)unsetenv(ND_ENV_PLATFORM);
+    /* AND THE CONSTANT, WHICH THE unsetenv ABOVE CANNOT REACH. Since
+     * DECISIONS.md D2 a build carries its own platform, and it OUTRANKS both
+     * the variable and the record -- so a libneodct compiled with
+     * ND_BUILD_PLATFORM decides every case here and the fixture underneath is
+     * never consulted, or contradicts it and lands on a mismatch. That is not
+     * a hypothetical build either: buildroot's NEODCT_MAKE_ENV passes exactly
+     * this variable to exactly this Makefile, so
+     * `ND_BUILD_PLATFORM=ND_PLATFORM_HW make test` is a real command, and
+     * unlike the environment a constant cannot be unset at runtime.
+     * nd_platform__set_build() is what nd_platform.h offers instead, and
+     * ND_PLATFORM_UNKNOWN is what every test binary in this tree honestly
+     * is. */
+    nd_platform__set_build(ND_PLATFORM_UNKNOWN);
 
     if (platform_word == NULL) {
         if (nd_path_resolve(resolved, sizeof resolved, ND_PATH_PLATFORM) == ND_OK)
@@ -1074,8 +1087,29 @@ static void test_the_crash_log_mode_field_names_the_machine(void)
     CHECK(!crash_log_contains("mode:   QEMU/simulation"));
     CHECK(crash_log_contains("mode:   unknown"));
 
+    /* A MIS-ASSEMBLED IMAGE IS UNKNOWN TOO, AND MUST NOT BE DESCRIBED AS AN
+     * ABSENCE. The parenthetical used to be the fixed sentence "this image
+     * carries no /NeoDCT/platform", which is simply false here: the image
+     * carries one and disagrees with it. A triage field that misdescribes why
+     * it could not name the machine is the same class of confidently-wrong
+     * line the FIQ-node heuristic produced, and the field is the first thing a
+     * bug report is sorted by. */
+    given_the_image_says("qemu");
+    nd_platform__set_build(ND_PLATFORM_HW);
+    write_one_report("modes");
+    CHECK(crash_log_contains("mode:   unknown"));
+    CHECK(!crash_log_contains("mode:   hardware"));
+    CHECK(!crash_log_contains("mode:   QEMU/simulation"));
+    CHECK(crash_log_contains("MISMATCH"));
+    /* Both sides, on the line somebody triages by. */
+    CHECK(crash_log_contains("built for hw"));
+    CHECK(crash_log_contains(ND_PATH_PLATFORM " says qemu"));
+    CHECK(!crash_log_contains("carries no " ND_PATH_PLATFORM));
+
     /* The cache outlives the case root, so put it back or every case after
-     * this one inherits whatever the last line said. */
+     * this one inherits whatever the last line said -- and the build constant
+     * outlives the cache, so it needs putting back too. */
+    nd_platform__set_build(ND_PLATFORM_UNKNOWN);
     given_the_image_says(NULL);
 }
 

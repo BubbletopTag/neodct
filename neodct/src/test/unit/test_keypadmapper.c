@@ -945,6 +945,19 @@ static bool given_the_image_says(const char *platform_word)
      * fixture underneath was never consulted. test_platform.c's own given_*
      * helpers have always cleared it; these copies of the pattern did not. */
     (void)unsetenv(ND_ENV_PLATFORM);
+    /* AND THE CONSTANT, WHICH THE unsetenv ABOVE CANNOT REACH. Since
+     * DECISIONS.md D2 a build carries its own platform, and it OUTRANKS both
+     * the variable and the record -- so a libneodct compiled with
+     * ND_BUILD_PLATFORM decides every case here and the fixture underneath is
+     * never consulted, or contradicts it and lands on a mismatch. That is not
+     * a hypothetical build either: buildroot's NEODCT_MAKE_ENV passes exactly
+     * this variable to exactly this Makefile, so
+     * `ND_BUILD_PLATFORM=ND_PLATFORM_HW make test` is a real command, and
+     * unlike the environment a constant cannot be unset at runtime.
+     * nd_platform__set_build() is what nd_platform.h offers instead, and
+     * ND_PLATFORM_UNKNOWN is what every test binary in this tree honestly
+     * is. */
+    nd_platform__set_build(ND_PLATFORM_UNKNOWN);
 
     if (platform_word == NULL) {
         unlink_virtual(ND_PATH_PLATFORM);
@@ -996,6 +1009,30 @@ static void test_the_refusal_says_what_is_actually_known(void)
     CHECK(given_the_image_says("luckfox"), "an unparseable record");
     CHECK_STR(i2c.i2c_required_text(), *i2c.i2c_required_msg, "and a bad record too");
 
+    /* ============ AND THE TWO STATES THE COMPILED CONSTANT ADDED =========
+     *
+     * A hardware image whose record was lost still gets the hardware wording:
+     * the constant is inside libneodct, so there is nothing left to lose. That
+     * is the hardening this app wanted -- an app telling the owner of a phone
+     * "this cannot run in QEMU" because one file went missing is the failure
+     * the three messages exist to end.
+     *
+     * A MIS-ASSEMBLED image gets the byte-for-byte legacy message, and that is
+     * right rather than a gap: nd_platform() is UNKNOWN there, so the app has
+     * exactly the evidence it had before the flag existed and says exactly
+     * what it said then. UNKNOWN means "keep the wording you had". */
+    CHECK(given_the_image_says(NULL), "no record at all");
+    nd_platform__set_build(ND_PLATFORM_HW);
+    CHECK_STR(i2c.i2c_required_text(), *i2c.i2c_required_hw_msg,
+              "a hardware BUILD is a phone even with no record");
+
+    CHECK(given_the_image_says("qemu"), "a record that contradicts the build");
+    nd_platform__set_build(ND_PLATFORM_HW);
+    CHECK(nd_platform_mismatch(), "and it really is a mismatch");
+    CHECK_STR(i2c.i2c_required_text(), *i2c.i2c_required_msg,
+              "a contested image says what it always said");
+
+    nd_platform__set_build(ND_PLATFORM_UNKNOWN);
     (void)given_the_image_says(NULL);
     root_restore();
 }

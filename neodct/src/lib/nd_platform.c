@@ -1,9 +1,16 @@
-/* nd_platform.c -- read /NeoDCT/platform once, remember the answer.
+/* nd_platform.c -- the constant this library was compiled with, cross-checked
+ * against /NeoDCT/platform once, and the answer remembered.
+ *
+ * THE ONLY TRANSLATION UNIT THAT MAY SEE ND_BUILD_PLATFORM. The generated
+ * header below is on this object's include path and on no other's, which is
+ * the enforcement -- see GENPLAT in neodct/src/Makefile for why a .nap must
+ * not carry a platform and why the constant must never become a preprocessor
+ * branch.
  *
  * The whole module is a cache in front of one small file. nd_platform.h has
- * the reasoning for the three-valued answer and for the rule about what
- * UNKNOWN is allowed to decide; this file only has to be careful about two
- * things.
+ * the reasoning for the three-valued answer, for the precedence, and for the
+ * rule about what UNKNOWN is allowed to decide; this file only has to be
+ * careful about two things.
  *
  * The first is that it goes through nd_path_resolve(), so NEODCT_ROOT points
  * it at a fixture and a host test can be a phone for one case without a
@@ -18,16 +25,46 @@
  * a truncated or non-UTF-8 file yields an empty map, which lands on UNKNOWN.
  */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "nd_buildplatform.h"
+
+#include "nd_log.h"
 #include "nd_paths.h"
 #include "nd_platform.h"
 #include "nd_props.h"
 
+/* The fallback lives HERE and not in the public header. Putting a
+ * `#ifndef ND_BUILD_PLATFORM / #define ... UNKNOWN` in nd_platform.h would
+ * make every other translation unit compile it and see UNKNOWN as if it were
+ * a fact -- a public default that is wrong in 199 places out of 200 is worse
+ * than no public name at all. */
+#ifndef ND_BUILD_PLATFORM
+#define ND_BUILD_PLATFORM ND_PLATFORM_UNKNOWN
+#endif
+
+/* Spelled as an ENUMERATOR and used in C code, never in a #if.
+ *
+ * A quoted string would have to survive make, buildroot's shell and the
+ * compiler, and the escaping is a silent-truncation footgun in a flags line
+ * that is already one quoted blob. A bare integer makes a typo a legal value.
+ * A bare identifier has no quoting hazard, and because it is read here as C
+ * rather than by the preprocessor, a misspelling (ND_PLATFORM_HQ) is an
+ * undeclared-identifier ERROR instead of the silent 0 that `#if` would give
+ * it. The assertion catches a hand-passed integer that happens to compile. */
+static nd_platform_t g_build = ND_BUILD_PLATFORM;
+
+_Static_assert(ND_BUILD_PLATFORM == ND_PLATFORM_UNKNOWN || ND_BUILD_PLATFORM == ND_PLATFORM_QEMU ||
+                   ND_BUILD_PLATFORM == ND_PLATFORM_HW,
+               "ND_BUILD_PLATFORM must be one of the three nd_platform_t values");
+
 static bool g_resolved;
 static nd_platform_t g_platform;
+static bool g_mismatch;
 static char g_board[ND_PLATFORM_BOARD_MAX];
+static char g_origin[ND_PLATFORM_ORIGIN_MAX];
 
 /* The word -> value mapping, in one place, so the environment override and
  * the file cannot end up understanding different vocabularies. Anything not
@@ -42,6 +79,21 @@ static nd_platform_t platform_from_word(const char *word)
     if (strcmp(word, ND_PLATFORM_NAME_QEMU) == 0)
         return ND_PLATFORM_QEMU;
     return ND_PLATFORM_UNKNOWN;
+}
+
+/* The same mapping backwards, so that a line naming both sides of a
+ * disagreement spells them the way every other reader of this file does. */
+static const char *word_for(nd_platform_t p)
+{
+    switch (p) {
+    case ND_PLATFORM_QEMU:
+        return ND_PLATFORM_NAME_QEMU;
+    case ND_PLATFORM_HW:
+        return ND_PLATFORM_NAME_HW;
+    case ND_PLATFORM_UNKNOWN:
+    default:
+        return ND_PLATFORM_NAME_UNKNOWN;
+    }
 }
 
 /* ============ g_resolved IS SET LAST, AND THAT IS THE WHOLE ORDER ========
@@ -61,41 +113,131 @@ static nd_platform_t platform_from_word(const char *word)
  * lock is not: nd_platform() is called from signal-adjacent paths (the crash
  * handler is one) where taking a mutex is the thing that must not happen.
  *
+ * THAT PROPERTY REQUIRES EVERY WRITE TO g_origin TO BE IDEMPOTENT, which is
+ * why the environment clause is composed into the same snprintf rather than
+ * appended with nd_strlcat(). An append is a read-modify-write: two threads
+ * arriving together would produce "...; NEODCT_PLATFORM ignored;
+ * NEODCT_PLATFORM ignored", possibly truncated at ND_PLATFORM_ORIGIN_MAX, in
+ * the crash log's mode: field and in nd-selftest's header. One snprintf per
+ * branch means every racing thread writes the same bytes.
+ *
+ * The one thing that is NOT idempotent is the mismatch log line, which can be
+ * emitted twice under the same race. That is left as it is: a duplicate of a
+ * line that says the image is mis-assembled costs a reader nothing, and the
+ * alternatives are a lock this module may not take or a flag written before
+ * the values, which is the lie this whole section exists to stop.
+ *
  * The early returns are gone for the same reason -- there is one exit and the
  * flag is on it -- rather than because the branches wanted rearranging. */
 static void resolve(void)
 {
     const char *env;
+    bool env_spoke;
+    nd_platform_t from_record = ND_PLATFORM_UNKNOWN;
+    char record_board[ND_PLATFORM_BOARD_MAX];
 
     g_platform = ND_PLATFORM_UNKNOWN;
     g_board[0] = '\0';
+    g_mismatch = false;
+    g_origin[0] = '\0';
+    record_board[0] = '\0';
 
-    /* 1. The environment, when it says something. It wins over the file so
-     *    that a developer can put a phone's answer in front of code running
-     *    on a laptop; it carries no board, for the reason in the header. */
+    /* "Said something", not "said something we understood". An override this
+     * build does not recognise stays a refusal and does NOT fall through to
+     * the file -- falling through would make a typo silently believe the
+     * image, which is the opposite of what somebody setting it asked for. */
     env = getenv(ND_ENV_PLATFORM);
-    if (env != NULL && env[0] != '\0') {
-        g_platform = platform_from_word(env);
-    } else {
-        /* 2. The image's own record. A NULL here is an allocation failure:
-         *    UNKNOWN, and nothing else to say. */
+    env_spoke = (env != NULL && env[0] != '\0');
+
+    /* The record is read whenever it can matter: on an image build it is
+     * still where the board comes from and it is the other side of the
+     * agreement check, so it is read even though the constant has already
+     * decided. A NULL here is an allocation failure: nothing else to say. */
+    if (g_build != ND_PLATFORM_UNKNOWN || !env_spoke) {
         nd_props *p = nd_props_parse_settings(ND_PATH_PLATFORM);
 
         if (p != NULL) {
-            g_platform = platform_from_word(nd_props_get(p, ND_PLATFORM_KEY_PLATFORM, NULL));
+            from_record = platform_from_word(nd_props_get(p, ND_PLATFORM_KEY_PLATFORM, NULL));
 
             /* The board is read only once the platform word parsed. A record
              * whose first key we did not understand is not a record to quote
              * the second key out of -- a caller that acted on board= while the
              * platform was UNKNOWN would be making exactly the claim UNKNOWN
              * exists to withhold. */
-            if (g_platform != ND_PLATFORM_UNKNOWN) {
-                (void)nd_strlcpy(g_board, nd_props_get(p, ND_PLATFORM_KEY_BOARD, ""),
-                                 sizeof g_board);
+            if (from_record != ND_PLATFORM_UNKNOWN) {
+                (void)nd_strlcpy(record_board, nd_props_get(p, ND_PLATFORM_KEY_BOARD, ""),
+                                 sizeof record_board);
             }
             nd_props_free(p);
         }
     }
+
+    if (g_build != ND_PLATFORM_UNKNOWN) {
+        /* The environment is read for the LINE and for nothing else, and it is
+         * a suffix passed to the snprintf below rather than a strlcat onto the
+         * result: see the note above about every write to g_origin staying
+         * idempotent. Its own value never reaches the line either --
+         * NEODCT_PLATFORM can come from env.sh, which is arbitrary root shell
+         * from the writable partition, and a diagnostic is not a place to echo
+         * text somebody else wrote. */
+        const char *ignored = env_spoke ? "; " ND_ENV_PLATFORM " ignored" : "";
+
+        /* AN IMAGE BUILD. The constant is the answer, unless the record makes
+         * a competing claim -- and only a record that NAMES A MACHINE can.
+         * Absent, unreadable or carrying a word this build has never heard of
+         * all withhold a claim rather than contradict one. */
+        if (from_record != ND_PLATFORM_UNKNOWN && from_record != g_build) {
+            g_mismatch = true;
+            g_platform = ND_PLATFORM_UNKNOWN;
+            (void)snprintf(g_origin, sizeof g_origin,
+                           "MISMATCH: built for %s, " ND_PATH_PLATFORM " says %s%s",
+                           word_for(g_build), word_for(from_record), ignored);
+        } else {
+            g_platform = g_build;
+            (void)nd_strlcpy(g_board, record_board, sizeof g_board);
+            if (from_record != ND_PLATFORM_UNKNOWN)
+                (void)snprintf(g_origin, sizeof g_origin,
+                               "built for %s, and " ND_PATH_PLATFORM " agrees%s", word_for(g_build),
+                               ignored);
+            else
+                (void)snprintf(g_origin, sizeof g_origin,
+                               "built for %s; " ND_PATH_PLATFORM " names no machine%s",
+                               word_for(g_build), ignored);
+        }
+    } else if (env_spoke) {
+        /* NO CONSTANT -- the host build, and today's behaviour exactly. */
+        g_platform = platform_from_word(env);
+        if (g_platform != ND_PLATFORM_UNKNOWN)
+            (void)snprintf(g_origin, sizeof g_origin, "no build flag; " ND_ENV_PLATFORM " says %s",
+                           word_for(g_platform));
+        else
+            (void)nd_strlcpy(g_origin, "no build flag; " ND_ENV_PLATFORM " ignored",
+                             sizeof g_origin);
+    } else {
+        g_platform = from_record;
+        (void)nd_strlcpy(g_board, record_board, sizeof g_board);
+        if (g_platform != ND_PLATFORM_UNKNOWN)
+            (void)snprintf(g_origin, sizeof g_origin, "no build flag; " ND_PATH_PLATFORM " says %s",
+                           word_for(g_platform));
+        else
+            (void)nd_strlcpy(g_origin, "no build flag and no usable " ND_PATH_PLATFORM,
+                             sizeof g_origin);
+    }
+
+    /* One line, in the mismatch branch ONLY, which is why it is safe here.
+     * nd_platform() is called from signal-adjacent paths, but this branch
+     * cannot be reached on a well-formed image, resolve() already does
+     * fopen/malloc through nd_props_parse_settings(), and nd_log.c takes no
+     * mutex -- the header's constraint is about locks, not about I/O. nd_log.c
+     * does not include nd_platform.h, so there is no recursion; anything that
+     * ever adds a platform question to nd_log's own startup path turns that
+     * into a loop. */
+    if (g_mismatch)
+        nd_log_err(ND_LOG_OS,
+                   "MIS-ASSEMBLED IMAGE: this libneodct was built for %s and " ND_PATH_PLATFORM
+                   " says %s. Claiming neither: nothing at runtime can know which build step "
+                   "was right.",
+                   word_for(g_build), word_for(from_record));
 
     g_resolved = true; /* LAST. See the note above. */
 }
@@ -109,15 +251,7 @@ nd_platform_t nd_platform(void)
 
 const char *nd_platform_name(void)
 {
-    switch (nd_platform()) {
-    case ND_PLATFORM_QEMU:
-        return ND_PLATFORM_NAME_QEMU;
-    case ND_PLATFORM_HW:
-        return ND_PLATFORM_NAME_HW;
-    case ND_PLATFORM_UNKNOWN:
-    default:
-        return ND_PLATFORM_NAME_UNKNOWN;
-    }
+    return word_for(nd_platform());
 }
 
 const char *nd_platform_board(void)
@@ -136,9 +270,38 @@ bool nd_platform_is_qemu(void)
     return nd_platform() == ND_PLATFORM_QEMU;
 }
 
+/* Both of these go through nd_platform() rather than reading their static
+ * directly, so that the first caller in a process still resolves. That is the
+ * nd_platform_board() contract applied to the two new readouts: they are
+ * valid before anything else has been called. */
+const char *nd_platform_origin(void)
+{
+    (void)nd_platform();
+    return g_origin;
+}
+
+bool nd_platform_mismatch(void)
+{
+    (void)nd_platform();
+    return g_mismatch;
+}
+
 void nd_platform__reset_cache(void)
 {
     g_resolved = false;
     g_platform = ND_PLATFORM_UNKNOWN;
+    g_mismatch = false;
     g_board[0] = '\0';
+    g_origin[0] = '\0';
+    /* g_build is deliberately NOT cleared. It is not a cached reading of
+     * anything: it is what this binary was compiled with, and a test that
+     * wanted it changed said so through nd_platform__set_build(). */
+}
+
+void nd_platform__set_build(nd_platform_t built_for)
+{
+    g_build = built_for;
+    /* Dropped in the same call so a case cannot set the constant and then
+     * assert against the previous case's resolved answer. */
+    nd_platform__reset_cache();
 }

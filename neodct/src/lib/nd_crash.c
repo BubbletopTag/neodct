@@ -399,17 +399,28 @@ static void rotate_if_needed(void)
 }
 
 /* The `mode:` field, which is what a bug report is sorted by before anyone
- * reads it. */
-static const char *crash_mode_text(void)
+ * reads it.
+ *
+ * The two named machines are fixed words so the field still sorts under three
+ * headings. The UNKNOWN parenthetical is NOT fixed any more, and it had to
+ * stop being: "this image carries no /NeoDCT/platform" is FALSE on a
+ * mis-assembled image, which carries one and disagrees with it. A triage field
+ * that misdescribes WHY it could not name the machine is the same class of
+ * confidently-wrong line the FIQ-node heuristic produced, and it is believed
+ * for the same reason. nd_platform_origin() says which of the two it is. */
+static void crash_mode_text(char *out, size_t out_sz)
 {
     switch (nd_platform()) {
     case ND_PLATFORM_QEMU:
-        return "QEMU/simulation";
+        (void)nd_strlcpy(out, "QEMU/simulation", out_sz);
+        break;
     case ND_PLATFORM_HW:
-        return "hardware";
+        (void)nd_strlcpy(out, "hardware", out_sz);
+        break;
     case ND_PLATFORM_UNKNOWN:
     default:
-        return "unknown (this image carries no " ND_PATH_PLATFORM ")";
+        (void)snprintf(out, out_sz, "unknown (%s)", nd_platform_origin());
+        break;
     }
 }
 
@@ -452,9 +463,15 @@ const char *nd_crash_log(const char *source, const nd_crash_info *info, const ch
     (void)fprintf(f, "time:   %s (epoch %lld)\n", stamp, (long long)now);
     /* Three values, because the image can genuinely fail to say. Writing
      * "hardware" or "QEMU/simulation" over an image that carries no
-     * /NeoDCT/platform would be a triage field that is confidently wrong,
-     * which is worse than one that admits it does not know. */
-    (void)fprintf(f, "mode:   %s\n", crash_mode_text());
+     * /NeoDCT/platform -- or over one whose two halves disagree -- would be a
+     * triage field that is confidently wrong, which is worse than one that
+     * admits it does not know. */
+    {
+        char mode[ND_PLATFORM_ORIGIN_MAX + 32];
+
+        crash_mode_text(mode, sizeof mode);
+        (void)fprintf(f, "mode:   %s\n", mode);
+    }
     (void)fprintf(f, "source: %s\n", source);
     (void)fprintf(f, "uptime: %s   mem: %s\n", uptime, mem);
     if (note != NULL && note[0] != '\0')
@@ -488,7 +505,11 @@ const char *nd_crash_log(const char *source, const nd_crash_info *info, const ch
      * nd_platform.h. Whether to print one more line on a console somebody is
      * watching is a COST question, so UNKNOWN takes the branch that costs a
      * line and helps a developer on a host that has no flag at all. The
-     * `mode:` field above is a TRUTH question and answers UNKNOWN honestly. */
+     * `mode:` field above is a TRUTH question and answers UNKNOWN honestly.
+     *
+     * A mis-assembled image is UNKNOWN too, so it lands in the chatty branch,
+     * and that is right: nobody there knows there is a phone, and the console
+     * is where somebody looking at a contested image wants the extra line. */
     if (!nd_platform_is_hw()) {
         nd_log(ND_LOG_CRASH, "%s: %s (report -> %s)", source,
                summary[0] != '\0' ? summary : "(no exception info)", ND_PATH_CRASH_LOG);

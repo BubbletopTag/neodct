@@ -140,6 +140,56 @@ NEODCT_DEPENDENCIES = host-pkgconf freetype jpeg libpng sqlite zlib openssl
 # find at the first hit, so this costs one truncated directory walk per make.
 NEODCT_STAMP_DIR = $(BUILD_DIR)/neodct-$(NEODCT_VERSION)
 
+# ============ WHICH MACHINE THIS IMAGE IS, COMPILED IN ============
+#
+# DECISIONS.md D2: once QEMU is armv7 the architecture stops telling a phone
+# from an emulator, and /NeoDCT/platform -- a separate artefact written by a
+# separate build step -- becomes the only discriminator. So the same fact is
+# also compiled into libneodct, and nd_platform.c makes a disagreement between
+# the two loud rather than picking one.
+#
+# ---- it reuses BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS and adds NO symbol ----
+#
+# The users block above is the record of what one forgotten defconfig line
+# costs: no ndusr, nd_priv_lookup() finding nothing, every app running as
+# root, found with `top` on a real build and by nothing in the tree. A
+# BR2_PACKAGE_NEODCT_PLATFORM would be a second line in two defconfigs to
+# forget (AGENTS.md's first gotcha is that there are two copies of every
+# defconfig and that they drift), and what forgetting it would produce is a
+# phone with no discriminator in it -- the exact failure this exists to
+# prevent, arriving by the route this tree has already been burned by.
+#
+# It also decides what the runtime check is worth. From ONE symbol through ONE
+# table, the file and the constant cannot disagree for any image this tree
+# builds, so the check in nd_platform.c fires only on a hand-assembled or
+# tampered image. From two symbols it would mostly catch a routine editing
+# slip, and a check that cries wolf stops being read.
+#
+# ---- qstrip is mandatory ----
+#
+# .config quotes the value, so the raw symbol arrives as "luckfox-armv7" WITH
+# the quotes and no case in platform-id.sh matches it. buildroot/Makefile:807
+# does exactly this qstrip when it hands the same variable to the post-build
+# script.
+#
+# ---- and $(lastword) is the faithful read of the script's own rule ----
+#
+# buildroot calls post-build scripts as
+# `script TARGET_DIR $POST_SCRIPT_ARGS $POST_BUILD_SCRIPT_ARGS`, and
+# post-build-system-metadata.sh takes the LAST argument for that reason. The
+# last word of this variable is the same token whenever it is non-empty, and
+# when it is empty that script refuses the build anyway. If anybody ever
+# appends a second argument after the tag, BOTH readers stop recognising it
+# and BOTH refuse -- the same rule, because it is the same script. That
+# equivalence has to keep holding; do not "fix" only one side of it.
+#
+# The name is ND_BUILD_PLATFORM and not NEODCT_BUILD_PLATFORM because every
+# NEODCT_* name in a package .mk is buildroot's namespace (NEODCT_BUILD_CMDS,
+# NEODCT_INSTALL_TARGET_CMDS), and a variable that looks like a buildroot hook
+# and is not one is a trap.
+ND_BUILD_PLATFORM := $(shell $(TOPDIR)/../neodct/scripts/platform-id.sh \
+	$(lastword $(call qstrip,$(BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS))) cdefine 2>/dev/null)
+
 ifneq ($(NEODCT_NO_AUTO_REBUILD),y)
 NEODCT_AUTO_REBUILD := $(shell \
 	stamp="$(NEODCT_STAMP_DIR)/.stamp_built"; \
@@ -151,6 +201,39 @@ NEODCT_AUTO_REBUILD := $(shell \
 	      "$(NEODCT_STAMP_DIR)"/.stamp_target_installed; \
 	echo "neodct: source changed, will rebuild" >&2)
 endif
+
+# And the same drop when the PLATFORM changed rather than a source file.
+#
+# Switching a tree from luckfox to qemu touches no source, so the block above
+# sees nothing; buildroot sees nothing either, because .stamp_built has no
+# dependency on .config. A -D is not a prerequisite of anything, so make would
+# not rebuild the object either. The result is an image whose libneodct
+# carries the OTHER machine's constant with nothing in the build saying so --
+# the same silent no-op the block above exists to end, and here it produces a
+# phone that files its crashes as QEMU and simulates its radio.
+#
+# ---- AND IT IS OUTSIDE NEODCT_NO_AUTO_REBUILD DELIBERATELY ----
+#
+# That knob exists to skip a truncated `find` over the source tree on every
+# make, and BUILDING.md invites a developer to set it for exactly that reason.
+# It is not a licence to ship a mis-assembled image, and inside the guard that
+# is what it became: with it set, `make luckfox_pico_mini_defconfig && make` on
+# a tree whose output/ was built for QEMU re-runs the post-build script -- so
+# /NeoDCT/platform becomes hw -- while libneodct keeps ND_PLATFORM_QEMU, and
+# the phone comes up claiming neither machine. This check costs one `cat` of a
+# one-word file, which is not what anybody turns that knob off to avoid.
+#
+# .stamp_ndplatform is written by NEODCT_BUILD_CMDS after a successful build.
+# It is a dotfile in $(@D), which NEODCT_PRUNE_STALE_SOURCES already skips
+# (-name '.?*' -prune) along with buildroot's own bookkeeping.
+NEODCT_PLATFORM_REBUILD := $(shell \
+	stamp="$(NEODCT_STAMP_DIR)/.stamp_ndplatform"; \
+	[ -f "$$stamp" ] || exit 0; \
+	[ "$$(cat "$$stamp" 2>/dev/null)" != "$(ND_BUILD_PLATFORM)" ] || exit 0; \
+	rm -f "$(NEODCT_STAMP_DIR)"/.stamp_rsynced \
+	      "$(NEODCT_STAMP_DIR)"/.stamp_built \
+	      "$(NEODCT_STAMP_DIR)"/.stamp_target_installed; \
+	echo "neodct: platform changed, will rebuild" >&2)
 
 # -Wconversion is in CODING-STANDARDS.md because implicit narrowing on 32-bit
 # ARM is a real source of pixel-offset bugs that do not reproduce on a desktop
@@ -180,6 +263,7 @@ endif
 NEODCT_MAKE_ENV = \
 	$(TARGET_CONFIGURE_OPTS) \
 	PKG_CONFIG="$(PKG_CONFIG_HOST_BINARY)" \
+	ND_BUILD_PLATFORM="$(ND_BUILD_PLATFORM)" \
 	NEODCT_CFLAGS="$(TARGET_CFLAGS) -std=c11 -fPIC \
 		-Wall -Wextra -Werror -Wshadow -Wconversion \
 		-Wstrict-prototypes -Wmissing-prototypes -Wvla \
@@ -187,8 +271,25 @@ NEODCT_MAKE_ENV = \
 		-ffp-contract=off" \
 	NEODCT_LDFLAGS="$(TARGET_LDFLAGS) -Wl,--gc-sections"
 
+# The refusal is HERE and not $(error) at parse time. Buildroot parses every
+# package .mk on every make in this tree, including `make raspberrypi_defconfig`
+# and every other board's build, where BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS is
+# empty and none of this is anyone's business. An $(error) up there would
+# brick the whole vendored tree for boards that do not build this package; in
+# the recipe it fires only when this package is actually built.
+#
+# The stamp is written after a successful build so the parse-time clause above
+# can see a value change. It is one word, and `cat` reads it back.
 define NEODCT_BUILD_CMDS
+	@if [ -z "$(ND_BUILD_PLATFORM)" ]; then \
+	    echo "neodct: cannot map image tag \"$(lastword $(call qstrip,$(BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS)))\" to hw or qemu;" >&2; \
+	    echo "neodct:   BR2_ROOTFS_POST_BUILD_SCRIPT_ARGS must end in a tag neodct/scripts/platform-id.sh knows." >&2; \
+	    echo "neodct:   Refusing to build a libneodct that cannot tell a phone from an emulator." >&2; \
+	    exit 1; \
+	fi
 	$(NEODCT_MAKE_ENV) $(MAKE) -C $(@D)
+	@mkdir -p $(NEODCT_STAMP_DIR)
+	@printf '%s\n' "$(ND_BUILD_PLATFORM)" > $(NEODCT_STAMP_DIR)/.stamp_ndplatform
 endef
 
 define NEODCT_INSTALL_TARGET_CMDS

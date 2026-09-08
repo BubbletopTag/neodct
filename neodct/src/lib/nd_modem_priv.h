@@ -270,9 +270,32 @@ struct nd_modem {
      * dropped modem: the probe repeats every ND_PROBE_RETRY_S for ever, and
      * a notice per probe is a modal in front of the user six times a minute.
      * Cleared when a modem is adopted, and when the candidates go away --
-     * a radio that has been unplugged is not an unreachable one. */
+     * a radio that has been unplugged is not an unreachable one.
+     *
+     * ---- and the FOURTH, which is not in this struct at all ----
+     *
+     * `saw_candidates` answers "did anything enumerate". It cannot answer
+     * "should anything HAVE enumerated", and that second question is what
+     * separates ND_MODEM_LINK_SIM from ND_MODEM_LINK_ABSENT. It is a claim
+     * about the board, so the only thing that may answer it is the image:
+     * nd_modem__board_should_have_a_radio(), declared below with the list of
+     * the five sites that ask it. nd_modem.h has the long version.
+     *
+     * `absent_announced` is unreachable_announced's mirror, and it CANNOT
+     * borrow it. note_candidates() clears that latch when the candidate list
+     * goes EMPTY -- which is precisely the ABSENT condition -- so sharing it
+     * would re-arm the notice on every probe and put a modal on the screen
+     * six times a minute for ever. The clear rules are mirrored too:
+     *
+     *   unreachable_announced  cleared when the candidates GO AWAY (a radio
+     *                          that was unplugged is not an unreachable one)
+     *                          and on adoption.
+     *   absent_announced       cleared when candidates APPEAR (a radio that
+     *                          turned up is not a missing one) and on
+     *                          adoption. */
     bool saw_candidates;
     bool unreachable_announced;
+    bool absent_announced;
     /* This fault came from ND_MODEM_SIM_FAULT rather than from a real modem
      * dying, so removing the file undoes it. A real fault has no undo short
      * of adopting a modem again. */
@@ -465,6 +488,44 @@ void nd_modem__lock(nd_modem *m);
  * can write, but only if the two-second cache can be told to forget what it
  * saw before the fixture existed. */
 void nd_modem__sim_route_forget(void);
+
+/* The "nothing enumerated, and nothing says one should have" console
+ * announcement. Shared by nd_modem_open()'s first probe and
+ * nd_modem__poll_sim()'s end-of-grace one-shot, because the boot grace decides
+ * which of the two gets there and the two must not say different things.
+ * Neither caller reaches it when the board claims a radio: there,
+ * announce_absent() has already said the true thing. Lives in nd_modem_sim.c
+ * beside the hooks it describes. */
+void nd_modem__announce_simulation(void);
+
+/* DOES THE IMAGE SAY THIS BOARD HAS A RADIO IN IT -- the only place in this
+ * service that reads the platform, and the reason "the console, the readouts
+ * and the notice cannot disagree" is a property rather than a hope.
+ *
+ * Exported for one caller outside nd_modem.c: nd_modem__poll_sim()'s
+ * Simulation Mode one-shot, which used to spell the same question out as
+ * !nd_platform_is_hw(). Two spellings of one gate is precisely the drift this
+ * service has been fixed for three times -- the console announcing Simulation
+ * on an image the classify had already decided was a phone -- so there is one
+ * spelling and it lives here.
+ *
+ * FIVE SITES ASK IT AND ALL FIVE MOVE TOGETHER. Narrowing or widening this
+ * predicate changes every one of them at once, which is the intent:
+ *
+ *   nd_modem_link_state()        SIM or ABSENT -- the classify, and the only
+ *                                one that produces a STATE
+ *   maybe_announce_absent()      whether the console says NO MODEM (both of
+ *                                nd_modem__probe_hardware()'s ways out)
+ *   nd_modem_open()              whether startup stays silent about
+ *                                Simulation Mode
+ *   device_has_a_radio()         whether nd_modem__may_simulate() is offered
+ *                                a device with a radio in it
+ *   nd_modem__poll_sim()         whether the end-of-grace one-shot announces
+ *                                Simulation Mode
+ *
+ * nd_modem.c has the reasoning for the predicate itself, including why a
+ * contested image counts as a phone and why the negation is not written. */
+bool nd_modem__board_should_have_a_radio(void);
 void nd_modem__unlock(nd_modem *m);
 
 bool nd_modem__acquire(nd_modem *m);
@@ -478,7 +539,20 @@ void nd_modem__lock_reopen(nd_modem *m);
  *
  * Pure, so the policy is one table a test can read: `link` is what
  * nd_modem_link_state() would return and `has_radio` is m->saw_candidates.
- * Faking is honest only on a device that genuinely has no radio. */
+ * Faking is honest only on a device that genuinely has no radio.
+ *
+ * THE PLATFORM IS NOT READ HERE, and that is what keeps this a pure table a
+ * test can read. A third `board_has_radio` argument, or an nd_platform() call
+ * inside this function, would make a policy table into something that opens a
+ * file and would add a decision point of its own.
+ *
+ * `has_radio` is device_has_a_radio() and NOT m->saw_candidates, which is the
+ * one correction this argument has needed. The candidate count alone is false
+ * during the boot grace on a phone whose modem has not appeared yet, and the
+ * PROBING arm read that as "no radio, so faking is honest" -- so a radio-less
+ * phone faked a connected call for the first minute of every boot. The board's
+ * claim is folded into the ARGUMENT rather than branched on in the body, so
+ * this stays a table and the platform stays behind one predicate. */
 bool nd_modem__may_simulate(nd_modem_link link, bool has_radio);
 
 /* --- the AT engine, nd_modem_at.c --- */
