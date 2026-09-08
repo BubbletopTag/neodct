@@ -33,6 +33,10 @@ import zipfile
 # The Python OS is the reference implementation, not something that ships.
 # It lives outside the overlay so BR2_ROOTFS_OVERLAY cannot put it on a
 # phone; see neodct/python-reference/README.md.
+# The repository root, for files that are not part of the Python reference.
+REPO_ROOT = os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))))
+
 REPO_NEODCT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "python-reference",
@@ -223,8 +227,20 @@ def main(argv=None):
     min_kernel = args.min_kernel or info["min_kernel"]
 
     changelog = ""
+    # ============ THE CHANGELOG THAT SHIPS IS THE ONE IN THE OVERLAY ========
+    #
+    # This used to look in REPO_NEODCT, which is neodct/python-reference -- the
+    # reference implementation that deliberately does NOT ship. There has never
+    # been a CHANGELOG.txt there, so os.path.exists() was false every time and
+    # every package ever built carried "changelog": "". The Update screen shows
+    # nd_update_msg_no_release_notes when that field is empty, so the phone has
+    # said "no release notes" for every release since the C port, and nothing
+    # noticed because an empty changelog is not an error at any layer.
+    #
+    # The file the release actually uses is the one release.sh reads its notes
+    # out of and the one that goes into the image: neodct/overlay/NeoDCT.
     changelog_path = args.changelog_file or os.path.join(
-        REPO_NEODCT, "CHANGELOG.txt")
+        REPO_ROOT, "neodct", "overlay", "NeoDCT", "CHANGELOG.txt")
     if os.path.exists(changelog_path):
         with open(changelog_path, errors="replace") as handle:
             changelog = changelog_section(handle.read(), version)

@@ -268,3 +268,41 @@ def test_an_oversized_thumbnail_is_refused_at_build_time(tmp_path):
 
     with pytest.raises(SystemExit, match="thumbnail"):
         mkupdate.main(build_args(images, tmp_path, "--thumbnail", str(art)))
+
+
+def test_the_package_carries_the_release_notes(tmp_path):
+    """THE FIELD THE PHONE SHOWS DURING AN UPDATE.
+
+    mkupdate looked for CHANGELOG.txt in neodct/python-reference, which is the
+    reference implementation and has never had one, so os.path.exists() was
+    false and every package ever built carried "changelog": "". The Update
+    screen falls back to nd_update_msg_no_release_notes on an empty field, so
+    the phone said "no release notes" for every release since the C port and
+    nothing failed. An empty changelog is not an error at any layer, which is
+    exactly why this has to be asserted rather than noticed."""
+    import importlib.util
+    import os
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(os.path.dirname(here))
+    spec = importlib.util.spec_from_file_location(
+        "mkupdate", os.path.join(root, "neodct", "tools", "mkupdate.py"))
+    mkupdate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mkupdate)
+
+    shipped = os.path.join(root, "neodct", "overlay", "NeoDCT", "CHANGELOG.txt")
+    assert os.path.exists(shipped), "the changelog that ships moved"
+
+    default = os.path.join(mkupdate.REPO_ROOT, "neodct", "overlay", "NeoDCT",
+                           "CHANGELOG.txt")
+    assert os.path.samefile(default, shipped), \
+        "mkupdate's default changelog is not the one that ships"
+
+    # And the section parser finds a real release in it, so a heading format
+    # change cannot quietly empty the field again.
+    text = open(shipped, errors="replace").read()
+    heads = [ln.strip() for ln in text.splitlines()
+             if ln.strip() and ln.strip()[0].isdigit() and " " not in ln.strip()]
+    assert heads, "no version headings in the changelog"
+    body = mkupdate.changelog_section(text, heads[0])
+    assert body, "the newest section (%s) came back empty" % heads[0]
