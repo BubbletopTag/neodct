@@ -46,7 +46,13 @@ musl, same hard-float NEON-VFPv4, same Thumb-2, same 32-bit `time_t`,
 machine agreed with the Pico Mini about everything except the things that
 break -- so those bugs passed here and failed on the bench. Measured on the
 kernel this tree builds: `uname -m` = `armv7l`, CPU part 0xc07, MemTotal
-53,824 kB of the 64 MB machine against the phone's ~54 MB.
+54,812 kB of the 64 MB machine against the phone's ~54 MB -- 53,824 kB of it
+the kernel's, and the last ~1 MB the device tree's. `run_qemu.sh` needs `dtc`
+now: it appends `neodct/board/qemu/nd-virt-additions.dtsi` to the tree QEMU
+generates, which is where the emulator's backlight and cpufreq policy come
+from, and the kernel reserves `fdt_totalsize()` -- so passing a 8 KB tree
+instead of the 1 MiB blob QEMU pads its own to gives ~1 MB BACK and MemTotal
+rises. Without `dtc` the script says so and boots without either device.
 
 The identity did NOT collapse with the ABI. The QEMU image is `qemu-armv7`
 and the phone is `luckfox-armv7`; `nd_manifest_check_compatible()` still
@@ -152,9 +158,12 @@ rather than falling back to a bare run.
 python3 -m pytest neodct/tests/ -q      # from the repo root
 ```
 
-1,961 passing and 14 skipped, ~105s. (It said "510 tests, ~20s" here for a
-long time, and that is the number agents calibrated on — `spec-build-test.md`
-risk R-15 is about exactly this.) They import the real overlay code —
+2,039 passing and 14 skipped, ~104s — measured, on this checkout. (It said
+"510 tests, ~20s" here for a long time, and that is the number agents
+calibrated on — `spec-build-test.md` risk R-15 is about exactly this. It then
+said 1,961 across two commits that added tests without touching it, which is
+the same failure at a smaller scale: a 78-test gap is wide enough to hide a
+whole file that has stopped importing.) They import the real overlay code —
 `conftest.py` puts `neodct/overlay/NeoDCT` on `sys.path` so `System.ui...`
 imports resolve exactly as they do on the device. Run them before and after
 any overlay change; they are fast enough that there is no excuse not to.
@@ -230,6 +239,77 @@ A SKIP is not a PASS — it means the check did not run, usually because the
 device or the user is not there. Run it after anything that touches
 `users-table.txt`, the udev rules, `S00userdata`, the mount options or
 `nd_priv.c`.
+
+**The other half of that is `nd-inventory`, and it asks the opposite
+question.** `nd-selftest` asks the kernel to DECIDE; `nd-inventory` asks the
+machine to DESCRIBE. It writes down what is on the machine it is standing on
+-- kernel identity, MemTotal, the sysfs class trees, the MTD geometry, the
+`/dev` node families, the framebuffer ioctls, the platform record and the
+modem's cold verdict -- as one sorted, byte-stable record per line, so that a
+capture from the phone and a capture from the emulator can be diffed in a pull
+request. It ships in `/NeoDCT/System/bin` beside `nd-selftest`, never forks,
+never changes euid, reads no clock and no sensor, and opens `/dev/fb0`
+`O_RDONLY` for two GET ioctls and nothing else under `/dev`, which is what
+makes it safe to run on a phone somebody is holding.
+
+```sh
+nd-inventory                      # the whole capture
+nd-inventory --self-check         # collect twice and refuse if they differ
+```
+
+`--self-check` takes a section list like every other invocation, and the
+capture scripts deliberately pass none: the `kernel` section is three strings
+from one `uname(2)` call and cannot differ, so scoping the check to it proved
+nothing about the readdir-driven collectors that are the whole reason the
+check exists.
+
+The allowlist of permitted differences, the committed emulator-side capture
+and the loop that maintains them live in `neodct/tests/parity/` -- start with
+its README. The gate that runs with no phone and no built image is
+`neodct/tests/test_parity_allowlist.py` in the pytest suite and
+`test_inventory` in the C suite. **Nothing has ever been captured from real
+hardware**, so that suite runs single-sided and says so on every run; the
+emulator-side capture is real but comes from a busybox initramfs on the repo's
+own kernel rather than from a built image, and the file says which records
+that makes untrustworthy.
+
+The line between the two tools, which goes in both headers: **`nd-inventory`
+may not contain the word FAIL, and `nd-selftest` may not print a record.**
+
+**And one thing neither of them can do, which is ask the kernel to REFUSE a
+write.** `neodct/tools/test_qemu_surfaces.sh --kernel <zImage> --rootfs <a
+busybox directory>` boots the emulator twice and asserts the four small
+hardware surfaces: that `/sys/class/backlight` holds exactly one device named
+`backlight` with `max_brightness` 10, that `/sys/class/power_supply` and
+`/sys/class/thermal` are EMPTY and `/sys/class/leds` absent, that gpio53,
+gpio56 and gpio57 export, and that a `scaling_min_freq` written before
+`scaling_max_freq` while RAISING is silently swallowed -- which is what
+`nd_cpufreq_max_first()` exists for and what `test_cpufreq.c` says in its own
+header it cannot check, because two ordinary files hold both values whichever
+order they were written in. It also asserts MemTotal on both sides of `-dtb`,
+which is the only thing that checks that number **in a booted guest**. The
+other half is `test_parity_allowlist.py`, which asserts it out of the
+committed capture with no boot at all -- both are gates and neither is
+redundant, because one measures the machine and the other pins what the
+committed artefact says about it.
+
+**And the drift gate is `make parity-probe`.** From `neodct/src`, with a
+zImage and a busybox rootfs in hand:
+
+```sh
+make parity-probe ND_KERNEL=<zImage> ND_ROOTFS=<a busybox directory>
+```
+
+It boots the emulator, takes a fresh `nd-inventory` capture and requires it to
+equal `neodct/tests/parity/qemu-armv7-probe.inventory` byte for byte. It costs
+about four seconds and it is the only thing anywhere that re-derives the
+parity baseline from a MACHINE rather than checking the allowlist against a
+file. **A change to `buildroot/board/qemu/armv7-virt/linux.config` or to
+`run_qemu.sh`'s machine means running it** -- those two files decide what the
+capture says, and until this existed nothing read them: dropping
+`gpio-mockup.gpio_mockup_ranges=0,64` cost the emulator gpio53, 56 and 57 --
+the backlight's GPIO tier and the panel's RST and DC -- with every gate in the
+tree still green.
 
 One consequence worth knowing before it confuses you: **if you create an
 `ndusr_ut` on your build host, `test_browser` starts exercising the real

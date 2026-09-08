@@ -1,0 +1,255 @@
+#!/bin/sh
+# test_qemu_surfaces.sh -- boot the emulator and ask the kernel whether the
+# four small hardware surfaces are what this tree says they are.
+#
+# ============ WHY THIS IS A BOOT AND NOT A UNIT TEST ============
+#
+# `make test` builds a sysfs tree under a case root and drives nd_backlight.c
+# and nd_cpufreq.c against it. That checks the code and it cannot check the
+# machine: a fixture agrees with whoever wrote it. Three of the things below
+# are properties of a running kernel and of nothing else --
+#
+#   * that /sys/class/backlight has exactly ONE device and it is called
+#     `backlight`, because nd_backlight.c takes the lexicographically smallest
+#     entry with a brightness file and a second device would silently change
+#     which panel dims;
+#   * that a min-before-max write while raising is SWALLOWED. nd_cpufreq.h has
+#     a paragraph about that failure and test_cpufreq.c says in its header that
+#     it cannot check it, because two ordinary files hold both values whichever
+#     order they were written in. A driver clamps. This is the only place in
+#     the project where the wrong order actually loses a write;
+#   * that /sys/class/power_supply and /sys/class/thermal are EMPTY and
+#     /sys/class/leds does not exist. Those are deliberate absences with
+#     reasons in neodct/tests/parity/allow.txt, and the way they would come
+#     back is a kernel config change nobody re-booted -- CONFIG_TEST_POWER
+#     alone brings back three fake supplies AND a thermal zone typed
+#     `test_battery`.
+#
+# ============ AND WHY IT TAKES A ROOTFS RATHER THAN AN IMAGE ============
+#
+# buildroot/output does not exist in a fresh checkout and a full build is
+# hours, so this asks for a kernel and a busybox directory, exactly as
+# parity_capture_probe.sh does. What it boots is run_qemu.sh's machine,
+# run_qemu.sh's device tree AND run_qemu.sh's kernel parameters -- the recipes
+# are nd_dtb_build() and nd_qemu_append() in qemu_machine.sh, sourced by all
+# three, so they cannot drift apart. The parameters used to be hand-copied
+# here and the copy had already lost the nandsim ID bytes, `video=vfb:on`,
+# `neodct.devenv=1` and `vt.global_cursor_default=0` while the comment beside
+# it still called them "run_qemu.sh's parameters, copied rather than
+# invented". AGENTS.md calls this script the thing that notices when the
+# parity number moves, and it was measuring MemTotal on a command line
+# run_qemu.sh does not use.
+#
+# Usage:
+#   test_qemu_surfaces.sh --kernel <zImage> --rootfs <busybox rootfs dir>
+#                         [--work <dir>]
+#
+# Environment, for the day the kernel config changes and the numbers move:
+#   ND_MEM_DTB=54812    expected MemTotal with the device tree
+#   ND_MEM_NODTB=53824  expected MemTotal without it
+set -eu
+
+KERNEL=""
+ROOTFS=""
+WORK="${TMPDIR:-/tmp}/nd-surfaces.$$"
+HERE="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+DTSI="$HERE/../board/qemu/nd-virt-additions.dtsi"
+
+# The two numbers four documents quote. They are here so that a kernel symbol
+# added without a re-boot fails a test instead of quietly making AGENTS.md,
+# BUILDING.md, docs/BLUETOOTH.md and the config header wrong at the same time.
+MEM_DTB="${ND_MEM_DTB:-54812}"
+MEM_NODTB="${ND_MEM_NODTB:-53824}"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --kernel) KERNEL="$2"; shift 2 ;;
+        --rootfs) ROOTFS="$2"; shift 2 ;;
+        --work)   WORK="$2";   shift 2 ;;
+        -h|--help) sed -n '2,45p' "$0"; exit 2 ;;
+        *) echo "test_qemu_surfaces.sh: unknown argument '$1'" >&2; exit 2 ;;
+    esac
+done
+
+[ -n "$KERNEL" ] && [ -n "$ROOTFS" ] || {
+    echo "usage: test_qemu_surfaces.sh --kernel zImage --rootfs DIR" >&2; exit 2; }
+[ -f "$KERNEL" ] || { echo "no kernel at $KERNEL" >&2; exit 2; }
+[ -d "$ROOTFS" ] || { echo "no rootfs at $ROOTFS" >&2; exit 2; }
+command -v qemu-system-arm >/dev/null || { echo "qemu-system-arm not found" >&2; exit 2; }
+
+. "$HERE/qemu_machine.sh"
+
+# The trap deletes $WORK recursively, and `mkdir -p` is happy with a directory
+# that is already there -- so --work at an existing path used to destroy it.
+if [ -e "$WORK" ]; then
+    echo "REFUSED: --work $WORK already exists, and this script deletes its work" >&2
+    echo "         directory recursively when it finishes. Name one that does not." >&2
+    exit 2
+fi
+mkdir -p "$WORK"
+trap 'rm -rf "$WORK"' EXIT
+
+nd_dtb_build "$DTSI" "$WORK" "$WORK/nd.dtb" || {
+    echo "test_qemu_surfaces: could not build the device tree; nothing to test." >&2
+    exit 2; }
+
+# The guest REPORTS and the host DECIDES. A guest that made the judgements
+# would have to be trusted to have run them all, and a boot that dies halfway
+# through looks the same as one that passed -- so every value comes out as a
+# framed record and the assertions are below, where a failure can print what
+# was actually there.
+cp -a "$ROOTFS" "$WORK/root"
+cat > "$WORK/root/init" <<'INIT'
+#!/bin/sh
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+say() { echo "SURF|$1|$2"; }
+echo "===SURFACES-BEGIN"
+say mem.total_kb "$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
+
+for c in backlight power_supply thermal leds; do
+    if [ -d "/sys/class/$c" ]; then
+        say "class.$c" "[$(ls /sys/class/$c | tr '\n' ' ')]"
+    else
+        say "class.$c" ABSENT
+    fi
+done
+
+D=/sys/class/backlight/backlight
+if [ -d "$D" ]; then
+    say bl.max_brightness "$(cat "$D/max_brightness")"
+    say bl.bl_power "$(cat "$D/bl_power")"
+    printf 5 > "$D/brightness"; say bl.wrote5 "$(cat "$D/brightness")"
+    printf 10 > "$D/brightness"
+    say bl.type "$(cat "$D/type")"
+fi
+
+C=/sys/devices/system/cpu/cpu0/cpufreq
+if [ -d "$C" ]; then
+    say cpufreq.present yes
+    say cpufreq.available "$(cat "$C/scaling_available_frequencies")"
+    say cpufreq.driver "$(cat "$C/scaling_driver")"
+    say cpufreq.hw_min "$(cat "$C/cpuinfo_min_freq")"
+    say cpufreq.hw_max "$(cat "$C/cpuinfo_max_freq")"
+    # Pin low the RIGHT way round (min first when lowering), then try to raise
+    # the WRONG way round (min first when raising) and report what stuck.
+    printf 816000 > "$C/scaling_min_freq"
+    printf 816000 > "$C/scaling_max_freq"
+    say cpufreq.pinned_min "$(cat "$C/scaling_min_freq")"
+    say cpufreq.pinned_cur "$(cat "$C/scaling_cur_freq")"
+    printf 1200000 > "$C/scaling_min_freq"
+    say cpufreq.min_after_wrong_order "$(cat "$C/scaling_min_freq")"
+    printf 1200000 > "$C/scaling_max_freq"
+    say cpufreq.min_after_max "$(cat "$C/scaling_min_freq")"
+    printf 408000 > "$C/scaling_min_freq"
+else
+    say cpufreq.present no
+fi
+
+for p in 53 56 57; do
+    if printf '%s' "$p" > /sys/class/gpio/export 2>/dev/null &&
+       printf high > "/sys/class/gpio/gpio$p/direction" 2>/dev/null; then
+        say "gpio$p" "dir=$(cat /sys/class/gpio/gpio$p/direction) value=$(cat /sys/class/gpio/gpio$p/value)"
+    else
+        say "gpio$p" UNAVAILABLE
+    fi
+done
+
+say rtc0.name "$(cat /sys/class/rtc/rtc0/name 2>/dev/null || echo ABSENT)"
+say psy.parent_warnings "$(dmesg | grep -c 'Expected proper parent device')"
+echo "===SURFACES-END"
+poweroff -f
+INIT
+chmod +x "$WORK/root/init"
+( cd "$WORK/root" && find . | cpio -o -H newc 2>/dev/null | gzip -9 ) > "$WORK/initramfs.cpio.gz"
+
+# run_qemu.sh's machine, and run_qemu.sh's parameters through the function
+# they both call rather than through a copy: force-legacy=false is here (it is
+# a QEMU flag, not a kernel parameter, and without it virtio_input is refused
+# SILENTLY), and everything that decides which DEVICES exist comes from
+# nd_qemu_append(). console= and rdinit= are this boot's own.
+boot() {   # boot <base name> [extra qemu args...]
+    _log="$1.log"; shift
+    timeout 300 qemu-system-arm \
+        -M virt -cpu cortex-a7 -smp 1 -m 64 -nographic \
+        -global virtio-mmio.force-legacy=false \
+        -kernel "$KERNEL" -initrd "$WORK/initramfs.cpio.gz" "$@" \
+        -append "console=ttyAMA0 rdinit=/init panic=5 $(nd_qemu_append)" \
+        > "$_log" 2>&1 || true
+    grep -q '===SURFACES-END' "$_log" || {
+        echo "test_qemu_surfaces: the guest did not finish; see $_log" >&2
+        return 1; }
+    tr -d '\r' < "$_log" | sed -n 's/^SURF|//p' > "${_log%.log}.rec"
+}
+
+FAILED=0
+val() { sed -n "s/^$1|//p" "$2.rec" | head -1; }
+check() {   # check <log> <key> <expected> <why>
+    _got="$(val "$2" "$1")"
+    if [ "$_got" = "$3" ]; then
+        echo "ok    $2 = $3"
+    else
+        echo "FAIL  $2: got '$_got', want '$3'"
+        echo "        $4"
+        FAILED=$((FAILED + 1))
+    fi
+}
+
+echo "== with the device tree =="
+boot "$WORK/dtb" -dtb "$WORK/nd.dtb"
+
+check "$WORK/dtb" mem.total_kb "$MEM_DTB" \
+    "the kernel reserves fdt_totalsize(); AGENTS.md, BUILDING.md, docs/BLUETOOTH.md and the kernel config header all quote this number"
+check "$WORK/dtb" class.backlight "[backlight ]" \
+    "exactly one device, named backlight -- nd_backlight.c takes the lexicographically smallest and a second one would change which panel dims"
+check "$WORK/dtb" bl.max_brightness 10 \
+    "the phone's eleven-entry brightness table, not a 0-255 range; docs/HARDWARE_NOTES.md has the node"
+check "$WORK/dtb" bl.bl_power 0 \
+    "bl_power 4 here means the .dtsi grew a label AND is being compiled with dtc -@, which is the fault docs/HARDWARE_NOTES.md records"
+check "$WORK/dtb" bl.wrote5 5 \
+    "sysfs validates on write and nd_backlight.c reads every write back"
+check "$WORK/dtb" cpufreq.present yes \
+    "ND_CPUFREQ_DIR is the only path nd_cpufreq.c opens"
+check "$WORK/dtb" cpufreq.available "408000 600000 816000 1008000 1200000 " \
+    "the RV1103's five operating points, in the .dtsi, with the trailing space the kernel really writes"
+check "$WORK/dtb" cpufreq.driver cpufreq-dt \
+    "the generic driver binding the .dtsi's operating-points-v2"
+check "$WORK/dtb" cpufreq.hw_min 408000 "the silicon's floor, what nd_cpufreq_set_range(0,0) unpins to"
+check "$WORK/dtb" cpufreq.hw_max 1200000 "the silicon's ceiling"
+check "$WORK/dtb" cpufreq.pinned_cur 816000 \
+    "scaling_cur_freq tracks the policy even though the stand-in's clock is fixed"
+check "$WORK/dtb" cpufreq.min_after_wrong_order 816000 \
+    "THE ONE THAT MATTERS: min written before max while RAISING is clamped away. nd_cpufreq_max_first() exists for this and no host test can see it"
+check "$WORK/dtb" cpufreq.min_after_max 1200000 \
+    "and it lands once the ceiling has moved, which is what makes the line above a swallowed write rather than a broken file"
+check "$WORK/dtb" class.power_supply "[]" \
+    "deliberately empty: nothing in this tree reads power_supply and the phone's battery is a MAX1704x on i2c-3. CONFIG_TEST_POWER coming back would put test_ac/test_battery/test_usb here"
+check "$WORK/dtb" class.thermal "[]" \
+    "deliberately empty: the only zone -M virt can produce is registered by power_supply and typed after the supply, i.e. test_battery"
+check "$WORK/dtb" class.leds ABSENT \
+    "not empty -- absent. LEDS_CLASS is what would create the directory and nothing in this tree reads LEDs"
+check "$WORK/dtb" psy.parent_warnings 0 \
+    "TEST_POWER printed three __power_supply_register warnings on every boot"
+check "$WORK/dtb" gpio53 "dir=out value=1" \
+    "the panel's BL wire, ND_BL_GPIO_PIN, granted by S90display; -M virt's own pl061 starts at 512 so this needs gpio-mockup"
+check "$WORK/dtb" gpio56 "dir=out value=1" "the panel's RST, driven by neodctDisplay.c"
+check "$WORK/dtb" gpio57 "dir=out value=1" "the panel's DC, driven by neodctDisplay.c"
+
+echo
+echo "== without it, which is what a host with no dtc gets =="
+boot "$WORK/nodtb"
+check "$WORK/nodtb" mem.total_kb "$MEM_NODTB" \
+    "no -dtb means no fdt reservation; this is the number the kernel config header quotes for a bare boot"
+check "$WORK/nodtb" class.backlight "[]" \
+    "the subsystem is built in and the DEVICE comes from the device tree -- which is the distinction the parity allowlist turns on"
+check "$WORK/nodtb" cpufreq.present no \
+    "cpufreq-dt binds nothing without operating-points-v2 on cpu@0"
+
+echo
+if [ "$FAILED" -eq 0 ]; then
+    echo "test_qemu_surfaces: all checks passed"
+    exit 0
+fi
+echo "test_qemu_surfaces: $FAILED check(s) failed"
+exit 1

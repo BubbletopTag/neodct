@@ -250,9 +250,17 @@ story.** It emulated an aarch64 Cortex-A53 with 72 MB until the ABI change:
 72 was a fudge that landed near the phone's usable memory on a kernel fat
 enough that 64 would have been *harsher* than the hardware. The armv7 kernel
 is built up from a minimal base instead, and `-m 64` measures MemTotal
-53,824 kB against the phone's ~54 MB. So the emulator now has the phone's RAM
-rather than a number chosen to approximate its effects, and `NEODCT_MEM` is
-for the rare harness that genuinely needs more.
+53,824 kB against the phone's ~54 MB -- 54,812 kB in an ordinary session,
+because `run_qemu.sh` passes a device tree and the kernel reserves
+`fdt_totalsize()` for it. So the emulator now has the phone's RAM rather than
+a number chosen to approximate its effects, and `NEODCT_MEM` is for the rare
+harness that genuinely needs more. `neodct/tools/test_qemu_surfaces.sh`
+asserts both numbers in a booted guest, which is the only thing that checks
+them against a running kernel; `neodct/tests/test_parity_allowlist.py` asserts
+54,812 out of the committed capture with no boot at all, and
+`make parity-probe` re-derives that capture from a real boot. All three, and
+none of them redundant: one measures, one pins the artefact, one keeps the
+artefact and the machine in step.
 
 ### Rebuilding after a code change
 

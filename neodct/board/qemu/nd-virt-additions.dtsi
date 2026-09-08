@@ -1,0 +1,181 @@
+/*
+ * nd-virt-additions.dtsi -- the two devices the phone has and `-M virt` does
+ * not, appended to QEMU's own generated device tree by run_qemu.sh.
+ *
+ * ============ WHY THERE IS A DEVICE TREE HERE AT ALL ============
+ *
+ * The emulator's kernel has carried CPU_FREQ, CPUFREQ_DT,
+ * BACKLIGHT_CLASS_DEVICE and BACKLIGHT_PWM since the armv7 config landed, and
+ * has had nothing to bind them to: `-M virt`'s cpu@0 declares neither `clocks`
+ * nor `operating-points-v2`, so cpufreq_dt_platdev_init() creates no platform
+ * device, and the machine has no PWM controller of any kind. Measured on the
+ * Stage-1 kernel: /sys/class/backlight EMPTY,
+ * /sys/devices/system/cpu/cpu0/cpufreq ABSENT, `pwm-backlight` and
+ * `cpufreq-dt` both loaded and bound to nothing.
+ *
+ * So the subsystems were there and the devices were not, and nd_backlight.c's
+ * PWM tier and every line of nd_cpufreq.c ran on precisely one machine in the
+ * world -- a phone somebody had to be holding. This file is the device half.
+ *
+ * IT IS A .dtsi AND NOT A .dtbo ON PURPOSE. A proper overlay was tried first
+ * and does not work: `dtc -@` refuses a value reference to a base-tree node by
+ * path with "FATAL ERROR: Can't generate fixup for reference to path
+ * &{/pl061@9030000}", and QEMU's generated blob carries no __symbols__ for a
+ * label form to resolve against. Concatenating this onto the decompiled base
+ * and compiling the whole thing is what works: dtc merges a second `/ { }`
+ * into the first, applies the `&{/cpus/cpu@0}` override by path, and resolves
+ * the pl061 phandle at compile time because that is a full compile rather
+ * than an overlay fixup.
+ *
+ * AND THE MERGED BLOB IS NEVER COMMITTED. `-M virt` is a versioned machine:
+ * a blob cut today would still boot on next year's QEMU -- only /memory and
+ * /chosen get patched -- so the guest would go on seeing the device set of
+ * whatever QEMU produced the day it was cut, with nothing anywhere saying so.
+ * That is the silent emulator-versus-reality divergence this branch exists to
+ * remove. run_qemu.sh regenerates from the installed QEMU on every run.
+ */
+
+/ {
+	/*
+	 * cpufreq-dt needs a clock it can call clk_set_rate() on. There is no
+	 * clock controller on -M virt, and a fixed-clock is the honest
+	 * stand-in rather than a lie: the RV1103's core PLL really does run at
+	 * 1.2 GHz at the top of the table, and every file nd_cpufreq.c reads
+	 * or writes behaves correctly against it -- scaling_cur_freq tracks
+	 * the POLICY, measured 816000 after a pin.
+	 *
+	 * What it cannot do is make the guest slower. cpuinfo_cur_freq would
+	 * report 1200000 whatever the policy says, because a fixed-clock has
+	 * no set_rate; nothing in NeoDCT reads that file, and nd_cpufreq.h
+	 * does not name it. Anybody using the emulator to answer docs/SLEEP.md's
+	 * open question -- "nothing has measured the current draw" -- would get
+	 * a meaningless answer that looks like a real one, and that is the one
+	 * thing this stand-in must not be trusted for.
+	 */
+	nd_cpu_clk: nd-cpu-clock {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <1200000000>;
+		clock-output-names = "nd-cpu-clk";
+	};
+
+	/*
+	 * The RV1103's own five operating points, in Hz. They are the numbers
+	 * ND_CPUFREQ_MAX_STEPS's comment names, and they are here rather than a
+	 * convenient pair because the table is what Sleepy's frequency menu
+	 * shows and what nd_cpufreq_read_table() sorts -- a two-entry table
+	 * would exercise the sort and the menu against a shape the phone does
+	 * not have.
+	 */
+	nd_opp_table: nd-opp-table {
+		compatible = "operating-points-v2";
+		opp-shared;
+		opp-408000000  { opp-hz = /bits/ 64 <408000000>; };
+		opp-600000000  { opp-hz = /bits/ 64 <600000000>; };
+		opp-816000000  { opp-hz = /bits/ 64 <816000000>; };
+		opp-1008000000 { opp-hz = /bits/ 64 <1008000000>; };
+		opp-1200000000 { opp-hz = /bits/ 64 <1200000000>; };
+	};
+
+	/*
+	 * A software PWM on one of the pl061's eight lines, because -M virt has
+	 * no PWM controller and pwm-backlight will not probe without one. Line
+	 * 5 is arbitrary and free: nothing else in the base tree claims it.
+	 *
+	 * ============ THE PERIOD IS 1 ms AND THE PHONE'S IS 25 us ============
+	 *
+	 * This is the one number in this file that deliberately does not match
+	 * docs/HARDWARE_NOTES.md, and it was measured rather than chosen.
+	 * pwm-gpio toggles the line from an hrtimer, so the period is the
+	 * guest's interrupt rate. Same 300-iteration shell loop at each level:
+	 *
+	 *   period 25000 ns    full on 0.04 s   off 0.03 s   MID 0.96 s
+	 *                      plus "hrtimer: interrupt took 217872 ns"
+	 *   period 1000000 ns  full on 0.04 s   off 0.03 s   MID 0.04 s
+	 *
+	 * A 24x slowdown of the whole guest whenever the panel is dimmed --
+	 * and dimming is what somebody boots the emulator to test. The
+	 * emulator exists to make memory and CPU pressure honest; a 40 kHz
+	 * software PWM destroys the measurement it is meant to support.
+	 *
+	 * NO CONSUMER READS THE PERIOD. nd_backlight.c opens max_brightness,
+	 * brightness and bl_power and nothing else, so this divergence is
+	 * invisible to every line of NeoDCT code. Do not "fix" it to match the
+	 * phone for tidiness: the person most likely to make that change is
+	 * the one testing Sleepy's brightness screen, which is exactly the
+	 * workload it ruins.
+	 */
+	nd_bl_pwm: nd-backlight-pwm {
+		compatible = "pwm-gpio";
+		#pwm-cells = <3>;
+		gpios = <&{/pl061@9030000} 5 0>;
+	};
+
+	/*
+	 * The phone's backlight node, copied from docs/HARDWARE_NOTES.md, with
+	 * the pwms phandle pointed at the software PWM above. Everything a
+	 * consumer can see is the phone's: the class device is named
+	 * `backlight`, max_brightness is 10, and the eleven-entry non-linear
+	 * table is the one the SDK device tree carries. nd_backlight.c's
+	 * round-half-even level arithmetic therefore runs here against the
+	 * coarse table it was written for instead of against a 0-255 range
+	 * nothing in this project has.
+	 *
+	 * ============ THE MISSING LABEL, AND WHAT IT REALLY TAKES ============
+	 *
+	 * There is no `backlight:` in front of this node. HARDWARE_NOTES.md
+	 * records why it must not have one on the phone:
+	 * pwm_backlight_initial_power_state() opens
+	 *
+	 *     if (!node || !node->phandle) return BACKLIGHT_POWER_ON;
+	 *
+	 * -- unchanged in 6.12, read in this tree -- so a phandle is taken as
+	 * evidence that some display driver will unblank the panel. NeoDCT's panel
+	 * daemon is userspace and never does, and the phone came up bl_power=4 with
+	 * brightness=10: Sleepy's writes stored and not acted on.
+	 *
+	 * A LABEL ON ITS OWN DOES NOT DO THAT HERE, AND THAT WAS MEASURED RATHER
+	 * THAN ASSUMED. Four boots of this kernel, same node, same initramfs:
+	 *
+	 *   dtc,    no label        bl_power=0
+	 *   dtc,    label           bl_power=0    <- the label alone is inert
+	 *   dtc -@, no label        bl_power=0
+	 *   dtc -@, label           bl_power=4    <- the phone's fault, exactly
+	 *
+	 * because plain dtc emits a phandle only for a label something REFERENCES,
+	 * and `-@` is what gives every labelled node one. That is the same `-@`
+	 * HARDWARE_NOTES.md names as the SDK compiler's flag, so the two halves of
+	 * the phone's fault are the label and that flag together, and run_qemu.sh
+	 * uses neither.
+	 *
+	 * Which cuts both ways, and both are worth having written down. Somebody
+	 * adding a label here for tidiness will NOT silently blank the emulator's
+	 * panel. And the fault that until now could only be seen on a phone with an
+	 * un-reflashed boot partition is two lines away from being reproducible on
+	 * demand: label this node and compile the merged tree with `dtc -@`.
+	 *
+	 * The brightness table and the default level must stay in step with
+	 * docs/HARDWARE_NOTES.md; neodct/tests/test_qemu_dtsi.py compares the
+	 * two files so that editing one of them fails a test rather than
+	 * quietly giving the emulator a panel the phone does not have.
+	 */
+	backlight {
+		compatible = "pwm-backlight";
+		pwms = <&nd_bl_pwm 0 1000000 0>;
+		brightness-levels = <0 1 2 4 8 16 32 48 64 80 100>;
+		default-brightness-level = <10>;
+		status = "okay";
+	};
+};
+
+/*
+ * By path and not by label, because QEMU's tree has no labels at all -- it is
+ * generated, and a decompiled blob carries node names only. cpufreq-dt's
+ * probe test is cpu0_node_has_opp_v2_prop(), so both properties have to land
+ * on cpu@0 itself; hanging them anywhere else leaves the driver loaded and
+ * bound to nothing, which is the state this file exists to end.
+ */
+&{/cpus/cpu@0} {
+	clocks = <&nd_cpu_clk>;
+	operating-points-v2 = <&nd_opp_table>;
+};

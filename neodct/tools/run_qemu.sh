@@ -17,7 +17,8 @@
 #
 #   uname -m       armv7l, CPU part 0xc07, CPU architecture 7
 #   features       neon vfpv3 vfpv4 idiva idivt thumbee
-#   MemTotal       53,824 kB of the 64 MB machine; the phone has ~54 MB
+#   MemTotal       54,812 kB of the 64 MB machine; the phone has ~54 MB
+#                  (53,824 kB with no -dtb -- see the device-tree block)
 #   input_event    16 bytes per record, not the 24 an LP64 host writes
 #
 # That last line is the shape of the whole change. nd_evdev.c has always
@@ -150,6 +151,8 @@
 #   NEODCT_UNSIGNED=1 ...                     install unsigned updates
 #   NEODCT_APPEND="printk.time=1" ...         extra kernel cmdline (see below)
 #   NEODCT_MEM=256 ...                        more RAM than the phone has
+#   NEODCT_RTC=epoch ...                      boot with the RTC at 1970-01-01,
+#                                             which is the phone's cold boot
 #   NEODCT_SD=none ...                        no card attached
 #   NEODCT_RECOVERY=1 ...                     boot into recovery mode
 #   NEODCT_RECTTY=/dev/console ...            drive recovery over serial
@@ -160,6 +163,10 @@
 #   NEODCT_DISPLAY=offscreen ...              panel present, no window
 #   NEODCT_DISPLAY=vnc ...                    VNC frontend, no desktop needed
 #                                             (127.0.0.1:5901; NEODCT_VNC to move it)
+#   NEODCT_CONSOLE=pipe:/tmp/fifo ...         put the serial console on a
+#                                             chardev instead of stdio, for a
+#                                             caller that drives the boot
+#                                             (parity_capture_qemu.sh)
 #   NEODCT_MONITOR=/tmp/ndmon ...             QEMU monitor socket -- sendkey
 #
 #   NEODCT_SD=share, NEODCT_MODEM, NEODCT_BT, NEODCT_NET and NEODCT_AUDIO
@@ -176,10 +183,12 @@ IMAGES="${NEODCT_IMAGES:-$(dirname "$REPO")/buildroot/output/images}"
 
 # 64 MB is the phone's whole RAM, and this kernel leaves 53,824 kB of it to
 # userspace against the phone's ~54 MB -- measured, at this -m, on this
-# kernel. The default used to be 72 "to stay near the Pico Mini's 64MB",
-# which was a fudge for a kernel fat enough that 64 would have been 12 MB
-# HARSHER than the hardware. It is not needed any more, and a fudge that says
-# 72 while the phone says 64 is the reason a build fits here and not there.
+# kernel, and 54,812 kB once the device tree below is passed, which is
+# ~1 MB ABOVE the phone rather than below it. The default used to be 72 "to
+# stay near the Pico Mini's 64MB", which was a fudge for a kernel fat enough
+# that 64 would have been 12 MB HARSHER than the hardware. It is not needed
+# any more, and a fudge that says 72 while the phone says 64 is the reason a
+# build fits here and not there.
 MEMORY="${NEODCT_MEM:-64}"
 VERITY="${NEODCT_VERITY:-enforce}"
 SD_MODE="${NEODCT_SD:-image}"
@@ -191,6 +200,25 @@ MONITOR="${NEODCT_MONITOR:-}"
 # is a loopback address and not a bare ":1".
 VNC_ADDR="${NEODCT_VNC:-127.0.0.1:1}"
 EXTRA="${NEODCT_QEMU_EXTRA:-}"
+
+# ============ WHERE THE SERIAL CONSOLE GOES, FOR A CALLER THAT DRIVES IT ====
+#
+# `stdio` by default, which is every interactive session. NEODCT_CONSOLE is
+# any QEMU chardev spec -- `pipe:/path/to/fifo`, `file:/path/to/log` -- and it
+# REPLACES stdio in every display branch below, because -M virt wires exactly
+# one pl011 and a second -serial would not be a second console.
+#
+# IT EXISTS BECAUSE THERE WAS NO WAY IN AT ALL. parity_capture_qemu.sh ran
+# `run_qemu.sh -serial pipe:$FIFO -display none`, and this script parses no
+# positional arguments whatsoever: the `set --` that assembles the QEMU
+# command line further down OVERWRITES "$@", so both flags were discarded in
+# silence. The console then went to stdio as usual, the capture script's fifo
+# never received a byte, and it timed out after 180 s with "REFUSED: the guest
+# never reached a login prompt" -- which reads as a broken image, on a
+# perfectly good one, every time. NEODCT_QEMU_EXTRA could not have rescued it
+# either: it is appended AFTER the display branch's own -serial stdio, and the
+# first -serial wins.
+CONSOLE="${NEODCT_CONSOLE:-stdio}"
 
 # ============ THE FLAGS THIS KERNEL CANNOT HONOUR ============
 #
@@ -272,6 +300,81 @@ for required in zImage initramfs.cpio.gz system.img userdata.ext4; do
     fi
 done
 
+# ============ THE DEVICE TREE, BUILT FRESH ON EVERY RUN ============
+#
+# `-M virt` generates its own device tree and hands it to the kernel. Two
+# things the phone has are not in it, and both are drivers this kernel has
+# been carrying with nothing to bind to since the armv7 config landed:
+#
+#   cpufreq   cpu@0 declares neither `clocks` nor `operating-points-v2`, so
+#             cpufreq_dt_platdev_init() creates no platform device and
+#             /sys/devices/system/cpu/cpu0/cpufreq -- ND_CPUFREQ_DIR, the only
+#             path nd_cpufreq.c opens -- does not exist. Measured.
+#   backlight -M virt has no PWM controller of any kind, so pwm-backlight
+#             never probes and /sys/class/backlight is empty. Measured.
+#
+# neodct/board/qemu/nd-virt-additions.dtsi supplies both, plus a software PWM
+# to hang the backlight off. It is APPENDED to QEMU's own decompiled tree and
+# the whole thing recompiled -- not applied as an overlay, which does not work
+# (`dtc -@` refuses a value reference to a base-tree node by path, and QEMU's
+# blob carries no __symbols__ for a label form to resolve against).
+#
+# NOTHING IS COMMITTED AND NOTHING IS CACHED ACROSS QEMU VERSIONS. `-M virt`
+# is a versioned machine: a blob cut today still boots on next year's QEMU --
+# only /memory and /chosen get patched -- so a committed one would freeze the
+# guest's device set to whatever QEMU produced the day it was cut, silently.
+# Regenerating from the installed binary every run cannot drift. Measured, so
+# that the dump can be this cheap: a tree dumped with only -M/-cpu/-smp/-m is
+# byte-identical to one dumped with the whole device set attached, apart from
+# rng-seed and kaslr-seed.
+#
+# AND NEODCT_MEM STILL WORKS. QEMU rewrites /memory in a user-supplied DTB --
+# measured: a tree dumped at -m 64, booted at -m 256, gives MemTotal
+# 249,740 kB -- so the tree does not have to be regenerated per memory size.
+#
+# THE ONE PRICE IS ~1 MB OF GUEST MEMORY. The kernel reserves
+# fdt_totalsize(), QEMU's own blob is padded to 1 MiB and a dtc-produced one
+# is 8 KB, so handing over a smaller tree gives the reservation back: MemTotal
+# 53,824 kB with no -dtb, 54,812 kB with one. The emulator moves from ~180 kB
+# below the phone's ~54 MB to ~800 kB above it. That is written down in the
+# kernel config's header rather than papered over with a pad size -- measured,
+# a 1 MiB dtc pad does not boot at all.
+NDDTB_DIR="${TMPDIR:-/tmp}/neodct-qemu-dtb"
+NDDTB="$NDDTB_DIR/nd.dtb"
+DTSI="$REPO/board/qemu/nd-virt-additions.dtsi"
+# The recipe itself is in qemu_machine.sh, shared with test_qemu_surfaces.sh
+# and parity_capture_probe.sh so that neither can go on asserting a backlight
+# against a recipe this script no longer uses. That file now holds the KERNEL
+# PARAMETERS too -- see nd_qemu_append() and the block below.
+#
+# Sourcing it is no longer optional and its absence is no longer silent: the
+# device tree half degrades (a session with no backlight is still worth
+# having, see below) but the parameter half does not -- without nandsim's ID
+# bytes the guest comes up on a 16 KiB erase block that is not the phone's,
+# and without mtdram.total_size=0 it vmallocs 4 MiB out of a 64 MB machine.
+if [ -r "$HERE/qemu_machine.sh" ]; then
+    . "$HERE/qemu_machine.sh"
+else
+    echo "run_qemu: $HERE/qemu_machine.sh is missing. It carries the device tree" >&2
+    echo "  AND the kernel parameters that decide which devices this guest has, so" >&2
+    echo "  a session assembled without it is not the machine anything else here" >&2
+    echo "  measures. Refusing rather than booting a different emulator." >&2
+    exit 2
+fi
+
+# Loud rather than fatal. Without a device tree the emulator is still the phone
+# in every other respect, and refusing to boot over a backlight would be the
+# worse trade -- but it has to be SAID, or the next person spends an afternoon
+# on nd_cpufreq_read_table() returning ND_ERR_NOTFOUND.
+if ! command -v nd_dtb_build >/dev/null 2>&1 \
+   || ! nd_dtb_build "$DTSI" "$NDDTB_DIR" "$NDDTB"; then
+    echo "run_qemu: booting with QEMU's own device tree." >&2
+    echo "  That means NO backlight (/sys/class/backlight stays empty) and NO" >&2
+    echo "  cpufreq (ND_CPUFREQ_DIR does not exist), so Sleepy's two screens" >&2
+    echo "  will both report that there is nothing there." >&2
+    NDDTB=""
+fi
+
 set -- \
     -M virt \
     -cpu cortex-a7 \
@@ -284,6 +387,29 @@ set -- \
     -device virtio-blk-device,drive=ndsys,serial=NDSYS \
     -drive "file=$IMAGES/userdata.ext4,if=none,format=raw,id=nduser" \
     -device virtio-blk-device,drive=nduser,serial=NDUSER
+
+[ -n "$NDDTB" ] && set -- "$@" -dtb "$NDDTB"
+
+# ============ THE HARDWARE CLOCK, AND THE ONE CONDITION IT NEVER HAD ========
+#
+# QEMU's PL031 comes up at the HOST's wall clock, so the phone's cold boot --
+# the first sentence of nd_clock.c, "RTC boots at the Unix epoch, and every
+# TLS certificate on the internet is not valid yet" -- has never once been
+# reproducible under emulation, and neither has nd_clock_apply_floor(), which
+# exists for nothing else. One existing QEMU flag is that condition exactly.
+# Measured: "rtc-pl031 9010000.pl031: setting system clock to
+# 1970-01-01T00:00:02 UTC", /sys/class/rtc/rtc0/date 1970-01-01.
+#
+# The default is deliberately unchanged: a phone whose clock is wrong on every
+# ordinary boot would make every ordinary boot about the clock.
+case "${NEODCT_RTC:-host}" in
+    host)  ;;
+    epoch) set -- "$@" -rtc base=1970-01-01 ;;
+    *)
+        echo "run_qemu: NEODCT_RTC must be host or epoch" >&2
+        exit 1
+        ;;
+esac
 
 # --- the removable card ---------------------------------------------------
 case "$SD_MODE" in
@@ -350,10 +476,19 @@ esac
 # 0x20/0xa1 is a 1 Gbit x8 part and 0x15 is 2 KiB page, 128 KiB erase block.
 # NEODCT_APPEND is appended after this, so a session that wants a different
 # chip -- or mtdram back -- still says so and wins.
-APPEND="console=ttyAMA0 vt.global_cursor_default=0 neodct.verity=$VERITY"
-APPEND="$APPEND mtdram.total_size=0"
-APPEND="$APPEND nandsim.first_id_byte=0x20 nandsim.second_id_byte=0xa1"
-APPEND="$APPEND nandsim.third_id_byte=0x00 nandsim.fourth_id_byte=0x15"
+#
+# ============ AND THE DEVICE PARAMETERS ARE NOT WRITTEN HERE ============
+#
+# nandsim, mtdram and the mock GPIO chip -- which is where gpio53, 56 and 57
+# come from, i.e. nd_backlight.c's GPIO tier and the panel's RST and DC --
+# live in nd_qemu_append() in qemu_machine.sh, beside nd_dtb_build(), and are
+# shared with test_qemu_surfaces.sh and parity_capture_probe.sh. They were
+# written out here and hand-copied into both of those, which is how the three
+# copies came to differ while the surfaces test's comment still called them
+# "run_qemu.sh's parameters": deleting one from this line left that test
+# asserting the old machine against its own private command line and passing.
+# The argument for every parameter in the set is in that function.
+APPEND="console=ttyAMA0 neodct.verity=$VERITY $(nd_qemu_append)"
 # Boot straight into recovery. NEODCT_RECTTY=/dev/console drives it over the
 # serial port instead of the emulated screen.
 [ -n "${NEODCT_RECOVERY:-}" ] && APPEND="$APPEND neodct.recovery=1"
@@ -402,7 +537,13 @@ fi
 # connector on the virtio-gpu, and this kernel has no DRM at all.
 case "$DISPLAY_MODE" in
     none)
-        set -- "$@" -nographic
+        # -nographic is -display none plus -serial stdio in one flag, so a
+        # caller that named a console has to be given the pieces instead.
+        if [ "$CONSOLE" = "stdio" ]; then
+            set -- "$@" -nographic
+        else
+            set -- "$@" -display none -serial "$CONSOLE" -monitor none
+        fi
         ;;
     offscreen)
         # A panel with nobody watching. The UI opens /dev/fb0 on the way up
@@ -413,7 +554,7 @@ case "$DISPLAY_MODE" in
             -device virtio-gpu-device \
             -device virtio-keyboard-device \
             -display none \
-            -serial stdio
+            -serial "$CONSOLE"
         APPEND="$APPEND video=vfb:on"
         ;;
     vnc)
@@ -453,7 +594,7 @@ case "$DISPLAY_MODE" in
             -device virtio-keyboard-device \
             -device virtio-tablet-device \
             -vnc "$VNC_ADDR" \
-            -serial stdio
+            -serial "$CONSOLE"
         APPEND="$APPEND video=vfb:on"
         ;;
     *)
@@ -462,7 +603,7 @@ case "$DISPLAY_MODE" in
             -device virtio-keyboard-device \
             -device virtio-tablet-device \
             -display "$DISPLAY_MODE,gl=off,zoom-to-fit=off" \
-            -serial stdio
+            -serial "$CONSOLE"
         APPEND="$APPEND video=vfb:on"
         ;;
 esac

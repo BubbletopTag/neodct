@@ -1,0 +1,182 @@
+INV|# format=1
+INV|# capture.method=nd-inventory-nolib
+INV|# capture.root=/
+INV|# capture.euid=0
+INV|# capture.os_version_id=ABSENT
+INV|# capture.sections=all
+INV|BEGIN
+INV|block.byserial.NDSYS.node vdb
+INV|block.byserial.NDUSER.node vda
+INV|block.loop0.removable 0
+INV|block.loop0.ro 0
+INV|block.loop0.size 0
+INV|block.loop1.removable 0
+INV|block.loop1.ro 0
+INV|block.loop1.size 0
+INV|block.loop2.removable 0
+INV|block.loop2.ro 0
+INV|block.loop2.size 0
+INV|block.loop3.removable 0
+INV|block.loop3.ro 0
+INV|block.loop3.size 0
+INV|block.loop4.removable 0
+INV|block.loop4.ro 0
+INV|block.loop4.size 0
+INV|block.loop5.removable 0
+INV|block.loop5.ro 0
+INV|block.loop5.size 0
+INV|block.loop6.removable 0
+INV|block.loop6.ro 0
+INV|block.loop6.size 0
+INV|block.loop7.removable 0
+INV|block.loop7.ro 0
+INV|block.loop7.size 0
+INV|block.mtdblock0.removable 0
+INV|block.mtdblock0.ro 0
+INV|block.mtdblock0.size 262144
+INV|block.vda.removable 0
+INV|block.vda.ro 0
+INV|block.vda.serial NDUSER
+INV|block.vda.size 16384
+INV|block.vdb.removable 0
+INV|block.vdb.ro 0
+INV|block.vdb.serial NDSYS
+INV|block.vdb.size 16384
+INV|block.zram0.removable 0
+INV|block.zram0.ro 0
+INV|block.zram0.size 0
+INV|class.backlight [backlight]
+INV|class.backlight.backlight.max_brightness 10
+INV|class.backlight.backlight.type raw
+INV|class.block [loop[N]x8 mtdblock0 vda vdb zram0]
+INV|class.gpio [export gpiochip0 gpiochip512 unexport]
+INV|class.graphics [fb0]
+INV|class.graphics.fb0.name Virtual FB
+INV|class.i2c-dev []
+INV|class.input [event0 input0]
+INV|class.input.event0.name ABSENT
+INV|class.input.input0.name QEMU Virtio Keyboard
+INV|class.leds ABSENT
+INV|class.misc [device-mapper loop-control ubi_ctrl uinput]
+INV|class.mtd [mtd0 mtd0ro]
+INV|class.net [lo sit0]
+INV|class.net.lo.type 772
+INV|class.net.sit0.type 776
+INV|class.power_supply []
+INV|class.rtc [rtc0]
+INV|class.rtc.rtc0.name rtc-pl031 9010000.pl031
+INV|class.thermal []
+INV|class.tty [console ptmx pty[a-z][0-f]x256 tty tty[N]x64 ttyAMA0 tty[a-z][0-f]x256]
+INV|class.ubi [version]
+INV|cmdline.keys [console gpio-mockup.gpio_mockup_ranges mtdram.total_size nandsim.first_id_byte nandsim.fourth_id_byte nandsim.second_id_byte nandsim.third_id_byte neodct.devenv panic rdinit video vt.global_cursor_default]
+INV|cmdline.mtdram.total_size 0
+INV|cmdline.nandsim.first_id_byte 0x20
+INV|cmdline.nandsim.fourth_id_byte 0x15
+INV|cmdline.nandsim.second_id_byte 0xa1
+INV|cmdline.nandsim.third_id_byte 0x00
+INV|cmdline.neodct.devenv 1
+INV|cmdline.panic 5
+INV|~cmdline.raw console=ttyAMA0 rdinit=/init panic=5 neodct.devenv=1 video=vfb:on vt.global_cursor_default=0 mtdram.total_size=0 nandsim.first_id_byte=0x20 nandsim.second_id_byte=0xa1 nandsim.third_id_byte=0x00 nandsim.fourth_id_byte=0x15 gpio-mockup.gpio_mockup_ranges=0,64
+INV|cmdline.video vfb:on
+INV|cpufreq.available 408000 600000 816000 1008000 1200000
+INV|cpufreq.cpu0 present
+INV|cpufreq.policies [policy0]
+INV|dev.console type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.count 622
+INV|dev.fb0 type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.full type=c mode=0666 uid=0(?) gid=0(?)
+INV|dev.gpiochip0 type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.gpiochip1 type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.input type=d mode=0755 uid=0(?) gid=0(?)
+INV|dev.input/event0 type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.kmsg type=c mode=0644 uid=0(?) gid=0(?)
+INV|dev.loop-control type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.loop[N] n=8 type=b mode=0600 uid=0(?) gid=0(?)
+INV|dev.mapper type=d mode=0755 uid=0(?) gid=0(?)
+INV|dev.mapper/control type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.mem type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.mtd0 type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.mtd0ro type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.mtdblock0 type=b mode=0600 uid=0(?) gid=0(?)
+INV|dev.null type=c mode=0666 uid=0(?) gid=0(?)
+INV|dev.port type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.ptmx type=c mode=0666 uid=0(?) gid=0(?)
+INV|dev.pts type=d mode=0755 uid=0(?) gid=0(?)
+INV|dev.pty[a-z][0-f] n=256 type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.random type=c mode=0666 uid=0(?) gid=0(?)
+INV|dev.rtc0 type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.snd type=d mode=0755 uid=0(?) gid=0(?)
+INV|dev.snd/timer type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.tty type=c mode=0666 uid=0(?) gid=0(?)
+INV|dev.ttyAMA0 type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.tty[N] n=64 type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.tty[a-z][0-f] n=256 type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.ubi_ctrl type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.uinput type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.urandom type=c mode=0666 uid=0(?) gid=0(?)
+INV|dev.vcs type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.vcs[N] n=1 type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.vcsa type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.vcsa[N] n=1 type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.vcsu type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.vcsu[N] n=1 type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.vda type=b mode=0600 uid=0(?) gid=0(?)
+INV|dev.vdb type=b mode=0600 uid=0(?) gid=0(?)
+INV|dev.zero type=c mode=0666 uid=0(?) gid=0(?)
+INV|dev.zram0 type=b mode=0600 uid=0(?) gid=0(?)
+INV|dm.control present
+INV|fb0 present
+INV|fb0.fix.id Virtual FB
+INV|fb0.fix.line_length 640
+INV|fb0.fix.smem_len 1048576
+INV|fb0.fix.type 0
+INV|fb0.fix.visual 3
+INV|fb0.var.bits_per_pixel 8
+INV|fb0.var.blue 0/8
+INV|fb0.var.green 0/8
+INV|fb0.var.red 0/8
+INV|fb0.var.transp 0/0
+INV|fb0.var.xres 640
+INV|fb0.var.xres_virtual 640
+INV|fb0.var.yres 480
+INV|fb0.var.yres_virtual 480
+INV|input.byname."QEMU\x20Virtio\x20Keyboard".ev 120003
+INV|input.byname."QEMU\x20Virtio\x20Keyboard".handlers [event0 kbd]
+INV|input.node.event0.name QEMU Virtio Keyboard
+INV|~mem.total_kb 54812
+INV|mem.total_mib 52
+INV|modem.board_expects_radio UNAVAILABLE(nolib)
+INV|modem.candidate_ports []
+INV|modem.cold_verdict UNAVAILABLE(nolib)
+INV|mount./ fstype=rootfs options=nr_inodes=<masked> rw size=<masked>
+INV|mount./dev fstype=devtmpfs options=mode=755 nr_inodes=<masked> relatime rw size=<masked>
+INV|mount./dev/pts fstype=devpts options=mode=600 ptmxmode=000 relatime rw
+INV|mount./proc fstype=proc options=relatime rw
+INV|mount./sys fstype=sysfs options=relatime rw
+INV|mtd.byname."NAND\x20simulator\x20partition\x200".erasesize 131072
+INV|mtd.byname."NAND\x20simulator\x20partition\x200".oobsize 64
+INV|mtd.byname."NAND\x20simulator\x20partition\x200".size 134217728
+INV|mtd.byname."NAND\x20simulator\x20partition\x200".type nand
+INV|mtd.byname."NAND\x20simulator\x20partition\x200".writesize 2048
+INV|mtd.node.mtd0.name NAND simulator partition 0
+INV|os.id ABSENT
+INV|os.name ABSENT
+INV|platform.board UNAVAILABLE(nolib)
+INV|platform.mismatch UNAVAILABLE(nolib)
+INV|~platform.origin UNAVAILABLE(nolib)
+INV|platform.record.board ABSENT
+INV|platform.record.image ABSENT
+INV|platform.record.platform ABSENT
+INV|platform.resolved UNAVAILABLE(nolib)
+INV|proc.consoles [ttyAMA0]
+INV|proc.devices.block [blkext device-mapper loop mtdblock ubiblock virtblk zram]
+INV|proc.devices.char [/dev/console /dev/ptmx /dev/tty /dev/vc/0 alsa fb gpiochip i2c input mem misc mtd ptm pts pty rtc tty ttyACM ttyAMA ttyUSB ttyp usb usb_device vcs]
+INV|proc.filesystems [bdev devpts devtmpfs ext2 ext3 ext4 mqueue pipefs proc ramfs sockfs squashfs sysfs tmpfs ubifs vfat]
+INV|proc.modules []
+INV|uname.machine armv7l
+INV|uname.release 6.12.47
+INV|uname.sysname Linux
+INV|zram0.disksize 0
+INV|END
+INV|# sha256.transport=6c7161f0ae6c7c40930dd93810e28b2d538d08290b881285add8a500bbac23d5
+INV|# sha256.compared=7df06b63898a4ea53b05eb217aff185bb116152d3b534ecead62013416535602

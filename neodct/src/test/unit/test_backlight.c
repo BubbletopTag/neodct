@@ -82,9 +82,16 @@ static void check_file(const char *path, const char *want)
  * Which tier
  * ------------------------------------------------------------------ */
 
-/* Nothing at all is a real answer and the commonest one: QEMU has no
- * /sys/class/backlight and no /sys/class/gpio, and an app that treated that as
- * a failure would refuse to start on the emulator. */
+/* Nothing at all is a real answer, and it is the state of a phone whose boot
+ * partition has never been reflashed: no pwm9 in the device tree means an
+ * empty /sys/class/backlight, and nd_fb.h's block explains why an .ndsw can
+ * never fix that. An app that treated it as a failure would refuse to start.
+ *
+ * IT IS NO LONGER THE EMULATOR'S STATE, and this comment used to say it was.
+ * The QEMU kernel now carries GPIO_SYSFS and run_qemu.sh appends
+ * neodct/board/qemu/nd-virt-additions.dtsi to QEMU's device tree, so both
+ * tiers are there: measured, /sys/class/backlight [backlight] with
+ * max_brightness 10, and gpio53 exportable off gpio-mockup's chip. */
 static void test_mode_is_none_with_no_hardware(void)
 {
     CHECK_INT(nd_backlight_mode(), ND_BL_NONE);
@@ -203,6 +210,56 @@ static void test_set_percent_assumes_255_with_no_max(void)
     CHECK(nd_backlight_set_percent(100));
     CHECK(pt_read_text(BL_PANEL "/brightness", text, sizeof text) != (size_t)-1);
     CHECK_STR(text, "255");
+}
+
+/* ============ THE PANEL THIS PHONE ACTUALLY HAS ============
+ *
+ * Every case above is built on a 0-255 panel and the Luckfox does not have
+ * one. The device-tree node in docs/HARDWARE_NOTES.md gives
+ * brightness-levels <0 1 2 4 8 16 32 48 64 80 100> and
+ * default-brightness-level 10, so max_brightness is TEN and a percentage
+ * lands on one of eleven steps. neodct/board/qemu/nd-virt-additions.dtsi
+ * gives the emulator the same table; measured there, max_brightness 10.
+ *
+ * Which makes the coarse table the interesting one rather than the fine one.
+ * On 255 steps an exact .5 is a curiosity; on ten steps 25% IS 2.5, so the
+ * rounding rule this module has a paragraph about decides a number the
+ * brightness slider produces by moving one row. Half-to-even gives 2. C's
+ * round() would give 3, and the level read back would not be the level set. */
+static void test_set_percent_on_the_phones_ten_step_panel(void)
+{
+    given_a_pwm_panel(BL_PANEL, "0\n", "10\n");
+
+    CHECK(nd_backlight_set_percent(100));
+    check_file(BL_PANEL "/brightness", "10");
+    CHECK_INT(nd_backlight_get_percent(), 100);
+
+    CHECK(nd_backlight_set_percent(50));
+    check_file(BL_PANEL "/brightness", "5");
+    CHECK_INT(nd_backlight_get_percent(), 50);
+
+    CHECK(nd_backlight_set_percent(25));
+    check_file(BL_PANEL "/brightness", "2");
+    CHECK_INT(nd_backlight_get_percent(), 20);
+}
+
+/* And the floor, which only a coarse table can reach. 5% of ten steps rounds
+ * to ZERO, and a positive request that turns the panel off is the one answer
+ * a brightness slider must never give -- the owner asked for dim and got
+ * dark, with no row left to press. nd_max32(1, level) is that clamp, and on a
+ * 255-step panel nothing gets anywhere near it, so this case did not exist.
+ *
+ * The percentage read back is 10 and not 5, and that is correct rather than a
+ * rounding bug: one step of ten IS a tenth of full. A ten-step panel cannot
+ * represent 5%, and reporting the level it is actually at beats reporting the
+ * number that was asked for. */
+static void test_set_percent_floors_a_dim_request_on_a_coarse_panel(void)
+{
+    given_a_pwm_panel(BL_PANEL, "0\n", "10\n");
+
+    CHECK(nd_backlight_set_percent(5));
+    check_file(BL_PANEL "/brightness", "1");
+    CHECK_INT(nd_backlight_get_percent(), 10);
 }
 
 /* ------------------------------------------------------------------ *
@@ -499,6 +556,8 @@ int main(void)
     RUN(test_set_percent_rounds_half_to_even);
     RUN(test_get_percent_survives_a_zero_max_brightness);
     RUN(test_set_percent_assumes_255_with_no_max);
+    RUN(test_set_percent_on_the_phones_ten_step_panel);
+    RUN(test_set_percent_floors_a_dim_request_on_a_coarse_panel);
     RUN(test_gpio_off_writes_zero_and_on_writes_one);
     RUN(test_gpio_get_percent_is_all_or_nothing);
     RUN(test_gpio_treats_any_nonzero_percent_as_on);

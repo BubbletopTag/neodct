@@ -12,7 +12,18 @@
  * are there afterwards whichever way round they were written. So the rule is
  * a function of its own, nd_cpufreq_max_first(), and it is checked directly.
  * The alternative would have been a test that passes on a wrong order.
- */
+ *
+ * THERE IS NOW ONE PLACE WHERE THE ORDER REALLY IS OBSERVABLE, and it is not
+ * here. Under the emulator's device tree the files are a driver rather than a
+ * directory, and the kernel clamps min against max on the way in. Measured,
+ * pinned at 816000 and raising:
+ *
+ *   echo 1200000 > scaling_min_freq   ->  min reads back 816000  (SWALLOWED)
+ *   echo 1200000 > scaling_max_freq   ->  min 1200000  max 1200000
+ *
+ * neodct/tools/test_qemu_surfaces.sh does exactly that in a booted guest. It
+ * is the only check in this project that a wrong order actually loses a
+ * write, and it needs a kernel, so it lives there and not in `make test`. */
 
 #include <string.h>
 #include <sys/stat.h>
@@ -247,6 +258,42 @@ static void test_read_state_says_notfound_when_nothing_is_there(void)
     CHECK_INT(nd_cpufreq_read_state(&state), ND_ERR_NOTFOUND);
 }
 
+/* The tree the QEMU stand-in publishes, which is not the phone's in two
+ * respects worth having written down where the numbers are.
+ *
+ * Measured on a booted guest with neodct/board/qemu/nd-virt-additions.dtsi in
+ * the device tree: driver cpufreq-dt, governor `performance`,
+ * scaling_available_governors "ondemand performance", and scaling_cur_freq
+ * TRACKING THE POLICY -- 816000 after a pin, not the fixed 1.2 GHz the
+ * stand-in's clock actually runs at. So every field this module reads behaves,
+ * which is the point; what does not is cpuinfo_cur_freq, and nothing here
+ * names it.
+ *
+ * The governor is a guess on both sides and recorded as one: DECISIONS.md D6
+ * says the RV1103 SDK's 5.10 config is not in this repository, so the phone's
+ * default cannot be checked against the kernel it runs. Sleepy prints the
+ * governor and nothing branches on it. What this case pins is that the buffer
+ * takes it: ND_CPUFREQ_GOV_MAX is 32 and `performance` is eleven characters,
+ * where the fixture above uses nine. */
+static void test_read_state_reads_the_qemu_stand_ins_tree(void)
+{
+    nd_cpufreq_state state;
+
+    pt_write_text(ND_CPUFREQ_AVAILABLE, "408000 600000 816000 1008000 1200000 \n");
+    pt_write_text(ND_CPUFREQ_CUR, "816000\n");
+    pt_write_text(ND_CPUFREQ_MIN, "816000\n");
+    pt_write_text(ND_CPUFREQ_MAX, "816000\n");
+    pt_write_text(ND_CPUFREQ_GOVERNOR, "performance\n");
+    write_cpuinfo_bounds();
+
+    CHECK_INT(nd_cpufreq_read_state(&state), ND_OK);
+    CHECK_INT(state.cur_khz, 816000);
+    CHECK_INT(state.min_khz, 816000);
+    CHECK_INT(state.max_khz, 816000);
+    CHECK_STR(state.governor, "performance");
+    CHECK(!nd_cpufreq_is_unpinned(&state));
+}
+
 /* ------------------------------------------------------------------ *
  * Pinning
  * ------------------------------------------------------------------ */
@@ -450,6 +497,7 @@ int main(void)
     RUN(test_read_state_reads_all_four);
     RUN(test_read_state_tolerates_a_missing_field);
     RUN(test_read_state_says_notfound_when_nothing_is_there);
+    RUN(test_read_state_reads_the_qemu_stand_ins_tree);
     RUN(test_set_pins_both_ends_of_the_range);
     RUN(test_set_pins_both_ends_when_raising);
     RUN(test_set_reports_a_refused_write_and_finishes_the_pair);

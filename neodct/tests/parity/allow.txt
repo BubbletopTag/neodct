@@ -1,0 +1,485 @@
+# allow.txt -- every way the emulator and the phone are allowed to differ,
+# with the argument for each one.
+#
+# ============ READ THIS BEFORE YOU BELIEVE A LINE OF IT ============
+#
+# NO CAPTURE HAS EVER BEEN TAKEN FROM A LUCKFOX PICO MINI B. Nobody working on
+# this branch has one. luckfox-armv7.inventory does not exist, so
+# test_parity_allowlist.py runs SINGLE-SIDED and says so on every run:
+# 0 of N records are verified against hardware. Every `hw` value below is a
+# CLAIM, and every record says which it is in its own hw_evidence field rather
+# than leaving it to the reader to notice.
+#
+# THE EMULATOR SIDE IS MEASURED, AND IT IS NOT MEASURED FROM AN IMAGE.
+# qemu-armv7-probe.inventory was captured by parity_capture_probe.sh: the
+# repo's own kernel (board/qemu/armv7-virt/linux.config), the exact machine
+# run_qemu.sh assembles (-M virt -cpu cortex-a7 -smp 1 -m 64,
+# force-legacy=false, mtdram.total_size=0 plus the Pico Mini's nandsim ID
+# bytes, video=vfb:on), and a BUSYBOX INITRAMFS where the NeoDCT rootfs would
+# be, because buildroot/output does not exist and a full build is hours. Two
+# boots produced byte-identical files.
+#
+# The capture is taken WITH THE DEVICE TREE run_qemu.sh builds. That is not a
+# detail: three of the records below turn on the difference between a
+# subsystem being compiled in and a device being present, and a capture taken
+# without -dtb would be of a machine nobody boots. parity_capture_probe.sh
+# refuses to run if it cannot build the tree, where run_qemu.sh only warns --
+# a session with no backlight is still worth having, a BASELINE with no
+# backlight is not.
+#
+# So the emulator column is a real measurement of a real armv7 machine and it
+# is NOT a measurement of a NeoDCT image. Everything below the image -- the
+# kernel identity, MemTotal, the class trees, the MTD geometry, /proc, the
+# input devices, the /dev families, the framebuffer ioctls -- is measured.
+# Everything about the image -- os-release, /NeoDCT/platform, the users table,
+# the mount set, and the six records that need libneodct -- reads ABSENT or
+# UNAVAILABLE(nolib) and is a property of that initramfs. Those records carry
+# the verdict `until-image` and MUST be revisited the first time
+# parity_capture_qemu.sh runs on a built image. Calling any of them permanent
+# would be this harness lying about its own evidence.
+#
+# ============ THE FOUR VERDICTS ============
+#
+#   until-stage-N   a divergence a named stage will close. This is what makes
+#                   the file SHRINK, and it has now happened once. FIVE
+#                   records said until-stage-5. Two of them -- cpufreq.cpu0
+#                   and cpufreq.policies -- had nothing left to annotate once
+#                   a device tree gave the emulator a policy, and were
+#                   DELETED. Three -- class.backlight, class.power_supply and
+#                   class.thermal -- still name a real difference, but not the
+#                   one they used to: the emulator side is now what it is
+#                   going to stay, so they are permanent with the argument
+#                   rewritten. Zero until-stage-5 records remain, which
+#                   test_the_surfaces_stage_closed_its_records asserts, and a
+#                   record that had survived its own stage would have failed
+#                   test_the_qemu_column_matches_the_committed_capture anyway,
+#                   because the emulator column stops matching the capture.
+#   until-image     the emulator side of this record is a property of the
+#                   probe initramfs, not of the emulator. Settled by the first
+#                   capture from a built image, not by any stage.
+#   permanent       with an argument. uname.release is the honest example.
+#   must-differ     REQUIRED to differ. If these ever agree the two images are
+#                   indistinguishable, which is the exact failure D1 exists to
+#                   prevent. parity_diff.py's check_must_differ() evaluates
+#                   this verdict against the two CAPTURES rather than against
+#                   the diff, because a diff only holds keys that differ -- so
+#                   for as long as it was evaluated against the diff, a
+#                   must-differ record whose two sides had come to agree was
+#                   reported as STALE and the operator was told to delete it.
+#
+# ============ AND NO COLUMN MAY BE A TOTAL WILDCARD ============
+#
+# Eight of these records used to carry `hw ~.*` or `hw ~.+`, six of them
+# permanent. The emulator column was pinned and the phone column matched any
+# value the phone could ever report, so those records could only ever say "the
+# emulator is what it was" and never "the two machines still agree" -- half an
+# annotation, with the missing half being the one the file is named after.
+# class.gpio was the sharpest: its own argument says what it exists to pin is
+# `export` and `unexport`, and `~.*` pinned neither on the phone.
+#
+# So there are none now, and test_no_column_is_a_total_wildcard pins the count
+# at zero. Where the phone's exact value cannot be predicted from this
+# repository the SHAPE still can -- a listing rather than ABSENT, a mount
+# record rather than a missing one -- and that is what each hw column says.
+# Moving that count off zero means arguing in a diff that a divergence nobody
+# can describe is still a described divergence.
+#
+# Fields: key / qemu / hw / verdict / hw_evidence / why. A value may be given
+# as ~<regex> where it is genuinely a free variable; a BARE `~` is refused,
+# because it used to mean a total wildcard in one code path and the empty
+# regex in every other. One segment of `key` may be [*]. Continuation lines
+# are indented.
+
+key          uname.release
+qemu         6.12.47
+hw           ~5\.10\..*
+verdict      permanent
+hw_evidence  unmeasured-claim
+why          A kernel cannot ship in a .ndsw -- manifest.py only CHECKS
+             min_kernel, and an update package is rootfs.squashfs plus a
+             manifest and nothing else -- so the phone stays on the RV1103
+             SDK's 5.10 until somebody reflashes it over a cable, and the
+             emulator tracks whatever board/qemu/armv7-virt/linux.config
+             builds. This is deliberately COMPARED rather than exempted: a
+             kernel bump then shows up as a diff in two committed files that
+             have to move in one commit and get reviewed. uname.machine is
+             NOT here, and must never be: armv7l on both sides is the whole
+             of Stage 1's claim.
+
+key          platform.record.image
+qemu         ~(qemu-armv7|ABSENT)
+hw           ~luckfox-armv7
+verdict      must-differ
+hw_evidence  unmeasured-claim
+why          D1's discriminator. nd_manifest_check_compatible() compares this
+             key byte for byte and it is the only thing standing between a
+             package built here and a phone in somebody's pocket; the ABI
+             collapsed and the identity deliberately did not. If the two sides
+             ever agree, a QEMU-built .ndsw becomes installable on hardware.
+             The emulator side reads ABSENT today only because the committed
+             capture has no image behind it -- see the header -- and the
+             regex accepts both so that this record does not have to be
+             rewritten the day a real capture arrives.
+
+key          platform.resolved
+qemu         UNAVAILABLE(nolib)
+hw           ~(hw|unknown)
+verdict      until-image
+hw_evidence  unmeasured-claim
+why          One of the six records that need libneodct, which cannot be
+             cross-compiled for the probe capture without freetype, sqlite,
+             libpng and libjpeg for the target. The probe build emits
+             UNAVAILABLE(nolib) rather than omitting the record -- a hole you
+             can see, never a shorter file -- and stamps
+             capture.method=nd-inventory-nolib so parity_diff.py refuses that
+             capture as a gating reference. Settled by the first capture from
+             a built image.
+
+key          platform.board
+qemu         UNAVAILABLE(nolib)
+hw           ~luckfox-pico-mini-b
+verdict      until-image
+hw_evidence  unmeasured-claim
+why          As platform.resolved. The board is what makes the platform word
+             forward-compatible -- a future dev kit ships platform=hw with a
+             different board and every is_hw() branch keeps working -- so it
+             is recorded separately rather than folded into the platform.
+
+key          platform.mismatch
+qemu         UNAVAILABLE(nolib)
+hw           false
+verdict      until-image
+hw_evidence  unmeasured-claim
+why          As platform.resolved. This one is worth its own record rather
+             than being folded in: a true here means the image was assembled
+             from two builds, every truth question in the running system has
+             fallen back to "unknown", and nd_modem__board_should_have_a_radio()
+             is deliberately answering yes to keep a contested phone from
+             simulating its radio. It should never be true on either machine,
+             which is exactly why it belongs in a file somebody reads.
+
+key          modem.board_expects_radio
+qemu         UNAVAILABLE(nolib)
+hw           true
+verdict      until-image
+hw_evidence  unmeasured-claim
+why          D3's predicate, the one five sites already share. On the phone it
+             is true, so a modem that does not enumerate at all is
+             ND_MODEM_LINK_ABSENT and calls and texts are refused; under QEMU
+             it is false and simulation is the honest answer. Recording the
+             INPUT rather than the live link is the whole point -- the live
+             state is PROBING for the boot grace and then LIVE or ABSENT, so
+             it would record when somebody ran the tool.
+
+key          modem.cold_verdict
+qemu         UNAVAILABLE(nolib)
+hw           ABSENT
+verdict      until-image
+hw_evidence  unmeasured-claim
+why          The acceptance test for cc651992 in one line: what
+             nd_modem_link_state() returns for a modem with nothing adopted.
+             SIM on the emulator, ABSENT on the phone. If the phone ever reads
+             SIM here, a radio-less phone is telling its owner their calls
+             connected and their texts went out, which is the failure that
+             whole commit exists to end.
+
+key          class.backlight
+qemu         [backlight]
+hw           ~(\[backlight\]|\[\])
+verdict      permanent
+hw_evidence  unmeasured-claim
+why          THIS RECORD IS THE WORKED EXAMPLE, AND IT HAS ALREADY CHANGED
+             ONCE. It used to say the emulator's directory was EMPTY while the
+             phone's was not, verdict until-stage-5, because the subsystem was
+             compiled in and -M virt has no PWM controller to hang a device
+             off. run_qemu.sh now appends
+             neodct/board/qemu/nd-virt-additions.dtsi -- the phone's own
+             pwm-backlight node over a software PWM -- so the emulator has the
+             device, with the phone's NAME (`backlight`), the phone's
+             max_brightness (10) and the phone's eleven-entry table. Measured.
+             What is left is a fact about the PHONE and not about the
+             emulator, which is why the verdict is permanent rather than
+             deleted: the DTB lives in the boot partition and an .ndsw
+             replaces the rootfs and never the boot partition, so a phone that
+             has only ever been updated over the air has an EMPTY directory
+             and drives the panel through gpio53 instead. Both populations are
+             in the field, nd_backlight.c ships both tiers for that reason,
+             and the emulator deliberately provides the one that DIMS because
+             that is the tier no other machine tests. Note that on such a
+             phone class.backlight.backlight.max_brightness and .type
+             disappear with the directory; they are not separately recorded
+             here because a key that exists on neither side of an
+             un-reflashed comparison is not a value difference.
+
+key          class.power_supply
+qemu         []
+hw           ~\[.+\]
+verdict      permanent
+hw_evidence  unmeasured-claim
+why          DELIBERATELY EMPTY, and the symbol that used to fill it was
+             REMOVED rather than left. Nothing in this tree reads power_supply
+             -- one grep hit repo-wide and it is prose in docs/SLEEP.md -- and
+             the phone's battery is not a power_supply device at all: it is a
+             MAX1704x fuel gauge on /dev/i2c-3 at 0x36, and nd_battery.c's
+             SIM/LIVE/UNREADABLE gate is decided by errno at open(2) of that
+             node and nothing else. CONFIG_TEST_POWER put three supplies here
+             named test_ac, test_battery and test_usb; those names are string
+             literals in drivers/power/supply/test_power.c and no module
+             parameter touches them, so the NAME cannot be made right without
+             patching the kernel, and a node with the wrong name is worse than
+             an absent one because the code reads names. Worse, test_battery
+             reported capacity=50, present=1, status=Discharging and
+             voltage_now=3300 -- a second, contradictory battery in an image
+             whose real battery is simulated, which is the exact class of lie
+             nd_battery.h's three-source block and ND_MODEM_LINK_ABSENT exist
+             to stop telling. The subsystem stays so that the directory
+             exists and is empty, which is the honest state. The hw column
+             used to be `~.*`, which pinned nothing at all: a permanent
+             divergence nobody can describe is not a described divergence, it
+             is a permanent silence. The phone's exact listing cannot be
+             predicted from this repository -- DECISIONS.md D6, the RV1103
+             SDK's 5.10 config is not here -- but the SHAPE can, and it is the
+             shape this record is about. The emulator is `[]`, so a difference
+             here means the phone is not empty; `~\[.+\]` says exactly that
+             and leaves ABSENT unexplained on purpose. A phone whose kernel
+             has no POWER_SUPPLY at all is a subsystem missing on one machine
+             and present on the other, which is a divergence somebody should
+             have to write a line about rather than one this record swallows.
+
+key          class.thermal
+qemu         []
+hw           ~\[.+\]
+verdict      permanent
+hw_evidence  unmeasured-claim
+why          The same removal seen from the other side. Nothing in this tree
+             reads thermal -- zero grep hits -- and the only zone -M virt
+             could produce was a by-product of CONFIG_TEST_POWER:
+             power_supply_core.c's psy_register_thermal() registers a zone
+             named after any supply carrying a TEMP property, so
+             thermal_zone0's type was literally `test_battery`. Measured on
+             the previous kernel: thermal_zone0 type=test_battery temp=2600.
+             A wrong-named node in a directory with no readers is worse than
+             an empty directory, because it is the first thing a future
+             consumer would bind to. A faithful zone would have to be typed
+             after the RV1103's own TSADC and there is no way to produce one
+             on -M virt without writing a driver, for a surface with no
+             consumer. Measured after the removal: []. `hw ~\[.+\]` for the
+             same reason as class.power_supply: the emulator side is `[]`, so
+             the only difference this record can annotate is a phone with
+             zones, and an ABSENT thermal class on the phone is the subsystem
+             itself missing and must stay unexplained.
+
+key          class.leds
+qemu         ABSENT
+hw           ~\[.*\]
+verdict      permanent
+hw_evidence  unmeasured-claim
+why          ABSENT and not [], which is the distinction this format exists to
+             keep: /sys/class/leds does not exist at all. LEDS_CLASS is what
+             creates it and CONFIG_NEW_LEDS on its own creates nothing --
+             measured both ways, with the symbol and without. So NEW_LEDS came
+             out of the kernel config as dead weight. Nothing in this tree
+             reads LEDs, zero grep hits repo-wide, and an empty class
+             directory for a subsystem with no consumer is kernel text spent
+             for nothing on a 64 MB machine. The record is here so that
+             putting the symbol back is a diff somebody has to argue for
+             rather than a line nobody notices. The emulator side is ABSENT,
+             so the only difference this can annotate is a phone that HAS the
+             directory: `~\[.*\]` says that and no more, where the `~.*` it
+             replaced would equally have absorbed the emulator growing a
+             listing of its own.
+
+key          class.gpio
+qemu         [export gpiochip0 gpiochip512 unexport]
+hw           ~\[export( gpiochip[0-9]+)+ unexport\]
+verdict      permanent
+hw_evidence  unmeasured-claim
+why          The one surface here that is a STAND-IN rather than a copy, and
+             it is recorded so that nobody mistakes it for the phone's. -M
+             virt's only real controller is a pl061 with EIGHT lines at base
+             512, so none of the pin numbers this tree hard-codes exists on it
+             -- measured, `echo 53 > export` answers "export_store: invalid
+             GPIO 53". gpiochip0 is CONFIG_GPIO_MOCKUP at
+             gpio-mockup.gpio_mockup_ranges=0,64, which puts gpio53, gpio56
+             and gpio57 -- ND_BL_GPIO_PIN and the panel's RST and DC -- where
+             nd_backlight.c, S90display and neodctDisplay.c expect them. The
+             phone's chips are the RV1103's own and will never match this
+             listing. What the record really pins is `export` and `unexport`:
+             they are the whole legacy sysfs GPIO interface, GPIO_SYSFS is
+             `bool ... if EXPERT` with no default, and losing it is one
+             olddefconfig away and silent. gpio-sim is what 6.12 recommends
+             instead and cannot be used -- it is configfs-driven with no fixed
+             gpiobase, so it cannot produce gpio53. That gpio-mockup is marked
+             DEPRECATED is a recorded risk and not a reason to ship pin
+             numbers that do not match the phone. AND THE hw COLUMN NOW PINS
+             WHAT THE SENTENCE ABOVE SAYS THIS RECORD PINS. It was `~.*`, so
+             the record asserted export and unexport on the emulator side and
+             nothing whatever on the phone's -- half an annotation, and the
+             sharpest case of it in this file, because a phone that lost
+             GPIO_SYSFS would have been absorbed in silence and
+             nd_backlight.c's GPIO tier writes into nothing without it. The
+             listing is sorted byte-wise and e < g < u, so `export` is always
+             first and `unexport` always last with the chips between:
+             `~\[export( gpiochip[0-9]+)+ unexport\]` asserts both files on
+             BOTH machines and leaves free only the chip names, which are the
+             half that genuinely cannot match.
+
+key          class.i2c-dev
+qemu         []
+hw           ~\[.+\]
+verdict      until-stage-4
+hw_evidence  unmeasured-claim
+why          -M virt on arm has no i2c controller, measured, with
+             CONFIG_I2C_CHARDEV=y. So the class is there and empty. The phone's
+             keypad is a PCF8575 on /dev/i2c-3 and the whole T9 path, the
+             keypad wizard and KeypadMapperI2C hang off it; Stage 4 cannot get
+             a bus by configuration alone and needs vhost-user-i2c or a mock
+             adapter.
+
+key          input.node.event0.name
+qemu         QEMU Virtio Keyboard
+hw           ~(?!ABSENT$).+
+verdict      permanent
+hw_evidence  unmeasured-claim
+why          ND_PATH_KEYPAD is the literal string /dev/input/event0, so the
+             binding is load-bearing, and the two machines legitimately have
+             different devices behind it. Measured here that an index is NOT
+             an identity -- a keyboard given FIRST on the command line
+             enumerated SECOND -- which is why both directions are recorded:
+             input.byname."<name>".handlers and input.node.event0.name. This
+             record is the one that says out loud "event0 is a QEMU keyboard
+             here and an i2c matrix keypad there", which is exactly the fact
+             somebody would otherwise find on the bench. The phone's name for
+             it genuinely cannot be predicted from this repository, but ABSENT
+             can be and must not be absorbed: no event0 at all means
+             ND_PATH_KEYPAD opens nothing and the phone has no keys. So the hw
+             column is `~(?!ABSENT$).+` -- any name, never the absence of one
+             -- rather than the `~.*` that would have explained a keypadless
+             phone as an allowed difference.
+
+key          input.byname.[*].handlers
+qemu         ~\[event0 kbd\]
+hw           ~\[.*\]
+verdict      permanent
+hw_evidence  unmeasured-claim
+why          The other direction, keyed by the device's own name. A
+             virtio_input silently refused for want of VIRTIO_F_VERSION_1
+             produces NO LINE HERE AT ALL -- -ENODEV from a probe prints
+             nothing at any loglevel, EMPIRICAL-FINDINGS 10 -- so the diff is
+             a whole missing device rather than a warning nobody saw. That is
+             the shape this harness is for.
+
+key          mtd.node.mtd0.name
+qemu         NAND simulator partition 0
+hw           ~env
+verdict      permanent
+hw_evidence  unmeasured-claim
+why          The GEOMETRY matches by design and that is finding 11: nandsim at
+             0x20/0xa1/0x00/0x15 gives 128 MB, 128 KiB PEB, 2048-byte page and
+             64-byte OOB -- the Pico Mini's part exactly, at no cost in guest
+             RAM because it allocates lazily. What does not match is the
+             partition NAME, and because the geometry records are keyed by
+             name rather than by index, that difference shows up as a
+             different SET OF KEYS rather than as different values. That is
+             the price of keying by identity, and it is the right price:
+             measured here that reordering the -drive arguments swaps vda and
+             vdb, so an index in a node name is not an identity. The hw column
+             is `~env` and not `~.*`: docs/PARTITIONS.md gives the table in
+             RK_PARTITION_CMD_IN_ENV, where mtd0 is the 256 KiB `env`
+             partition holding the U-Boot environment -- which is where this
+             board's kernel cmdline lives, so a phone whose mtd0 is called
+             something else has a partition table this repository does not
+             describe. A documented claim like every other hw value here, and
+             hw_evidence says which it is.
+
+key          class.mtd
+qemu         [mtd0 mtd0ro]
+hw           ~\[.+\]
+verdict      permanent
+hw_evidence  unmeasured-claim
+why          One simulated chip against the phone's real partition table.
+             mtdram is deliberately not in this listing: run_qemu.sh passes
+             mtdram.total_size=0 because a built-in mtdram vmallocs its 4 MiB
+             default out of a 64 MB machine on every boot, and because mtdram
+             reports write=1, so every LEB size and VID header offset computed
+             on it is arithmetic the phone never does.
+
+key          os.id
+qemu         ABSENT
+hw           ~neodct
+verdict      until-image
+hw_evidence  unmeasured-claim
+why          There is no /etc/os-release in the probe initramfs. VERSION_ID
+             from the same file is deliberately NOT a record: it is a
+             precondition in the preamble, and parity_diff.py refuses to
+             compare a 0.5.8b phone against a 0.6.0a emulator rather than
+             printing the difference, because that is two unrelated
+             observations and not a parity test.
+
+key          os.name
+qemu         ABSENT
+hw           ~NeoDCT OS
+verdict      until-image
+hw_evidence  unmeasured-claim
+why          As os.id. The hw column is the literal NAME= in
+             neodct/overlay/etc/os-release rather than the `~.+` it replaced,
+             which matched the string ABSENT as happily as anything else and
+             so could not have told a phone with no os-release from a phone
+             with one.
+
+key          dev.[*]
+qemu         ~.*uid=0\(\?\) gid=0\(\?\)
+hw           ~.*uid=[0-9]+\([a-z]+\) gid=[0-9]+\([a-z]+\)
+verdict      until-image
+hw_evidence  unmeasured-claim
+why          Every owner in the probe capture reads (?) because the busybox
+             initramfs has no /etc/passwd and no /etc/group to resolve against
+             -- a fact about that rootfs, not about the emulator. The names
+             are read from those two files directly and NOT through
+             getpwuid(3), which is a correction the first probe boot forced:
+             a statically cross-compiled glibc needs libnss_files.so.2 at
+             runtime and returns NULL without it, so the same machine read by
+             two builds of the same tool gave two answers. That is a READER
+             difference, and reporting one of those as a machine difference is
+             the exact failure this harness exists to avoid. Reading the files
+             also means the names recorded here are the names
+             nd_priv_lookup() would find.
+
+key          mount.[*]
+qemu         ~fstype=(rootfs|proc|sysfs|devtmpfs|devpts).*
+hw           ~fstype=.+ options=.*
+verdict      until-image
+hw_evidence  unmeasured-claim
+why          The probe initramfs mounts five things; a phone mounts a
+             verity-covered squashfs root, /NeoDCT/System and the ext4
+             /NeoDCT/User. Nothing INSIDE /NeoDCT/User is ever recorded -- it
+             is the only writable partition and it holds the phonebook, the
+             SMS databases and Remote Shell's private key -- so the mount
+             point is the whole of what this harness says about it. Note also
+             what is NOT masked in an option list: ro, rw, nosuid, nodev,
+             noexec and relatime are exactly the options nd-selftest's mount
+             section fails on, and a mask over them would hide the divergence
+             this file exists to find. Only size=, nr_inodes= and blksize=
+             are masked, because those are MemTotal/2 restated. This is also
+             the one record here that exempts a SUBTREE and had a free hw
+             column, which is the combination that lets one block cover
+             everything under a prefix. `~fstype=.+ options=.*` keeps it an
+             annotation: the phone side has to BE a mount record, so a mount
+             point the emulator has and the phone does not reads ABSENT, fails
+             to match, and stays unexplained -- which is the case worth
+             hearing about.
+             .
+             WHAT IT STILL ABSORBS, written down rather than hidden: a
+             difference in the OPTIONS on a point both machines have. Measured
+             with a synthetic phone capture, /proc carrying nosuid,nodev,noexec
+             on one side only is explained by this record. That is the exact
+             class the paragraph above says a mask must never hide, and the
+             reason it is tolerated here and nowhere else is that this record
+             is until-image: the probe initramfs mounts five things and a
+             phone mounts a verity root, /NeoDCT/System and an ext4
+             /NeoDCT/User, so until there is a capture from a real image there
+             is no honest option string to pin. THE FIRST CAPTURE FROM A BUILT
+             IMAGE MUST SPLIT THIS RECORD: one per point, with the options on
+             both sides. nd-selftest is the gate that fails on those options
+             on the phone tonight; this one is only supposed to fail in a pull
+             request next week, and today it cannot.

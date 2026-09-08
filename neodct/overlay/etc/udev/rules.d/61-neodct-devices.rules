@@ -118,9 +118,21 @@ SUBSYSTEM=="gpio", ACTION=="add", \
 # /dev/null unless udevd is at LOG_INFO or above, and a non-zero exit is
 # logged at debug and otherwise discarded, so a rule that fails on every boot
 # fails SILENTLY. It is there because not every kernel exports all three
-# attributes: QEMU's virt machine has no cpufreq directory at all, and a
-# kernel built with one governor has no scaling_governor. Testing for each
-# one is what makes the rule mean the same thing on both.
+# attributes: a kernel built with one governor has no scaling_governor, and
+# until recently QEMU's virt machine had no cpufreq directory at all.
+#
+# THAT SECOND HALF IS NO LONGER TRUE AND THE CHANGE IS WORTH KNOWING. -M virt
+# still declares no operating points of its own; run_qemu.sh now appends
+# neodct/board/qemu/nd-virt-additions.dtsi -- the RV1103's five, and a clock
+# for cpufreq-dt to take -- to the tree QEMU generates, so the emulator grows
+# a policy0 and cpu0/cpufreq is a symlink to it exactly as it is on the phone.
+# Measured: scaling_available_frequencies "408000 600000 816000 1008000
+# 1200000", driver cpufreq-dt.
+#
+# So this rule finally executes somewhere other than a phone, and the row
+# nd_selftest.c hangs off scaling_max_freq stops being an R_SKIP under
+# emulation. If the grant has never worked, that row is where it will say so,
+# and a first FAIL there is this rule being tested rather than a regression.
 SUBSYSTEM=="cpu", ACTION=="add", \
     RUN+="/bin/sh -c 'for f in scaling_min_freq scaling_max_freq scaling_governor; do p=/sys%p/cpufreq/$$f; [ -e $$p ] && { chgrp ndusr $$p; chmod 0664 $$p; }; done'"
 

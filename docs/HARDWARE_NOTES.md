@@ -56,6 +56,30 @@ driver looks for, and what the `pwm9` node in `rv1106.dtsi` declares.
 PWM9_M1 shares pin 11 with UART4_TX_M1, which this board file already
 disables, so nothing collides.
 
+**There is a second copy of that node and it has to stay in step.**
+`neodct/board/qemu/nd-virt-additions.dtsi` gives the emulator the same
+backlight -- same `brightness-levels`, same `default-brightness-level`, so the
+same class device named `backlight` with `max_brightness` 10 -- over a
+software PWM, because `-M virt` has no PWM controller. That is what lets
+`nd_backlight.c`'s round-half-even level arithmetic run against the coarse
+table this phone actually has instead of a 0-255 range nothing here has.
+`neodct/tests/test_qemu_dtsi.py` compares the two files, so editing the table
+in one place fails a test rather than quietly giving the emulator a different
+panel. One number is deliberately NOT the same and the .dtsi says why on the
+node: the period is 1 ms there against 25 µs here, because a 40 kHz software
+PWM costs a measured 24x slowdown of the whole guest whenever the panel is
+dimmed.
+
+**And the phandle fault below can now be reproduced without a phone.** Four
+boots of the emulator, same node, same kernel: `dtc` with no label, `dtc` with
+a label, and `dtc -@` with no label all give `bl_power=0`; only `dtc -@` WITH
+a label gives `bl_power=4`, `brightness=10`. So it is the phandle and not the
+label that does it -- plain `dtc` emits a phandle only for a label something
+references, and `-@` is what gives every labelled node one, which is exactly
+the SDK compiler flag named below. `run_qemu.sh` passes neither, so the
+emulator boots healthy; adding a label to the .dtsi and compiling the merged
+tree with `-@` reproduces the fault on demand.
+
 The absence of a `backlight:` label matters on this SDK. Its DT compiler uses
 `-@`, which gives labelled nodes a phandle even when nothing references them.
 Linux 5.10's `pwm_backlight_initial_power_state()` treats a phandle as evidence

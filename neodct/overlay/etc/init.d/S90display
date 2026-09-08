@@ -13,13 +13,31 @@
 #
 # hw       run, and let neodct_displayd say for itself what it found. It logs;
 #          this script never did.
-# qemu     exit: there is no SPI bus and the virtual framebuffer IS the screen.
+# qemu     no panel daemon: there is no SPI bus and the virtual framebuffer IS
+#          the screen. The backlight grant below still runs -- see why.
 # unknown  fall back to the evidence, which is exactly what this script had
 #          before the flag existed. An image with no platform record is not an
 #          image that gets to be told it has a panel -- nd_platform.h's rule --
 #          so the device node keeps its old casting vote.
+#
+# ============ WHY QEMU NO LONGER LEAVES BY THE FRONT DOOR ============
+#
+# This was `exit 0`, and that answered two questions with one word again --
+# the same mistake the spidev test made, one level up. "Should the panel
+# daemon run?" is no on an emulator. "Should gpio53 be exported and handed to
+# `video`?" was no only because the emulator had no gpio53 to export.
+#
+# It has one now: the QEMU kernel carries GPIO_SYSFS and GPIO_MOCKUP and
+# run_qemu.sh passes gpio-mockup.gpio_mockup_ranges=0,64, so gpiochip0 covers
+# the phone's BL, RST and DC pin numbers exactly. So the export-then-chgrp
+# path below -- the one 61-neodct-devices.rules explains no udev rule can ever
+# reach, because the sysfs GPIO class emits no uevent for an exported pin --
+# now runs somewhere other than a phone, for the first time. Leaving it gated
+# out would keep the only untestable half of the backlight untested on the one
+# machine that could finally test it.
+PANEL_DAEMON=yes
 if /bin/nd-platform is qemu; then
-    exit 0
+    PANEL_DAEMON=no
 elif ! /bin/nd-platform is hw; then
     [ -e /dev/spidev0.0 ] || exit 0
 fi
@@ -101,6 +119,13 @@ case "$1" in
     # in place before nd-core starts, which is the whole point -- the core has
     # stopped being root and cannot chgrp anything for itself.
     backlight_gpio_grant
+
+    # And nothing below this line on an emulator: there is no SPI bus for the
+    # daemon to open. The test is HERE, after the grant, and not at the top of
+    # the file where it used to be -- a gate above the grant is exactly the
+    # shape of the bug this script's header opens with, and putting one back
+    # would cost the emulator the pin it just gained.
+    [ "$PANEL_DAEMON" = yes ] || exit 0
 
     # NOTE: no fbset here. neodct_displayd v2.2 owns the framebuffer
     # mode: it forces 240x175 @ 32bpp (falling back to 16bpp) and

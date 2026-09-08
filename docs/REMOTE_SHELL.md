@@ -261,6 +261,15 @@ and `sit0`. Restoring it is `CONFIG_NETDEVICES` + `CONFIG_VIRTIO_NET` and a
 re-boot for a fresh MemTotal; the rest of this section is what to do then,
 and is unchanged.
 
+**That absence is the reason the parity harness has one framing rather than
+two transports.** `parity_capture_hw.sh` reads a phone over Remote Shell in
+one line -- `ssh neodct /NeoDCT/System/bin/nd-inventory` -- and the emulator
+side cannot do the same at all, because there is no NIC here even in
+principle; it has to scrape the serial console instead. So `nd-inventory`
+frames every line with an `INV|` sentinel, brackets the body, and puts two
+SHA-256s in the trailer, and the two routes then produce byte-identical
+artefacts. See `neodct/tests/parity/README.md`.
+
 The same thing works, and is easier, because a QEMU phone is not behind
 CGNAT. You still need a relay for the tunnel to make sense — or, if you
 only want a shell into your own QEMU instance, you do not need Remote Shell
@@ -373,6 +382,7 @@ is earned:
 | a relay to test against | `neodct/tools/test_relay.sh` |
 | the whole thing, end to end | `neodct/tools/test_remoteshell_e2e.sh` |
 | the card flow, through the real UI | `neodct/tools/test_card_flow.sh` |
+| a parity capture from a phone, over this tunnel or over serial | `neodct/tools/parity_capture_hw.sh` |
 
 The sshd config is generated from `write_sshd_config()` every single time
 it starts, and is not read back. If you edit it on the phone to get past

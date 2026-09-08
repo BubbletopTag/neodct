@@ -40,7 +40,8 @@ device classes and not names.
 **None of this is in the emulator's kernel any more.** QEMU moved to armv7 to
 match the phone's ABI, and `buildroot/board/qemu/armv7-virt/linux.config` was
 built up from a minimal base to reach memory parity (53,824 kB of 64 MB
-against the phone's ~54 MB) rather than ported across. It carries no `BT` at
+against the phone's ~54 MB, 54,812 kB once `run_qemu.sh` hands the kernel a
+device tree) rather than ported across. It carries no `BT` at
 all, and no `PCI` either -- so there is no xhci to plug the dongle into,
 `NEODCT_BT=1` refuses in `run_qemu.sh` and says so, and `CONFIG_BT_HCIVHCI`
 is not there for the dongle-less route below. The reasoning below is intact

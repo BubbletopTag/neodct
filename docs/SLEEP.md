@@ -118,19 +118,45 @@ Anything built on top of this inherits that obligation.
   removing before any of this counts as sleep, and it is step 3's problem.
 - **No wake source is designed.** A keypress is the obvious one; whether the
   modem can raise one without a full-speed poll is the open question.
-- **Sleepy is not verified on real hardware.** It was built and driven end to
-  end against a scratch sysfs tree — the pin lands on both files, the panel
-  goes dark and comes back, and both "nothing there" paths report honestly —
-  but no Luckfox has run it. The aarch64 emulator's kernel had no
-  `CONFIG_CPU_FREQ` and no backlight, so both screens correctly reported that
-  there was nothing there, which was the one thing it *could* confirm. The
-  armv7 kernel that replaced it sets `CPU_FREQ`, `CPU_FREQ_GOV_ONDEMAND`,
-  `CPUFREQ_DT`, `BACKLIGHT_CLASS_DEVICE` and `BACKLIGHT_PWM` — measured, the
-  `/sys/class/backlight` and `/sys/class/power_supply` directories exist and
-  are **empty**, because `-M virt` provides no such devices. So the subsystems
-  are there and the devices are not: still "nothing there", but for a
-  different reason, and now one that a device model rather than a kernel
-  rebuild would fix.
+- **Sleepy is not verified on real hardware, but both of its screens now have
+  devices to talk to.** It was built and driven end to end against a scratch
+  sysfs tree — the pin lands on both files, the panel goes dark and comes
+  back, and both "nothing there" paths report honestly — and no Luckfox has
+  run it. What has changed is the emulator. The aarch64 kernel had no
+  `CONFIG_CPU_FREQ` and no backlight; the armv7 kernel that replaced it had
+  both symbols and no devices, because `-M virt` declares no operating points
+  on `cpu@0` and has no PWM controller at all, so `/sys/class/backlight` was
+  empty and `/sys/devices/system/cpu/cpu0/cpufreq` — which is `ND_CPUFREQ_DIR`
+  and the only path `nd_cpufreq.c` opens — did not exist.
+
+  `run_qemu.sh` now appends `neodct/board/qemu/nd-virt-additions.dtsi` to the
+  device tree QEMU generates, and both appear. Measured in a booted guest:
+  `/sys/class/backlight/backlight` with `max_brightness` **10** and the
+  phone's own eleven-entry table, `bl_power` 0, a write of 5 reading back 5;
+  and `scaling_available_frequencies` = `408000 600000 816000 1008000
+  1200000`, driver `cpufreq-dt`, `scaling_cur_freq` tracking the policy.
+
+  So the two screens are exercised rather than reporting an absence — with
+  three honest limits. The stand-in's clock is FIXED, so pinning changes what
+  sysfs says and not what the silicon does: nobody can answer "nothing has
+  measured the current draw" from here. The default governor is `performance`
+  under QEMU and the phone's is unknown, because the RV1103 SDK's 5.10 config
+  is not in this repository. And the software PWM's period is 1 ms rather
+  than the phone's 25 µs, deliberately — at 25 µs the whole guest runs 24×
+  slower whenever the panel is dimmed, measured, and no NeoDCT code reads the
+  period.
+
+- **`/sys/class/power_supply` is empty on the emulator and it is staying
+  that way.** `CONFIG_TEST_POWER` used to fill it with `test_ac`,
+  `test_battery` and `test_usb`, and the symbol was removed: nothing in this
+  tree reads `power_supply` (this file is the only hit repo-wide), the names
+  are string literals no module parameter can change, and the phone's battery
+  is a MAX1704x on `/dev/i2c-3` that `nd_battery.c` reaches over i2c and
+  nothing else. A second battery reporting `capacity=50` in an image whose
+  real battery is simulated is a comfortable-looking lie, which is the kind
+  this project has been removing. It also took `/sys/class/thermal`'s only
+  zone with it — that zone was registered by `power_supply` and typed
+  `test_battery`, measured — and neither directory has a reader anywhere.
 - **There is still no idle screen-off.** `Screen off` is a row somebody
   presses, not a timeout. A real blanker belongs beside `battery_tick()` in
   `nd_ui.c`, and needs the same call in `nd_proc.c`'s key pump or it will

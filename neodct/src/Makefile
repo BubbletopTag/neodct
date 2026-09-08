@@ -208,6 +208,11 @@ APPRUN_SRCS := $(wildcard apprun/*.c)
 MEDIA_SRCS  := $(wildcard mediawidget/*.c)
 SHOOT_SRCS  := $(wildcard tools/nd_shoot*.c)
 SELF_SRCS   := $(wildcard tools/nd_selftest*.c)
+# The parity harness. Split in two on purpose: nd_inventory.c has main() and
+# the six library-derived records, nd_inventory_collect.c has every collector
+# and every canonicaliser, so test_inventory can link the second without the
+# first. Exactly the split BOOTBAR_LIB_OBJS already uses, for the same reason.
+INV_SRCS    := $(wildcard tools/nd_inventory.c tools/nd_inventory_collect.c)
 # A build-host tool, never installed: see its header.
 DLGFIT_SRCS := $(wildcard tools/nd_dialogfit.c)
 VERIFY_SRCS := $(wildcard tools/nd_verify*.c)
@@ -241,6 +246,10 @@ MEDIA_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(MEDIA_SRCS))
 SHOOT_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(SHOOT_SRCS))
 DLGFIT_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(DLGFIT_SRCS))
 SELF_OBJS   := $(patsubst %.c,$(OBJDIR)/%.o,$(SELF_SRCS))
+INV_OBJS    := $(patsubst %.c,$(OBJDIR)/%.o,$(INV_SRCS))
+# Everything in nd-inventory except its main(), which is what test_inventory
+# links against.
+INV_LIB_OBJS := $(filter-out $(OBJDIR)/tools/nd_inventory.o,$(INV_OBJS))
 VERIFY_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(VERIFY_SRCS))
 PANIC_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(PANIC_SRCS))
 BOOTFB_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(BOOTFB_SRCS))
@@ -276,6 +285,7 @@ TARGETS += $(if $(MEDIA_SRCS),$(BINDIR)/neodct-play)
 TARGETS += $(if $(SHOOT_SRCS),$(BINDIR)/nd-shoot)
 TARGETS += $(if $(DLGFIT_SRCS),$(BINDIR)/nd-dialogfit)
 TARGETS += $(if $(SELF_SRCS),$(BINDIR)/nd-selftest)
+TARGETS += $(if $(INV_SRCS),$(BINDIR)/nd-inventory)
 TARGETS += $(if $(VERIFY_SRCS),$(BINDIR)/nd-verify)
 TARGETS += $(if $(PANIC_SRCS),$(BINDIR)/nd-panic)
 TARGETS += $(if $(BOOTBAR_SRCS),$(BINDIR)/nd-bootbar)
@@ -300,7 +310,7 @@ endif
 # Rules
 # ------------------------------------------------------------------ #
 
-.PHONY: all test test-one clean distclean install format skipped help
+.PHONY: all test test-one parity-probe clean distclean install format skipped help
 .DEFAULT_GOAL := all
 
 all: $(TARGETS) skipped
@@ -313,6 +323,7 @@ skipped:
 	$(Q)$(if $(APPRUN_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-apprun (no apprun/*.c yet)';)
 	$(Q)$(if $(SHOOT_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-shoot (no tools/nd_shoot*.c yet)';)
 	$(Q)$(if $(SELF_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-selftest (no tools/nd_selftest*.c yet)';)
+	$(Q)$(if $(INV_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-inventory (no tools/nd_inventory*.c yet)';)
 	$(Q)$(if $(VERIFY_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-verify (no tools/nd_verify*.c yet)';)
 	$(Q)$(if $(PANIC_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-panic (no tools/nd_panic*.c yet)';)
 	$(Q)$(if $(RECUI_SRCS),,printf '  %-7s %s\n' 'SKIP' 'nd-recui (no recovery/*.c yet)';)
@@ -475,6 +486,14 @@ $(BINDIR)/nd-shoot: $(SHOOT_OBJS) $(LIB)
 $(BINDIR)/nd-selftest: $(SELF_OBJS) $(LIB)
 	$(LINK_BIN)
 
+# nd-inventory links libneodct for exactly six records -- the resolved
+# platform, the board, the mismatch flag, its origin sentence, and the modem's
+# expects-radio predicate and cold verdict. Everything else in it is plain
+# POSIX, deliberately, so tools/nd_inventory_collect.c can be cross-compiled
+# on its own for the probe capture that produced the committed baseline.
+$(BINDIR)/nd-inventory: $(INV_OBJS) $(LIB)
+	$(LINK_BIN)
+
 $(BINDIR)/nd-dialogfit: $(DLGFIT_OBJS) $(LIB)
 	$(LINK_BIN)
 
@@ -544,6 +563,24 @@ $(BINDIR)/gen-bootfont: $(GENFONT_OBJS) $(LIB)
 # drawing layer. test_bootbar is the one translation unit that needs both
 # sides, so it gets the extra include path and nobody else does.
 $(OBJDIR)/test/unit/test_bootbar.o: CPPFLAGS_ALL += -Itools
+
+# nd_inventory.h lives in tools/ for the same reason and enforces the same
+# direction: the inventory reads libneodct, the library must never learn to
+# read the inventory. Two translation units get the include path -- the tool's
+# own main() and this test -- and nobody else does.
+$(OBJDIR)/tools/nd_inventory.o: CPPFLAGS_ALL += -Itools
+$(OBJDIR)/tools/nd_inventory_collect.o: CPPFLAGS_ALL += -Itools
+$(OBJDIR)/test/unit/test_inventory.o: CPPFLAGS_ALL += -Itools
+
+# test_inventory links the collectors WITHOUT main(): its subject is the
+# canonicaliser -- the sort, the family collapse, the masks, ABSENT versus []
+# -- which are pure functions over text and a synthetic --root tree, and none
+# of which needs a machine to run on.
+$(TESTDIR)/test_inventory: $(OBJDIR)/test/unit/test_inventory.o $(INV_LIB_OBJS) \
+        $(HARNESS_OBJ) $(LIB)
+	$(Q)mkdir -p $(dir $@)
+	$(say) LINK $@
+	$(Q)$(CC) -o $@ $(filter %.o,$^) -L$(LIBDIR) -lneodct $(LDFLAGS_ALL) $(PKG_LIBS) -lm
 
 # test_bootbar links BOTH libneodct and the boot bar: its whole job is to
 # hold the two against each other, asserting that nd_bootbar's hard-coded
@@ -636,6 +673,39 @@ test-one: all $(TESTDIR)/$(T) $(TEST_APP_SOS)
 	$(TEST_ENV) $(SANDBOX) $(RUN_TESTS) $(TESTDIR)/$(T)
 
 # ------------------------------------------------------------------ #
+# The parity drift gate -- the one thing that re-derives the baseline
+# ------------------------------------------------------------------ #
+#
+#     make parity-probe ND_KERNEL=<zImage> ND_ROOTFS=<a busybox directory>
+#
+# WHY IT NEEDS A TARGET AT ALL. Every other parity gate validates
+# neodct/tests/parity/allow.txt against a committed FILE and never against a
+# machine, and the one gate the parity README named for drift --
+# parity_capture_qemu.sh --compare -- needs a Buildroot image that does not
+# exist in a fresh checkout. So nothing in the tree ever re-derived the
+# emulator baseline, and the ratchet's only input was a static file. Measured
+# what that cost: drop `gpio-mockup.gpio_mockup_ranges=0,64` from run_qemu.sh
+# as an obsolete-looking parameter and the emulator loses gpio53, 56 and 57 --
+# nd_backlight.c's GPIO tier and the panel's RST and DC -- while `make test`,
+# the whole pytest suite and test_qemu_surfaces.sh all stay green.
+#
+# It is NOT in `test`, and that is deliberate: it wants a built armv7 kernel, a
+# busybox rootfs, qemu-system-arm, dtc and a cross toolchain, none of which a
+# checkout has. `make test` refusing to run for want of a zImage would be a
+# suite people stop running. It costs about four seconds when the inputs are
+# in hand.
+.PHONY: parity-probe
+parity-probe:
+	$(Q)if [ -z "$(ND_KERNEL)" ] || [ -z "$(ND_ROOTFS)" ]; then \
+	    echo "usage: make parity-probe ND_KERNEL=<zImage> ND_ROOTFS=<busybox dir>"; \
+	    echo "  boots the emulator and requires the fresh capture to equal"; \
+	    echo "  neodct/tests/parity/qemu-armv7-probe.inventory byte for byte."; \
+	    exit 2; \
+	fi; \
+	../tools/parity_capture_probe.sh --kernel "$(ND_KERNEL)" --rootfs "$(ND_ROOTFS)" \
+	    --compare ../tests/parity/qemu-armv7-probe.inventory
+
+# ------------------------------------------------------------------ #
 # Install -- the target layout, whose absolute paths are load-bearing
 # ------------------------------------------------------------------ #
 
@@ -670,6 +740,13 @@ install: all
 	@# really shut out of the databases. It is ~65 kB against libneodct,
 	@# which is already mapped, and it only reads.
 	$(Q)$(if $(SELF_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-selftest $(DESTDIR)$(PREFIX)/bin/,:)
+	@# nd-inventory ships beside it, and for the mirror-image reason: the
+	@# questions nd-selftest asks only have answers on the phone, and the
+	@# facts nd-inventory writes down only exist on the phone. A parity
+	@# harness whose hardware half has to be pasted into a serial console is
+	@# a harness whose hardware half does not get run. It is smaller than
+	@# nd-selftest, it never forks, and it only reads.
+	$(Q)$(if $(INV_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-inventory $(DESTDIR)$(PREFIX)/bin/,:)
 	@# nd-panic ships. It is the only part of the UI that runs when nd-core
 	@# is dead, and /bin/run_neodct.sh names it as
 	@#   /NeoDCT/System/bin/nd-panic
