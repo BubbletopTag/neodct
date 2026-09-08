@@ -13,12 +13,49 @@
 #
 # hw       run, and let neodct_displayd say for itself what it found. It logs;
 #          this script never did.
-# qemu     no panel daemon: there is no SPI bus and the virtual framebuffer IS
-#          the screen. The backlight grant below still runs -- see why.
+# qemu     the daemon has a backend that is not the panel now -- see the block
+#          below. The backlight grant further down still runs either way.
 # unknown  fall back to the evidence, which is exactly what this script had
 #          before the flag existed. An image with no platform record is not an
 #          image that gets to be told it has a panel -- nd_platform.h's rule --
-#          so the device node keeps its old casting vote.
+#          so the device node keeps its old casting vote. It gets NO emulator
+#          backend: an image that cannot say which machine it is on does not
+#          get told it is on an emulator either.
+#
+# ============ THE SAME TEST NOW PICKS A BACKEND, NOT A YES/NO ============
+#
+# neodct_displayd is two halves behind one seam (neodct/src/displayd/nd_panel.h):
+# the transport, which is spidev on the phone and nothing anywhere else, and
+# everything that composes -- the frame diff, the dirty rectangle, the
+# 8888->RGB565 pack, the CASET/RASET window and the FBIOPUT_VSCREENINFO that
+# puts fb0 into 240x175x32. The second half is worth running on the emulator
+# and the first half cannot be.
+#
+#   hw       --panel spidev, passed EXPLICITLY rather than left to the
+#            default, so what the phone chose is visible in `ps` and in the
+#            log. The default is still spidev, which is what keeps
+#            neodct/initramfs/ndsys-panel.sh -- which starts this binary with
+#            no arguments at all -- behaving exactly as it does today.
+#   qemu     --panel null --once. force_mode() runs, fb0 comes out of vfb's
+#            640x480x8 default and into the phone's mode, and the process
+#            exits. NOT a daemon: with a null sink a 30 fps poll is a memcmp
+#            over 168,000 bytes thirty times a second producing nothing, which
+#            is the exact CPU burn the v2 frame skip exists to avoid, spent on
+#            a machine where nobody is watching.
+#   qemu     --panel stream:<port>, and then it IS a daemon, when a virtio
+#   + asked  console port is present AND something outside the writable
+#            partition asked for it. The transcript is decoded into a picture
+#            on the HOST by neodct/tools/st7789_replay.py, because vfb has no
+#            scanout and never will.
+#
+# THE ASK IS GATED THE WAY env.sh IS GATED, and for the same reason: /NeoDCT/User
+# is the one writable partition and survives every update, so anything it can
+# turn on is a thing an attacker who wrote one file has turned on for ever.
+# A panel transcript is a continuous copy of the screen leaving the machine,
+# which is not a decision that partition gets to make. So: neodct.panel=stream
+# on the kernel command line, or /etc/neodct-panelstream in the read-only,
+# verity-covered rootfs. Engineering mode is deliberately not accepted -- it
+# lives in settings.prop, on the partition in question.
 #
 # ============ WHY QEMU NO LONGER LEAVES BY THE FRONT DOOR ============
 #
@@ -35,9 +72,67 @@
 # now runs somewhere other than a phone, for the first time. Leaving it gated
 # out would keep the only untestable half of the backlight untested on the one
 # machine that could finally test it.
-PANEL_DAEMON=yes
+
+# ============ THE PORT IS FOUND BY ITS NAME, NOT BY ITS NUMBER ============
+#
+# QEMU attaches it as `-device virtserialport,chardev=...,name=neodct.panel`
+# and the guest publishes that identity at
+# /sys/class/virtio-ports/vportNpM/name. This used to be the bare literal
+# /dev/vport0p1, which is a POSITIONAL name for a device that has an explicit
+# one -- the same rule ndflash defuses with device_by_serial() and run_qemu.sh
+# spends fifteen lines on for the cache drive, because this repository has
+# been bitten by it twice.
+#
+# What a positional name costs here is specific: add any second virtio-serial
+# port that lands ahead of this one -- a guest agent, a second diagnostic
+# channel -- and /dev/vport0p1 is somebody else's. The `[ -c ]` test still
+# passes, stream_open() writes its ND79 header successfully, and the panel
+# transcript goes to whatever chardev that port is bound to while everything
+# reports success. That is the "silently start writing a panel stream to
+# nowhere and report success" nd_panel_stream.c's header says it exists not
+# to do.
+#
+# No fallback to a guessed node. Nothing named neodct.panel means no stream
+# backend, which is `--panel null` and a boot that says so -- the same rule as
+# the O_CREAT refusal in the sink.
+#
+# run_qemu.sh's NEODCT_PANEL_STREAM adds the port; nothing else in the tree
+# does, and the parity capture deliberately does not -- a diagnostic port the
+# phone has no analogue of would change what the emulator's inventory says
+# about itself.
+PANEL_STREAM_PORT=""
+
+panel_stream_port() {
+    for _name in /sys/class/virtio-ports/*/name; do
+        [ -r "$_name" ] || continue
+        [ "$(cat "$_name" 2>/dev/null)" = neodct.panel ] || continue
+        _node="/dev/$(basename "$(dirname "$_name")")"
+        [ -c "$_node" ] || continue
+        echo "$_node"
+        return 0
+    done
+    return 1
+}
+
+panel_stream_asked() {
+    [ -e /etc/neodct-panelstream ] && return 0
+    for _word in $(cat /proc/cmdline 2>/dev/null); do
+        case "$_word" in
+            neodct.panel=stream) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+PANEL_BACKEND=spidev
+PANEL_ONCE=""
 if /bin/nd-platform is qemu; then
-    PANEL_DAEMON=no
+    PANEL_BACKEND=null
+    PANEL_ONCE=--once
+    if panel_stream_asked && PANEL_STREAM_PORT="$(panel_stream_port)"; then
+        PANEL_BACKEND="stream:$PANEL_STREAM_PORT"
+        PANEL_ONCE=""
+    fi
 elif ! /bin/nd-platform is hw; then
     [ -e /dev/spidev0.0 ] || exit 0
 fi
@@ -120,12 +215,16 @@ case "$1" in
     # stopped being root and cannot chgrp anything for itself.
     backlight_gpio_grant
 
-    # And nothing below this line on an emulator: there is no SPI bus for the
-    # daemon to open. The test is HERE, after the grant, and not at the top of
-    # the file where it used to be -- a gate above the grant is exactly the
-    # shape of the bug this script's header opens with, and putting one back
-    # would cost the emulator the pin it just gained.
-    [ "$PANEL_DAEMON" = yes ] || exit 0
+    # There is no `PANEL_DAEMON=no` branch here any more, and its absence is
+    # the change. It existed because the emulator had nothing for the daemon
+    # to talk to; it now has a backend, so the SAME platform test picks one
+    # rather than answering a second question about whether to run at all. The
+    # only remaining way not to run is the unknown-platform evidence rule at
+    # the top of the file, which is where it has always been.
+    #
+    # Nothing moved above the backlight grant. A gate above the grant is
+    # exactly the shape of the bug this script's header opens with, and
+    # putting one back would cost the emulator the pin it just gained.
 
     # NOTE: no fbset here. neodct_displayd v2.2 owns the framebuffer
     # mode: it forces 240x175 @ 32bpp (falling back to 16bpp) and
@@ -137,7 +236,13 @@ case "$1" in
     #   --speed 60     SPI clock in MHz (default 20; you validated 60)
     #   --yoff 65      panel row where the UI band starts (default 65)
     #   --stats        5s perf reports in the log
+    # --panel is passed on every platform, hardware included, so the log and
+    # `ps` both say which transport this phone chose. The `&` is right for all
+    # three: with --once the process is short-lived and nothing waits for it
+    # here -- ndsys-panel.sh is the caller that waits, and it waits on
+    # NEODCT_DISPLAYD_READY rather than on a pid.
     /NeoDCT/System/hw/neodct_displayd --speed 16 \
+        --panel "$PANEL_BACKEND" $PANEL_ONCE \
         > /var/log/neodct_displayd.log 2>&1 &
     ;;
   stop)

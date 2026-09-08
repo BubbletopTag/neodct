@@ -25,17 +25,46 @@
 # ============ WHY NOT mtdram, WHICH IS WHAT THIS USED TO DO ============
 #
 # Because the number that matters is the page size, and mtdram has none.
-# Measured, both devices side by side on the armv7 kernel:
+# Measured, all three on the armv7 kernel:
 #
-#                 min I/O (writesize)   UBI LEB size
-#   mtdram                          1        130,944
-#   nandsim                      2048        129,024   <- the phone's
+#                            min I/O (writesize)   UBI LEB size
+#   mtdram                                     1        130,944
+#   nandsim, formatted here                 2048        129,024
+#   nandsim, flashed with mknand.sh's own image        126,976   <- the phone's
 #
 # UBI reads min_io straight off the MTD, so on mtdram every LEB size, every
-# VID header offset and every ubinize -O argument is arithmetic the phone
-# will never do -- and LEB arithmetic is exactly what section B below is
-# about. A harness that gets 130,944 where the phone gets 129,024 is not
-# testing the phone.
+# VID header offset and every ubinize -O argument is arithmetic the phone will
+# never do -- and LEB arithmetic is exactly what section B below is about.
+#
+# THE THIRD ROW IS NEW AND THE SECOND ROW USED TO CARRY THE LABEL. This header
+# said 129,024 was "the phone's" and it is not: it is what UBI computes when
+# it FORMATS a nandsim itself, because nandsim emulates a parallel NAND with
+# four 512-byte ECC steps, nand_scan_tail() sets subpage_sft = 2, and UBI's
+# default VID header offset becomes 2048 >> 2 = 512. The Pico Mini's part is
+# SPI NAND; drivers/mtd/nand/spi/ never sets subpage_sft, so its default is
+# the whole 2048-byte page -- which is exactly what mknand.sh writes with
+# `ubinize -O 2048`, and why its own LEB_SIZE is 0x1f000 = 126,976. That
+# constant has been sitting in this repository contradicting this comment.
+# Measured on a real attach of a real mknand.sh image:
+#
+#   ubi0: VID header offset: 2048 (aligned 2048), data offset: 4096
+#   ubi0: PEB size: 131072 bytes (128 KiB), LEB size: 126976 bytes
+#
+# WHAT THIS HARNESS STILL MEASURES IS ROW TWO, and that is now a NAMED gap
+# rather than a wrong label. It makes its own volumes on a blank chip, so
+# ubinize's headers are never involved and the offset is UBI's own default.
+# Closing it means attaching with neodct/src/tools/nd_ubiattach.c at offset
+# 2048 -- the tool run_qemu.sh's NAND storage modes already use -- and riding
+# it into the guest on a raw disk the way the applier arrives below. That is
+# the next change to this file and it is deliberately not this one: the whole
+# script needs a built Buildroot image to run at all, and none exists here to
+# check the rewrite against.
+#
+# THE EMULATOR NOW BOOTS mknand.sh's OUTPUT BY DEFAULT, which is where row
+# three comes from. NEODCT_STORAGE=nand flashes userdata.ubi onto the chip and
+# mounts it as /NeoDCT/User; NEODCT_STORAGE=nand-full adds system.ubi,
+# /dev/ubiblock0_0 and dm-verity over it, at a memory cost that mode states in
+# its own refusal. Section A below is the natural user of nand-full.
 #
 # It also costs nothing. mtdram keeps its whole backing store in kernel
 # memory, which is why this script used to demand NEODCT_MEM=256 for a
@@ -154,8 +183,14 @@ say "applier delivered on $APPLYDEV, sha matches the host's"
 # ASKED FOR rather than assumed: writesize is where UBI gets min_io, and 1
 # instead of 2048 is the whole difference between this harness and the one
 # that came before it.
+# THE LAST nandsim PARTITION AND NOT THE FIRST. run_qemu.sh's machine now
+# carries `nandsim.parts=2,2,4,128,64`, so the chip is cut into
+# PARTITIONS.md's six partitions and mtd0 is the 256 KiB `env` partition --
+# far too small for the 1 MB volume below, and `head -1` was silently picking
+# it. `tail -1` is the rootfs partition, which is where the phone's system
+# volume lives and the only one with room.
 M=$(wc -c < "$log")
-ask 'N=$(sed -n "s/^mtd\([0-9]*\):.*NAND simulator.*/\1/p" /proc/mtd | head -1); echo NANDMTD=$N; echo NANDWRITE=$(cat /sys/class/mtd/mtd$N/writesize 2>/dev/null)' 6
+ask 'N=$(sed -n "s/^mtd\([0-9]*\):.*NAND simulator.*/\1/p" /proc/mtd | tail -1); echo NANDMTD=$N; echo NANDWRITE=$(cat /sys/class/mtd/mtd$N/writesize 2>/dev/null)' 6
 NANDMTD="$(grab "$M" NANDMTD)"
 [ -n "$NANDMTD" ] || { tail -c +"$M" "$log" | tail -20; fail "no nandsim device -- are run_qemu.sh's nandsim.*_id_byte arguments still in its default cmdline?"; }
 [ "$(grab "$M" NANDWRITE)" = "2048" ] \

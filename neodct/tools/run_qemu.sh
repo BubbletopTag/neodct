@@ -120,26 +120,35 @@
 # and is worth passing so nothing depends on the fallback. nd-recui is
 # unaffected -- it draws on /dev/fb0, which is there.
 #
-# TWO THINGS ARE STILL MISSING AND BOTH ARE THE PANEL STAGE'S:
+# THE MODE IS THE PHONE'S, SET BY THE PHONE'S OWN CODE. vfb comes up at its
+# built-in default -- 640x480 at 8 bpp, measured here -- and is put into
+# 240x175x32 by a userspace FBIOPUT_VSCREENINFO. On the phone neodct_displayd
+# does that; under QEMU S90display now starts the same daemon with
+# `--panel null --once`, so the same force_mode() runs on the same driver.
+# Measured on a real boot of this kernel: 640,480 / 8 / 640 before, 240,175 /
+# 32 / 960 after, red.offset 0 -- the phone's framebuffer byte for byte, and
+# force_mode() a tested path for the first time.
 #
-# vfb comes up at its built-in default -- 640x480 at 8 bpp, measured here --
-# and is put into 240x175x32 by a userspace FBIOPUT_VSCREENINFO. On the phone
-# neodct_displayd does that;
-# under QEMU nothing does it yet, so nd_fb sees 640x480x8, takes it, and
-# writes a 240-wide band into a 640-wide 8-bit buffer. Measured with a probe
-# doing exactly what displayd's force_mode() does: after the ioctl it is
-# 240x175, 32 bpp, line_length 960, red.offset 0 -- the phone's framebuffer
-# byte for byte. So the fix is to run the phone's own code path, which also
-# makes force_mode() a tested path for the first time.
+# AND vfb HAS NO SCANOUT, WHICH IS WHY THE PICTURE IS RENDERED ON THE HOST.
+# Nothing a QEMU display frontend shows is the phone and nothing ever will be:
+# the pixels are in vfb's memory and no display device reads them. The
+# virtio-gpu device below is attached for keystrokes, not pixels -- a frontend
+# only routes keys into the guest's virtio keyboard when console 0 is a
+# GRAPHIC console. Measured: with no graphics device at all, keys sent over
+# VNC went to QEMU's text console and /dev/input/event0 saw none of them; with
+# virtio-gpu-device they arrive. With NEODCT_DISPLAY=none there is no frontend
+# and the way in is the monitor: NEODCT_MONITOR=/tmp/ndmon, then `sendkey a`
+# (also measured).
 #
-# And vfb has no scanout, so nothing a QEMU display frontend shows is the
-# phone. The virtio-gpu device below is still attached, and not for the
-# picture: a frontend only routes keystrokes into the guest's virtio keyboard
-# when console 0 is a GRAPHIC console. Measured -- with no graphics device at
-# all, keys sent over VNC went to QEMU's text console and /dev/input/event0
-# saw none of them; with virtio-gpu-device they arrive. With
-# NEODCT_DISPLAY=none there is no frontend and the way in is the monitor:
-# NEODCT_MONITOR=/tmp/ndmon, then `sendkey a` (also measured).
+# So the panel image comes out over a virtio-console port instead:
+# NEODCT_PANEL_STREAM=<file> attaches one, S90display starts the daemon with
+# `--panel stream:/dev/vport0p1`, and every ST7789 command and every pixel the
+# panel would have received arrives on the host as an ND79 transcript.
+# neodct/tools/st7789_replay.py turns it into a 240x240 PNG -- the composed
+# panel, letterbox and all, which is something no frontend here can show.
+# Measured: 199,353 bytes for one frame, byte-identical to the same daemon run
+# on the host, and MemTotal 54,812 kB with the device attached and 54,812 kB
+# without it. The transport is free.
 #
 # Usage:
 #   neodct/tools/run_qemu.sh                  boot normally (writes persist)
@@ -153,6 +162,14 @@
 #   NEODCT_MEM=256 ...                        more RAM than the phone has
 #   NEODCT_RTC=epoch ...                      boot with the RTC at 1970-01-01,
 #                                             which is the phone's cold boot
+#   NEODCT_STORAGE=virtio ...                 /NeoDCT/User back on the ext4
+#                                             virtio disk (see the storage
+#                                             block below -- it says on every
+#                                             boot what it is not testing)
+#   NEODCT_STORAGE=nand-full ...              system AND userdata on the
+#                                             simulated NAND, through
+#                                             /dev/ubiblock0_0. Needs
+#                                             NEODCT_MEM>=128 and says why
 #   NEODCT_SD=none ...                        no card attached
 #   NEODCT_RECOVERY=1 ...                     boot into recovery mode
 #   NEODCT_RECTTY=/dev/console ...            drive recovery over serial
@@ -163,6 +180,9 @@
 #   NEODCT_DISPLAY=offscreen ...              panel present, no window
 #   NEODCT_DISPLAY=vnc ...                    VNC frontend, no desktop needed
 #                                             (127.0.0.1:5901; NEODCT_VNC to move it)
+#   NEODCT_PANEL_STREAM=/tmp/panel.nd79 ...   write the ST7789 wire stream to
+#                                             a host file, then
+#                                             st7789_replay.py --out a.png
 #   NEODCT_CONSOLE=pipe:/tmp/fifo ...         put the serial console on a
 #                                             chardev instead of stdio, for a
 #                                             caller that drives the boot
@@ -175,6 +195,70 @@
 # Persistence matters for update testing: SystemUpdate stages an update, the
 # phone reboots and the initramfs applies it. With NEODCT_SNAPSHOT=1 that
 # write is discarded and the update looks like it vanished.
+#
+# ============ STORAGE: THE PHONE HAS NO BLOCK DEVICES AT ALL ============
+#
+# The Luckfox has raw NAND behind MTD and nothing else. /NeoDCT/System is a
+# squashfs on a static UBI volume published as /dev/ubiblock0_0, and
+# /NeoDCT/User is ubifs on `ubi1:userdata`. Every one of those words named a
+# code path that had never executed anywhere: user_is_ubi(), the ubifs branch
+# of the initramfs's mount, ubi_fit(), ubiupdatevol.
+#
+# NEODCT_STORAGE=nand is the default and it moves /NeoDCT/User onto the chip.
+# nandsim at the Pico Mini's ID bytes is the phone's part exactly -- 128 MB, a
+# 128 KiB PEB, a 2048-byte page, 64 bytes of OOB -- `nandsim.parts=` in
+# qemu_machine.sh gives it PARTITIONS.md's six partitions at the phone's mtd
+# numbers, and a QEMU-only flasher (neodct/initramfs/qemu/ndflash, packed in
+# as a second cpio) writes mknand.sh's own userdata.ubi onto mtd4 and attaches
+# UBI over it. Measured, at -m 64, on this kernel:
+#
+#   ubi1: volume 0 ("userdata") re-sized from 13 to 40 LEBs
+#   ubi1: PEB size: 131072 bytes, LEB size: 126976 bytes
+#   ubi1: VID header offset: 2048 (aligned 2048), data offset: 4096
+#   UBIFS (ubi1:0): mounted UBI device 1, volume 0, name "userdata"
+#
+# ============ AND WHY THE SYSTEM HALF IS NOT ALSO ON IT ============
+#
+# It was meant to be. It cannot be, at the phone's memory, and both walls were
+# measured rather than argued:
+#
+#   1. WITHOUT a host-backed cache file, nandsim keeps one 2112-byte slab
+#      object per WRITTEN page. A 51 MB system.ubi is 26,112 pages = 54,953 kB
+#      of unreclaimable slab on a machine with 53,824 kB of usable RAM.
+#      Measured at -m 64: the OOM killer takes dd partway through, with
+#      `nandsim 40526KB` in the unreclaimable slab report. At -m 128 the same
+#      flash completes and the whole stack works -- ubiblock0_0, squashfs,
+#      dm-verity over it, ubifs on ubi1 -- which is what NEODCT_STORAGE=nand-full
+#      is, and why it refuses below 128 MB rather than pretending.
+#
+#   2. WITH nandsim.cache_file, the memory cost goes away and the guest
+#      DEADLOCKS instead, on the first read of the system volume that misses
+#      the cache file's page cache. The stack, caught in the act:
+#
+#        mount -> squashfs_fill_super -> submit_bio_wait -> __submit_bio
+#              -> blk_mq_dispatch_rq_list -> ubiblock_queue_rq -> ubi_leb_read_sg
+#              -> mtd_read -> ns_do_state_action -> ns_read_file
+#              -> __kernel_read -> blkdev_read_iter -> filemap_read_folio
+#
+#      nandsim's backing store is a BLOCK DEVICE, so servicing a ubiblock
+#      request submits a second bio from inside the first one's dispatch --
+#      and /sys/block/vda/stat then stops advancing with 0 in flight, i.e. the
+#      nested request never reaches the driver at all. Controlled pair, same
+#      cmdline, same image: a mount whose cache-file pages are still resident
+#      from the flash succeeds in 0.1 s, and the same mount after
+#      `echo 3 > /proc/sys/vm/drop_caches` never returns. So "read the device
+#      once to warm it up" is not a fix, it is a coincidence that ends at the
+#      first cold region -- and the SRCU stall this looked like at first is
+#      blk_mq_timeout_work firing thirty seconds later on the request that is
+#      already stuck.
+#
+#      It does NOT affect ubifs on ubi1, which is why the default mode is
+#      possible at all: UBIFS reads UBI directly and stacks no block device on
+#      the chip, so nothing nests. Measured across a session boundary.
+#
+# NEODCT_STORAGE=virtio is the old arrangement, kept, and it prints on every
+# boot the list of code paths it is not exercising -- because the reason this
+# stage exists is that nobody noticed those paths had never run.
 set -eu
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -193,6 +277,56 @@ MEMORY="${NEODCT_MEM:-64}"
 VERITY="${NEODCT_VERITY:-enforce}"
 SD_MODE="${NEODCT_SD:-image}"
 DISPLAY_MODE="${NEODCT_DISPLAY:-gtk}"
+STORAGE="${NEODCT_STORAGE:-nand}"
+
+case "$STORAGE" in
+    nand|nand-full|virtio) ;;
+    *)
+        echo "run_qemu: NEODCT_STORAGE must be nand, nand-full or virtio" >&2
+        exit 1
+        ;;
+esac
+
+# 128 MB is not a round number picked for comfort: it is the first -m at which
+# a 51 MB system.ubi fits, because the chip costs 54,953 kB of unreclaimable
+# kernel slab the moment it holds one (see the storage block in the header).
+# Refusing is the point -- assembling this mode at -m 64 gets an OOM panic
+# eight seconds into the boot, which reads as a broken image.
+if [ "$STORAGE" = "nand-full" ] && [ "$MEMORY" -lt 128 ]; then
+    echo "run_qemu: NEODCT_STORAGE=nand-full needs NEODCT_MEM=128 or more." >&2
+    echo "  A 51 MB system volume on the simulated chip is 26,112 written" >&2
+    echo "  pages at 2112 bytes of kernel slab each -- 54,953 kB, measured --" >&2
+    echo "  and this guest has ${MEMORY} MB. At -m 64 the OOM killer takes the" >&2
+    echo "  flash partway through and panics the guest." >&2
+    echo "  THIS MODE IS NOT THE PHONE'S MEMORY. It is the phone's STORAGE," >&2
+    echo "  which is the other half of the parity this branch is chasing, and" >&2
+    echo "  the two cannot be had at once on this kernel." >&2
+    exit 1
+fi
+
+# ============ THE PANEL TRANSCRIPT, AND WHY IT IS NOT ALWAYS ON ============
+#
+# A path here attaches a virtio-console port named neodct.panel and tells the
+# guest, on the kernel command line, that something outside /NeoDCT/User has
+# asked for a panel stream. S90display then starts neodct_displayd with
+# `--panel stream:/dev/vport0p1` instead of `--panel null --once`, and the
+# host file fills with the ND79 record stream nd_panel.h pins.
+#
+# Off by default, for two separate reasons and only one of them is cost:
+#
+#   * IT CHANGES THE MACHINE. The guest grows /dev/vport0p1 and
+#     /sys/class/virtio-ports, both of which nd-inventory records, and
+#     dev.count moves. The parity harness must describe the machine somebody
+#     boots, so parity_capture_probe.sh deliberately does NOT attach this and
+#     runs `--panel null` -- which is why the null backend exists as a
+#     configuration rather than being "the stream pointed at /dev/null".
+#   * it is a continuous copy of the screen leaving the machine, and the gate
+#     for that is the kernel command line rather than anything on the writable
+#     partition. Same rule as env.sh, same reason.
+#
+# It costs no memory: MemTotal 54,812 kB measured with the device and 54,812 kB
+# without it, and CONFIG_VIRTIO_CONSOLE=y is already in the kernel config.
+PANEL_STREAM="${NEODCT_PANEL_STREAM:-}"
 SHARE_DIR="${NEODCT_SHARE:-$HOME/neodct-sdcard}"
 MONITOR="${NEODCT_MONITOR:-}"
 
@@ -292,13 +426,30 @@ BT_PRODUCT="${NEODCT_BT_PRODUCT:-0x0604}"
 # aarch64 `Image` is a tree whose .config predates the defconfig -- which is
 # the failure AGENTS.md opens with -- so the missing file is the right thing
 # to complain about.
-for required in zImage initramfs.cpio.gz system.img userdata.ext4; do
+REQUIRED="zImage initramfs.cpio.gz system.img"
+[ "$STORAGE" = "virtio" ] && REQUIRED="$REQUIRED userdata.ext4"
+[ "$STORAGE" = "nand-full" ] && REQUIRED="$REQUIRED system.ubi"
+for required in $REQUIRED; do
     if [ ! -f "$IMAGES/$required" ]; then
         echo "run_qemu: $IMAGES/$required missing." >&2
         echo "  Build with: cd buildroot && make neodct_qemu_defconfig && make" >&2
         exit 1
     fi
 done
+
+# userdata.ubi gets its own refusal because the cause is almost always "this
+# image predates the NAND storage mode" rather than "the build failed", and
+# the two need different answers. post-image-neodct.sh builds it from the same
+# skeleton as userdata.ext4 -- it has to, because that skeleton carries
+# .ndsys/installed.prop and dm-verity has no root hash without it.
+if [ "$STORAGE" != "virtio" ] && [ ! -f "$IMAGES/userdata.ubi" ]; then
+    echo "run_qemu: $IMAGES/userdata.ubi missing, so /NeoDCT/User cannot go on" >&2
+    echo "  the NAND. Either the image was built before this storage mode" >&2
+    echo "  existed -- rebuild, post-image-neodct.sh writes it beside" >&2
+    echo "  userdata.ext4 -- or mtd-utils was not available to that build and" >&2
+    echo "  post-image said so. NEODCT_STORAGE=virtio boots the old way." >&2
+    exit 1
+fi
 
 # ============ THE DEVICE TREE, BUILT FRESH ON EVERY RUN ============
 #
@@ -375,6 +526,200 @@ if ! command -v nd_dtb_build >/dev/null 2>&1 \
     NDDTB=""
 fi
 
+# ============ THE NAND, AND THE FACTORY THAT WRITES IT ============
+#
+# Everything in this block is skipped entirely by NEODCT_STORAGE=virtio.
+#
+# NAND_WORK holds the three things a NAND boot needs and none of them is
+# committed or cached across runs, for the same reason the device tree is not:
+# an artefact that cannot drift is worth more than one that can.
+# $$ throughout, so two sessions on one machine cannot hand each other a
+# half-written flasher archive or save each other's userdata partition -- the
+# same rule nd_dtb_build() already follows for the device tree.
+NAND_WORK="${TMPDIR:-/tmp}/neodct-qemu-nand.$$"
+NAND_INITRD="$IMAGES/initramfs.cpio.gz"
+NAND_CACHE=""
+NAND_USERDATA=""
+# Where a session's /NeoDCT/User survives to the next QEMU process. It sits
+# beside userdata.ext4 and means the same thing: the writable partition, kept.
+NAND_SAVED="$IMAGES/userdata.nand.img"
+
+# ============ ONE EXIT PATH, BECAUSE THERE ARE NOW THINGS TO DO ON IT ======
+#
+# This script used to end in `exec`, and everything below could be a leak or a
+# missing save without anybody noticing, because there was no "below". There
+# is now -- a NAND session has to lift /NeoDCT/User out of the cache file --
+# and the first draft of that got all three of the ways a session ends wrong:
+#
+#   * `qemu-system-arm ...` followed by `QEMU_STATUS=$?` under `set -eu` is
+#     DEAD CODE on the failure path. errexit terminates the script AT the
+#     qemu line the moment it returns non-zero, so the save, both of its
+#     messages and the cleanup were unreachable on every abnormal exit. Not a
+#     corner: `NEODCT_DISPLAY=gtk` with no DISPLAY is `gtk initialization
+#     failed`, exit 1, and the session's writes gone with nothing said.
+#     Reproduced: `set -eu; false; S=$?; echo reached` prints nothing.
+#   * a SIGTERM while the shell waits on a FOREGROUND child does not reach
+#     that child. Measured: kill the wrapper and `sleep` is reparented to PID
+#     1 and runs on. neodct/tools/test_update_e2e.sh and
+#     test_remoteshell_e2e.sh both hold run_qemu.sh's pid and `kill` it to end
+#     a boot, and that worked only for as long as this script exec'd. So QEMU
+#     is started in the BACKGROUND and waited for, which is the only shape in
+#     which a trap can run while it is still alive.
+#   * `&` without an explicit redirection assigns the child /dev/null for
+#     stdin (POSIX), and stdin is the serial console -- the two e2e harnesses
+#     feed it from a fifo. `<&0` does not rescue it: measured, dash applies
+#     the /dev/null assignment first, so fd 0 is already gone by the time the
+#     redirection is read (bash does not, which is exactly the sort of
+#     difference that ships). Hence `exec 3<&0` here and `<&3` there: fd 3 is
+#     saved while fd 0 is still the terminal.
+#
+# The INT and TERM traps exit rather than doing the work, so the EXIT trap is
+# the single place a session is wound up and it cannot run twice.
+exec 3<&0
+QEMU_PID=""
+QEMU_RAN=""
+VIRTIOFSD_PID=""
+
+nd_nand_save() {
+    # The de-interleave is in mkqemuflash.py, with the argument for it and for
+    # the one rule that is not obvious -- an all-zero page comes back as 0xFF,
+    # because a page nandsim never programmed reads as zeros out of a sparse
+    # host file and zeros in a UBI partition are a corrupted erase counter
+    # rather than free space. Proven by round trip: a session's files came
+    # back byte-identical through a second QEMU process with 0 corrupted PEBs.
+    #
+    # Only for the mode that has a cache file to lift out of, and only once
+    # QEMU has actually run: an `exit 1` from the assembly above has nothing
+    # to save, and saying "nothing was written" there would be an answer to a
+    # question nobody asked.
+    [ -n "$QEMU_RAN" ] || return 0
+    [ -n "$NAND_CACHE" ] || return 0
+    # -snapshot makes the cache drive copy-on-write too, so the host file is
+    # untouched and the lift would report "nothing was written" -- true, and
+    # an answer to a question nobody asked. The banner above already said it.
+    [ -z "${NEODCT_SNAPSHOT:-}" ] || return 0
+    if "$REPO/tools/mkqemuflash.py" save \
+            --cache "$NAND_CACHE" --out "$NAND_SAVED" > /dev/null 2>&1; then
+        echo "run_qemu: /NeoDCT/User saved to $NAND_SAVED" >&2
+    else
+        echo "run_qemu: nothing was written to the userdata partition this" >&2
+        echo "  session, so $NAND_SAVED is left as it was." >&2
+    fi
+    return 0
+}
+
+nd_session_end() {
+    if [ -n "$QEMU_PID" ]; then
+        kill "$QEMU_PID" 2>/dev/null || true
+        wait "$QEMU_PID" 2>/dev/null || true
+        QEMU_PID=""
+    fi
+    if [ -n "$VIRTIOFSD_PID" ]; then
+        kill "$VIRTIOFSD_PID" 2>/dev/null || true
+        VIRTIOFSD_PID=""
+    fi
+    nd_nand_save
+    rm -rf "$NAND_WORK"
+    return 0
+}
+
+trap 'nd_session_end' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [ "$STORAGE" != "virtio" ]; then
+    rm -rf "$NAND_WORK"
+    mkdir -p "$NAND_WORK"
+
+    # --- nd-ubiattach, cross-compiled here rather than shipped ------------
+    #
+    # It is QEMU-only (its own header says why it must not be in the image),
+    # so there is nowhere in the rootfs to take it from. Buildroot's own
+    # toolchain first, because a tree that built this image has one; a system
+    # cross compiler second. Static, so it needs nothing from the initramfs.
+    UBIATTACH="${NEODCT_UBIATTACH:-}"
+    if [ -z "$UBIATTACH" ]; then
+        NDCC=""
+        # $CROSS_COMPILE is only consulted when it is SET. `${CROSS_COMPILE:-}gcc`
+        # with it unset is the host's own gcc, which happily produces an x86-64
+        # binary that the archive carries into the guest -- where exec fails with
+        # ENOEXEC, the shell falls back to interpreting it, and the first line of
+        # the boot log is `/bin/nd-ubiattach: line 1: ELF: not found`. Found by
+        # booting it.
+        for candidate in "$IMAGES"/../host/bin/arm-*-linux-*-gcc \
+                         ${CROSS_COMPILE:+"${CROSS_COMPILE}gcc"} \
+                         arm-linux-gnueabihf-gcc arm-linux-gnueabi-gcc; do
+            command -v "$candidate" > /dev/null 2>&1 && { NDCC="$candidate"; break; }
+        done
+        if [ -z "$NDCC" ]; then
+            echo "run_qemu: NEODCT_STORAGE=$STORAGE needs an armv7 cross compiler to" >&2
+            echo "  build nd-ubiattach, and neither buildroot's" >&2
+            echo "  ($IMAGES/../host/bin/arm-*-gcc) nor arm-linux-gnueabihf-gcc is" >&2
+            echo "  on \$PATH. NEODCT_UBIATTACH=<a static armv7 binary> skips this;" >&2
+            echo "  NEODCT_STORAGE=virtio skips the NAND altogether." >&2
+            exit 1
+        fi
+        UBIATTACH="$NAND_WORK/nd-ubiattach"
+        "$NDCC" -static -O2 -o "$UBIATTACH" "$REPO/src/tools/nd_ubiattach.c" \
+            || { echo "run_qemu: $NDCC could not build nd_ubiattach.c" >&2; exit 1; }
+    fi
+
+    # --- the flasher overlay ---------------------------------------------
+    #
+    # The kernel accepts CONCATENATED cpio archives and unpacks them in order
+    # into one rootfs, so the QEMU-only half is a second archive rather than
+    # anything inside neodct/initramfs/. rdinit=/ndflash then runs the factory
+    # first and it exec's the phone's own /init, which is PID 1 with argv0
+    # /init exactly as the kernel would have started it. Measured.
+    "$REPO/tools/mkqemuflash.py" overlay \
+        --out "$NAND_WORK/ndflash.cpio.gz" \
+        --flasher "$REPO/initramfs/qemu/ndflash" \
+        --ubiattach "$UBIATTACH" > /dev/null \
+        || { echo "run_qemu: could not build the flasher overlay" >&2; exit 1; }
+    cat "$IMAGES/initramfs.cpio.gz" "$NAND_WORK/ndflash.cpio.gz" \
+        > "$NAND_WORK/initramfs+ndflash.cpio.gz"
+    NAND_INITRD="$NAND_WORK/initramfs+ndflash.cpio.gz"
+
+    # --- which userdata image the factory writes --------------------------
+    #
+    # The saved one, unless the build has moved on underneath it. installed.prop
+    # inside that partition records the root hash of the system image that was
+    # installed; a rebuild changes the image, and dm-verity then refuses to
+    # boot the new system against the old hash. The ext4 path solves that with
+    # debugfs; here the honest answer is to start again and say so.
+    NAND_USERDATA="$IMAGES/userdata.ubi"
+    if [ -f "$NAND_SAVED" ]; then
+        if [ "$NAND_SAVED" -nt "$IMAGES/userdata.ubi" ]; then
+            NAND_USERDATA="$NAND_SAVED"
+        else
+            echo "run_qemu: $NAND_SAVED is older than the build; starting" >&2
+            echo "  /NeoDCT/User again from userdata.ubi, because its" >&2
+            echo "  installed.prop names a system image that no longer exists." >&2
+            rm -f "$NAND_SAVED"
+        fi
+    fi
+
+    # --- the chip's backing store -----------------------------------------
+    #
+    # 65,536 pages of 2048+64. Sparse and recreated every boot: nandsim's
+    # pages_written bitmap is per-boot, so a kept cache file reads as blank
+    # silicon however good its bytes are -- a 57 MB artefact that would look
+    # like state and behave like nothing. What DOES carry over is
+    # userdata.nand.img, lifted back out of this file when QEMU exits.
+    #
+    # `nand` only. nand-full deliberately has no cache file (a ubiblock read
+    # through one deadlocks the guest -- see the header), so creating one there
+    # would leave a 132 MB file nothing ever opens.
+    if [ "$STORAGE" = "nand" ]; then
+        NAND_CACHE="$NAND_WORK/nandcache.raw"
+        : > "$NAND_CACHE"
+        # 138,412,032 = 65536 * 2112. dd rather than truncate so that a host
+        # without GNU coreutils still gets a sparse file of the right length.
+        dd if=/dev/null of="$NAND_CACHE" bs=1 seek=138412032 2>/dev/null \
+            || { echo "run_qemu: could not create $NAND_CACHE" >&2; exit 1; }
+    fi
+fi
+
 set -- \
     -M virt \
     -cpu cortex-a7 \
@@ -382,11 +727,42 @@ set -- \
     -m "$MEMORY" \
     -global virtio-mmio.force-legacy=false \
     -kernel "$IMAGES/zImage" \
-    -initrd "$IMAGES/initramfs.cpio.gz" \
-    -drive "file=$IMAGES/system.img,if=none,format=raw,id=ndsys" \
-    -device virtio-blk-device,drive=ndsys,serial=NDSYS \
-    -drive "file=$IMAGES/userdata.ext4,if=none,format=raw,id=nduser" \
-    -device virtio-blk-device,drive=nduser,serial=NDUSER
+    -initrd "$NAND_INITRD"
+
+# ============ THE DRIVES ============
+#
+# NDSYS is the system image and it keeps its serial in every mode, because
+# find_system_device()'s first rule is device_by_serial("NDSYS") and it
+# outranks everything else. The FLASHING sources deliberately do NOT use it:
+# a raw UBI image labelled NDSYS would be picked as the system partition, and
+# NDUSER likewise. They are NDNANDSYS and NDNANDUSR, they are readonly=on, and
+# both begin "UBI#" rather than "hsqs" so the squashfs scan cannot mistake
+# them either.
+case "$STORAGE" in
+    virtio)
+        set -- "$@" \
+            -drive "file=$IMAGES/system.img,if=none,format=raw,id=ndsys" \
+            -device virtio-blk-device,drive=ndsys,serial=NDSYS \
+            -drive "file=$IMAGES/userdata.ext4,if=none,format=raw,id=nduser" \
+            -device virtio-blk-device,drive=nduser,serial=NDUSER
+        ;;
+    nand)
+        # The system stays on virtio-blk here and that is a MEASURED limit,
+        # not an oversight -- the header's storage block has both numbers.
+        set -- "$@" \
+            -drive "file=$IMAGES/system.img,if=none,format=raw,id=ndsys" \
+            -device virtio-blk-device,drive=ndsys,serial=NDSYS \
+            -drive "file=$NAND_USERDATA,if=none,format=raw,readonly=on,id=ndnandusr" \
+            -device virtio-blk-device,drive=ndnandusr,serial=NDNANDUSR
+        ;;
+    nand-full)
+        set -- "$@" \
+            -drive "file=$IMAGES/system.ubi,if=none,format=raw,readonly=on,id=ndnandsys" \
+            -device virtio-blk-device,drive=ndnandsys,serial=NDNANDSYS \
+            -drive "file=$NAND_USERDATA,if=none,format=raw,readonly=on,id=ndnandusr" \
+            -device virtio-blk-device,drive=ndnandusr,serial=NDNANDUSR
+        ;;
+esac
 
 [ -n "$NDDTB" ] && set -- "$@" -dtb "$NDDTB"
 
@@ -443,6 +819,45 @@ case "$SD_MODE" in
         ;;
 esac
 
+# ============ THE CACHE DRIVE, AND WHY IT IS ATTACHED HERE ============
+#
+# nandsim opens `nandsim.cache_file=` at device_initcall, before devtmpfs
+# exists, so it can only be given a literal path -- and QEMU enumerates
+# virtio-mmio in REVERSE, so the LAST virtio-blk-device on the command line is
+# the one the guest calls /dev/vda. Measured three times, on this kernel.
+#
+# THIS BLOCK MUST THEREFORE STAY AFTER THE CARD, AND ANY NEW virtio-blk DEVICE
+# MUST GO ABOVE IT. That is exactly the class of positional rule this
+# repository has been bitten by twice (ndsys-apply.sh:83, the neodct-sdcard
+# comment), so it is defused rather than trusted: ndflash's first act is to
+# refuse unless /dev/vda's serial is NDNAND, and nandsim writes nothing to the
+# cache device until a page is programmed -- measured, a boot that flashed
+# nothing left the host file at 0 blocks allocated -- so that refusal lands
+# before anything could be damaged.
+#
+# A misorder that made one of the readonly=on image drives vda does NOT stop
+# nandsim at init, which is what this comment used to say. Measured: the open
+# succeeds on a read-only block device and the chip appears; the failure is
+# `[nandsim] error: prog_page: write error` at the first program, so the
+# flasher's dd fails and it refuses there. Loud, one step later. ndflash's
+# header has both this and the worse case -- a cache_file path that does not
+# exist, where O_CREAT makes a regular file in the initramfs and puts the
+# whole chip in guest RAM with nothing saying so.
+#
+# nand-full deliberately gets NO cache file: with one, the first read of the
+# system volume that misses the cache file's page cache deadlocks the guest,
+# because servicing a ubiblock request then submits a second bio from inside
+# the first one's dispatch. The header's storage block has the stack trace and
+# the controlled pair. The price is that nand-full keeps the whole chip in
+# kernel slab -- hence its 128 MB floor -- and that /NeoDCT/User does not
+# survive that mode's exit, because there is no host-side file to lift it out
+# of.
+if [ "$STORAGE" = "nand" ]; then
+    set -- "$@" \
+        -drive "file=$NAND_CACHE,if=none,format=raw,id=ndnandcache" \
+        -device virtio-blk-device,drive=ndnandcache,serial=NDNAND
+fi
+
 # --- kernel cmdline ------------------------------------------------------
 # One console. `console=ttyS0,115200` was here for a machine that had an
 # 8250; -M virt has a PL011 and nothing else (/proc/consoles lists ttyAMA0
@@ -489,6 +904,36 @@ esac
 # asserting the old machine against its own private command line and passing.
 # The argument for every parameter in the set is in that function.
 APPEND="console=ttyAMA0 neodct.verity=$VERITY $(nd_qemu_append)"
+
+# ============ THE STORAGE HALF OF THE COMMAND LINE ============
+#
+# Three of these four keys are carried VERBATIM from docs/PARTITIONS.md
+# section 6, which is the phone's own U-Boot environment:
+#
+#     ubi.block=0,system  neodct.sys=/dev/ubiblock0_0  neodct.user=ubi1:userdata
+#
+# The fourth, `ubi.mtd=`, cannot be here and that asymmetry is recorded in
+# allow.txt rather than hidden: it is consumed by ubi_init_attach(), a
+# late_initcall, which runs before any userspace flasher can exist. On a blank
+# chip UBI does the worst possible thing with it -- it succeeds and FORMATS
+# the partition, after which a raw image cannot be written over it at all,
+# because programming NAND only clears bits. ndflash does the attach instead,
+# through the same ioctl, at the phone's VID header offset.
+#
+# `ubi.block=` DOES survive, and that is the good part: ubiblock_notify() on
+# UBI_VOLUME_ADDED calls ubiblock_create_from_param(), so a volume attached
+# from userspace later still matches the cmdline. Measured -- the emulator's
+# /dev/ubiblock0_0 is created by the KERNEL, from the phone's own argument.
+case "$STORAGE" in
+    nand)
+        APPEND="$APPEND neodct.user=ubi1:userdata nandsim.cache_file=/dev/vda"
+        ;;
+    nand-full)
+        APPEND="$APPEND neodct.user=ubi1:userdata"
+        APPEND="$APPEND ubi.block=0,system neodct.sys=/dev/ubiblock0_0"
+        ;;
+esac
+[ "$STORAGE" = "virtio" ] || APPEND="$APPEND rdinit=/ndflash"
 # Boot straight into recovery. NEODCT_RECTTY=/dev/console drives it over the
 # serial port instead of the emulated screen.
 [ -n "${NEODCT_RECOVERY:-}" ] && APPEND="$APPEND neodct.recovery=1"
@@ -608,6 +1053,38 @@ case "$DISPLAY_MODE" in
         ;;
 esac
 
+# --- the panel transcript -------------------------------------------------
+#
+# One block after the case rather than a line in each of three, and after it
+# rather than inside it because a shell function has its own "$@" and cannot
+# append to the caller's argument list.
+#
+# `none` is REFUSED rather than ignored. It attaches no framebuffer at all --
+# no `video=vfb:on`, so no /dev/fb0 -- and the daemon that would write this
+# transcript exits without one. A flag that silently produced an empty file
+# would look exactly like a broken panel.
+#
+# `neodct.panel=stream` is what S90display reads, and the port existing is
+# deliberately NOT enough on its own: the daemon's backend is chosen and never
+# detected, and a machine that grew a serial port is not a machine that asked
+# for a continuous copy of its screen.
+if [ -n "$PANEL_STREAM" ]; then
+    if [ "$DISPLAY_MODE" = none ]; then
+        echo "run_qemu: NEODCT_PANEL_STREAM needs a framebuffer, and" >&2
+        echo "run_qemu: NEODCT_DISPLAY=none attaches none. Use offscreen." >&2
+        exit 1
+    fi
+    # -chardev file truncates and writes; the guest only ever writes to the
+    # port, so there is no reader to starve and no flow control to get wrong.
+    set -- "$@" \
+        -chardev "file,id=ndpanelchr,path=$PANEL_STREAM" \
+        -device virtio-serial-device \
+        -device "virtserialport,chardev=ndpanelchr,name=neodct.panel"
+    APPEND="$APPEND neodct.panel=stream"
+    echo "run_qemu: panel transcript -> $PANEL_STREAM" >&2
+    echo "run_qemu:   decode it with neodct/tools/st7789_replay.py --out a.png" >&2
+fi
+
 # --- usb: audio, and optionally the real modem ---------------------------
 # Nothing below runs today: AUDIO is none and NEODCT_MODEM / NEODCT_BT refuse
 # at the top, because qemu-xhci is a PCI device and the guest has no PCI. It
@@ -684,8 +1161,11 @@ if [ "$SD_MODE" = "share" ]; then
     echo "run_qemu: sharing $SHARE_DIR as the SD card"
     "$VIRTIOFSD" --socket-path="$SOCKET" --shared-dir "$SHARE_DIR" \
         --sandbox=none > /tmp/virtiofsd.log 2>&1 &
+    # No trap of its own any more, and that is the fix rather than tidying:
+    # this one replaced the NAND cleanup installed above it, so a share boot
+    # saved nothing and left its work directory behind. nd_session_end() kills
+    # it, and there is one EXIT trap in this file.
     VIRTIOFSD_PID=$!
-    trap 'kill $VIRTIOFSD_PID 2>/dev/null || true' EXIT INT TERM
     tries=0
     while [ ! -S "$SOCKET" ] && [ "$tries" -lt 50 ]; do
         sleep 0.1
@@ -701,7 +1181,92 @@ if [ "$SD_MODE" = "share" ]; then
 fi
 
 [ -n "$MONITOR" ] && set -- "$@" -monitor "unix:$MONITOR,server,nowait"
+# -snapshot makes every drive copy-on-write, the cache file included, so a
+# snapshot boot has nothing to save and the block below skips it. That is the
+# same meaning NEODCT_SNAPSHOT has always had.
 [ -n "${NEODCT_SNAPSHOT:-}" ] && set -- "$@" -snapshot
 
+# ============ WHAT THIS BOOT IS NOT TESTING ============
+#
+# One line, on the boot that skips the phone's storage. A banner is the
+# WEAKEST of the four things that stop the fast path from becoming the way
+# everybody works, and it is here last on purpose. The other three are
+# stronger and need nobody to read anything:
+#
+#   * an nd-inventory capture taken on NEODCT_STORAGE=virtio is visibly a
+#     different machine -- class.ubi is [version] instead of
+#     [ubi1 ubi1_0 version], the ubi.* records are absent and /NeoDCT/User is
+#     ext4 rather than ubifs -- so parity_capture_qemu.sh --compare fails on
+#     it with no new machinery;
+#   * parity_capture_qemu.sh refuses such a capture outright rather than
+#     letting it reach a diff, the way it already refuses one taken without
+#     libneodct;
+#   * verity_state.prop already records user_device=, and on this path it says
+#     /dev/vdX where the NAND path says ubi1:userdata. Nothing new to write,
+#     something new to read.
+if [ "$STORAGE" = "virtio" ]; then
+    echo "run_qemu: NEODCT_STORAGE=virtio -- /NeoDCT/User is ext4 on a virtio" >&2
+    echo "  disk, which the phone does not have. user_is_ubi(), the ubifs" >&2
+    echo "  mount and mknand.sh's userdata.ubi are NOT exercised by this boot," >&2
+    echo "  and a capture taken on it cannot be a parity baseline." >&2
+fi
+
+# The other silent cost, and the banner was on the wrong mode. virtio says
+# what it is not exercising; nand-full says nothing at all and DISCARDS the
+# session -- it deliberately has no cache file (a ubiblock read through one
+# deadlocks the guest), so there is no host-side file for nd_nand_save() to
+# lift /NeoDCT/User out of. An hour of work in the guest, a clean poweroff,
+# and the partition is back at the factory skeleton next boot. The mode that
+# keeps writes was the one with the warning.
+if [ "$STORAGE" = "nand-full" ]; then
+    echo "run_qemu: NEODCT_STORAGE=nand-full -- this mode has NO nandsim cache" >&2
+    echo "  file, because a ubiblock read through one deadlocks the guest, so" >&2
+    echo "  nothing lifts /NeoDCT/User back out when QEMU exits: everything" >&2
+    echo "  written to the user partition this session is discarded. Use the" >&2
+    echo "  default NEODCT_STORAGE=nand for anything you want to keep." >&2
+fi
+if [ "$STORAGE" != "virtio" ] && [ -n "${NEODCT_SNAPSHOT:-}" ]; then
+    echo "run_qemu: NEODCT_SNAPSHOT=1 -- every drive is copy-on-write, the" >&2
+    echo "  nandsim cache file included, so /NeoDCT/User is not saved when" >&2
+    echo "  QEMU exits. That is what snapshot has always meant here." >&2
+fi
+
+# ============ AND WHY THIS IS NOT AN exec ============
+#
+# It was, for the whole life of this script. A NAND boot has to lift
+# /NeoDCT/User back out of the cache file after QEMU exits, or the partition
+# resets on every boot -- which would silently make every session a snapshot
+# session and kill the stage-reboot-apply workflow this storage stack exists
+# for.
+#
+# THE CONDITION IS "IS THERE ANYTHING LEFT TO DO", AND IT USED TO BE "IS THIS
+# THE SAVING MODE", which was three leaks in one line. NAND_WORK is built for
+# every non-virtio mode and holds the flasher overlay, a copy of the whole
+# initramfs and a 132 MB sparse cache file, and an EXIT trap does not survive
+# an exec -- so `nand-full` and `NEODCT_SNAPSHOT=1` each left one of those
+# directories in TMPDIR on every successful boot, for ever. The share path
+# leaked a virtiofsd the same way. So: exec only when this script genuinely
+# has nothing to clean up and nothing to save, which is the plain virtio boot
+# with no host folder attached -- the mode that never made a NAND_WORK.
+# Everywhere else, an extra shell in the process tree is the price of the
+# cleanup, and it now forwards a kill rather than orphaning QEMU under one.
+#
 # shellcheck disable=SC2086  # EXTRA is intentionally word-split
-exec qemu-system-arm "$@" -append "$APPEND" $EXTRA
+if [ "$STORAGE" = "virtio" ] && [ "$SD_MODE" != "share" ]; then
+    trap - EXIT INT TERM
+    exec qemu-system-arm "$@" -append "$APPEND" $EXTRA
+fi
+
+# `<&3` and not plain `&`: an asynchronous command with no explicit
+# redirection gets /dev/null on stdin, and stdin is the serial console. fd 3
+# was saved at the top of the file, before any of that could apply.
+QEMU_RAN=1
+qemu-system-arm "$@" -append "$APPEND" $EXTRA <&3 &
+QEMU_PID=$!
+QEMU_STATUS=0
+wait "$QEMU_PID" || QEMU_STATUS=$?
+QEMU_PID=""
+
+# The save and the cleanup are nd_session_end()'s, on the EXIT trap, so that
+# they happen identically whether QEMU returned 0, returned 1 or was killed.
+exit "$QEMU_STATUS"

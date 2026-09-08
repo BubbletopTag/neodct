@@ -33,7 +33,22 @@ INV|block.loop7.ro 0
 INV|block.loop7.size 0
 INV|block.mtdblock0.removable 0
 INV|block.mtdblock0.ro 0
-INV|block.mtdblock0.size 262144
+INV|block.mtdblock0.size 512
+INV|block.mtdblock1.removable 0
+INV|block.mtdblock1.ro 0
+INV|block.mtdblock1.size 512
+INV|block.mtdblock2.removable 0
+INV|block.mtdblock2.ro 0
+INV|block.mtdblock2.size 1024
+INV|block.mtdblock3.removable 0
+INV|block.mtdblock3.ro 0
+INV|block.mtdblock3.size 32768
+INV|block.mtdblock4.removable 0
+INV|block.mtdblock4.ro 0
+INV|block.mtdblock4.size 16384
+INV|block.mtdblock5.removable 0
+INV|block.mtdblock5.ro 0
+INV|block.mtdblock5.size 210944
 INV|block.vda.removable 0
 INV|block.vda.ro 0
 INV|block.vda.serial NDUSER
@@ -48,7 +63,7 @@ INV|block.zram0.size 0
 INV|class.backlight [backlight]
 INV|class.backlight.backlight.max_brightness 10
 INV|class.backlight.backlight.type raw
-INV|class.block [loop[N]x8 mtdblock0 vda vdb zram0]
+INV|class.block [loop[N]x8 mtdblock0 mtdblock1 mtdblock2 mtdblock3 mtdblock4 mtdblock5 vda vdb zram0]
 INV|class.gpio [export gpiochip0 gpiochip512 unexport]
 INV|class.graphics [fb0]
 INV|class.graphics.fb0.name Virtual FB
@@ -58,7 +73,7 @@ INV|class.input.event0.name ABSENT
 INV|class.input.input0.name QEMU Virtio Keyboard
 INV|class.leds ABSENT
 INV|class.misc [device-mapper loop-control ubi_ctrl uinput]
-INV|class.mtd [mtd0 mtd0ro]
+INV|class.mtd [mtd0 mtd0ro mtd1 mtd1ro mtd2 mtd2ro mtd3 mtd3ro mtd4 mtd4ro mtd5 mtd5ro]
 INV|class.net [lo sit0]
 INV|class.net.lo.type 772
 INV|class.net.sit0.type 776
@@ -68,21 +83,22 @@ INV|class.rtc.rtc0.name rtc-pl031 9010000.pl031
 INV|class.thermal []
 INV|class.tty [console ptmx pty[a-z][0-f]x256 tty tty[N]x64 ttyAMA0 tty[a-z][0-f]x256]
 INV|class.ubi [version]
-INV|cmdline.keys [console gpio-mockup.gpio_mockup_ranges mtdram.total_size nandsim.first_id_byte nandsim.fourth_id_byte nandsim.second_id_byte nandsim.third_id_byte neodct.devenv panic rdinit video vt.global_cursor_default]
+INV|cmdline.keys [console gpio-mockup.gpio_mockup_ranges mtdram.total_size nandsim.first_id_byte nandsim.fourth_id_byte nandsim.parts nandsim.second_id_byte nandsim.third_id_byte neodct.devenv panic rdinit video vt.global_cursor_default]
 INV|cmdline.mtdram.total_size 0
 INV|cmdline.nandsim.first_id_byte 0x20
 INV|cmdline.nandsim.fourth_id_byte 0x15
+INV|cmdline.nandsim.parts 2,2,4,128,64
 INV|cmdline.nandsim.second_id_byte 0xa1
 INV|cmdline.nandsim.third_id_byte 0x00
 INV|cmdline.neodct.devenv 1
 INV|cmdline.panic 5
-INV|~cmdline.raw console=ttyAMA0 rdinit=/init panic=5 neodct.devenv=1 video=vfb:on vt.global_cursor_default=0 mtdram.total_size=0 nandsim.first_id_byte=0x20 nandsim.second_id_byte=0xa1 nandsim.third_id_byte=0x00 nandsim.fourth_id_byte=0x15 gpio-mockup.gpio_mockup_ranges=0,64
+INV|~cmdline.raw console=ttyAMA0 rdinit=/init panic=5 neodct.devenv=1 video=vfb:on vt.global_cursor_default=0 mtdram.total_size=0 nandsim.first_id_byte=0x20 nandsim.second_id_byte=0xa1 nandsim.third_id_byte=0x00 nandsim.fourth_id_byte=0x15 nandsim.parts=2,2,4,128,64 gpio-mockup.gpio_mockup_ranges=0,64
 INV|cmdline.video vfb:on
 INV|cpufreq.available 408000 600000 816000 1008000 1200000
 INV|cpufreq.cpu0 present
 INV|cpufreq.policies [policy0]
 INV|dev.console type=c mode=0600 uid=0(?) gid=0(?)
-INV|dev.count 622
+INV|dev.count 637
 INV|dev.fb0 type=c mode=0600 uid=0(?) gid=0(?)
 INV|dev.full type=c mode=0666 uid=0(?) gid=0(?)
 INV|dev.gpiochip0 type=c mode=0600 uid=0(?) gid=0(?)
@@ -97,7 +113,22 @@ INV|dev.mapper/control type=c mode=0600 uid=0(?) gid=0(?)
 INV|dev.mem type=c mode=0600 uid=0(?) gid=0(?)
 INV|dev.mtd0 type=c mode=0600 uid=0(?) gid=0(?)
 INV|dev.mtd0ro type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.mtd1 type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.mtd1ro type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.mtd2 type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.mtd2ro type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.mtd3 type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.mtd3ro type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.mtd4 type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.mtd4ro type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.mtd5 type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.mtd5ro type=c mode=0600 uid=0(?) gid=0(?)
 INV|dev.mtdblock0 type=b mode=0600 uid=0(?) gid=0(?)
+INV|dev.mtdblock1 type=b mode=0600 uid=0(?) gid=0(?)
+INV|dev.mtdblock2 type=b mode=0600 uid=0(?) gid=0(?)
+INV|dev.mtdblock3 type=b mode=0600 uid=0(?) gid=0(?)
+INV|dev.mtdblock4 type=b mode=0600 uid=0(?) gid=0(?)
+INV|dev.mtdblock5 type=b mode=0600 uid=0(?) gid=0(?)
 INV|dev.null type=c mode=0666 uid=0(?) gid=0(?)
 INV|dev.port type=c mode=0600 uid=0(?) gid=0(?)
 INV|dev.ptmx type=c mode=0666 uid=0(?) gid=0(?)
@@ -127,19 +158,19 @@ INV|dev.zram0 type=b mode=0600 uid=0(?) gid=0(?)
 INV|dm.control present
 INV|fb0 present
 INV|fb0.fix.id Virtual FB
-INV|fb0.fix.line_length 640
+INV|fb0.fix.line_length 960
 INV|fb0.fix.smem_len 1048576
 INV|fb0.fix.type 0
-INV|fb0.fix.visual 3
-INV|fb0.var.bits_per_pixel 8
-INV|fb0.var.blue 0/8
-INV|fb0.var.green 0/8
+INV|fb0.fix.visual 2
+INV|fb0.var.bits_per_pixel 32
+INV|fb0.var.blue 16/8
+INV|fb0.var.green 8/8
 INV|fb0.var.red 0/8
-INV|fb0.var.transp 0/0
-INV|fb0.var.xres 640
-INV|fb0.var.xres_virtual 640
-INV|fb0.var.yres 480
-INV|fb0.var.yres_virtual 480
+INV|fb0.var.transp 24/8
+INV|fb0.var.xres 240
+INV|fb0.var.xres_virtual 240
+INV|fb0.var.yres 175
+INV|fb0.var.yres_virtual 175
 INV|input.byname."QEMU\x20Virtio\x20Keyboard".ev 120003
 INV|input.byname."QEMU\x20Virtio\x20Keyboard".handlers [event0 kbd]
 INV|input.node.event0.name QEMU Virtio Keyboard
@@ -155,10 +186,40 @@ INV|mount./proc fstype=proc options=relatime rw
 INV|mount./sys fstype=sysfs options=relatime rw
 INV|mtd.byname."NAND\x20simulator\x20partition\x200".erasesize 131072
 INV|mtd.byname."NAND\x20simulator\x20partition\x200".oobsize 64
-INV|mtd.byname."NAND\x20simulator\x20partition\x200".size 134217728
+INV|mtd.byname."NAND\x20simulator\x20partition\x200".size 262144
 INV|mtd.byname."NAND\x20simulator\x20partition\x200".type nand
 INV|mtd.byname."NAND\x20simulator\x20partition\x200".writesize 2048
+INV|mtd.byname."NAND\x20simulator\x20partition\x201".erasesize 131072
+INV|mtd.byname."NAND\x20simulator\x20partition\x201".oobsize 64
+INV|mtd.byname."NAND\x20simulator\x20partition\x201".size 262144
+INV|mtd.byname."NAND\x20simulator\x20partition\x201".type nand
+INV|mtd.byname."NAND\x20simulator\x20partition\x201".writesize 2048
+INV|mtd.byname."NAND\x20simulator\x20partition\x202".erasesize 131072
+INV|mtd.byname."NAND\x20simulator\x20partition\x202".oobsize 64
+INV|mtd.byname."NAND\x20simulator\x20partition\x202".size 524288
+INV|mtd.byname."NAND\x20simulator\x20partition\x202".type nand
+INV|mtd.byname."NAND\x20simulator\x20partition\x202".writesize 2048
+INV|mtd.byname."NAND\x20simulator\x20partition\x203".erasesize 131072
+INV|mtd.byname."NAND\x20simulator\x20partition\x203".oobsize 64
+INV|mtd.byname."NAND\x20simulator\x20partition\x203".size 16777216
+INV|mtd.byname."NAND\x20simulator\x20partition\x203".type nand
+INV|mtd.byname."NAND\x20simulator\x20partition\x203".writesize 2048
+INV|mtd.byname."NAND\x20simulator\x20partition\x204".erasesize 131072
+INV|mtd.byname."NAND\x20simulator\x20partition\x204".oobsize 64
+INV|mtd.byname."NAND\x20simulator\x20partition\x204".size 8388608
+INV|mtd.byname."NAND\x20simulator\x20partition\x204".type nand
+INV|mtd.byname."NAND\x20simulator\x20partition\x204".writesize 2048
+INV|mtd.byname."NAND\x20simulator\x20partition\x205".erasesize 131072
+INV|mtd.byname."NAND\x20simulator\x20partition\x205".oobsize 64
+INV|mtd.byname."NAND\x20simulator\x20partition\x205".size 108003328
+INV|mtd.byname."NAND\x20simulator\x20partition\x205".type nand
+INV|mtd.byname."NAND\x20simulator\x20partition\x205".writesize 2048
 INV|mtd.node.mtd0.name NAND simulator partition 0
+INV|mtd.node.mtd1.name NAND simulator partition 1
+INV|mtd.node.mtd2.name NAND simulator partition 2
+INV|mtd.node.mtd3.name NAND simulator partition 3
+INV|mtd.node.mtd4.name NAND simulator partition 4
+INV|mtd.node.mtd5.name NAND simulator partition 5
 INV|os.id ABSENT
 INV|os.name ABSENT
 INV|platform.board UNAVAILABLE(nolib)
@@ -178,5 +239,5 @@ INV|uname.release 6.12.47
 INV|uname.sysname Linux
 INV|zram0.disksize 0
 INV|END
-INV|# sha256.transport=6c7161f0ae6c7c40930dd93810e28b2d538d08290b881285add8a500bbac23d5
-INV|# sha256.compared=7df06b63898a4ea53b05eb217aff185bb116152d3b534ecead62013416535602
+INV|# sha256.transport=c084d5d2eaca99615ca90016d04ad2b2c76fc05c636fcab6a8f291ec19ceaff4
+INV|# sha256.compared=278aa3ad4e57ba595058d8a34f9ce77e0e61471abfd384fa87cd00adfaaee2f9

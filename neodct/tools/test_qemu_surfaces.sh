@@ -158,6 +158,19 @@ done
 
 say rtc0.name "$(cat /sys/class/rtc/rtc0/name 2>/dev/null || echo ABSENT)"
 say psy.parent_warnings "$(dmesg | grep -c 'Expected proper parent device')"
+
+# The flash. nandsim.parts= is in nd_qemu_append() and it is the one parameter
+# here whose absence is invisible until somebody tries to attach UBI: without
+# it the chip is one 128 MB partition, the phone's mtd4 and mtd5 do not exist,
+# and neodct.user=ubi1:userdata has nothing to resolve against. writesize is
+# the load-bearing number -- UBI reads min_io straight off it -- and 1 instead
+# of 2048 is the whole difference between mtdram and the phone's part.
+say mtd.count "$(sed -n 's/^mtd\([0-9]*\):.*/\1/p' /proc/mtd | wc -l)"
+say mtd.class "[$(ls /sys/class/mtd | tr '\n' ' ')]"
+say mtd4.size "$(cat /sys/class/mtd/mtd4/size 2>/dev/null || echo ABSENT)"
+say mtd4.writesize "$(cat /sys/class/mtd/mtd4/writesize 2>/dev/null || echo ABSENT)"
+say mtd4.erasesize "$(cat /sys/class/mtd/mtd4/erasesize 2>/dev/null || echo ABSENT)"
+say mtd5.size "$(cat /sys/class/mtd/mtd5/size 2>/dev/null || echo ABSENT)"
 echo "===SURFACES-END"
 poweroff -f
 INIT
@@ -235,6 +248,19 @@ check "$WORK/dtb" gpio53 "dir=out value=1" \
     "the panel's BL wire, ND_BL_GPIO_PIN, granted by S90display; -M virt's own pl061 starts at 512 so this needs gpio-mockup"
 check "$WORK/dtb" gpio56 "dir=out value=1" "the panel's RST, driven by neodctDisplay.c"
 check "$WORK/dtb" gpio57 "dir=out value=1" "the panel's DC, driven by neodctDisplay.c"
+
+check "$WORK/dtb" mtd.count 6 \
+    "nandsim.parts=2,2,4,128,64 must give SIX partitions -- five sizes and the remainder. Six sizes gives seven, and the seventh is 3 MiB of bad-block slack the phone's table has no name for"
+check "$WORK/dtb" mtd.class "[mtd0 mtd0ro mtd1 mtd1ro mtd2 mtd2ro mtd3 mtd3ro mtd4 mtd4ro mtd5 mtd5ro ]" \
+    "the phone's exact MTD key set, which is why class.mtd stopped being an allow.txt record"
+check "$WORK/dtb" mtd4.size 8388608 \
+    "docs/PARTITIONS.md's userdata partition, at the phone's own mtd number; neodct.user=ubi1:userdata resolves against a UBI device attached to this one"
+check "$WORK/dtb" mtd4.writesize 2048 \
+    "the Pico Mini's page size. UBI reads min_io straight off it: 2048 gives mknand.sh's LEB of 126,976, and mtdram's 1 gives 130,944 -- arithmetic the phone never does"
+check "$WORK/dtb" mtd4.erasesize 131072 \
+    "the Pico Mini's erase block, from the 0x15 ID byte's bits[5:4]"
+check "$WORK/dtb" mtd5.size 108003328 \
+    "the rootfs partition, 3 MiB larger than the phone's 100 MiB because the bad-block slack is folded into it rather than made a seventh partition. Nothing in this tree reads it -- mknand.sh's check_fits uses its own constant"
 
 echo
 echo "== without it, which is what a host with no dtc gets =="

@@ -93,10 +93,10 @@ Build an installable update on an already-built tree (no rebuild):
 NEODCT_SIGN_KEY=$PWD/../neodct/tools/devkey/neodct-dev.key make update
 ```
 
-`run_qemu.sh` is driven entirely by environment variables — `NEODCT_SNAPSHOT`,
-`NEODCT_VERITY`, `NEODCT_SD`, `NEODCT_RECOVERY`, `NEODCT_MODEM`, `NEODCT_NET`,
-`NEODCT_DEBUG` and more. Read its header before adding a flag; the one you want
-probably exists.
+`run_qemu.sh` is driven entirely by environment variables — `NEODCT_STORAGE`,
+`NEODCT_SNAPSHOT`, `NEODCT_VERITY`, `NEODCT_SD`, `NEODCT_RECOVERY`,
+`NEODCT_MODEM`, `NEODCT_NET`, `NEODCT_DEBUG` and more. Read its header before
+adding a flag; the one you want probably exists.
 
 Several of them **refuse** on the armv7 kernel and say what is missing:
 `NEODCT_NET`, `NEODCT_MODEM`, `NEODCT_BT`, `NEODCT_AUDIO` and
@@ -107,15 +107,31 @@ absences and what each costs are listed in the header of
 `buildroot/board/qemu/armv7-virt/linux.config`; adding one back means booting
 the kernel again and writing down the new MemTotal.
 
-**There is no picture yet, and that is the next stage.** `/dev/fb0` is vfb —
-the phone's own driver rather than a DRM device pretending to be one — which
-is the arrangement worth having, but two things are unfinished. vfb comes up
-640×480 at 8 bpp and is put into 240×175×32 by a userspace
-`FBIOPUT_VSCREENINFO`; on the phone `neodct_displayd` does that and under
-QEMU nothing does it yet. And vfb has no scanout, so the QEMU window is not
-showing the phone whatever the mode is. The window is still where keystrokes
-come from; with no display at all the way in is `NEODCT_MONITOR` and the
-monitor's `sendkey`.
+**The emulator's `/dev/fb0` is the phone's, and the phone's own code put it
+there.** It is vfb on both machines — the phone's own driver rather than a DRM
+device pretending to be one — and it comes up 640×480 at 8 bpp on both.
+`neodct_displayd`'s `force_mode()` is what makes it 240×175×32, and that
+daemon now runs under QEMU as well: `S90display` starts it with `--panel null
+--once` there and `--panel spidev` on hardware, the same binary and the same
+`FBIOPUT_VSCREENINFO`. Measured on a real armv7 boot: `640,480 / 8 / 640`
+before and `240,175 / 32 / 960` after, `red.offset` 0 — the phone's
+framebuffer byte for byte, and `force_mode()` a tested path for the first
+time. `neodct/tests/parity/qemu-armv7-probe.inventory` is captured **after**
+it runs, so ten `fb0` records that a first hardware capture would have
+diverged on now agree.
+
+**The picture is rendered on the host, and always will be.** vfb has no
+scanout: nothing a QEMU display frontend shows is the phone, whatever the mode
+is. So the panel comes out as a byte stream instead — `neodct_displayd
+--panel stream:<path>` writes every ST7789 command and every pixel the panel
+would have received, `NEODCT_PANEL_STREAM=/tmp/panel.nd79 run_qemu.sh`
+attaches the virtio-console port that carries it, and
+`neodct/tools/st7789_replay.py --out a.png` decodes it into the composed
+240×240 frame, letterbox and all. The format is pinned in
+`neodct/src/displayd/nd_panel.h` and the decoder is deliberately a second
+implementation written from the datasheet, so it can disagree with a wrong
+encoder. The QEMU window is still where keystrokes come from; with no display
+at all the way in is `NEODCT_MONITOR` and the monitor's `sendkey`.
 
 Version comes from one place: `VERSION_ID` in `neodct/overlay/etc/os-release`.
 An update built without bumping it installs but shows no change on screen.
@@ -158,7 +174,7 @@ rather than falling back to a bare run.
 python3 -m pytest neodct/tests/ -q      # from the repo root
 ```
 
-2,039 passing and 14 skipped, ~104s — measured, on this checkout. (It said
+2,087 passing and 14 skipped, ~111s — measured, on this checkout. (It said
 "510 tests, ~20s" here for a long time, and that is the number agents
 calibrated on — `spec-build-test.md` risk R-15 is about exactly this. It then
 said 1,961 across two commits that added tests without touching it, which is
@@ -328,10 +344,53 @@ frame for a new screen. See CODING-STANDARDS.md section 7.
 ## The image design (understand this before touching storage)
 
 At runtime `/` and `/NeoDCT/System` are **read-only squashfs** under dm-verity.
-`/NeoDCT/User` is a **separate ext4 partition** and the only writable storage.
-It never appears in `/etc/fstab`: `neodct/initramfs/init` finds it (by disk
+`/NeoDCT/User` is the only writable storage — **ubifs on `ubi1:userdata` on the
+phone and in QEMU, ext4 on a partition where there is a block device**. It
+never appears in `/etc/fstab`: `neodct/initramfs/init` finds it (by disk
 serial `NDUSER`, then `LABEL="NDUSER"`, then the `neodct.user=` cmdline hint),
 mounts it, `mount --move`s it into the new root, then `switch_root`s.
+
+**The emulator's `/NeoDCT/User` is now the phone's, and `run_qemu.sh` flashes
+`mknand.sh`'s own image to get it there.** `NEODCT_STORAGE=nand` is the
+default: nandsim at the Pico Mini's ID bytes, `nandsim.parts=2,2,4,128,64`
+giving `docs/PARTITIONS.md`'s six partitions at the phone's mtd numbers, and a
+QEMU-only flasher (`neodct/initramfs/qemu/ndflash`, packed in as a second cpio
+archive with `rdinit=/ndflash`) that writes `userdata.ubi` onto mtd4 and
+attaches UBI over it before `exec`ing the phone's `/init`. Measured on a real
+boot: `LEB size: 126976 bytes`, `VID header offset: 2048`, volume `userdata`
+dynamic at 40 LEBs, `mount -t ubifs ubi1:userdata`. `user_is_ubi()` and the
+ubifs branch of the mount had never executed anywhere before.
+
+**The system half is NOT on the chip, and that is measured rather than
+forgotten.** A 51 MB `system.ubi` costs 54,953 kB of unreclaimable nandsim
+slab, which OOM-panics a 64 MB guest; `nandsim.cache_file=` removes that cost
+and deadlocks the guest instead, on the first read of the system volume that
+misses the cache file's page cache, because servicing a `ubiblock` request
+then submits a second bio from inside the first one's dispatch.
+`NEODCT_STORAGE=nand-full` is the whole stack — `/dev/ubiblock0_0`, squashfs
+and dm-verity over it — and it refuses below `NEODCT_MEM=128` and says why.
+`NEODCT_STORAGE=virtio` is the old arrangement and prints on every boot what
+it is not exercising. `docs/PARTITIONS.md` section 11 has all of it.
+
+**The NAND does not persist across QEMU processes** — nandsim's
+`pages_written` bitmap is per-boot — so `run_qemu.sh` lifts the userdata
+partition out of the cache file when QEMU exits and hands it back next boot.
+That lift is on an EXIT trap and not after the QEMU line, which is the
+difference between a save that happens and one that happens on the happy path
+only: under `set -e` a non-zero QEMU exit terminated the script before the
+save, and a `kill` of the script orphaned QEMU and skipped it too. Both
+measured, both fixed; `run_qemu.sh` now `exec`s only on the plain virtio boot,
+which is the one mode with nothing to save and nothing to clean up.
+
+**Three storage modes, three different fates for `/NeoDCT/User`**, and each
+one says which on every boot: `nand` (the default) saves it,
+`NEODCT_SNAPSHOT=1` does not because every drive is copy-on-write, and
+`nand-full` does not because it deliberately has no cache file to lift out of.
+`NEODCT_KEEP_USERDATA=1` belongs to the **ext4/virtio** path only — it keeps
+`userdata.ext4` across a rebuild by rewriting `installed.prop` with `debugfs`,
+and there is no host-side way to rewrite one file inside a ubifs volume, so
+`post-image-neodct.sh` says so rather than reporting a success the NAND path
+does not get.
 
 An `UPDATE.ndsw` is a zip of `rootfs.squashfs` + `manifest.json` +
 `manifest.sig` — **the entire root filesystem**, not the `/NeoDCT` directory.

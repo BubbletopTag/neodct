@@ -34,24 +34,28 @@
 # and then check fb0.var.xres. A refusal is not a measurement, but a recorded
 # capture that is not a measurement is worse, because it becomes the reference.
 #
-# ============ AND THAT CHECK IS A WARNING UNDER QEMU, NOT A REFUSAL ========
+# ============ AND THAT CHECK IS A REFUSAL AGAIN, BECAUSE IT CAN PASS =======
 #
-# It was a refusal, and it could never have passed. force_mode() lives in
-# neodct/src/displayd/neodctDisplay.c and runs only when S90display starts
-# that daemon -- and S90display sets PANEL_DAEMON=no on qemu, deliberately,
-# because there is no SPI bus and the virtual framebuffer IS the screen.
-# AGENTS.md says the same thing outright: "on the phone neodct_displayd does
-# that and under QEMU nothing does it yet." So the first person to run this
-# against a built image would have waited, been told the framebuffer was
+# It was written as a refusal, then demoted to a warning, and both were right
+# at the time. force_mode() lives in neodct/src/displayd/neodctDisplay.c and
+# runs only when S90display starts that daemon -- and S90display used to set
+# PANEL_DAEMON=no on qemu, because there was no SPI bus for the daemon to
+# open. So the refusal could never have passed, and the first person to run
+# this against a built image would have waited, been told the framebuffer was
 # 640x480, and started debugging an image that was fine.
 #
-# The precondition is named instead of asserted: xres is 240 where a panel
-# daemon is expected to have run, and until something under QEMU issues the
-# ioctl -- which is the missing piece AGENTS.md already flags -- this says so
-# on stderr and records the capture with vfb's default in it. The fb0 records
-# are then a property of that gap, not of the emulator, and they are the
-# reason the drift comparison is byte-for-byte against a baseline taken the
-# same way rather than against the phone.
+# The daemon has a backend that is not the SPI panel now. S90display starts it
+# on the emulator with `--panel null --once`: force_mode() runs, fb0 comes out
+# of vfb's 640x480x8 default and into 240x175x32, and the process exits.
+# Measured on a real armv7 boot through parity_capture_probe.sh, which does
+# the same thing by hand because a busybox initramfs has no S90display: ten
+# framebuffer records move and nothing else does.
+#
+# So the check is an assertion again and NEODCT_REQUIRE_PANEL is no longer the
+# thing that turns it on -- it is the escape hatch, NEODCT_REQUIRE_PANEL=0,
+# for recording a capture while debugging. A capture taken before force_mode()
+# is now the thing that gets refused, because a baseline holding vfb's default
+# describes a framebuffer no NeoDCT process ever sees.
 
 set -eu
 
@@ -103,6 +107,26 @@ cat "$FIFO" > "$LOG" &
 # for `login:` timed out after 180 s on a perfectly good image. -M virt wires
 # one pl011, so a second -serial would not have been a second console either;
 # run_qemu.sh names the chardev now instead of hard-coding stdio.
+# ============ AND A virtio-STORAGE CAPTURE IS REFUSED OUTRIGHT ============
+#
+# NEODCT_STORAGE=virtio puts /NeoDCT/User back on an ext4 disk the phone does
+# not have, so class.ubi, class.block and the whole mount set describe a
+# machine nobody ships. Such a capture would FAIL --compare against the
+# committed baseline anyway -- that is the point of the baseline -- but
+# failing at the diff means somebody has already spent four minutes booting
+# and is now reading a wall of differences with the cause four lines above the
+# scrollback. This is the same refusal the script already makes for a capture
+# taken without libneodct, for the same reason: A WEAKER INSTRUMENT MUST NEVER
+# BE ABLE TO BECOME THE REFERENCE.
+if [ "${NEODCT_STORAGE:-nand}" = "virtio" ]; then
+    echo "REFUSED: NEODCT_STORAGE=virtio is in the environment. That boot puts" >&2
+    echo "         /NeoDCT/User on an ext4 virtio disk, which the phone has no" >&2
+    echo "         equivalent of, so the capture would describe a machine" >&2
+    echo "         nobody ships and could never be a parity baseline." >&2
+    echo "         Unset it, or use NEODCT_STORAGE=nand explicitly." >&2
+    exit 1
+fi
+
 NEODCT_DISPLAY=offscreen NEODCT_SD=none NEODCT_CONSOLE="pipe:$FIFO" \
     "$REPO/tools/run_qemu.sh" &
 QEMU_PID=$!
@@ -160,27 +184,25 @@ EOF
 grep -q '^INV|BEGIN$' "$WORK/capture.txt" || { echo "REFUSED: no BEGIN in the capture" >&2; exit 1; }
 grep -q '^INV|END$'   "$WORK/capture.txt" || { echo "REFUSED: no END in the capture" >&2; exit 1; }
 
-# THE ONE THAT MATTERS, AND THE ONE THAT CANNOT YET BE AN ASSERTION. vfb comes
-# up 640x480 at 8 bpp and neodct_displayd puts it into the phone's mode with
-# FBIOPUT_VSCREENINFO. A capture taken before that is a capture of a
-# framebuffer no NeoDCT process ever sees, and the eleven numbers it would put
-# in the baseline are the exact eleven that carry the whole Stage 3 claim.
+# THE ONE THAT MATTERS. vfb comes up 640x480 at 8 bpp and neodct_displayd puts
+# it into the phone's mode with FBIOPUT_VSCREENINFO. A capture taken before
+# that is a capture of a framebuffer no NeoDCT process ever sees, and the
+# eleven numbers it would put in the baseline are the exact eleven that carry
+# the whole panel claim.
 #
-# But S90display sets PANEL_DAEMON=no on qemu and nothing else issues the
-# ioctl, so under the emulator this is a KNOWN gap rather than a bad capture,
-# and refusing here refused every capture that will ever be taken. It says so
-# loudly instead, and NEODCT_REQUIRE_PANEL=1 turns it back into a refusal for
-# the day something under QEMU does set the mode.
+# S90display now starts the daemon on the emulator too -- `--panel null --once`
+# -- so this is an assertion rather than a note, and NEODCT_REQUIRE_PANEL=0 is
+# the escape hatch rather than NEODCT_REQUIRE_PANEL=1 being the switch. See the
+# header.
 xres=$(sed -n 's/^INV|fb0\.var\.xres \(.*\)$/\1/p' "$WORK/capture.txt")
-if [ "$xres" != "240" ]; then
-    echo "NOTE: fb0.var.xres is '${xres:-nothing}', not 240. Nothing under QEMU calls" >&2
-    echo "      force_mode(): S90display sets PANEL_DAEMON=no here because there is no" >&2
-    echo "      SPI bus and vfb IS the screen. So the fb0 records below describe vfb's" >&2
-    echo "      own default and are a property of that gap, not of the emulator." >&2
-    [ -z "${NEODCT_REQUIRE_PANEL:-}" ] || {
-        echo "REFUSED: NEODCT_REQUIRE_PANEL is set and the panel is not in the phone's" >&2
-        echo "         mode, so this capture is not of the machine you asked for." >&2
-        exit 1; }
+if [ "$xres" != "240" ] && [ "${NEODCT_REQUIRE_PANEL:-1}" != "0" ]; then
+    echo "REFUSED: fb0.var.xres is '${xres:-nothing}', not 240, so nothing in this" >&2
+    echo "         image called force_mode() and the fb0 records describe vfb's own" >&2
+    echo "         default rather than the machine you asked for. Look at" >&2
+    echo "         /var/log/neodct_displayd.log in the guest: S90display starts the" >&2
+    echo "         daemon with --panel null --once on qemu, and it logs what it got." >&2
+    echo "         NEODCT_REQUIRE_PANEL=0 records the capture anyway, for debugging." >&2
+    exit 1
 fi
 
 mkdir -p "$(dirname "$OUT")"

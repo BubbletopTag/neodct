@@ -137,6 +137,26 @@ if [ -f "$USERDATA" ] && [ -n "${NEODCT_KEEP_USERDATA:-}" ]; then
             exit 1
         fi
         say "userdata.ext4 kept, installed.prop refreshed (root ${WANT%%"${WANT#????????}"}...)"
+        # And say what it does NOT cover, because the default emulator boot no
+        # longer uses this partition at all. NEODCT_STORAGE=nand puts
+        # /NeoDCT/User on ubifs over a simulated chip, flashed from the
+        # userdata.ubi rebuilt below, and run_qemu.sh discards its saved
+        # userdata.nand.img whenever userdata.ubi is newer -- which a rebuild
+        # always makes it. So a developer who sets this flag, rebuilds and
+        # then boots with no arguments loses everything, having just been told
+        # the partition was kept.
+        #
+        # It is not fixable by keeping the old userdata.ubi. The whole reason
+        # this branch exists is installed.prop: dm-verity refuses the new
+        # system against the old root hash, the ext4 path rewrites it with
+        # debugfs, and THERE IS NO HOST-SIDE WAY TO REWRITE ONE FILE INSIDE A
+        # ubifs VOLUME -- mkfs.ubifs builds a volume from a directory and
+        # nothing here can read one back. Keeping it would swap "your contacts
+        # are gone" for "the phone boots to recovery", which is worse.
+        say "  NOTE: this covers NEODCT_STORAGE=virtio only. The default"
+        say "  storage mode is nand, whose userdata.ubi is rebuilt below and"
+        say "  which therefore starts /NeoDCT/User again -- there is no way to"
+        say "  refresh installed.prop inside a ubifs volume from the host."
     else
         say "debugfs not found; cannot refresh installed.prop in place."
         say "  Unset NEODCT_KEEP_USERDATA to rebuild the partition instead."
@@ -151,6 +171,35 @@ else
         "$USERDATA" "$((USERDATA_MB * 256))" > /dev/null
     say "userdata.ext4 (${USERDATA_MB}M, label NDUSER) -- user data reset"
     say "  (NEODCT_KEEP_USERDATA=1 keeps it across rebuilds)"
+fi
+
+# --- userdata.ubi: the same partition, as the PHONE has it ----------------
+#
+# run_qemu.sh's default storage mode puts /NeoDCT/User on a UBI volume over a
+# simulated NAND chip instead of on the ext4 above, because that is what the
+# Luckfox has: `neodct.user=ubi1:userdata`, ubifs, the phone's 126,976-byte
+# LEB. user_is_ubi() and the ubifs branch of the initramfs's mount had never
+# run anywhere before that mode existed.
+#
+# It is built HERE, from the SAME skeleton as userdata.ext4, for one reason
+# that is not tidiness: the skeleton carries .ndsys/installed.prop, and
+# without it dm-verity has no root hash to check on first boot and an
+# `enforce` boot goes straight to recovery. Building the volume anywhere else
+# would mean rebuilding system.img to get that file, with a fresh random salt,
+# which would change the very image the hash describes.
+#
+# NOT FATAL when mtd-utils is missing. The qemu defconfig need not carry the
+# UBIFS block that pulls host-mtd (DECISIONS D5 is about the luckfox one), and
+# failing an image build over the emulator's storage mode would be the wrong
+# trade -- the same argument --bootbar makes above. run_qemu.sh says exactly
+# what is missing if the file is not there.
+if "$NEODCT_DIR/tools/mknand.sh" --userdata-only --skel "$SKEL" \
+        "$BINARIES_DIR" > /dev/null 2>&1; then
+    say "userdata.ubi ($(du -h "$BINARIES_DIR/userdata.ubi" | cut -f1), volume 'userdata', ubifs)"
+else
+    rm -f "$BINARIES_DIR/userdata.ubi"
+    say "no userdata.ubi -- mknand.sh could not run (ubinize/mkfs.ubifs missing?)."
+    say "  NEODCT_STORAGE=nand will refuse and say so; NEODCT_STORAGE=virtio still boots."
 fi
 rm -rf "$SKEL"
 

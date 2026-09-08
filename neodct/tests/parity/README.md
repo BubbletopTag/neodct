@@ -37,7 +37,8 @@ one at a time.
 own kernel (`board/qemu/armv7-virt/linux.config`), the exact machine
 `run_qemu.sh` assembles — `-M virt -cpu cortex-a7 -smp 1 -m 64`,
 `-global virtio-mmio.force-legacy=false`, `mtdram.total_size=0` plus the Pico
-Mini's nandsim ID bytes, `video=vfb:on`, `gpio-mockup.gpio_mockup_ranges=0,64`
+Mini's nandsim ID bytes and `nandsim.parts=2,2,4,128,64`, `video=vfb:on`,
+`gpio-mockup.gpio_mockup_ranges=0,64`
 and **the device tree `run_qemu.sh` builds** — and a **busybox initramfs**
 where the NeoDCT rootfs would be, because `buildroot/output` does not exist
 and a full build is hours. Two boots produced byte-identical files.
@@ -67,20 +68,36 @@ integer somebody sees.
 
 Three consequences worth knowing before the file confuses you:
 
-- `fb0.var.xres` is **640** and `bits_per_pixel` is **8**, because there is no
-  `S90display` in a busybox initramfs and nothing called `force_mode()`.
-  `parity_capture_qemu.sh` used to *refuse* a capture whose xres was not 240,
-  which it could never have accepted: `force_mode()` lives in
-  `neodct_displayd` and `S90display` sets `PANEL_DAEMON=no` on qemu, so
-  **nothing under the emulator sets the mode at all** — AGENTS.md flags the
-  same gap. It says so loudly and records the capture now, and
-  `NEODCT_REQUIRE_PANEL=1` turns it back into a refusal for the day something
-  does.
+- `fb0.var.xres` is **240** and `bits_per_pixel` is **32**, because the
+  capture is taken **after** `neodct_displayd`'s `force_mode()` has run. There
+  is no `S90display` in a busybox initramfs, so `parity_capture_probe.sh`
+  cross-compiles the daemon in beside `nd-inventory` and runs
+  `neodct_displayd --panel null --once` itself — the phone's binary, the
+  phone's `FBIOPUT_VSCREENINFO`, on vfb, which is the driver both machines
+  have. Ten `fb0` records moved when that landed and nothing else did.
+  `NEODCT_REQUIRE_PANEL` is no longer a hook held open for a day that had not
+  come: the check is the default in both capture scripts and
+  `NEODCT_REQUIRE_PANEL=0` is the escape hatch. **`--panel null` and not
+  `--panel stream:`** — the stream needs a virtio-console port, the port gives
+  the guest `/dev/vport0p1` and `/sys/class/virtio-ports`, and `dev.count`
+  would move. A baseline describes the machine somebody boots.
 - `class.gpio`'s `gpiochip0` is `CONFIG_GPIO_MOCKUP`, not a real controller.
   It is there because `-M virt`'s own pl061 is eight lines at base 512, so
   none of the pin numbers this tree hard-codes — `ND_BL_GPIO_PIN` 53, and 56
   and 57 for the panel's RST and DC — exists on it. `gpio-sim`, which 6.12
   recommends instead, has no fixed gpiobase and cannot produce them.
+- `class.mtd` is `[mtd0 mtd0ro ... mtd5 mtd5ro]` and **that is the phone's own
+  key set**, because `nandsim.parts=2,2,4,128,64` in `nd_qemu_append()` cuts
+  the simulated chip into `docs/PARTITIONS.md`'s six partitions at the phone's
+  own mtd numbers. It used to be `[mtd0 mtd0ro]` with an allow.txt record
+  explaining the difference, and that record is gone. What it cost is five
+  `mtd.byname.[*].*` records plus `block.mtdblock5.size`: those geometry keys
+  are named after the PARTITION, nandsim names its partitions after itself,
+  and six partitions means thirty such keys where there were five — none of
+  which was listed at all before, i.e. all thirty silently *required to agree*
+  with a phone they cannot agree with. The phone's own thirty are the mirror
+  image and are deliberately not written, because they do not exist until
+  somebody captures a phone.
 - every `dev.*` owner reads `uid=0(?)`, because that initramfs has no
   `/etc/passwd` to resolve against. The names are read from `/etc/passwd` and
   `/etc/group` directly and not through `getpwuid(3)` — see the record for
@@ -120,15 +137,59 @@ neodct/tools/parity_diff.py ... --propose >> neodct/tests/parity/allow.txt
 | gate | when it runs | what it catches |
 |---|---|---|
 | `test_parity_allowlist.py` | every change, no boot | an empty argument, an unedited `--propose` skeleton, a `permanent`/`until-image`/total count that moved, a column that matches every value, a `[*]` key free on both sides, an emulator column that no longer matches the committed capture, a baseline whose hashes do not verify or has none, a closed stage still promising to close, a `qemu-armv7.inventory` that has arrived unnoticed |
-| `test_qemu_surfaces.sh` | when a kernel is in hand, no image | the four small hardware surfaces in a booted guest — the backlight's name and table, the cpufreq table, the two deliberately empty classes and the absent one, the phone's three GPIO pins, MemTotal on both sides of `-dtb`, and the one thing no host test can see: a write in the wrong order being swallowed |
+| `test_qemu_surfaces.sh` | when a kernel is in hand, no image | the small hardware surfaces in a booted guest — the backlight's name and table, the cpufreq table, the two deliberately empty classes and the absent one, the phone's three GPIO pins, **the flash: six MTD partitions at the phone's numbers, mtd4 at 8 MiB, writesize 2048** — MemTotal on both sides of `-dtb`, and the one thing no host test can see: a write in the wrong order being swallowed |
 | `test_inventory` (`make test`) | every change, no boot | the canonicaliser: LC_ALL=C sorting, the `/dev` family collapse with the *first* member escaping it (which is what tests the majority rule — breaking a middle member cannot), every mask, `ABSENT` versus `[]`, key escaping, a duplicate key being refused, both line shapes of `/proc/filesystems`, and one tree built in two creation orders producing byte-identical output **and** the exact output a correct sort produces |
-| `parity_capture_probe.sh --compare` (`make parity-probe`) | when a kernel and a busybox rootfs are in hand, no image | **emulator drift** — a fresh capture from a real boot must equal the committed baseline byte for byte. ~4 s. This is the only gate anywhere that re-derives the allowlist's input from a *machine* rather than checking it against a file |
+| `parity_capture_probe.sh --compare` (`make parity-probe`) | when a kernel and a busybox rootfs are in hand, no image | **emulator drift** — a fresh capture from a real boot must equal the committed baseline byte for byte, *and* `neodct_displayd`'s start-up path, which the capture now runs before `nd-inventory`. ~4 s. This is the only gate anywhere that re-derives the allowlist's input from a *machine* rather than checking it against a file |
+| `test_qemu_nand.py` (`pytest`) | every change, no boot | the emulator's NAND without booting one: the de-interleave `/NeoDCT/User`'s persistence rests on (including that a page nandsim never programmed comes back as 0xFF and not 0x00), `nandsim.parts=` and `mkqemuflash.py`'s table being the same six partitions, `mknand.sh`'s LEB arithmetic and its `USERDATA_MAX_LEB`, that the flashing drives cannot wear `NDSYS` or `NDUSER`, that the cache drive is the last virtio-blk on the line, that the flasher is not packed into the phone's initramfs, and that the overlay cpio is reproducible and really unpacks |
+| `test_displayd_stream.py` + `test_displayd` (`make test`) | every change, no boot | the panel daemon's composing half, driven through `--fb-at` and `--panel stream:` — the ST7789 bring-up, the CASET/RASET window including the `+65` letterbox, the one-pixel dirty rect, the frame skip, the big-endian 565 pack, and `st7789_replay.py`'s decode of all of it |
 | `parity_capture_qemu.sh --compare` | on a built image | the same, from the image rather than from a busybox initramfs |
 | `parity_capture_hw.sh` + `parity_diff.py` | when hardware is in hand | genuine cross-machine divergence |
 
 The split is the point. Hardware is rare and kernel-config changes are not, so
 the common case — somebody changes something and the emulator quietly drifts —
 is caught with no phone in the room.
+
+## The storage row, and why a virtio boot cannot be a baseline
+
+`run_qemu.sh`'s default is `NEODCT_STORAGE=nand`: `/NeoDCT/User` is ubifs on
+`ubi1:userdata`, over a simulated chip with the phone's geometry, flashed from
+`mknand.sh`'s own `userdata.ubi`. A capture from that boot carries `class.ubi`
+= `[ubi1 ubi1_0 version]`, the `ubi.*` geometry records, a `dev.ubi*` family
+and a `/NeoDCT/User` mount whose fstype is `ubifs` — every one of which is a
+record the phone will produce too.
+
+A capture from `NEODCT_STORAGE=virtio` carries none of them. It is visibly a
+different machine, so `parity_capture_qemu.sh --compare` fails on it byte for
+byte with no new machinery — the same mechanism that already refuses a
+shell-fallback capture as a gating reference. `parity_capture_qemu.sh` now
+also refuses such a boot **before** it starts, because failing at the diff
+means four minutes of booting and then a wall of differences whose cause has
+scrolled off.
+
+What the emulator still cannot do is put the SYSTEM volume on that chip at the
+phone's memory, and both walls are measured rather than argued: without a
+host-backed cache file a 51 MB `system.ubi` is 54,953 kB of unreclaimable
+nandsim slab on a 53,824 kB machine, and with one the first read of the volume
+that misses the cache file's page cache deadlocks the guest.
+`NEODCT_STORAGE=nand-full` is that stack at `NEODCT_MEM=128` or more, and it
+says in its own refusal that it is the phone's storage and not the phone's
+memory. `docs/PARTITIONS.md` section 11 has the numbers and the stack trace.
+
+**The committed baseline does not contain any of that, and the gate table
+above must not be read as saying it does.** `qemu-armv7-probe.inventory` comes
+from a boot with two blank virtio drives and no flasher, so it carries
+`class.ubi [version]`, `block.vda.serial NDUSER`, no `ubi.*` geometry and no
+`/NeoDCT/User` mount at all. **No gate anywhere re-derives a UBI record from a
+machine**: change `nandsim.parts=`, `ndflash`'s VID header offset,
+`mknand.sh`'s `LEB_SIZE` or `nd_ubiattach`'s ioctl struct and `make test`,
+`make ASAN=1 test`, the pytest suite, `test_qemu_surfaces.sh` and
+`make parity-probe` all stay green. That is deliberate — the probe has to
+produce a byte-identical capture on any host with a kernel and a busybox
+rootfs, and flashing a real volume would make `mtd-utils` a precondition of
+the cheapest gate in the tree — but it is a hole, it is this size, and
+`parity_capture_probe.sh`'s header carries the same paragraph. What covers the
+storage stack today is `test_qemu_nand.py` (tables and arithmetic, no boot)
+and a manual `run_qemu.sh`, where `ndflash` refuses out loud at every step.
 
 **And that row is why the probe capture is a gate and not just an artefact.**
 For as long as nothing re-derived the baseline, every host test validated
@@ -139,6 +200,39 @@ nothing. Measured: drop `gpio-mockup.gpio_mockup_ranges=0,64` from
 tier, and the panel's RST and DC), three capture records change, and every
 gate stays green. A change to either file means running `make parity-probe`;
 both files say so in their own headers.
+
+## Which way this file has actually moved
+
+**It grew, and saying otherwise was the most misleading sentence in it.** The
+storage and panel stages took it from 21 records to 27, and by the number that
+matters more — how many of the capture's keys are excused from parity — from
+67 of 169 to 118 of 230. The fraction of a capture this file exempts went from
+40% to 51%. Both integers are pinned in `test_parity_allowlist.py`
+(`TOTAL_RECORDS_EXPECTED`, `PERMANENT_RECORDS_EXPECTED`,
+`COVERED_KEYS_EXPECTED`) precisely so that neither can move without somebody
+typing the new one.
+
+The honest version of the good news is a different sentence, and it is not
+"the file shrank":
+
+- **Ten `fb0` records were not needed rather than being written.** Before the
+  panel stage, a first hardware capture would have diverged on `xres`, `yres`,
+  both virtuals, `bits_per_pixel`, `line_length`, `visual` and the three
+  channel offsets — eleven records' worth of argument. `neodct_displayd` now
+  runs on both machines and `force_mode()` sets all of them, so ten of the
+  eleven agree by construction and only `fb0.fix.smem_len`, which no ioctl can
+  reach, needed an entry.
+- **Thirty `mtd.byname` keys stopped being silently required to agree.** They
+  were unlisted, which in this harness means "must match" — and they could
+  never match, because they are keyed by a partition name nandsim does not let
+  anybody set. Six records now say so. That is the file getting *bigger* and
+  the harness getting *more honest* at the same time, which is a trade worth
+  making and worth naming.
+- **One record closed outright**: `class.mtd`, deleted because the emulator's
+  MTD listing became the phone's.
+
+A record count going up is not by itself a failure; a record count going up
+while the README says it went down is.
 
 ## The four verdicts
 

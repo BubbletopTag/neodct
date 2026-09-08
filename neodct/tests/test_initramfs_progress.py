@@ -349,6 +349,33 @@ def test_a_progress_bar_that_cannot_be_reached_leaves_no_trace_in_the_record(tmp
     assert read_prop(state / "last_result.prop", "result") == "ok"
 
 
+def test_the_initramfs_starts_the_panel_daemon_with_no_backend_argument():
+    """ndsys-panel.sh must keep taking neodct_displayd's DEFAULT backend.
+
+    The daemon grew `--panel spidev|null|stream:<path>` when the panel stage
+    put a seam between its composing half and its transport. The default is
+    still spidev, and this script depends on that in a way nothing else in
+    either suite covers: it starts the binary with no arguments at all and
+    DEPENDS ON IT EXITING under QEMU, where there is no SPI bus. mkinitramfs.py
+    ships the same binary into the QEMU initramfs now that the ABI has
+    collapsed and its ELF check can no longer tell the boards apart.
+
+    So a `--panel` argument appearing here -- or the daemon's default moving
+    off spidev -- would change boot-critical initramfs behaviour on the
+    emulator as a side effect. This is the line that would notice.
+    """
+    body = open(PANEL_SH).read()
+    assert "--panel" not in body, (
+        "ndsys-panel.sh now passes a panel backend; it depends on the default")
+
+    daemon = os.path.join(os.path.dirname(os.path.dirname(APPLY_SH)),
+                          "src", "displayd", "neodctDisplay.c")
+    source = open(daemon).read()
+    assert 'static const char *opt_panel = "spidev";' in source, (
+        "neodct_displayd's default backend is no longer spidev, which changes "
+        "what ndsys-panel.sh does on QEMU with nothing else to notice")
+
+
 def test_nothing_is_drawn_when_the_panel_never_came_up(tmp_path):
     """PANEL_UP empty is QEMU with no framebuffer and a phone whose daemon
     exited. progress_filter must not even exec the tool: `[ -n "$PANEL_UP" ]`

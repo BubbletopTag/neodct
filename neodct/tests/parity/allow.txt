@@ -15,9 +15,9 @@
 # repo's own kernel (board/qemu/armv7-virt/linux.config), the exact machine
 # run_qemu.sh assembles (-M virt -cpu cortex-a7 -smp 1 -m 64,
 # force-legacy=false, mtdram.total_size=0 plus the Pico Mini's nandsim ID
-# bytes, video=vfb:on), and a BUSYBOX INITRAMFS where the NeoDCT rootfs would
-# be, because buildroot/output does not exist and a full build is hours. Two
-# boots produced byte-identical files.
+# bytes and nandsim.parts=2,2,4,128,64, video=vfb:on), and a BUSYBOX INITRAMFS
+# where the NeoDCT rootfs would be, because buildroot/output does not exist and
+# a full build is hours. Two boots produced byte-identical files.
 #
 # The capture is taken WITH THE DEVICE TREE run_qemu.sh builds. That is not a
 # detail: three of the records below turn on the difference between a
@@ -324,6 +324,46 @@ why          The one surface here that is a STAND-IN rather than a copy, and
              BOTH machines and leaves free only the chip names, which are the
              half that genuinely cannot match.
 
+key          fb0.fix.smem_len
+qemu         1048576
+hw           ~(1[7-9][0-9]{4}|[2-9][0-9]{5}|[0-9]{7,})
+verdict      permanent
+hw_evidence  unmeasured-claim
+why          The one framebuffer field the two kernels set INDEPENDENTLY, and
+             the only fb0 record force_mode() cannot move. The other ten now
+             AGREE by construction: neodct_displayd runs on both machines and
+             its FBIOPUT_VSCREENINFO puts vfb into 240x175x32 on each, so
+             xres, yres, both virtuals, bits_per_pixel, line_length, visual
+             and the three channel offsets are the phone's numbers here
+             because the phone's own code put them here. This one is fixed at
+             probe from vfb's compile-time VIDEOMEMSIZE
+             (drivers/video/fbdev/vfb.c, 1 MB) and no ioctl can change it.
+             .
+             WHAT MATTERS IS NOT EQUALITY BUT A FLOOR, which is why the hw
+             column is a shape rather than a number. vfb_check_var() refuses a
+             mode whose line_length * yres_virtual exceeds videomemorysize, so
+             a phone whose vfb is smaller than 168,000 bytes cannot be granted
+             240x175x32 AT ALL: force_mode() falls back to 16 bpp, fb_bytespp
+             becomes 2, convert_rect() takes its other branch, and the phone
+             runs a different pixel pipeline from the emulator with nothing
+             anywhere saying so. A value that is not 1048576 is not a fault as
+             long as it clears 168,000; a value below it is the whole panel.
+             The RV1103 SDK's 5.10 config is not in this repository
+             (DECISIONS D6), so the phone's value is a claim -- but the
+             daemon logs the depth it was granted on every start, and the
+             first hardware boot settles it in one line of the log.
+             .
+             THE COLUMN ENCODES THE FLOOR RATHER THAN A DIGIT COUNT, and the
+             first version of it did not: `~1?[0-9]{6,}` was six-or-more
+             digits, so it MATCHED 131072 -- a 128 KiB vfb, which is below
+             168,000 and is therefore exactly the phone this record exists to
+             catch, reported as fine. The regex now admits 170,000 and up and
+             refuses 167,999 and down, which is what the paragraph above says.
+             It is one digit loose at the bottom (168,000 to 169,999 are
+             refused) and that is deliberate: a bound a reader can check
+             against the prose beats one that is exact and unreadable, and
+             nothing can legitimately land in a 2 KB window above the floor.
+
 key          class.i2c-dev
 qemu         []
 hw           ~\[.+\]
@@ -369,40 +409,145 @@ why          The other direction, keyed by the device's own name. A
              a whole missing device rather than a warning nobody saw. That is
              the shape this harness is for.
 
-key          mtd.node.mtd0.name
-qemu         NAND simulator partition 0
-hw           ~env
+key          mtd.node.[*].name
+qemu         ~NAND simulator partition [0-5]
+hw           ~(env|idblock|uboot|boot|userdata|rootfs)
 verdict      permanent
 hw_evidence  unmeasured-claim
 why          The GEOMETRY matches by design and that is finding 11: nandsim at
              0x20/0xa1/0x00/0x15 gives 128 MB, 128 KiB PEB, 2048-byte page and
              64-byte OOB -- the Pico Mini's part exactly, at no cost in guest
-             RAM because it allocates lazily. What does not match is the
-             partition NAME, and because the geometry records are keyed by
-             name rather than by index, that difference shows up as a
-             different SET OF KEYS rather than as different values. That is
-             the price of keying by identity, and it is the right price:
-             measured here that reordering the -drive arguments swaps vda and
-             vdb, so an index in a node name is not an identity. The hw column
-             is `~env` and not `~.*`: docs/PARTITIONS.md gives the table in
-             RK_PARTITION_CMD_IN_ENV, where mtd0 is the 256 KiB `env`
-             partition holding the U-Boot environment -- which is where this
-             board's kernel cmdline lives, so a phone whose mtd0 is called
-             something else has a partition table this repository does not
-             describe. A documented claim like every other hw value here, and
-             hw_evidence says which it is.
+             RAM because it allocates lazily. The PARTITION TABLE now matches
+             too: `nandsim.parts=2,2,4,128,64` in qemu_machine.sh reproduces
+             docs/PARTITIONS.md's six partitions at the phone's own mtd
+             numbers, so mtd4 is the 8 MiB userdata and mtd5 the rootfs on both
+             machines. What still cannot match is the partition NAME -- nandsim
+             names its partitions after itself and takes no parameter for it.
+             .
+             THIS RECORD USED TO BE mtd.node.mtd0.name AND COVERED ONE KEY.
+             There was one partition then. There are six now, and five of them
+             would have been unlisted -- i.e. required to agree -- so the same
+             one-line divergence would have been reported five more times with
+             nothing to explain it. `[*]` matches exactly one segment and an
+             mtd node name has no dots in it, so the family form is legal here.
+             The hw column names the six partitions PARTITIONS.md gives in
+             RK_PARTITION_CMD_IN_ENV rather than `~.*`: a phone whose mtd0 is
+             not `env` has a partition table this repository does not describe,
+             and that is worth failing on.
 
-key          class.mtd
-qemu         [mtd0 mtd0ro]
-hw           ~\[.+\]
+key          mtd.byname.[*].erasesize
+qemu         131072
+hw           ABSENT
 verdict      permanent
 hw_evidence  unmeasured-claim
-why          One simulated chip against the phone's real partition table.
-             mtdram is deliberately not in this listing: run_qemu.sh passes
-             mtdram.total_size=0 because a built-in mtdram vmallocs its 4 MiB
-             default out of a 64 MB machine on every boot, and because mtdram
-             reports write=1, so every LEB size and VID header offset computed
-             on it is arithmetic the phone never does.
+why          The FIRST of five records that all say one thing: the geometry
+             records are keyed by partition NAME, and the two machines spell
+             those names differently, so what would be one differing value
+             becomes two disjoint sets of keys. The emulator has six
+             `mtd.byname."NAND\x20simulator\x20partition\x20N".*` keys that
+             the phone does not have; the phone has six `mtd.byname."env".*`
+             and friends that the emulator does not. These five records cover
+             the emulator's half -- hence `hw ABSENT`, which is what a key
+             present on one side only reads as.
+             .
+             THE PHONE'S HALF IS NOT COVERED AND MUST NOT BE INVENTED. The
+             first capture from real hardware has to add the mirror-image
+             records with the phone's own names, and until it does those keys
+             do not exist to be listed. Writing them now would be this file
+             claiming an observation it does not have, which is the one thing
+             it may never do.
+             .
+             The VALUE is the point of keeping them at all: 131072 is the
+             phone's erase block, and if nandsim's ID bytes ever changed, this
+             record would stop matching rather than the geometry quietly
+             becoming somebody else's chip.
+
+key          mtd.byname.[*].oobsize
+qemu         64
+hw           ABSENT
+verdict      permanent
+hw_evidence  unmeasured-claim
+why          As mtd.byname.[*].erasesize. 64 bytes of OOB per 2048-byte page
+             is the 0x15 ID byte's bit[2], decoded in test_update_ubi.sh's
+             header.
+
+key          mtd.byname.[*].size
+qemu         ~(262144|524288|8388608|16777216|108003328)
+hw           ABSENT
+verdict      permanent
+hw_evidence  unmeasured-claim
+why          As mtd.byname.[*].erasesize, but the value is a set rather than a
+             constant because the six partitions are six sizes. Five of them
+             are PARTITIONS.md's exactly -- 256 KiB env and idblock, 512 KiB
+             uboot, 16 MiB boot, 8 MiB userdata. The sixth is 108,003,328
+             where the phone's rootfs is 100 MiB, and that is deliberate:
+             `nandsim.parts=` is given five sizes and not six so that the
+             3 MiB of bad-block slack falls into the last partition instead of
+             becoming an mtd6 the phone has no name for. Measured: six values
+             produce SEVEN partitions. Nothing in this tree reads that size --
+             mknand.sh's check_fits uses its own constant -- so the trade is
+             three megabytes of a number nobody reads against a partition
+             nobody can explain.
+
+key          mtd.byname.[*].type
+qemu         nand
+hw           ABSENT
+verdict      permanent
+hw_evidence  unmeasured-claim
+why          As mtd.byname.[*].erasesize. `nand` and not `mtdram`: this is the
+             record that would have caught the emulator being moved back onto
+             a RAM-backed MTD, which reports write=1 and makes every LEB size
+             computed on it arithmetic the phone never does.
+
+key          mtd.byname.[*].writesize
+qemu         2048
+hw           ABSENT
+verdict      permanent
+hw_evidence  unmeasured-claim
+why          As mtd.byname.[*].erasesize, and this is the single most
+             load-bearing number in the whole storage stack. UBI reads min_io
+             straight off it, so 2048 here is what makes the emulator's LEB
+             126,976 -- mknand.sh's own LEB_SIZE -- rather than mtdram's
+             130,944 or a silently-formatted nandsim's 129,024. A capture
+             where this said 1 would be a capture of a machine that cannot
+             test this phone's flash arithmetic at all.
+
+key          block.mtdblock5.size
+qemu         210944
+hw           ~204800
+verdict      permanent
+hw_evidence  unmeasured-claim
+why          The same three megabytes as mtd.byname.[*].size, in the one place
+             where both machines produce the KEY and so the difference lands
+             as a VALUE. `nandsim.parts=` is given five sizes and not six so
+             that the chip's bad-block slack falls into the last partition
+             rather than becoming an mtd6 the phone has no name for -- the
+             full argument is three records above -- and mtd5 is therefore
+             108,003,328 bytes here against the phone's 100 MiB. In 512-byte
+             sectors, which is the unit /sys/block/*/size uses: 210,944
+             against 204,800.
+             .
+             WITHOUT THIS RECORD IT WOULD HAVE BEEN THE ONE UNEXPLAINED
+             DIFFERENCE IN THE FIRST HARDWARE DIFF, because the mtd.byname
+             family is keyed by partition NAME and is `hw ABSENT` on both
+             sides of that argument, while block.* is keyed by NODE name and
+             mtdblock5 exists on both machines. The reasoning was written down
+             and attached to the wrong key family.
+             .
+             AND ITS FOUR SIBLINGS AGREE, which is the good half of the same
+             change: block.mtdblock0 through block.mtdblock4 are 512, 512,
+             1024, 32768 and 16384 sectors -- PARTITIONS.md's 256 KiB env,
+             256 KiB idblock, 512 KiB uboot, 16 MiB boot and 8 MiB userdata,
+             exactly -- so five keys that used to be one 128 MB partition now
+             match the phone by construction and are deliberately NOT listed
+             here. `class.block` still differs and is deliberately not listed
+             either: the emulator's listing carries vda and vdb, which are
+             QEMU's transport for the images and have no phone analogue, and
+             the phone's carries a ubiblock this probe has no UBI to make.
+             That divergence predates this stage, it is about the IMAGE rather
+             than the machine, and writing an hw column for it today would be
+             inventing the phone's block listing -- which is the one thing
+             mtd.byname.[*].erasesize refuses to do two records up.
 
 key          os.id
 qemu         ABSENT

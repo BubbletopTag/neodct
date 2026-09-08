@@ -53,6 +53,36 @@
 # board/qemu/armv7-virt/linux.config or to run_qemu.sh's machine means running
 # it; both files say so in their own headers.
 #
+# ============ AND WHAT THIS BOOT DELIBERATELY IS NOT: THE STORAGE STACK =====
+#
+# THE CAPTURE THIS SCRIPT TAKES IS A PRE-STORAGE MACHINE, and that is a stated
+# limit rather than an omission somebody has to infer from a missing record.
+# The two drives below are blank 8 MB images carrying NDSYS and NDUSER, they
+# are never mounted, there is no ndflash, no UBI attach and no ubifs. So the
+# baseline says `class.ubi [version]`, `block.vda.serial NDUSER`, has no
+# `ubi.*` geometry and no /NeoDCT/User mount -- which is very nearly the shape
+# parity_capture_qemu.sh now refuses by name. NOTHING ANYWHERE RE-DERIVES A
+# UBI RECORD FROM A BOOT: change nandsim.parts=, ndflash's VID header offset,
+# mknand.sh's LEB_SIZE or nd_ubiattach's ioctl struct and every gate in the
+# tree stays green.
+#
+# It is that way on purpose, and the reason is what this gate is FOR. It has
+# to produce a byte-identical capture on any host that has a zImage, a busybox
+# rootfs and a cross compiler -- that is what makes "the emulator has not
+# drifted" mean anything. Flashing a real userdata volume here would put
+# `ubinize` and `mkfs.ubifs` on that list, and a host without mtd-utils would
+# then get either a DIFFERENT baseline (fatal for a byte-for-byte comparison)
+# or a refusal on the one gate that is supposed to be cheap and always
+# runnable. Moving the baseline is also a deliberate act -- `--force` exists
+# for exactly that -- and not a side effect of adding a drive.
+#
+# What covers the storage stack instead, stated here so the gap is bounded
+# rather than open: neodct/tests/test_qemu_nand.py (the tables and the
+# de-interleave, no boot) and a manual run of run_qemu.sh, whose ndflash
+# refuses out loud at each step. That is weaker than a gate and it is written
+# down as weaker. The day parity_capture_qemu.sh runs on a built image, the
+# UBI records arrive with it and this paragraph goes.
+#
 # Usage:
 #   parity_capture_probe.sh --kernel <zImage> --rootfs <busybox rootfs dir> \
 #                           [--out <file>] [--compare <baseline>] \
@@ -141,6 +171,47 @@ nd_dtb_build "$DTSI" "$WORK" "$WORK/nd.dtb" || {
     echo "  does not assemble -- no backlight and no cpufreq." >&2
     exit 1; }
 
+# ============ AND THE PANEL DAEMON IS CROSS-COMPILED IN BESIDE IT =========
+#
+# The framebuffer records are the eleven that carry the whole panel claim, and
+# until Stage 3 they described vfb's own 640x480x8 default, because nothing
+# under the emulator called force_mode(). neodct_displayd now has a backend
+# that is not the SPI panel, so the phone's own code puts fb0 into the phone's
+# mode here -- which is the point: the baseline records a framebuffer the
+# PHONE'S CODE set, not one this script described.
+#
+# `--panel null` and NOT `--panel stream:...`, deliberately. The stream needs a
+# virtio-console port, the port gives the guest /dev/vport0p1 and
+# /sys/class/virtio-ports, nd-inventory records both and dev.count moves. A
+# baseline has to describe the machine somebody boots, and a diagnostic port
+# the phone has no analogue of is not part of it.
+#
+# `--once` and not a daemon: it forces the mode, composes one frame and exits,
+# so nd-inventory runs on a settled machine rather than beside a 30 fps poll.
+#
+# It is one translation unit per file, three of them, linking nothing of ours
+# -- no libneodct, no freetype -- so it cross-compiles static for armv7 in one
+# command. neodctDisplay.c keeps the -Wconversion exemption the Makefile gives
+# it and the two backend files do not, which is the same split the host build
+# makes and the reason it is spelled out twice rather than shared.
+DISPLAYD_WARN="-std=c11 -Wall -Wextra -Werror -Wshadow -Wstrict-prototypes \
+    -Wmissing-prototypes -Wvla -O2 -D_GNU_SOURCE"
+for _f in nd_panel_spidev nd_panel_stream; do
+    "${CROSS}gcc" $DISPLAYD_WARN -Wconversion \
+        -c "$SRC/displayd/$_f.c" -o "$WORK/$_f.o" 2>>"$WORK/cc.log" || {
+        echo "cross build of displayd/$_f.c failed:" >&2
+        cat "$WORK/cc.log" >&2; exit 1; }
+done
+"${CROSS}gcc" $DISPLAYD_WARN \
+    -c "$SRC/displayd/neodctDisplay.c" -o "$WORK/neodctDisplay.o" 2>>"$WORK/cc.log" || {
+    echo "cross build of displayd/neodctDisplay.c failed:" >&2
+    cat "$WORK/cc.log" >&2; exit 1; }
+"${CROSS}gcc" -static -o "$WORK/neodct_displayd" \
+    "$WORK/nd_panel_spidev.o" "$WORK/nd_panel_stream.o" "$WORK/neodctDisplay.o" \
+    2>>"$WORK/cc.log" || {
+    echo "cross link of neodct_displayd failed:" >&2
+    cat "$WORK/cc.log" >&2; exit 1; }
+
 # The full warning set, including -Wconversion and -Werror. This build is not
 # a lesser build of the tool -- it is the same two translation units under the
 # same flags, minus the six records that need the library.
@@ -155,7 +226,9 @@ nd_dtb_build "$DTSI" "$WORK" "$WORK/nd.dtb" || {
 
 cp -a "$ROOTFS" "$WORK/root"
 cp "$WORK/nd-inventory" "$WORK/root/bin/nd-inventory"
-"${CROSS}strip" "$WORK/root/bin/nd-inventory" 2>/dev/null || true
+cp "$WORK/neodct_displayd" "$WORK/root/bin/neodct_displayd"
+"${CROSS}strip" "$WORK/root/bin/nd-inventory" "$WORK/root/bin/neodct_displayd" \
+    2>/dev/null || true
 
 # The markers are what makes the scrape reconstructible from a log that also
 # carries printk. The INV| sentinel does the same job line by line; these two
@@ -166,6 +239,12 @@ mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev
 mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
+# Before the inventory, because it is what puts fb0 into the phone's mode.
+# S90display does this on a built image; there is no S90display in a busybox
+# initramfs, so the same binary is run the same way by hand.
+echo "===PARITY-PANEL-BEGIN"
+/bin/neodct_displayd --panel null --once
+echo "===PARITY-PANEL=$?"
 /bin/nd-inventory --self-check >/dev/null 2>/dev/null
 echo "===PARITY-SELFCHECK=$?"
 echo "===PARITY-BEGIN"
@@ -216,8 +295,15 @@ $(nd_qemu_append)" \
 # A capture is REFUSED rather than recorded whenever anything about the run
 # was not what it should be. A refusal is not a measurement, but a recorded
 # capture that is not a measurement is worse: it becomes a baseline.
+panel=$(sed -n 's/^===PARITY-PANEL=\([0-9]*\).*/\1/p' "$WORK/boot.log" | tr -d '\r' | head -1)
 selfcheck=$(sed -n 's/^===PARITY-SELFCHECK=\([0-9]*\).*/\1/p' "$WORK/boot.log" | tr -d '\r' | head -1)
 rc=$(sed -n 's/^===PARITY-RC=\([0-9]*\).*/\1/p' "$WORK/boot.log" | tr -d '\r' | head -1)
+[ "${panel:-x}" = "0" ] || {
+    echo "REFUSED: neodct_displayd did not run (got '${panel:-nothing}'), so nothing" >&2
+    echo "         called force_mode() and the eleven framebuffer records would be" >&2
+    echo "         vfb's own 640x480x8 default rather than the phone's mode." >&2
+    sed -n '/===PARITY-PANEL-BEGIN/,/===PARITY-PANEL=/p' "$WORK/boot.log" | tr -d '\r' >&2
+    exit 1; }
 [ "${selfcheck:-x}" = "0" ] || {
     echo "REFUSED: --self-check did not pass in the guest (got '${selfcheck:-nothing}')" >&2
     exit 1; }
@@ -235,6 +321,24 @@ sed -n '/^===PARITY-BEGIN/,/^===PARITY-END/p' "$WORK/boot.log" \
 
 grep -q '^INV|BEGIN$' "$WORK/capture.txt" || { echo "REFUSED: no BEGIN in the capture" >&2; exit 1; }
 grep -q '^INV|END$'   "$WORK/capture.txt" || { echo "REFUSED: no END in the capture" >&2; exit 1; }
+
+# ============ AND THE FRAMEBUFFER IS IN THE PHONE'S MODE, OR THIS IS NOT A
+# ============ CAPTURE OF THE MACHINE YOU ASKED FOR
+#
+# NEODCT_REQUIRE_PANEL used to be an opt-in hook held open for a day that had
+# not come: force_mode() lived behind an SPI bus the emulator does not have,
+# so the check could never have passed and demanding it would have refused
+# every capture. It can pass now, so it is the DEFAULT, and a capture taken
+# before force_mode() is the thing that gets refused instead. Set
+# NEODCT_REQUIRE_PANEL=0 to record one anyway, which is a thing to do while
+# debugging and never a thing to commit.
+xres=$(sed -n 's/^INV|fb0\.var\.xres \(.*\)$/\1/p' "$WORK/capture.txt")
+if [ "$xres" != "240" ] && [ "${NEODCT_REQUIRE_PANEL:-1}" != "0" ]; then
+    echo "REFUSED: fb0.var.xres is '${xres:-nothing}', not 240. The panel daemon" >&2
+    echo "         ran and exited 0, so vfb refused the mode -- which is a real" >&2
+    echo "         divergence and not a capture to commit." >&2
+    exit 1
+fi
 
 if [ -n "$OUT" ]; then
     mkdir -p "$(dirname "$OUT")"

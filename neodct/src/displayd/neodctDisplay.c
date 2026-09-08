@@ -28,10 +28,41 @@
  *   neodct_displayd --full              disable diffing (v1 behavior)
  *   neodct_displayd --swap-rb           invert the detected R/B order
  *   neodct_displayd --stats             print stats every 5 s
+ *   neodct_displayd --panel spidev      the panel (default; see below)
+ *   neodct_displayd --panel null        compose and discard
+ *   neodct_displayd --panel stream:P    compose and write the transcript to P
+ *   neodct_displayd --fb-at WxH@B:S F   read F as the framebuffer (host only)
  *
  * Wiring (matches proven-good harness):
  *   CS  = pin 6  (SPI0_CS0)     CLK = pin 7 (SPI0_CLK)   SDA/MOSI = pin 8 (SPI0_MOSI)
  *   RST = pin 12 (GPIO 56)      DC  = pin 13 (GPIO 57)   BL = 3.3V
+ *
+ * ============ WHAT IS IN THIS FILE AND WHAT IS BEHIND nd_panel.h ==========
+ *
+ * The transport -- sysfs GPIO, spidev, the chunked transfer, the reset pulse
+ * train -- moved to displayd/nd_panel_spidev.c behind the five-entry vtable
+ * in displayd/nd_panel.h. Everything that composes stayed here and is SHARED
+ * by every backend: force_mode(), init_framebuffer(), convert_rect(),
+ * render_dirty(), render_full(), set_window(), fill_color(), panel_init(),
+ * now_ms() and the pacer. If any of that had moved, a second machine running
+ * this daemon would be testing a second implementation rather than the
+ * phone's -- which is the entire reason to run it on a second machine.
+ *
+ * THE BACKEND IS CHOSEN, NEVER DETECTED, and the default is spidev. There is
+ * deliberately no "try spidev, fall back to a stream": a phone whose spidev
+ * has not enumerated by the time S90display runs must fail loudly exactly as
+ * it does now, and must never quietly start writing a panel stream to nowhere
+ * and report success. S90display's own header is the written record of what
+ * answering two questions with one test cost last time, and
+ * neodct/initramfs/ndsys-panel.sh starts this binary with NO arguments and
+ * DEPENDS on it exiting under QEMU.
+ *
+ * THERE IS STILL NO 240x240 COMPOSE BUFFER IN THIS PROGRAM AND THERE MUST NOT
+ * BECOME ONE. The daemon blanks the panel once with fill_color(0,0,0) and
+ * thereafter writes only rows [yoff, yoff+copy_h-1]; the composed 240x240
+ * frame lives in the panel's GRAM. A shared compose buffer would add 115,200
+ * bytes and a second full copy per frame to a single-core 64 MB phone whose
+ * dirty-rect optimisation exists precisely because a full frame is expensive.
  */
 
 /* usleep() is XSI, and <unistd.h> hides it under -std=c11 unless a feature
@@ -48,16 +79,15 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <linux/spi/spidev.h>
+#include <sys/stat.h>
 #include <linux/fb.h>
 #include <time.h>
 #include <signal.h>
 #include <errno.h>
 
-/* ---------- configuration ---------- */
+#include "nd_panel.h"
 
-#define DC_PIN     57          /* GPIO1_D1, physical pin 13 */
-#define RESET_PIN  56          /* GPIO1_D0, physical pin 12 */
+/* ---------- configuration ---------- */
 
 #define PANEL_W    240
 #define PANEL_H    240
@@ -70,10 +100,6 @@
 #define FB_W       240
 #define FB_H       175
 #define DEFAULT_Y_OFFSET (PANEL_H - FB_H)   /* 65 */
-
-#define SPI_DEVICE "/dev/spidev0.0"
-#define SPI_BITS   8
-#define SPI_MODE   0           /* proven on this board+panel by fb_diag */
 
 #define FB_DEVICE  "/dev/fb0"
 
@@ -90,11 +116,26 @@ static int opt_swap_rb = 0;
 static int opt_stats   = 0;
 static int opt_yoff    = DEFAULT_Y_OFFSET;  /* panel row where fb band starts */
 
+/* Which transport, and where. Both are argument-only and neither has a
+ * detection path -- see the header. */
+static const char *opt_panel = "spidev";
+
+/* --fb-at: an ordinary file standing in for /dev/fb0, with its geometry
+ * supplied rather than asked for.
+ *
+ * This is nd_bootfb_open_at()'s argument verbatim and it carries the same
+ * restriction: a regular file has no FBIOGET_VSCREENINFO to answer, and
+ * inventing a default inside the device path would be exactly the assumption
+ * this daemon must not make. NEVER USED ON A DEVICE. force_mode() is skipped
+ * on this path because there is no driver to force -- force_mode() is covered
+ * under QEMU instead, on vfb, which is the whole of the parity claim. */
+static const char *opt_fb_path = NULL;
+static unsigned opt_fb_w = 0, opt_fb_h = 0, opt_fb_bpp = 0, opt_fb_stride = 0;
+
 /* ---------- globals ---------- */
 
-static int spi_fd = -1;
+static struct nd_panel *panel = NULL;
 static int fb_fd  = -1;
-static int dc_fd  = -1;                 /* cached sysfs value fd for DC */
 static unsigned char *fb_data = NULL;
 static size_t fb_size = 0;
 static volatile int quit_flag = 0;
@@ -107,7 +148,6 @@ static int fb_swap_rb = 0;              /* red/blue order, decided at init */
 static unsigned char *out_buf  = NULL;  /* converted RGB565 big-endian rect */
 static size_t out_buf_size = 0;
 static unsigned char *prev_fb  = NULL;  /* last frame we sent, fb layout    */
-static size_t spi_chunk = 4096;         /* from spidev bufsiz when readable */
 
 /* stats */
 static long st_sent = 0, st_skipped = 0;
@@ -139,166 +179,23 @@ static double now_ms(void)
     return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
 }
 
-/* ---------- gpio (sysfs) ---------- */
+/* ---------- the panel transport ---------- */
 
-static int gpio_export(int pin)
-{
-    char path[64], buf[16];
-    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d", pin);
-    if (access(path, F_OK) == 0)
-        return 0;
-
-    int fd = open("/sys/class/gpio/export", O_WRONLY);
-    if (fd < 0) {
-        fprintf(stderr, "gpio%d: open export failed: %s\n", pin, strerror(errno));
-        return -1;
-    }
-    snprintf(buf, sizeof(buf), "%d", pin);
-    if (write(fd, buf, strlen(buf)) < 0) {
-        fprintf(stderr, "gpio%d: export failed: %s\n", pin, strerror(errno));
-        close(fd);
-        return -1;
-    }
-    close(fd);
-    usleep(10000);
-    return 0;
-}
-
-static int gpio_direction_out(int pin)
-{
-    char path[64];
-    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/direction", pin);
-    int fd = open(path, O_WRONLY);
-    if (fd < 0) {
-        fprintf(stderr, "gpio%d: open direction failed: %s\n", pin, strerror(errno));
-        return -1;
-    }
-    if (write(fd, "out", 3) < 0) {
-        fprintf(stderr, "gpio%d: set direction failed: %s\n", pin, strerror(errno));
-        close(fd);
-        return -1;
-    }
-    close(fd);
-    return 0;
-}
-
-static int gpio_open_value(int pin)
-{
-    char path[64];
-    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/value", pin);
-    int fd = open(path, O_WRONLY);
-    if (fd < 0)
-        fprintf(stderr, "gpio%d: open value failed: %s\n", pin, strerror(errno));
-    return fd;
-}
-
-static void gpio_fd_write(int fd, int value)
-{
-    if (fd >= 0 && write(fd, value ? "1" : "0", 1) < 0)
-        fprintf(stderr, "gpio write failed: %s\n", strerror(errno));
-}
-
-static int gpio_write(int pin, int value)   /* slow path, used for RESET only */
-{
-    int fd = gpio_open_value(pin);
-    if (fd < 0)
-        return -1;
-    gpio_fd_write(fd, value);
-    close(fd);
-    return 0;
-}
-
-static int setup_gpio(void)
-{
-    if (gpio_export(DC_PIN)    < 0) return -1;
-    if (gpio_export(RESET_PIN) < 0) return -1;
-    if (gpio_direction_out(DC_PIN)    < 0) return -1;
-    if (gpio_direction_out(RESET_PIN) < 0) return -1;
-
-    dc_fd = gpio_open_value(DC_PIN);
-    if (dc_fd < 0) return -1;
-
-    printf("GPIO ready (DC=%d cached fd, RESET=%d)\n", DC_PIN, RESET_PIN);
-    return 0;
-}
-
-/* ---------- spi ---------- */
-
-static void detect_spi_chunk(void)
-{
-    FILE *f = fopen("/sys/module/spidev/parameters/bufsiz", "r");
-    if (f) {
-        long v = 0;
-        if (fscanf(f, "%ld", &v) == 1 && v >= 4096)
-            spi_chunk = (size_t)v;
-        fclose(f);
-    }
-    printf("SPI chunk size: %zu bytes%s\n", spi_chunk,
-           spi_chunk <= 4096 ? " (boot with spidev.bufsiz=65536 for fewer ioctls)" : "");
-}
-
-static int init_spi(void)
-{
-    spi_fd = open(SPI_DEVICE, O_RDWR);
-    if (spi_fd < 0) {
-        fprintf(stderr, "open %s failed: %s\n", SPI_DEVICE, strerror(errno));
-        return -1;
-    }
-
-    int mode = SPI_MODE, bits = SPI_BITS, speed = opt_speed;
-    if (ioctl(spi_fd, SPI_IOC_WR_MODE, &mode) < 0 ||
-        ioctl(spi_fd, SPI_IOC_WR_BITS_PER_WORD, &bits) < 0 ||
-        ioctl(spi_fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed) < 0) {
-        fprintf(stderr, "SPI param setup failed: %s\n", strerror(errno));
-        close(spi_fd);
-        spi_fd = -1;
-        return -1;
-    }
-    detect_spi_chunk();
-    printf("SPI up: %s @ %d Hz, mode %d\n", SPI_DEVICE, opt_speed, SPI_MODE);
-    return 0;
-}
-
-static void spi_send(unsigned char *data, size_t len)
-{
-    for (size_t i = 0; i < len; i += spi_chunk) {
-        size_t chunk = len - i;
-        if (chunk > spi_chunk)
-            chunk = spi_chunk;
-        struct spi_ioc_transfer tr = {
-            .tx_buf = (unsigned long)(data + i),
-            .rx_buf = 0,
-            .len = chunk,
-            .delay_usecs = 0,
-            .speed_hz = (unsigned)opt_speed,
-            .bits_per_word = SPI_BITS,
-        };
-        if (ioctl(spi_fd, SPI_IOC_MESSAGE(1), &tr) < 0)
-            fprintf(stderr, "SPI transfer failed: %s\n", strerror(errno));
-    }
-}
-
+/* Both of these are one line through displayd/nd_panel.h's vtable now. What
+ * used to be here -- the sysfs GPIO helpers, detect_spi_chunk(), init_spi(),
+ * spi_send() and the DC toggle -- is in nd_panel_spidev.c, unchanged. Six
+ * indirect calls per frame; the dispatch is not measurable beside the SPI. */
 static void write_command(unsigned char cmd)
 {
-    gpio_fd_write(dc_fd, 0);
-    spi_send(&cmd, 1);
+    panel->cmd(panel, cmd);
 }
 
-static void write_data(unsigned char *data, size_t len)
+static void write_data(const unsigned char *data, size_t len)
 {
-    gpio_fd_write(dc_fd, 1);
-    spi_send(data, len);
+    panel->data(panel, data, len);
 }
 
 /* ---------- panel ---------- */
-
-static void reset_display(void)
-{
-    printf("Resetting panel...\n");
-    gpio_write(RESET_PIN, 1); usleep(100000);
-    gpio_write(RESET_PIN, 0); usleep(100000);
-    gpio_write(RESET_PIN, 1); usleep(120000);
-}
 
 static void panel_init(void)
 {
@@ -365,20 +262,107 @@ static void force_mode(void)
     }
 }
 
-static int init_framebuffer(void)
+/* --fb-at's half of init_framebuffer(): open an ordinary file and FILL IN the
+ * geometry the device path would have asked the driver for.
+ *
+ * The channel offsets are vfb's, because vfb is the driver on both machines
+ * and the whole point of this path is to exercise the same convert_rect()
+ * branch the phone takes. vfb_check_var() grants R G B x at 32 bpp (red.offset
+ * 0) and 5-6-5 at 16 bpp (red.offset 11), measured on this kernel; the
+ * red<blue test below then decides fb_swap_rb from those, exactly as it does
+ * off a real ioctl. */
+static int init_framebuffer_at(void)
 {
-    fb_fd = open(FB_DEVICE, O_RDWR);
+    struct stat st;
+
+    fb_fd = open(opt_fb_path, O_RDONLY);
     if (fb_fd < 0) {
-        fprintf(stderr, "open %s failed: %s\n", FB_DEVICE, strerror(errno));
+        fprintf(stderr, "open %s failed: %s\n", opt_fb_path, strerror(errno));
         return -1;
     }
 
-    force_mode();
+    vinfo.xres = opt_fb_w;  vinfo.yres = opt_fb_h;
+    vinfo.xres_virtual = opt_fb_w;  vinfo.yres_virtual = opt_fb_h;
+    vinfo.bits_per_pixel = opt_fb_bpp;
+    finfo.line_length = opt_fb_stride;
+    if (opt_fb_bpp == 32) {
+        vinfo.red.offset   = 0;  vinfo.red.length    = 8;
+        vinfo.green.offset = 8;  vinfo.green.length  = 8;
+        vinfo.blue.offset  = 16; vinfo.blue.length   = 8;
+        vinfo.transp.offset = 24; vinfo.transp.length = 8;
+    } else if (opt_fb_bpp == 16) {
+        vinfo.red.offset   = 11; vinfo.red.length   = 5;
+        vinfo.green.offset = 5;  vinfo.green.length = 6;
+        vinfo.blue.offset  = 0;  vinfo.blue.length  = 5;
+    }
 
-    if (ioctl(fb_fd, FBIOGET_VSCREENINFO, &vinfo) < 0 ||
-        ioctl(fb_fd, FBIOGET_FSCREENINFO, &finfo) < 0) {
-        fprintf(stderr, "framebuffer ioctl failed: %s\n", strerror(errno));
+    /* ============ THE GEOMETRY IS TYPED BY HAND, SO CHECK ALL OF IT ========
+     *
+     * Two refusals, and the second was missing.
+     *
+     * A stride SMALLER than the row it describes is not caught by the length
+     * test below -- a 240x175@32 fixture with stride 480 instead of 960 is
+     * exactly 84,000 bytes, which is exactly stride * h, so the file "fits".
+     * Everything downstream then indexes rows at y * line_length and reads
+     * copy_w * fb_bytespp bytes inside them, walking off the end of both the
+     * mapping and prev_fb (malloc'd line_length * yres). Reproduced under
+     * ASAN before this check existed: a heap-buffer-overflow WRITE of 960
+     * bytes 0 bytes past an 84,000-byte region, in render_full()'s memcpy.
+     * On a real fb0 the driver supplies both numbers and they agree by
+     * construction; --fb-at is the one path where a human types them, which
+     * is precisely why it is the one path that has to check.
+     *
+     * And mmap() past the end of a short file is a SIGBUS the first time a
+     * row is read, which on a test host looks like a daemon bug rather than a
+     * mis-sized fixture. Refuse instead.
+     *
+     * fb_fd is closed on both refusals. Nothing leaks today -- main() exits
+     * straight after -- but this function's caller does not close it and the
+     * next call site would not know that. */
+    if (opt_fb_stride < opt_fb_w * (opt_fb_bpp / 8u)) {
+        fprintf(stderr, "--fb-at stride %u is less than the %u bytes a row of "
+                        "%u pixels at %u bpp needs\n",
+                opt_fb_stride, opt_fb_w * (opt_fb_bpp / 8u),
+                opt_fb_w, opt_fb_bpp);
+        close(fb_fd);
+        fb_fd = -1;
         return -1;
+    }
+    if (fstat(fb_fd, &st) < 0 ||
+        (unsigned long long)st.st_size <
+            (unsigned long long)opt_fb_stride * opt_fb_h) {
+        fprintf(stderr, "%s is %lld bytes, need %llu for %ux%u stride %u\n",
+                opt_fb_path, (long long)st.st_size,
+                (unsigned long long)opt_fb_stride * opt_fb_h,
+                opt_fb_w, opt_fb_h, opt_fb_stride);
+        close(fb_fd);
+        fb_fd = -1;
+        return -1;
+    }
+    printf("fb at %s: geometry supplied, force_mode() skipped (no driver)\n",
+           opt_fb_path);
+    return 0;
+}
+
+static int init_framebuffer(void)
+{
+    if (opt_fb_path != NULL) {
+        if (init_framebuffer_at() < 0)
+            return -1;
+    } else {
+        fb_fd = open(FB_DEVICE, O_RDWR);
+        if (fb_fd < 0) {
+            fprintf(stderr, "open %s failed: %s\n", FB_DEVICE, strerror(errno));
+            return -1;
+        }
+
+        force_mode();
+
+        if (ioctl(fb_fd, FBIOGET_VSCREENINFO, &vinfo) < 0 ||
+            ioctl(fb_fd, FBIOGET_FSCREENINFO, &finfo) < 0) {
+            fprintf(stderr, "framebuffer ioctl failed: %s\n", strerror(errno));
+            return -1;
+        }
     }
     printf("fb0: %ux%u, %u bpp, line_length %u\n",
            vinfo.xres, vinfo.yres, vinfo.bits_per_pixel, finfo.line_length);
@@ -618,19 +602,53 @@ int main(int argc, char *argv[])
             opt_fps = parse_int(argv[++i], DEFAULT_FPS);
             if (opt_fps < 1) opt_fps = 1;
         }
+        else if (!strcmp(argv[i], "--panel") && i + 1 < argc) {
+            opt_panel = argv[++i];
+        }
+        else if (!strcmp(argv[i], "--fb-at") && i + 2 < argc) {
+            const char *spec = argv[++i];
+            if (sscanf(spec, "%ux%u@%u:%u", &opt_fb_w, &opt_fb_h,
+                       &opt_fb_bpp, &opt_fb_stride) != 4 ||
+                opt_fb_w == 0 || opt_fb_h == 0 || opt_fb_stride == 0) {
+                fprintf(stderr, "--fb-at: expected WxH@BPP:STRIDE (got '%s')\n", spec);
+                return 2;
+            }
+            opt_fb_path = argv[++i];
+        }
         else {
             fprintf(stderr, "unknown arg: %s\n", argv[i]);
             return 2;
         }
     }
 
+    /* After the loop, because --speed is the spidev backend's parameter and
+     * may be given in either order. */
+    if (!strcmp(opt_panel, "spidev")) {
+        panel = nd_panel_spidev(opt_speed);
+    } else if (!strcmp(opt_panel, "null")) {
+        panel = nd_panel_stream(NULL, PANEL_W, PANEL_H);
+    } else if (!strncmp(opt_panel, "stream:", 7) && opt_panel[7] != '\0') {
+        panel = nd_panel_stream(opt_panel + 7, PANEL_W, PANEL_H);
+    } else {
+        /* `stream:` with nothing after it lands here rather than quietly
+         * becoming the null sink, which is the one mistake a chosen-never-
+         * detected backend must not make. */
+        fprintf(stderr, "--panel: expected spidev, null or stream:<path> "
+                        "(got '%s')\n", opt_panel);
+        return 2;
+    }
+
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    printf("neodct_displayd v2.2 (panel %dx%d, fb band %dx%d at y=%d, "
+    /* The backend is in the banner because S90display now passes it
+     * explicitly: the choice has to be visible in `ps` and in the log, or the
+     * one thing that decides whether a phone is driving a panel is invisible
+     * on the phone. */
+    printf("neodct_displayd v2.2 (panel %dx%d via %s, fb band %dx%d at y=%d, "
            "%d Hz SPI, %d fps poll, %s)\n",
-           PANEL_W, PANEL_H, FB_W, FB_H, opt_yoff, opt_speed, opt_fps,
-           opt_full ? "full-frame" : "dirty-rect");
+           PANEL_W, PANEL_H, panel->name, FB_W, FB_H, opt_yoff, opt_speed,
+           opt_fps, opt_full ? "full-frame" : "dirty-rect");
 
     out_buf_size = (size_t)PANEL_W * PANEL_H * 2;
     out_buf = malloc(out_buf_size);
@@ -639,10 +657,9 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    if (setup_gpio() < 0) return 1;
-    if (init_spi() < 0) return 1;
+    if (panel->open(panel) < 0) return 1;
 
-    reset_display();
+    panel->reset(panel);
     panel_init();
 
     /* Blank the whole panel once so regions outside the fb copy area
@@ -658,13 +675,13 @@ int main(int argc, char *argv[])
         fill_color(0, 0, 0);
         printf("Self-test done.\n");
         free(out_buf);
-        close(spi_fd);
+        panel->close(panel);
         return 0;
     }
 
     if (init_framebuffer() < 0) {
         free(out_buf);
-        close(spi_fd);
+        panel->close(panel);
         return 1;
     }
 
@@ -739,8 +756,7 @@ int main(int argc, char *argv[])
     if (prev_fb) free(prev_fb);
     munmap(fb_data, fb_size);
     close(fb_fd);
-    if (dc_fd >= 0) close(dc_fd);
-    close(spi_fd);
+    panel->close(panel);
     free(out_buf);
     return 0;
 }

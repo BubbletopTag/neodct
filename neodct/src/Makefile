@@ -216,6 +216,13 @@ INV_SRCS    := $(wildcard tools/nd_inventory.c tools/nd_inventory_collect.c)
 # A build-host tool, never installed: see its header.
 DLGFIT_SRCS := $(wildcard tools/nd_dialogfit.c)
 VERIFY_SRCS := $(wildcard tools/nd_verify*.c)
+# The emulator's UBI attach. Built here and NEVER INSTALLED -- the phone
+# attaches UBI from ubi.mtd= at late_initcall and has no ubiattach at all, so
+# a NAND attach tool in the image would be a hazard rather than a feature. It
+# is built here because this is where the target toolchain and the coding
+# standards are; run_qemu.sh packs it into the QEMU-only flasher overlay, and
+# cross-compiles the same .c directly when no build tree is at hand.
+UBIATT_SRCS := $(wildcard tools/nd_ubiattach.c)
 PANIC_SRCS  := $(wildcard tools/nd_panic*.c)
 # The initramfs progress bar. Two layers on purpose (see nd_bootfb.h): the
 # framebuffer primitive, which knows nothing about updates and which the
@@ -251,6 +258,7 @@ INV_OBJS    := $(patsubst %.c,$(OBJDIR)/%.o,$(INV_SRCS))
 # links against.
 INV_LIB_OBJS := $(filter-out $(OBJDIR)/tools/nd_inventory.o,$(INV_OBJS))
 VERIFY_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(VERIFY_SRCS))
+UBIATT_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(UBIATT_SRCS))
 PANIC_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(PANIC_SRCS))
 BOOTFB_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(BOOTFB_SRCS))
 BOOTBAR_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(BOOTBAR_SRCS))
@@ -287,6 +295,7 @@ TARGETS += $(if $(DLGFIT_SRCS),$(BINDIR)/nd-dialogfit)
 TARGETS += $(if $(SELF_SRCS),$(BINDIR)/nd-selftest)
 TARGETS += $(if $(INV_SRCS),$(BINDIR)/nd-inventory)
 TARGETS += $(if $(VERIFY_SRCS),$(BINDIR)/nd-verify)
+TARGETS += $(if $(UBIATT_SRCS),$(BINDIR)/nd-ubiattach)
 TARGETS += $(if $(PANIC_SRCS),$(BINDIR)/nd-panic)
 TARGETS += $(if $(BOOTBAR_SRCS),$(BINDIR)/nd-bootbar)
 TARGETS += $(if $(GENFONT_SRCS),$(BINDIR)/gen-bootfont)
@@ -426,9 +435,27 @@ $(BINDIR)/nd-apprun: $(APPRUN_OBJS) $(LIB)
 # -Wconversion on for the cross build -- which is the one that matters and the
 # one a host `make` does not exercise. That is not hypothetical: it is how this
 # change first broke the image build.
-DISPLAYD_CFLAGS := $(filter-out -Wconversion -Wsign-conversion, \
-	$(WARNINGS) $(OPTFLAGS) $(SANFLAGS) $(NEODCT_CFLAGS) $(CFLAGS)) \
-	-D_GNU_SOURCE -MMD -MP
+#
+# ============ AND THE EXEMPTION IS ONE FILE'S, NOT THE DIRECTORY'S ==========
+#
+# DISPLAYD_SRCS is a wildcard over displayd/*.c, so the panel-backend seam's
+# new files -- nd_panel_spidev.c and nd_panel_stream.c -- would have inherited
+# this dispensation for free the moment they landed. The stated justification
+# is specifically "a proven hardware driver predating the port", and new code
+# has no such claim; handing it one by wildcard is the same mistake the
+# section above is the record of, one directory wider.
+#
+# So: DISPLAYD_CFLAGS is the FULL set and neodctDisplay.c alone gets the two
+# warnings filtered, through a target-specific variable on its object. The
+# transport moved out of that file verbatim and came out clean under
+# -Wconversion with exactly one explicit cast (spi_send()'s .len, which its
+# own comment names), which is the evidence that the exemption is now scoped
+# to the code that actually needs it.
+DISPLAYD_CFLAGS := $(WARNINGS) $(OPTFLAGS) $(SANFLAGS) $(NEODCT_CFLAGS) \
+	$(CFLAGS) -D_GNU_SOURCE -MMD -MP
+
+$(OBJDIR)/displayd/neodctDisplay.o: DISPLAYD_CFLAGS := \
+	$(filter-out -Wconversion -Wsign-conversion,$(DISPLAYD_CFLAGS))
 
 $(OBJDIR)/displayd/%.o: displayd/%.c
 	$(Q)mkdir -p $(dir $@)
@@ -497,6 +524,15 @@ $(BINDIR)/nd-inventory: $(INV_OBJS) $(LIB)
 $(BINDIR)/nd-dialogfit: $(DLGFIT_OBJS) $(LIB)
 	$(LINK_BIN)
 
+# nd-ubiattach does NOT link libneodct, and that is not tidiness: run_qemu.sh
+# cross-compiles this same .c on its own with one gcc invocation when there is
+# no build tree to take a binary from, and a dependency on the library would
+# make that impossible. Its whole body is one ioctl.
+$(BINDIR)/nd-ubiattach: $(UBIATT_OBJS)
+	$(Q)mkdir -p $(dir $@)
+	$(say) LINK $@
+	$(Q)$(CC) -o $@ $^ $(LDFLAGS_ALL)
+
 # ---- nd-verify: the initramfs signature check ----------------------
 #
 # The one binary here that does NOT link libneodct, and the one that is
@@ -563,6 +599,13 @@ $(BINDIR)/gen-bootfont: $(GENFONT_OBJS) $(LIB)
 # drawing layer. test_bootbar is the one translation unit that needs both
 # sides, so it gets the extra include path and nobody else does.
 $(OBJDIR)/test/unit/test_bootbar.o: CPPFLAGS_ALL += -Itools
+
+# nd_panel.h lives in displayd/ and not in include/, for the same reason and
+# in the same direction: neodct_displayd links no libneodct, so nothing in the
+# library may learn about the panel transport. test_displayd is the one
+# translation unit that needs it -- it reads the transcript the daemon writes
+# -- and it gets the include path alone.
+$(OBJDIR)/test/unit/test_displayd.o: CPPFLAGS_ALL += -Idisplayd
 
 # nd_inventory.h lives in tools/ for the same reason and enforces the same
 # direction: the inventory reads libneodct, the library must never learn to

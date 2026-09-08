@@ -66,7 +66,30 @@ ALLOW = os.path.join(PARITY_DIR, "allow.txt")
 # emulator. Every one of them is a decision somebody made on purpose, which is
 # what `permanent` is for; the count is here so the next five have to be
 # argued for in a diff.
-PERMANENT_RECORDS_EXPECTED = 10
+# The eleventh is fb0.fix.smem_len, and it is the panel stage paying for what
+# it did NOT allowlist: the other ten fb0 records that a first hardware
+# capture would have diverged on now AGREE, because neodct_displayd's
+# force_mode() runs on both machines. smem_len is the one the ioctl cannot
+# reach -- vfb's compile-time VIDEOMEMSIZE -- so it is argued as a FLOOR
+# rather than explained away as a difference.
+#
+# TWELVE THROUGH FIFTEEN ARE THE STORAGE STAGE, AND ONE RECORD WENT AWAY TO
+# PAY FOR THEM. `class.mtd` was deleted: the emulator's MTD listing is now
+# [mtd0 mtd0ro ... mtd5 mtd5ro], the same key set the phone's six partitions
+# produce, so there was nothing left to annotate -- the same reason
+# cpufreq.cpu0 and cpufreq.policies were deleted when the surfaces stage
+# landed. In its place are the five mtd.byname.[*].* records, which cover the
+# emulator's THIRTY geometry keys where before there were five and none of
+# them was listed at all. The phone's own thirty are the mirror image and are
+# deliberately not written: they do not exist until somebody captures a phone.
+#
+# AND THE SIXTEENTH IS block.mtdblock5.size, which is the same three megabytes
+# of bad-block slack landing in the one family where both machines produce the
+# key -- so it lands as a differing VALUE and not as two disjoint key sets.
+# It was found by a reviewer, not by this file, and it is here because the
+# argument for it was already written down three records away, attached to the
+# wrong key family.
+PERMANENT_RECORDS_EXPECTED = 16
 
 # `permanent` was the ONLY integer this suite pinned, which left every other
 # way of growing the file uncounted. One appended record with a `[*]` key and
@@ -76,8 +99,27 @@ PERMANENT_RECORDS_EXPECTED = 10
 # `until-image`: those are the records the README says MUST be revisited the
 # first time a built image is captured, and a promise that can be added to
 # without a diff on an integer is a promise nobody is holding.
-TOTAL_RECORDS_EXPECTED = 21
+TOTAL_RECORDS_EXPECTED = 27
 UNTIL_IMAGE_RECORDS_EXPECTED = 9
+
+# ============ AND THE NUMBER THAT ACTUALLY MOVES, WHICH WAS UNPINNED =======
+#
+# The record count is a poor proxy for how much of a capture is excused,
+# because one `[*]` record can cover thirty keys. Measured across this branch:
+# the file went from 21 records covering 67 of the capture's 169 keys to 27
+# covering 118 of 230 -- so the fraction of the capture exempt from parity
+# went from 40% to 51% while the record count went up by six. Both directions
+# are defensible and neither is visible in the other's integer, so both are
+# pinned here.
+#
+# THE README SAID THIS FILE HAD SHRUNK AND IT HAD NOT. One `permanent` record
+# (class.mtd) was deleted and six were added. What genuinely shrank is the
+# work a first hardware diff has to do: ten fb0 records stopped needing an
+# entry because force_mode() now runs on both machines, and thirty
+# mtd.byname keys that were silently REQUIRED TO AGREE -- and could not --
+# are now argued for. That is the honest sentence, and the README says it in
+# those words now.
+COVERED_KEYS_EXPECTED = 118
 
 # A column matching every possible value. `~.*` and `~.+` are the two ways to
 # write one; see the block in allow.txt's header for why there are none left.
@@ -180,7 +222,22 @@ def test_the_measured_records_are_the_ones_the_findings_name(qemu):
     assert r[f"{name}.erasesize"] == "131072"
     assert r[f"{name}.writesize"] == "2048"
     assert r[f"{name}.oobsize"] == "64"
-    assert r[f"{name}.size"] == "134217728"
+    # 262144 and not 134217728: `nandsim.parts=2,2,4,128,64` now cuts the chip
+    # into PARTITIONS.md's six partitions, so partition 0 is the 256 KiB `env`
+    # partition rather than the whole 128 MB part. The CHIP is unchanged -- the
+    # erase, write and OOB sizes above are the ones finding 11 measured, and
+    # they are per-partition properties every partition reports identically.
+    assert r[f"{name}.size"] == "262144"
+    # The phone's userdata partition, at the phone's own mtd number, which is
+    # what makes `neodct.user=ubi1:userdata` reachable in the emulator at all.
+    userdata = 'mtd.byname."NAND\\x20simulator\\x20partition\\x204"'
+    assert r[f"{userdata}.size"] == "8388608"
+    assert r["mtd.node.mtd4.name"] == "NAND simulator partition 4"
+    # The listing the phone produces too, which is why class.mtd stopped being
+    # an allow.txt record.
+    assert r["class.mtd"] == (
+        "[mtd0 mtd0ro mtd1 mtd1ro mtd2 mtd2ro mtd3 mtd3ro mtd4 mtd4ro mtd5 mtd5ro]"
+    )
     # The four small hardware surfaces, which are the whole reason a device
     # tree is built at run time. Two of them are PRESENT and it took a .dtsi;
     # two are ABSENT and it took removing a kernel symbol -- and this block
@@ -227,16 +284,45 @@ def test_the_measured_records_are_the_ones_the_findings_name(qemu):
         )
 
 
-def test_the_framebuffer_is_captured_before_force_mode_and_says_so(qemu):
-    """The probe capture has no S90display, so /dev/fb0 is still vfb's default.
+def test_the_framebuffer_is_the_phones_because_the_phones_code_put_it_there(qemu):
+    """fb0 in the phone's mode, set by the phone's own force_mode().
 
-    Recorded rather than hidden, and it is the reason parity_capture_qemu.sh
-    must REFUSE a capture whose fb0.var.xres is not 240 instead of baking a
-    pre-force_mode() panel into a baseline. 640x480x8 is exactly what
-    EMPIRICAL-FINDINGS measured as the BEFORE half of finding 12.
+    THIS TEST USED TO ASSERT 640 AND 8, and documented an ABSENCE: there was
+    no S90display in a busybox initramfs, nothing under the emulator issued
+    FBIOPUT_VSCREENINFO, and the eleven framebuffer records described vfb's
+    built-in default rather than anything NeoDCT would ever see. It now
+    documents a PARITY, and the difference between those two sentences is the
+    whole of the panel stage.
+
+    What makes it worth asserting is HOW it became true. The mode is not set
+    by the capture script, by a kernel parameter or by a device model: the
+    probe runs neodct_displayd -- the same binary, the same force_mode(), the
+    same 32-bpp-then-16-bpp fallback -- with a backend that is not the SPI
+    panel. So these numbers are evidence about the daemon's start-up path on a
+    real armv7 boot, and not a description somebody typed.
+
+    line_length 960 is 240 * 4, and visual 2 is TRUECOLOR where vfb's 8-bpp
+    default was 3, PSEUDOCOLOR. red at offset 0 with blue at 16 is what
+    convert_rect() reads to decide fb_swap_rb -- the bug its comment block is
+    about -- so it is asserted here rather than left implicit.
     """
-    assert qemu.records["fb0.var.xres"] == "640"
-    assert qemu.records["fb0.var.bits_per_pixel"] == "8"
+    r = qemu.records
+    assert r["fb0.var.xres"] == "240"
+    assert r["fb0.var.yres"] == "175"
+    assert r["fb0.var.xres_virtual"] == "240"
+    assert r["fb0.var.yres_virtual"] == "175"
+    assert r["fb0.var.bits_per_pixel"] == "32"
+    assert r["fb0.fix.line_length"] == "960"
+    assert r["fb0.fix.visual"] == "2"
+    assert r["fb0.var.red"] == "0/8"
+    assert r["fb0.var.green"] == "8/8"
+    assert r["fb0.var.blue"] == "16/8"
+    assert r["fb0.var.transp"] == "24/8"
+    # And the one force_mode() cannot move, which is why it is the only fb0
+    # record in allow.txt. 168,000 is 960 * 175: below it vfb_check_var()
+    # refuses the 32-bpp mode outright and the daemon silently runs a
+    # different pixel pipeline.
+    assert int(r["fb0.fix.smem_len"]) >= 960 * 175
 
 
 # --------------------------------------------------------------------- #
@@ -285,6 +371,28 @@ def test_the_record_counts_are_pinned(allow):
         f"the until-image records are now {until_image}. Each one is a promise to "
         f"revisit a record the first time parity_capture_qemu.sh runs on a built "
         f"image; adding one is a diff on this integer."
+    )
+
+
+def test_how_much_of_the_capture_is_excused_is_pinned_too(allow, qemu):
+    """The record count is a poor proxy, and this is the number it hides.
+
+    One `[*]` record can cover thirty keys, so a file can grow its exempt
+    surface by fifty keys while its record count moves by five -- which is
+    exactly what happened on the branch that added the storage stage, and the
+    README said the file had shrunk. It shrank in one sense (ten fb0 records
+    became unnecessary, thirty mtd.byname keys stopped being silently required
+    to agree) and grew in the other. Both are now integers a reviewer sees.
+    """
+    covered = [
+        key for key in qemu.records
+        if any(pd.key_matches(rec["key"], key) for rec in allow)
+    ]
+    assert len(covered) == COVERED_KEYS_EXPECTED, (
+        f"{len(covered)} of the capture's {len(qemu.records)} records are now "
+        f"excused by the allowlist, not {COVERED_KEYS_EXPECTED}. That is the "
+        f"number the record count hides: change it here, deliberately, and say "
+        f"in the commit which direction the file moved."
     )
 
 

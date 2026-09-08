@@ -1,0 +1,204 @@
+#!/bin/sh
+# ndflash -- the emulator's stand-in for upgrade_tool and a maskrom cable.
+#
+# It writes the images mknand.sh produces onto the simulated NAND chip,
+# attaches UBI over them the way the phone's U-Boot environment does, and then
+# exec's the phone's own /init as PID 1. It is the FACTORY, not the phone.
+#
+# ============ WHY IT IS HERE AND NOT IN neodct/initramfs/ ============
+#
+# Everything in the directory above this one ships inside the kernel image on
+# real hardware. A NAND flasher on a phone whose NAND is already flashed is a
+# hazard, not a feature -- and QEMU-only code inside the artefact the parity
+# harness exists to keep honest is the exact thing that harness is for.
+#
+# The alternative costs nothing, because the kernel accepts CONCATENATED cpio
+# archives: run_qemu.sh cats a QEMU-only overlay holding this script and
+# nd-ubiattach onto initramfs.cpio.gz and passes rdinit=/ndflash. Measured on
+# this kernel -- "Run /ndflash as init process", then the phone's /init runs as
+# PID 1 with argv0 /init, exactly as the kernel would have started it.
+#
+# ============ WHY THE FLASH HAS TO HAPPEN AT ALL, EVERY BOOT ============
+#
+# nandsim's "has this page been programmed" bitmap is vzalloc'd fresh in
+# ns_alloc_device() and is never persisted, and ns_read_page() opens with
+#
+#     if (!test_bit(ns->regs.row, ns->pages_written)) memset(buf, 0xFF, num);
+#
+# so a chip that was written last session reads as blank silicon this session
+# however good the host-side cache file is. Handing nandsim a pre-built image
+# is therefore impossible and the chip has to be written from userspace on
+# every boot. That is also why `ubi.mtd=` cannot be on the cmdline: it is
+# consumed by ubi_init_attach(), a late_initcall, which runs before any
+# userspace flasher can exist, and UBI does the worst possible thing with a
+# blank chip -- it succeeds, FORMATS it, and afterwards a raw image cannot be
+# written over it at all, because programming NAND only clears bits.
+#
+# ============ WHAT IT REFUSES, AND WHY THAT IS THE SAFE ORDER ============
+#
+# QEMU enumerates virtio-mmio in REVERSE, so the vdX letters depend on how
+# many drives are attached and no fixed name can be right. Every image drive
+# is therefore found by its disk SERIAL, exactly as ndsys-apply.sh's
+# device_by_serial() does. The one name that cannot be found that way is the
+# cache device: nandsim opens `nandsim.cache_file=` at device_initcall, before
+# devtmpfs exists, so it has to be a literal path -- /dev/vda, a node baked
+# into this overlay's cpio, and the LAST -device on the command line.
+#
+# That positional rule is defused rather than trusted. nandsim writes nothing
+# to the cache device until a page is programmed -- measured: a boot that
+# flashed nothing left the host file at 0 blocks allocated -- so this script's
+# refusal below happens strictly BEFORE anything could be damaged.
+#
+# ============ AND THE TWO WAYS cache_file GOES WRONG QUIETLY ============
+#
+# Both measured, and NEITHER of them is the "nandsim refuses at init" this
+# comment used to claim:
+#
+#   * cache_file on a READ-ONLY device. `filp_open(O_CREAT|O_RDWR)` on a block
+#     device whose /sys/block/vdX/ro is 1 SUCCEEDS, the chip appears with all
+#     six partitions, and the failure arrives at the first program:
+#     `[nandsim] error: prog_page: write error for page 8704 ret -1`. Loud, but
+#     one step later than expected -- the dd below fails and this script dies.
+#
+#   * cache_file naming a path that does not exist. O_CREAT then CREATES A
+#     REGULAR FILE at that path, in the initramfs rootfs, which is RAM. The
+#     chip works, writes run at 5 MB/s, no slab appears, nothing anywhere says
+#     a word -- and the pages are in the guest's own memory, which is the one
+#     thing the cache file exists to prevent. On a 64 MB machine that is an OOM
+#     panic partway through a flash, reported as a broken image.
+#
+#     /sys/block/vda/serial cannot catch it: sysfs is populated by the driver
+#     whatever nandsim opened. What catches it is the node itself, tested
+#     BEFORE devtmpfs is mounted over it -- the cpio's /dev/vda is what nandsim
+#     saw, and if that node was missing then what is there now is nandsim's own
+#     regular file. Hence the order of the first three statements below.
+set -u
+
+FLASH_PEB=131072            # the Pico Mini's erase block; nandsim's too
+FLASH_VID_OFFSET=2048       # ubinize -O 2048, per mknand.sh. nd-ubiattach's
+                            # header is where the 2048-versus-512 argument is.
+MTD_USERDATA=4              # docs/PARTITIONS.md's table, reproduced by
+MTD_SYSTEM=5                # nandsim.parts=2,2,4,128,64 -- see qemu_machine.sh
+
+say()  { echo "[ndflash] $*" > /dev/console 2>/dev/null; }
+die()  { say "REFUSING: $*"; say "the phone's /init has NOT been started."; exec /bin/sh; }
+
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+
+CMDLINE="$(cat /proc/cmdline 2>/dev/null)"
+
+# BEFORE devtmpfs, and that is the whole point: this is the /dev nandsim saw.
+case "$CMDLINE" in
+    *nandsim.cache_file=/dev/vda*)
+        if [ ! -b /dev/vda ]; then
+            echo "[ndflash] REFUSING: /dev/vda is not a block device." > /dev/console
+            echo "[ndflash] nandsim was told to cache the chip there and O_CREAT will" > /dev/console
+            echo "[ndflash] have made a regular file instead -- in the initramfs, which" > /dev/console
+            echo "[ndflash] is RAM. The chip would be in guest memory and a flash would" > /dev/console
+            echo "[ndflash] OOM-panic a 64 MB machine. The node belongs in the flasher" > /dev/console
+            echo "[ndflash] overlay; see neodct/tools/mkqemuflash.py." > /dev/console
+            exec /bin/sh
+        fi
+        ;;
+esac
+
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+
+# device_by_serial NAME -- /dev/vdX for the drive whose serial= is NAME, or
+# empty. The same shape as ndsys-apply.sh's, and for the same reason.
+device_by_serial() {
+    for entry in /sys/block/*/serial; do
+        [ -r "$entry" ] || continue
+        if [ "$(cat "$entry" 2>/dev/null)" = "$1" ]; then
+            echo "/dev/$(basename "$(dirname "$entry")")"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# The cache device, if this boot has one. Checked before a single page is
+# programmed, which is what makes a reordered -device list harmless.
+case "$CMDLINE" in
+    *nandsim.cache_file=/dev/vda*)
+        serial="$(cat /sys/block/vda/serial 2>/dev/null || true)"
+        [ "$serial" = "NDNAND" ] || die \
+            "nandsim.cache_file=/dev/vda but vda's serial is '${serial:-none}', not NDNAND.
+           The cache drive must be the LAST -device on the QEMU command line;
+           QEMU enumerates virtio-mmio in reverse. Nothing has been written."
+        say "cache device /dev/vda verified by serial (NDNAND)"
+        ;;
+esac
+
+# flash_partition SERIAL MTDNUM WHAT -- raw-write one mknand.sh image onto one
+# MTD partition. Returns 1 when no drive carries that serial, which is how a
+# storage mode that flashes only userdata is spelled: it simply is not given
+# a system drive.
+flash_partition() {
+    _dev="$(device_by_serial "$1")" || return 1
+    [ -n "$_dev" ] || return 1
+    [ -c "/dev/mtd$2" ] || die "no /dev/mtd$2 -- is nandsim.parts= on the cmdline?"
+    say "flashing $3 from $_dev ($1) onto /dev/mtd$2"
+    dd if="$_dev" of="/dev/mtd$2" bs="$FLASH_PEB" 2>/dev/null \
+        || die "the write of $3 onto /dev/mtd$2 failed"
+    return 0
+}
+
+sys_flashed=""
+usr_flashed=""
+flash_partition NDNANDSYS "$MTD_SYSTEM"   "the system volume"  && sys_flashed=1
+flash_partition NDNANDUSR "$MTD_USERDATA" "the userdata volume" && usr_flashed=1
+sync
+
+# UBI is attached in PARTITIONS.md section 7's order -- the system chip is
+# ubi0 and userdata is ubi1 -- and the numbers are STATED rather than
+# allocated, so that `neodct.user=ubi1:userdata` and `ubi.block=0,system` are
+# true in a mode that flashes only one of the two.
+if [ -n "$sys_flashed" ]; then
+    nd-ubiattach "$MTD_SYSTEM" 0 "$FLASH_VID_OFFSET" > /dev/console 2>&1 \
+        || die "UBI would not attach mtd$MTD_SYSTEM at VID header offset $FLASH_VID_OFFSET"
+    # The initramfs's own is_squashfs() test, applied by the factory to what it
+    # has just written. A flash that wrote and verified nothing looks exactly
+    # like a working one until find_system_device() drops into recovery.
+    [ "$(dd if=/dev/ubiblock0_0 bs=4 count=1 2>/dev/null)" = "hsqs" ] \
+        || die "/dev/ubiblock0_0 does not begin 'hsqs' -- the system volume is not a squashfs.
+           ubi.block=0,system creates that device from the cmdline; if it is
+           missing entirely, that argument is not on this boot's cmdline."
+    say "ubi0 = system, /dev/ubiblock0_0 is a squashfs"
+fi
+if [ -n "$usr_flashed" ]; then
+    nd-ubiattach "$MTD_USERDATA" 1 "$FLASH_VID_OFFSET" > /dev/console 2>&1 \
+        || die "UBI would not attach mtd$MTD_USERDATA at VID header offset $FLASH_VID_OFFSET"
+    [ "$(cat /sys/class/ubi/ubi1_0/name 2>/dev/null)" = "userdata" ] \
+        || die "ubi1's volume 0 is not called 'userdata'; neodct.user=ubi1:userdata cannot resolve"
+    say "ubi1 = userdata, LEB $(cat /sys/class/ubi/ubi1/eraseblock_size 2>/dev/null) bytes"
+fi
+
+[ -n "$sys_flashed$usr_flashed" ] || die \
+    "no drive with serial NDNANDSYS or NDNANDUSR is attached, so there is
+           nothing to flash. run_qemu.sh assembles those; this script should
+           not have been made the rdinit of a boot without them."
+
+# Hand the machine over exactly as the kernel would have, which means these
+# three have to be GONE and not merely tidied.
+#
+# LEAVING /dev MOUNTED IS NOT HARMLESS, and this is measured. The phone's
+# /init line 84 is
+#
+#     mount -t devtmpfs devtmpfs /dev 2>/dev/null || mount -t tmpfs tmpfs /dev
+#
+# so a /dev that is already mounted makes the first half fail with EBUSY and
+# the second half succeed -- putting an EMPTY TMPFS over the real device nodes.
+# The phone then comes up with no /dev/vdX, no /dev/ubi*, and an initramfs that
+# reports it can find no system image at all. A plain `umount /dev` returned
+# "Device or resource busy" on a real boot of this script, so the lazy form is
+# the fallback and a failure past that is said out loud rather than left for
+# find_system_device() to report as a missing phone.
+for point in /dev /sys /proc; do
+    umount "$point" 2>/dev/null && continue
+    umount -l "$point" 2>/dev/null && continue
+    say "WARNING: $point is still mounted; the phone's /init will mount its own"
+    say "         over the top, and on /dev that means an empty tmpfs."
+done
+exec /init

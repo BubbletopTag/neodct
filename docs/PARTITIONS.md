@@ -201,7 +201,112 @@ Use the `update` target for every change to the partition table.
 
 `docs/HARDWARE_NOTES.md` gives the build steps that produce `update.img`.
 
-## 11. Terms
+## 11. How the emulator reproduces this table
+
+Everything in this section was measured on `qemu-system-arm -M virt -cpu
+cortex-a7 -smp 1 -m 64`, on the kernel `buildroot/board/qemu/armv7-virt/linux.config`
+builds. `neodct/tools/run_qemu.sh` assembles it and `NEODCT_STORAGE` selects
+how much of it is used.
+
+### The chip and the table
+
+`nandsim` at the Pico Mini's ID bytes is the part exactly -- 128 MB, a 128 KiB
+erase block, a 2048-byte page, 64 bytes of OOB -- and
+`nandsim.parts=2,2,4,128,64` in `neodct/tools/qemu_machine.sh` cuts it into
+this document's six partitions at this document's own mtd numbers:
+
+```
+mtd0: 00040000 00020000   mtd3: 01000000 00020000
+mtd1: 00040000 00020000   mtd4: 00800000 00020000   <- userdata, 8 MiB
+mtd2: 00080000 00020000   mtd5: 06700000 00020000   <- rootfs
+```
+
+Five sizes and not six. nandsim gives whatever is left to a final partition,
+so five produce exactly six; six produce **seven**, because the 3 MiB of
+bad-block slack becomes an `mtd6` this table has no name for. The price is an
+mtd5 of 103 MiB against the phone's 100, which nothing in the tree reads --
+`mknand.sh`'s `check_fits` uses its own constant.
+
+### The one cmdline key the emulator cannot carry
+
+`ubi.block=0,system`, `neodct.sys=/dev/ubiblock0_0` and
+`neodct.user=ubi1:userdata` are passed **verbatim** from section 6.
+`ubi.mtd=` is not, and cannot be.
+
+`ubi.mtd=` is consumed by `ubi_init_attach()`, a `late_initcall`. Userspace
+does not run until every initcall has, so under QEMU the chip is still blank
+when UBI reads that argument -- and UBI does the worst possible thing with a
+blank chip: it succeeds, and formats the partition. After that a raw image
+cannot be written over it at all, because programming NAND only clears bits.
+
+So the emulator flashes first and attaches afterwards, from userspace, with a
+QEMU-only flasher (`neodct/initramfs/qemu/ndflash`) that rides in as a second
+cpio archive and `exec`s the phone's own `/init`. `ubi.block=` **does**
+survive, and that is the good part: `ubiblock_notify()` on `UBI_VOLUME_ADDED`
+calls `ubiblock_create_from_param()`, so a volume attached later still matches
+the cmdline. The emulator's `/dev/ubiblock0_0` is created by the kernel, from
+this document's own argument.
+
+The attach must state the VID header offset, and busybox cannot. The phone's
+flash is `ubinize -O 2048`, so its LEB is 126,976; nandsim advertises a
+512-byte subpage, so UBI's default there is 512 and the same image will not
+attach at all (`bad VID header offset 2048, expected 512`).
+`neodct/src/tools/nd_ubiattach.c` exists for that one ioctl and its header has
+the argument.
+
+### What fits, and what does not
+
+| | `/NeoDCT/User` | `/NeoDCT/System` | guest memory |
+|---|---|---|---|
+| `NEODCT_STORAGE=nand` (default) | ubifs on `ubi1:userdata` | squashfs on virtio-blk | the phone's 64 MB |
+| `NEODCT_STORAGE=nand-full` | ubifs on `ubi1:userdata` | squashfs on `/dev/ubiblock0_0`, under dm-verity | 128 MB or more |
+| `NEODCT_STORAGE=virtio` | ext4 on virtio-blk | squashfs on virtio-blk | the phone's 64 MB |
+
+The system volume cannot be on the chip at the phone's memory, and both walls
+were measured:
+
+* nandsim keeps one 2112-byte slab object per **written** page, so a 51 MB
+  `system.ubi` is 26,112 pages = 54,953 kB of unreclaimable kernel slab on a
+  machine with 53,824 kB of usable RAM. At `-m 64` the OOM killer takes the
+  flash partway through and the guest panics.
+* `nandsim.cache_file=` moves those pages onto the host and costs nothing --
+  and then the first read of the system volume that misses that file's page
+  cache **deadlocks the guest**, because servicing a `ubiblock` request
+  submits a second bio from inside the first one's dispatch. Controlled pair,
+  same image: a mount whose cache-file pages are still resident succeeds in
+  0.1 s; the same mount after `echo 3 > /proc/sys/vm/drop_caches` never
+  returns. It does not affect UBIFS on `ubi1`, which reads UBI directly and
+  stacks no block device on the chip.
+
+### Persistence
+
+The chip does not survive a QEMU process: nandsim's `pages_written` bitmap is
+allocated fresh on every boot, so next session every page reads 0xFF whatever
+the cache file holds. `/NeoDCT/User` survives anyway, on the host:
+`neodct/tools/mkqemuflash.py` lifts the userdata partition's data planes out
+of the cache file when QEMU exits, and the flasher writes them back next boot.
+Proven by round trip -- a session's files came back byte-identical through a
+second QEMU process with 0 corrupted PEBs and UBI's erase counters carried
+forward. `NEODCT_SNAPSHOT=1` skips the save, which is the same meaning it has
+everywhere else.
+
+The save runs from `run_qemu.sh`'s EXIT trap and not after the QEMU line,
+which is the difference between "it saves" and "it saves when QEMU exits 0".
+Under `set -eu` a non-zero QEMU exit terminated the script before the save
+could run and before either of its messages printed; a `kill` of the script --
+which is how `test_update_e2e.sh` and `test_remoteshell_e2e.sh` end a boot --
+left QEMU orphaned and running and skipped the save as well. Both were
+measured, and both are why the script now `exec`s only on the plain virtio
+boot, which is the one mode with nothing to save and no work directory to
+remove.
+
+`NEODCT_STORAGE=nand-full` **discards** the session, and says so on every
+boot. It deliberately has no `nandsim.cache_file=` -- with one, the first read
+of the system volume that misses the cache file's page cache deadlocks the
+guest -- so there is no host-side file for anything to lift `/NeoDCT/User` out
+of. The mode that keeps writes is the default `nand`.
+
+## 12. Terms
 
 | Term | Meaning |
 |---|---|

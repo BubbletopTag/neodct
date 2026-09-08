@@ -120,8 +120,37 @@ nd_qemu_append() {
     # THE `gpio-mockup.` PREFIX IS REQUIRED AND ITS ABSENCE IS SILENT: for a
     # built-in driver the bare parameter name is handed to userspace, on one
     # line, at the end of a boot nobody reads, and the chip never appears.
+    #
+    # AND `nandsim.parts=` GIVES THAT CHIP THE PHONE'S PARTITION TABLE.
+    # docs/PARTITIONS.md's table in 128 KiB erase blocks is 2,2,4,128,64,800 --
+    # env, idblock, uboot, boot, userdata, rootfs -- and the value here stops
+    # at FIVE on purpose. nandsim gives whatever is left over to a final
+    # partition, so five sizes produce exactly six partitions at the phone's
+    # numbers, with mtd4 the 8 MiB userdata and mtd5 the rootfs.
+    #
+    # Writing all six produces SEVEN. Measured: the 3 MiB of bad-block slack
+    # becomes an mtd6 that the phone's table has no name for, `class.mtd` then
+    # has a cardinality the phone can never match, and every mtd.byname family
+    # record covers a seventh key that is pure emulator. The price of stopping
+    # at five is an mtd5 of 103 MiB where the phone's is 100 -- a size nothing
+    # in this tree reads, because mknand.sh's check_fits uses its own constant.
+    #
+    # Measured with it, on this kernel:
+    #   mtd0 00040000  mtd1 00040000  mtd2 00080000
+    #   mtd3 01000000  mtd4 00800000  mtd5 06700000
+    #   class.mtd = [mtd0 mtd0ro mtd1 mtd1ro ... mtd5 mtd5ro]
+    #
+    # `nandsim.cache_file=` is deliberately NOT here, and the reason is worse
+    # than "the probe has no cache disk". It names a literal /dev/vda that only
+    # run_qemu.sh's NAND storage mode attaches, and nandsim opens it with
+    # O_CREAT: measured, a cache_file naming a path that does not exist gets a
+    # REGULAR FILE created there instead, in the initramfs, which is RAM. The
+    # chip then works, writes run at 5 MB/s, no slab appears and nothing says a
+    # word -- while the pages sit in the guest's own memory, which is the one
+    # thing a cache file exists to prevent.
     echo "vt.global_cursor_default=0 mtdram.total_size=0 \
 nandsim.first_id_byte=0x20 nandsim.second_id_byte=0xa1 \
 nandsim.third_id_byte=0x00 nandsim.fourth_id_byte=0x15 \
+nandsim.parts=2,2,4,128,64 \
 gpio-mockup.gpio_mockup_ranges=0,64"
 }
