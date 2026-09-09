@@ -196,8 +196,15 @@ static void threads_draw(nd_ui *ui, thread_list *tl, nd_softkey *bar)
 
         nd_theme_plate_draw(ui->canvas, ND_RECT(2, y - 2, w - 8, y + NEW_ROW_H - 4), &p);
     }
-    nd_theme_text_light(d, CHAT_MARGIN + 4, y - 2, "New Message",
-                        on_new ? nd_ui_font_bold(ui, ui->font_md) : ui->font_md);
+    /* On the signature plate when it is the selected row, and on the
+     * background when it is not -- so the ink has to follow. It was always
+     * ink_light, which is white on a WHITE row under the classic look: the
+     * row is there and the words are not. */
+    if (on_new)
+        nd_theme_text_sel(d, CHAT_MARGIN + 4, y - 2, "New Message",
+                          nd_ui_font_bold(ui, ui->font_md));
+    else
+        nd_theme_text_light(d, CHAT_MARGIN + 4, y - 2, "New Message", ui->font_md);
     y += NEW_ROW_H;
     nd_theme_divider(ui->canvas, CHAT_MARGIN, w - 8, y - 2, 140u);
 
@@ -222,14 +229,27 @@ static void threads_draw(nd_ui *ui, thread_list *tl, nd_softkey *bar)
             nd_theme_plate p = nd_theme_plate_blue(ROW_RADIUS);
 
             nd_theme_plate_draw(ui->canvas, ND_RECT(2, y + 1, w - 8, y + ROW_H - 4), &p);
-            name_c = ND_TH_INK_LIGHT;
-            prev_c = ND_TH_CHROME_TOP;
+            /* Both lines stand ON the signature plate, so both take sel_ink.
+             * The hierarchy between them is carried by the WEIGHT -- the name
+             * is bold on a selected row -- rather than by a second colour,
+             * because the palette names one ink for type on this plate and a
+             * theme that inverts here has no second one to give.
+             *
+             * The preview used chrome_top, which is white in the classic look
+             * and therefore white on a white row. */
+            name_c = ND_TH_SEL_INK;
+            prev_c = ND_TH_SEL_INK;
         } else {
             name_c = ND_TH_INK_LIGHT;
             /* The preview is the second line of the row and has to read as
-             * quieter than the name above it. ND_GRAY did that on a black
-             * screen; on a blue one it is mud. */
-            prev_c = ND_TH_SKY_TOP;
+             * quieter than the name above it.
+             *
+             * It was sky_top -- the BACKGROUND colour, used as a quiet ink
+             * because the glass theme's background is a pale sky. Under the
+             * classic look that is the colour behind it and the preview line
+             * is simply absent. ink_muted is the palette's own name for the
+             * role. */
+            prev_c = ND_TH_INK_MUTED;
         }
 
         /* An unread thread is marked the way the ported inbox marks an unread
@@ -459,9 +479,9 @@ static void chat_draw(nd_ui *ui, chat_view *v, const char *title, nd_softkey *ba
         if (y > view_bottom)
             break; /* and everything after it is further down still */
 
-        /* OUTGOING is filled white with black text, INCOMING is an outline
-         * with white text. That is the strongest two-way distinction a
-         * one-bit-looking panel has, and it survives being photographed. */
+        /* OUTGOING is the signature-coloured plate, INCOMING is glass. That
+         * is the strongest two-way distinction a panel this size has, and it
+         * survives being photographed. */
         chat_bubble(ui, box, out);
 
         /* The selection is a second rule just outside the bubble rather than
@@ -476,11 +496,22 @@ static void chat_draw(nd_ui *ui, chat_view *v, const char *title, nd_softkey *ba
         for (k = 0u; k < bl->n_lines; k++) {
             int32_t ty = y + BUBBLE_PAD_Y + (int32_t)k * BUBBLE_LINE_H;
 
-            /* Both bubbles are light-ish, so both take dark ink. The old code
-             * flipped between black and white because the two bubbles were
-             * filled and hollow. */
+            /* ============ EACH BUBBLE TAKES ITS OWN PLATE'S INK ============
+             *
+             * An outgoing bubble is nd_theme_plate_blue -- the SIGNATURE
+             * colour -- so its text is sel_ink, the same ink a selected list
+             * row uses for the same reason. An incoming bubble is glass, so
+             * its text is the dark ink glass takes.
+             *
+             * This used to read ink_light for the outgoing side, which is
+             * "type over the background" and has nothing to do with the plate
+             * underneath it. The two are the same white in a theme whose type
+             * is white everywhere, so it looked right for as long as there
+             * was only one theme. It is white on a WHITE bubble under the
+             * classic look -- the message simply is not there -- and charcoal
+             * on rich pink under Hello Kitty. */
             if (out)
-                nd_theme_text_light(d, bx + BUBBLE_PAD_X, ty, bl->lines[k], ui->font_s);
+                nd_theme_text_sel(d, bx + BUBBLE_PAD_X, ty, bl->lines[k], ui->font_s);
             else
                 nd_theme_text_dark(d, bx + BUBBLE_PAD_X, ty, bl->lines[k], ui->font_s);
         }
