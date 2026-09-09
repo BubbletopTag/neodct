@@ -24,12 +24,20 @@
  *    the frame. MessageDialog and PagedList clear the full 0..175 instead.
  *    Getting either wrong loses or double-draws the softkey.
  *
+ *    This is also why nd_ui_paint_chrome() ramps its gradient and its scrim
+ *    over the PANEL rather than over the rectangle it was asked to paint --
+ *    see the note in nd_theme.h. A background whose colour depended on which
+ *    of the two clears a screen did would put a seam at row 145.
+ *
  * 2. TEXT IS MEASURED BY ITS INK. nd_text_size() returns the ink box of that
  *    specific string, so centring visibly shifts depending on which letters
  *    are in it. "_" is 3 px tall at 20 px; "Ag" is 21. That is not a bug.
  *
  * 3. SCROLLBAR NOTCHES TRUNCATE. notch_y = track_top + selected * step is a
  *    float and Pillow truncates it. Compute in double, cast with nd_trunc32().
+ *    Four of the five scrollbars go through nd_theme_scrollbar(), which does
+ *    this once; DetailPage's rides a pixel offset rather than an item index
+ *    and keeps its own copy.
  *
  * 4. SIX WIDGETS BUILD A FRESH SOFTKEY BAR INSIDE draw(), and three of those
  *    then present a second time. The double present is visible on the panel as
@@ -111,6 +119,24 @@ void nd_header_text_for(const nd_header *h, int32_t sub_index, char *out, size_t
 int32_t nd_header_width(const nd_header *h, int32_t sub_index);
 
 void nd_header_draw(const nd_header *h, int32_t sub_index);
+
+/* The whole top-of-screen furniture in one call: the glossy title plate, the
+ * title on it, and the breadcrumb as its badge.
+ *
+ * This exists because seven screens across four apps hand-rolled the same
+ * three calls -- a 24 px title at (5, 5), a one-pixel rule at
+ * nd_ui_header_divider_y(), and nd_header_draw() beside it -- and a theme that
+ * only reached the widgets would have left every one of them looking like the
+ * old OS. They are not widgets and they should not have to become widgets to
+ * get a title bar.
+ *
+ * The title is drawn AS GIVEN. Trimming it against the badge is the caller's
+ * decision, because only the caller knows whether the answer is to ellipsize,
+ * to step down a font size, or to let it run (which is what two of these
+ * screens have always done, on purpose, and nd_textlong.c says why).
+ *
+ * Returns the y of the first content row below the bar. */
+int32_t nd_header_bar(const nd_header *h, const char *title, int32_t sub_index);
 
 /* ================================================================== *
  * 3. AppSelector -- the main menu, one big icon at a time

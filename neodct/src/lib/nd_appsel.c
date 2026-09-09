@@ -9,42 +9,43 @@
  * ============ THE NUMBERS, WORKED OUT FOR THIS PANEL ============
  *
  *   header_y      = max(30, H*0.11)                      = 30
- *   title_y       = header_y - 16                        = 14   (negative-ish
- *                                                          on purpose: the ink
- *                                                          starts 3 px lower)
- *   icon_y        = header_y + max(24, (145-30)*0.22)    = 55
- *   icon_cap      = min(175, max(24, 145 - 55 - 8))      = 82
+ *   icon_y        = header_y + 8                         = 38
+ *   icon_cap      = min(175, max(24, (145-38) * 3/4))    = 80
+ *   reflection    = min(icon_h/3, 145 - (38 + icon_h))
  *   bar_x         = W - 8                                = 232
  *   track_top     = header_y + 6                         = 36
  *   track_bottom  = max(track_top, 145 - 10)             = 135
  *
- * 0.22 * 115 is 25.299999999999997 in IEEE754 and int() takes 25. Computing it
- * as 115 * 22 / 100 would also give 25, but only by luck on this panel; the
- * double is what the Python evaluates, so it is what is evaluated here.
+ * The icon numbers are the ones the theme changed and the reason is in the
+ * body of nd_appsel_draw(): the Python's 82 px icon at y=55 ran to row 137
+ * and left eight rows under it, which is fine for an icon that simply stops
+ * and impossible for one standing on a reflection. The scrollbar's extent did
+ * not move.
  *
  * ============ THREE THINGS THAT DECIDE THE PIXELS ============
  *
- * 1. The track is drawn with width 2, and nd_draw.h RULE 2 says a wide line
- *    grows in the MINOR axis only -- so a vertical track at x=232 lights
- *    columns 232 and 233 and stops at row 135 exactly.
+ * 1. The scrollbar is nd_theme_scrollbar at the same centre column and the
+ *    same extent as the width-2 white line it replaces. Its notch is still a
+ *    FLOAT that truncates -- see nd_widgets.h rule 3.
  *
- * 2. The notch is a FLOAT. step = (135-36)/(n-1) is 99/23 = 4.3043... for the
- *    24 shipped apps, and Pillow truncates the corners of the rectangle it is
- *    handed. Rounding instead moves the notch a pixel on most indices.
- *
- * 3. The icon is fetched with max_size=82, so the cache holds an 82x82
+ * 2. The icon is fetched with max_size=icon_cap, so the cache holds a
  *    thumbnail rather than the 120x120 original. That is not only a memory
- *    decision: the thumbnail's dimensions are what centres it, and asking for
- *    the full-size art and scaling per frame would land it elsewhere.
+ *    decision: the thumbnail's dimensions are what centres it and what sizes
+ *    the reflection, and asking for the full-size art and scaling per frame
+ *    would land both elsewhere.
+ *
+ * 3. The reflection reads the icon's rows BOTTOM-UP through its own alpha
+ *    (nd_theme_reflection). It allocates nothing, which is why it can run in
+ *    the menu's repaint at the wallpaper's frame rate.
  *
  * ============ WHAT IS DELIBERATELY MISSING ============
  *
- * `title` is stored and never drawn. The header line shows the selected app's
+ * `title` is stored and never drawn. The title bar shows the selected app's
  * name instead. It is kept so a reader of both sources sees the same
  * constructor. nd_widgets.h says so too.
  *
- * There is no HeaderWidget here and no breadcrumb: the page number in the top
- * right is drawn by hand, at (W - 5 - w, 10), with font_n.
+ * There is still no HeaderWidget here and no breadcrumb: the page number goes
+ * into nd_theme_titlebar as its badge.
  */
 
 #include <stdio.h>
@@ -55,6 +56,8 @@
 #include "nd_image.h"
 #include "nd_input.h"
 #include "nd_keycodes.h"
+#include "nd_text.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_widgets.h"
@@ -101,7 +104,6 @@ void nd_appsel_draw(nd_appsel *s)
     int32_t h = 0;
     const nd_app_entry *current;
     const char *icon_path;
-    double notch_y;
     char page_num[16];
 
     if (s == NULL || s->ui == NULL || s->ui->draw == NULL)
@@ -123,8 +125,18 @@ void nd_appsel_draw(nd_appsel *s)
     if (s->background != NULL) {
         (void)nd_image_blit(ui->canvas, s->background, 0, 0);
     } else {
-        (void)nd_draw_rect_fill(d, ND_RECT(0, 0, screen_w, screen_h), ND_BLACK);
+        /* The sky rather than black -- see nd_ui_paint_chrome(), which makes
+         * the same choice for every other screen. Ramped over the panel so a
+         * menu with no wallpaper and a dialog opened on top of it agree about
+         * what colour row 144 is. */
+        nd_theme_gradient_v_ramped(ui->canvas, ND_RECT(0, 0, screen_w - 1, screen_h - 1), 0,
+                                   screen_h - 1, ND_TH_SKY_TOP, ND_TH_SKY_BOT, 255u);
     }
+    /* The scrim goes on either ground: the title plate and the "Select" label
+     * both sit on it, and over a bright wallpaper white type on a blue plate
+     * still wants the picture behind it held down. */
+    nd_theme_scrim(ui->canvas, ND_RECT(0, 0, screen_w - 1, screen_h - 1), 0, content_bottom,
+                   ND_TH_APPSEL_SCRIM_A, 0u);
 
     /* An empty list is a real state: the scan can fail, and every later step
      * would divide by zero or index past the end. */
@@ -133,7 +145,7 @@ void nd_appsel_draw(nd_appsel *s)
 
         nd_ui_text_size(ui, "No Apps", ui->font_n, &w, &h);
         y = nd_max32(header_y, header_y + ((content_bottom - header_y - h) / 2));
-        (void)nd_draw_text(d, floordiv2(screen_w - w), y, "No Apps", ui->font_n, ND_WHITE);
+        nd_theme_text_light(d, floordiv2(screen_w - w), y, "No Apps", ui->font_n);
         (void)nd_ui_present(ui);
         return;
     }
@@ -142,69 +154,120 @@ void nd_appsel_draw(nd_appsel *s)
         s->selected_index = 0u;
     current = &s->items[s->selected_index];
 
-    /* 2. The app's name, centred, at 24 px. */
-    nd_ui_text_size(ui, current->name, ui->font_xl, &w, &h);
-    (void)nd_draw_text(d, floordiv2(screen_w - w), header_y - 16, current->name, ui->font_xl,
-                       ND_WHITE);
+    /* ============ WHAT MOVED, AND WHY ============
+     *
+     * The Python's layout put a centred 24 px name at y=14, an 82 px icon at
+     * y=55 filling everything down to row 137, and a page number floating in
+     * the top right. That leaves eight rows under the icon, which is fine for
+     * an icon that ends where it ends and impossible for one that is supposed
+     * to be standing on something.
+     *
+     * So the name goes into a title plate occupying rows 0..29 -- the rows
+     * every other screen in the OS gives its title bar, which is the point --
+     * and the icon moves up under it and gives back a fifth of its height to
+     * a reflection. The numbers are recomputed from the panel rather than
+     * from the old constants; ND_APP_SELECTOR_ICON_MAX still caps them.
+     *
+     * The page number is the title bar's badge now, for the same reason the
+     * VerticalList's breadcrumb is: two right-aligned strings on the same row
+     * drawn by two different pieces of code eventually stop agreeing.
+     */
 
-    /* 3. The icon, centred horizontally at a fixed y. */
-    icon_y = header_y + nd_max32(24, nd_trunc32((double)(content_bottom - header_y) * 0.22));
+    /* 2. The title bar, with the name centred rather than left-aligned --
+     *    this is the one screen whose title is centred, and it was centred
+     *    before. nd_theme_titlebar left-aligns, so the plate is drawn through
+     *    it with an empty title and the name is placed here. */
+    /* Clamped into an int before formatting. The index cannot exceed
+     * ND_APP_MAX here -- the guard above reset it -- but -Wformat-truncation
+     * reasons about size_t and assumes twenty digits, which does not fit the
+     * 16-byte buffer. nd_vlist.c's LevelSelector spells the same clamp out
+     * for the same reason. */
+    (void)snprintf(page_num, sizeof page_num, "%d",
+                   (int)nd_clamp32((int32_t)(s->selected_index + 1u), 1, ND_APP_MAX));
+    (void)nd_theme_titlebar(ui->canvas, d, screen_w, header_y, NULL, NULL, page_num, ui->font_n);
+    {
+        const nd_font *tf = nd_ui_font_bold(ui, ui->font_xl);
+        char fitted[ND_TEXT_LINE_MAX];
+        int32_t badge_w = 0;
+
+        nd_ui_text_size(ui, page_num, ui->font_n, &badge_w, NULL);
+        /* Trimmed against the badge on BOTH sides, because the name is
+         * centred: a name that just fits on the left would otherwise reach
+         * under the page number on the right. "Remote Shell" at 24 px bold is
+         * the string that found this. */
+        (void)nd_text_fit(fitted, sizeof fitted, current->name, tf, screen_w - 2 * (badge_w + 12));
+        nd_ui_text_size(ui, fitted, tf, &w, &h);
+        nd_theme_text_light(d, floordiv2(screen_w - w), (header_y - h) / 2, fitted, tf);
+    }
+
+    /* 3. The icon: a glow, the picture, then its reflection. */
+    icon_y = header_y + 8;
     icon_path = current->icon;
+    icon_cap =
+        nd_min32(ND_APP_SELECTOR_ICON_MAX, nd_max32(24, ((content_bottom - icon_y) * 3) / 4));
     if (icon_path != NULL && icon_path[0] != '\0') {
-        const nd_image *img;
+        const nd_image *img = nd_ui_get_image_max(ui, icon_path, icon_cap);
 
-        icon_cap = nd_min32(ND_APP_SELECTOR_ICON_MAX, nd_max32(24, content_bottom - icon_y - 8));
-        img = nd_ui_get_image_max(ui, icon_path, icon_cap);
         if (img != NULL) {
+            int32_t ix = floordiv2(screen_w - img->w);
+
+            /* The glow goes under the icon and is sized to it. Centred on the
+             * icon's middle, reaching a little past its corners, so a
+             * circular icon and a square one both sit in one. */
+            nd_theme_glow(ui->canvas, screen_w / 2, icon_y + img->h / 2, (img->w * 3) / 4,
+                          ND_TH_SKY_TOP, 90u);
+
             /* paste(img, (ix, iy), img): composited through the icon's own
              * alpha, so a transparent corner shows the wallpaper rather than
-             * punching a black square into it. */
-            (void)nd_image_blit_alpha(ui->canvas, img, floordiv2(screen_w - img->w), icon_y);
+             * punching a square into it. */
+            (void)nd_image_blit_alpha(ui->canvas, img, ix, icon_y);
+
+            /* And the floor it stands on. Bounded by what is left above the
+             * softkey strip, so a tall icon loses reflection rather than
+             * spilling into the bar. */
+            nd_theme_reflection(ui->canvas, img, ix, icon_y + img->h,
+                                nd_min32(img->h / 3, content_bottom - (icon_y + img->h)), 110u);
         } else {
+            /* The missing-icon placeholder, on the theme's terms: a glass
+             * plate with a question mark on it rather than a wire outline. */
             int32_t px = floordiv2(screen_w - icon_cap);
             int32_t qw = 0;
             int32_t qh = 0;
 
-            (void)nd_draw_rect_outline(d, ND_RECT(px, icon_y, px + icon_cap, icon_y + icon_cap),
-                                       ND_WHITE, 1);
+            nd_theme_panel(ui->canvas, ND_RECT(px, icon_y, px + icon_cap, icon_y + icon_cap), 10);
             nd_ui_text_size(ui, "?", ui->font_xl, &qw, &qh);
-            (void)nd_draw_text(d, px + ((icon_cap - qw) / 2), icon_y + ((icon_cap - qh) / 2), "?",
-                               ui->font_xl, ND_WHITE);
+            nd_theme_text_dark(d, px + ((icon_cap - qw) / 2), icon_y + ((icon_cap - qh) / 2), "?",
+                               ui->font_xl);
         }
     }
 
-    /* 4. "Select" sits INSIDE the softkey strip, vertically centred on the
-     *    string's own ink height -- the core's transparent bar has already
-     *    been overwritten by the background paste above, so this is the only
-     *    thing in those 30 rows. */
-    nd_ui_text_size(ui, "Select", ui->font_n, &w, &h);
-    (void)nd_draw_text(d, floordiv2(screen_w - w),
-                       content_bottom + nd_max32(0, (softkey_h - h) / 2), "Select", ui->font_n,
-                       ND_WHITE);
+    /* 4. "Select" sits INSIDE the softkey strip. The selector paints its own
+     *    background over the core's transparent bar (step 1), so it has
+     *    always had to draw this itself rather than letting nd_softkey do it.
+     *    It gets the same plate nd_softkey_update() would have given it --
+     *    the two are side by side every time the menu is opened from the home
+     *    screen, and a bar that changed shape on the way in would be the most
+     *    visible seam in the OS. */
+    {
+        const nd_font *f = nd_ui_font_bold(ui, ui->font_n);
+        nd_theme_plate p = nd_theme_plate_blue(6);
+        nd_rect plate = ND_RECT(2, content_bottom + 2, screen_w - 3, screen_h - 3);
 
-    /* 5. The scrollbar. */
+        nd_theme_plate_draw(ui->canvas, plate, &p);
+        nd_ui_text_size(ui, "Select", f, &w, &h);
+        nd_theme_text_light(d, floordiv2(screen_w - w), plate.y0 + floordiv2(nd_rect_h(plate) - h),
+                            "Select", f);
+    }
+
+    /* 5. The scrollbar. Same centre column and same extent as before; see
+     *    nd_theme_scrollbar for the thumb's truncating arithmetic. */
     bar_x = screen_w - 8;
     track_top = header_y + 6;
     track_bottom = nd_max32(track_top, content_bottom - 10);
-    (void)nd_draw_line(d, bar_x, track_top, bar_x, track_bottom, ND_WHITE, 2);
-
-    if (s->n_items > 1u) {
-        double step = (double)(track_bottom - track_top) / (double)(s->n_items - 1u);
-
-        notch_y = (double)track_top + ((double)s->selected_index * step);
-    } else {
-        notch_y = (double)track_top;
-    }
-    (void)nd_draw_rect_fill(
-        d, ND_RECT(bar_x - 4, nd_trunc32(notch_y - 3.0), bar_x + 2, nd_trunc32(notch_y + 3.0)),
-        ND_WHITE);
-
-    /* 6. The page number, right-aligned 5 px in from the edge. */
-    (void)snprintf(page_num, sizeof page_num, "%zu", s->selected_index + 1u);
-    nd_ui_text_size(ui, page_num, ui->font_n, &w, &h);
-    (void)nd_draw_text(d, screen_w - 5 - w, 10, page_num, ui->font_n, ND_WHITE);
+    nd_theme_scrollbar(ui->canvas, bar_x, track_top, track_bottom, s->selected_index, s->n_items);
 
     (void)nd_ui_present(ui);
+    (void)softkey_h;
 }
 
 /* See nd_ui_set_repaint(): the menu is the screen an animated wallpaper is

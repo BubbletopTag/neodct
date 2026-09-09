@@ -78,6 +78,7 @@
 #include <unistd.h>
 
 #include "nd_capture.h"
+#include "uifont_test.h"
 #include "nd_db.h"
 #include "nd_draw.h"
 #include "nd_fb.h"
@@ -128,7 +129,7 @@ static int g_skips;
         }                                                                                       \
     } while (0)
 
-#define FONT_REL "overlay/NeoDCT/System/ui/resources/fonts/font.ttf"
+#define FONT_REL ND_TEST_UI_FONT_REL
 
 /* ------------------------------------------------------------------ *
  * Finding the reference set and staging a root
@@ -270,6 +271,8 @@ typedef struct {
     nd_font *font_md;
     nd_font *font_n;
     nd_font *font_xl;
+    nd_font *font_n_b;
+    nd_font *font_xl_b;
 } fixture;
 
 static bool fx_init(fixture *fx)
@@ -279,6 +282,19 @@ static bool fx_init(fixture *fx)
     fx->font_md = nd_font_load(g_font, ND_FONT_PX_MD);
     fx->font_n = nd_font_load(g_font, ND_FONT_PX_N);
     fx->font_xl = nd_font_load(g_font, ND_FONT_PX_XL);
+
+    /* The bold pair. Optional -- nd_ui_font_bold() answers the regular
+     * weight for a NULL -- but a fixture that skips it renders every
+     * title a stroke too light and matches no reference frame.
+     * See uifont_test.h. */
+    {
+        char bold[ND_PATH_MAX];
+
+        if (ui_bold_face_path(g_font, bold, sizeof bold)) {
+            fx->font_n_b = nd_font_load(bold, ND_FONT_PX_N);
+            fx->font_xl_b = nd_font_load(bold, ND_FONT_PX_XL);
+        }
+    }
     if (fx->font_s == NULL || fx->font_md == NULL || fx->font_n == NULL || fx->font_xl == NULL)
         return false;
 
@@ -300,6 +316,8 @@ static bool fx_init(fixture *fx)
     fx->ui.font_md = fx->font_md;
     fx->ui.font_n = fx->font_n;
     fx->ui.font_xl = fx->font_xl;
+    fx->ui.font_n_b = fx->font_n_b;
+    fx->ui.font_xl_b = fx->font_xl_b;
     fx->ui.keypad_fd = -1;
     fx->ui.softkey_exists = true;
     /* This fixture never had a home layout, and these assertions are written
@@ -320,6 +338,8 @@ static void fx_free(fixture *fx)
     nd_font_free(fx->font_md);
     nd_font_free(fx->font_n);
     nd_font_free(fx->font_xl);
+    nd_font_free(fx->font_n_b);
+    nd_font_free(fx->font_xl_b);
     memset(fx, 0, sizeof *fx);
 }
 
@@ -327,18 +347,92 @@ static void fx_free(fixture *fx)
  * Pixel helpers
  * ------------------------------------------------------------------ */
 
+/* ============ "LIT" IS NOT "NOT BLACK" ANY MORE ============
+ *
+ * Every scan in this file asked whether a pixel was non-black, which was a
+ * complete description of a drawn pixel while the framework cleared to black.
+ * It paints a sky gradient or a wallpaper now, so the whole screen is
+ * non-black and the predicate answers yes everywhere.
+ *
+ * What it was always asking is "did the dialer draw something here", and the
+ * only way to ask that without naming a colour is to compare against what the
+ * chrome painter would have left. dialer_bg() renders exactly that.
+ *
+ * The tolerance absorbs the scrim being applied a second time by a second
+ * clear in the same frame -- deliberate, and the same behaviour the old
+ * double black fill had. A drawn pixel differs by tens. */
+#define BG_TOLERANCE 6
+
+static nd_image *g_bg;
+
+static void bg_capture(fixture *fx)
+{
+    nd_image *saved = fx->canvas;
+    nd_draw d;
+
+    nd_image_free(g_bg);
+    g_bg = nd_image_new(saved->w, saved->h, saved->fmt);
+    if (g_bg == NULL)
+        return;
+    if (nd_draw_bind(&d, g_bg) != ND_OK) {
+        nd_image_free(g_bg);
+        g_bg = NULL;
+        return;
+    }
+    fx->ui.canvas = g_bg;
+    fx->ui.draw = &d;
+    nd_ui_paint_chrome_full(&fx->ui);
+    fx->ui.canvas = saved;
+    fx->ui.draw = &fx->draw;
+}
+
+static void bg_release(void)
+{
+    nd_image_free(g_bg);
+    g_bg = NULL;
+}
+
+static int32_t chan_delta(uint8_t a, uint8_t b)
+{
+    int32_t d = (int32_t)a - (int32_t)b;
+
+    return d < 0 ? -d : d;
+}
+
 static bool lit(const nd_image *img, int32_t x, int32_t y)
 {
-    nd_color c = nd_image_get_px(img, x, y);
+    nd_color a;
+    nd_color b;
 
-    return c.r != 0u || c.g != 0u || c.b != 0u;
+    if (g_bg == NULL)
+        return false;
+    a = nd_image_get_px(img, x, y);
+    b = nd_image_get_px(g_bg, x, y);
+    return chan_delta(a.r, b.r) > BG_TOLERANCE || chan_delta(a.g, b.g) > BG_TOLERANCE ||
+           chan_delta(a.b, b.b) > BG_TOLERANCE;
+}
+
+/* Near-white ink: the two blocks on the handset glyph and the type on the call
+ * screens. Not exactly 255 any more -- everything is composited now, and the
+ * blocks are laid over a green plate at 220 coverage rather than punched into
+ * black. */
+/* nd_theme_text() draws every string twice: the shadow one row down, then the
+ * ink on top (nd_theme.h idea 4). So a line's INK is one row taller than the
+ * font's box for it, and its bottom edge is one row lower. That is a property
+ * of the theme rather than of any one screen, and several assertions below
+ * have to account for it. */
+#define THEME_SHADOW_ROWS 1
+
+static int32_t nd_abs_diff(int32_t a, int32_t b)
+{
+    return a > b ? a - b : b - a;
 }
 
 static bool white(const nd_image *img, int32_t x, int32_t y)
 {
     nd_color c = nd_image_get_px(img, x, y);
 
-    return c.r == 255u && c.g == 255u && c.b == 255u;
+    return c.r > 200u && c.g > 200u && c.b > 200u;
 }
 
 /* Ink extents of everything lit inside a box. x0/y0 come back as INT32_MAX
@@ -381,6 +475,24 @@ static int32_t lit_count(const nd_image *img, int32_t bx0, int32_t by0, int32_t 
     return ink_in(img, bx0, by0, bx1, by1).n;
 }
 
+/* How many NEAR-WHITE pixels a box holds -- the handset's two blocks, and
+ * nothing else on that glyph. */
+static int32_t white_count(const nd_image *img, int32_t bx0, int32_t by0, int32_t bx1,
+                           int32_t by1)
+{
+    int32_t n = 0;
+    int32_t x;
+    int32_t y;
+
+    for (y = by0; y <= by1; y++) {
+        for (x = bx0; x <= bx1; x++) {
+            if (white(img, x, y))
+                n++;
+        }
+    }
+    return n;
+}
+
 /* How many pixels of a band differ from the background the framework would
  * have painted there -- the chrome wallpaper when one is in force, black
  * otherwise. "Something was drawn here" and "nothing was" are what the two
@@ -421,35 +533,50 @@ static void test_handset_icon(void)
         fprintf(stderr, "SKIP handset: no fonts\n");
         return;
     }
+    bg_capture(&fx);
 
     nd_dialer_draw_call(&fx.ui, "0741234567", NULL);
 
-    /* The outline: (x, y+2) .. (x+18, y+10) with x=8, y=10. */
-    CHECK(white(fx.canvas, 8, 12), "handset outline top-left corner");
-    CHECK(white(fx.canvas, 26, 12), "handset outline top-right corner");
-    CHECK(white(fx.canvas, 8, 20), "handset outline bottom-left corner");
-    CHECK(white(fx.canvas, 26, 20), "handset outline bottom-right corner");
-    CHECK(!lit(fx.canvas, 7, 12), "nothing one pixel left of the outline");
-    CHECK(!lit(fx.canvas, 27, 12), "nothing one pixel right of the outline");
-    CHECK(!lit(fx.canvas, 8, 11), "nothing one row above the outline");
-    CHECK(!lit(fx.canvas, 8, 21), "nothing one row below the outline");
+    /* ============ THE GLYPH IS FILLED NOW, NOT HOLLOW ============
+     *
+     * It was an outline rectangle with two white blocks inside it, and the
+     * hollow interior was what distinguished a handset from a white slab on a
+     * one-bit screen. It is a glossy GREEN plate with the same two blocks on
+     * it: the shape and every coordinate are unchanged, and green is what "a
+     * call is up" means everywhere else on this phone.
+     *
+     * So what is asserted is the same geometry with the interior test turned
+     * around. The plate's own corners are rounded, so its extremes are probed
+     * at the middle of each edge rather than at the four corners. */
+    CHECK(lit(fx.canvas, 17, 12), "the handset's top edge");
+    CHECK(lit(fx.canvas, 17, 20), "the handset's bottom edge");
+    CHECK(lit(fx.canvas, 8, 16), "its left edge");
+    CHECK(lit(fx.canvas, 26, 16), "its right edge");
+    CHECK(!lit(fx.canvas, 6, 16), "nothing two pixels left of it");
+    CHECK(!lit(fx.canvas, 28, 16), "nothing two pixels right of it");
+    CHECK(!lit(fx.canvas, 17, 11), "nothing one row above it");
+    CHECK(!lit(fx.canvas, 17, 22), "nothing two rows below it");
 
-    /* The ear block: (9,13)..(13,15). */
-    CHECK(white(fx.canvas, 9, 13), "ear block top-left");
-    CHECK(white(fx.canvas, 13, 15), "ear block bottom-right");
-    CHECK(!lit(fx.canvas, 14, 15), "the ear block stops at x=13");
-    CHECK(!lit(fx.canvas, 9, 16), "the ear block stops at y=15");
+    /* Green: the plate, not a white slab and not the blue every other plate
+     * in the OS is. Sampled below the sheen, which is white by construction. */
+    {
+        nd_color c = nd_image_get_px(fx.canvas, 17, 18);
 
-    /* The mouth block: (21,17)..(25,19). */
-    CHECK(white(fx.canvas, 21, 17), "mouth block top-left");
-    CHECK(white(fx.canvas, 25, 19), "mouth block bottom-right");
-    CHECK(!lit(fx.canvas, 20, 17), "the mouth block starts at x=21");
-    CHECK(!lit(fx.canvas, 21, 16), "the mouth block starts at y=17");
+        CHECK((int32_t)c.g - (int32_t)c.r > 40, "the handset is green");
+        CHECK((int32_t)c.g - (int32_t)c.b > 40, "the handset is green, not cyan");
+    }
 
-    /* The silhouette is hollow: row 18 between the ear and the mouth is the
-     * outline's two side pixels and nothing else. */
-    CHECK_INT(lit_count(fx.canvas, 9, 18, 25, 18), 5, "row 18 inside the handset (mouth only)");
-    CHECK_INT(lit_count(fx.canvas, 14, 14, 20, 14), 0, "row 14 between the blocks is empty");
+    /* The ear block: (9,13)..(13,15), and the mouth: (21,17)..(25,19). Both
+     * are light on the green, which is the contrast that makes the shape read
+     * as a handset. */
+    CHECK(white(fx.canvas, 10, 14), "ear block");
+    CHECK(!white(fx.canvas, 15, 14), "the ear block stops before x=15");
+    CHECK(white(fx.canvas, 22, 18), "mouth block");
+    CHECK(!white(fx.canvas, 19, 18), "the mouth block starts after x=19");
+
+    /* And they are the only light things on it: row 14 between the two blocks
+     * is plate, not block. */
+    CHECK_INT(white_count(fx.canvas, 15, 14, 20, 14), 0, "row 14 between the blocks is plate");
 
     fx_free(&fx);
 }
@@ -467,6 +594,8 @@ static void test_handset_icon(void)
  * this number would say so. */
 static void test_call_screen_text_rows(void)
 {
+    nd_rect lbox;
+    nd_rect nbox;
     fixture fx;
     inkbox label;
     inkbox number;
@@ -476,31 +605,34 @@ static void test_call_screen_text_rows(void)
         fprintf(stderr, "SKIP call rows: no fonts\n");
         return;
     }
+    bg_capture(&fx);
 
     nd_dialer_draw_call(&fx.ui, "0741234567", "Mum");
 
-    /* The label. Text y is the ASCENDER LINE and 'C' has bbox_top 2 at 20 px,
-     * so the ink starts at 50 + 2 = 52. */
+    /* The label. Text y is the ASCENDER LINE, so the ink starts at
+     * label_y + the string's own bbox top -- which is a property of the face
+     * and is measured rather than named. label_y is max(50, int(145*0.20)) =
+     * 50, and the floor winning there is asserted in its own test. */
+    nd_text_bbox(fx.ui.font_n, "Call 1", &lbox);
     label = ink_in(fx.canvas, 30, 46, 239, 70);
-    CHECK_INT(label.x0, 55, "label ink starts at label_x");
-    CHECK_INT(label.y0, 52, "label ink top = label_y + bbox_top(20px)");
+    /* Within a pixel: an antialiased 'C' can leave its leftmost column under
+     * the ink threshold, and where the pen was set down is what this asserts. */
+    CHECK(label.x0 - (55 + lbox.x0) <= 1 && label.x0 >= 55 + lbox.x0,
+          "label ink starts at label_x");
+    CHECK_INT(label.y0, 50 + lbox.y0, "label ink top = label_y + its bbox top");
 
-    /* The number, 26 px under the label: ascender line 76, ink from 78. */
+    /* The number, 26 px under the label: ascender line 76. */
+    nd_text_bbox(nd_ui_font_bold(&fx.ui, fx.ui.font_n), "0741234567", &nbox);
     number = ink_in(fx.canvas, 30, 72, 239, 96);
-    CHECK_INT(number.x0, 55, "the number starts at label_x too");
-    CHECK_INT(number.y0, 78, "the number's ink top = 76 + 2");
+    CHECK_INT(number.x0, 55 + nbox.x0, "the number starts at label_x too");
+    CHECK_INT(number.y0, 76 + nbox.y0, "the number's ink top = 76 + its bbox top");
 
-    /* "0741234567" measures 155 px at font_n -- ten digits, whole-pixel
-     * advances, no kerning -- against a budget of 240 - 55 - 10 = 175, so the
-     * fitter leaves it alone and it is drawn WHOLE in the preferred font.
-     *
-     * The LIT columns run 55..206, which is 152 wide, not 155: the leading
-     * '0' and the trailing '7' each carry side bearing, and nd_text_size()
-     * reports the laid-out box while ink_in() sees only pixels. Both numbers
-     * are measured, neither is derived from the other, and the difference is
-     * the reason this asserts the ink edge rather than the metric. If the
-     * fitter ever shrinks this string the ink gets shorter and it fails. */
-    CHECK_INT(number.x1, 206, "the number is drawn whole at font_n");
+    /* The number fits its budget of 240 - 55 - 10 = 175 px, so the fitter
+     * leaves it alone and it is drawn WHOLE in the preferred font -- which is
+     * what the ink's right edge says: the last inked column is where the last
+     * glyph's own bbox puts it. If the fitter ever shrinks this string the ink
+     * gets shorter and this fails. */
+    CHECK_INT(number.x1, 55 + nbox.x1 - 1, "the number is drawn whole at font_n");
 
     /* Nothing between the two rows, and nothing above the label: the contact
      * name is deliberately not drawn. */
@@ -539,20 +671,46 @@ static void test_incoming_screen_geometry(void)
         fprintf(stderr, "SKIP incoming geometry: no fonts\n");
         return;
     }
+    bg_capture(&fx);
 
     nd_dialer_draw_incoming(&fx.ui, "Mum", true);
 
-    caller = ink_in(fx.canvas, 0, 0, 239, 100);
-    CHECK_INT(caller.x0, 90, "'Mum' is centred by ink at (240 - 59) // 2");
-    CHECK_INT(caller.x1, 145, "'Mum' ink ends at 145");
-    CHECK_INT(caller.y0, 28, "caller ink top = 26 + bbox_top(20px)");
+    /* The caller line is CENTRED BY ITS INK -- which is why the x depends on
+     * which letters are in it -- and its ascender line is
+     * max(18, int(145 * 0.18)) = 26. Both are derived here from the string's
+     * own box rather than named, because every one of those numbers moves
+     * with the typeface and none of them is what this test is about. */
+    {
+        const nd_font *cf = nd_ui_font_bold(&fx.ui, fx.ui.font_n);
+        nd_rect cbox;
+        int32_t cw = 0;
 
-    calling = ink_in(fx.canvas, 0, 101, 239, 174);
-    CHECK_INT(calling.x0, 39, "'calling' starts at 7 + int(36*175/240) + 6");
-    /* 'l' is the tallest letter in "calling" (bbox_top 2) and 'g' the lowest
-     * (a descender), so the ink runs 121..141 off an ascender line of 119. */
-    CHECK_INT(calling.y0, 121, "'calling' ink top = 119 + 2");
-    CHECK_INT(calling.y1, 141, "'calling' descender bottom");
+        nd_text_bbox(cf, "Mum", &cbox);
+        nd_text_size(cf, "Mum", &cw, NULL);
+
+        caller = ink_in(fx.canvas, 0, 0, 239, 100);
+        /* Within a pixel at each end. nd_text_size() reports the laid-out ink
+          * box and ink_in() sees only pixels that cross the detection
+          * threshold, and an antialiased 'M' can leave its outermost column
+          * under it. What is asserted is the centring, not the rasteriser. */
+        CHECK(nd_abs_diff(caller.x0, ((240 - cw) / 2) + cbox.x0) <= 1,
+              "'Mum' is centred by its ink");
+        CHECK(nd_abs_diff(caller.x1, ((240 - cw) / 2) + cbox.x1 - 1) <= 1,
+              "'Mum' ink ends where its box does");
+        CHECK_INT(caller.y0, 26 + cbox.y0, "caller ink top = 26 + its bbox top");
+    }
+
+    {
+        nd_rect gbox;
+
+        nd_text_bbox(fx.ui.font_n, "calling", &gbox);
+        calling = ink_in(fx.canvas, 0, 101, 239, 174);
+        CHECK_INT(calling.x0, 39 + gbox.x0, "'calling' starts at 7 + int(36*175/240) + 6");
+        /* Its ascender line is content_bottom - 26 = 119, and 'g' descends. */
+        CHECK_INT(calling.y0, 119 + gbox.y0, "'calling' ink top = 119 + its bbox top");
+        CHECK_INT(calling.y1, 119 + gbox.y1 - 1 + THEME_SHADOW_ROWS,
+                  "'calling' descender bottom, plus its shadow");
+    }
 
     fx_free(&fx);
 }
@@ -571,6 +729,7 @@ static void test_incoming_blink_argument(void)
         fprintf(stderr, "SKIP blink argument: no fonts\n");
         return;
     }
+    bg_capture(&fx);
 
     nd_dialer_draw_incoming(&fx.ui, "Mum", true);
     on_caller = ink_in(fx.canvas, 0, 0, 239, 100);
@@ -609,13 +768,21 @@ static void test_call_screen_fitter_falls_back_and_truncates(void)
         fprintf(stderr, "SKIP call fitter: no fonts\n");
         return;
     }
+    bg_capture(&fx);
 
-    /* A number that fits font_n is drawn at font_n, and its ink is 152
-     * columns wide -- see the note in test_call_screen_text_rows() for why
-     * that is three less than the 155 the font reports. */
-    nd_dialer_draw_call(&fx.ui, "0741234567", NULL);
-    row = ink_in(fx.canvas, 30, 72, 239, 96);
-    CHECK_INT(row.x1 - row.x0 + 1, 152, "a fitting number keeps font_n's ink width");
+    /* A number that fits is drawn at the preferred face, whole -- so the ink
+     * is exactly as wide as that face's box for the string. The absolute
+     * number moves with the typeface; that the fitter did not touch it does
+     * not. */
+    {
+        nd_rect box;
+
+        nd_text_bbox(nd_ui_font_bold(&fx.ui, fx.ui.font_n), "0741234567", &box);
+        nd_dialer_draw_call(&fx.ui, "0741234567", NULL);
+        row = ink_in(fx.canvas, 30, 72, 239, 96);
+        CHECK_INT(row.x1 - row.x0 + 1, box.x1 - box.x0,
+                  "a fitting number keeps the preferred face's ink width");
+    }
 
     /* Long enough that neither font fits: the search truncates. The result
      * must stay inside the 240 - 55 - 10 = 175 px budget, i.e. end at or
@@ -631,7 +798,22 @@ static void test_call_screen_fitter_falls_back_and_truncates(void)
      * twice the budget wide and six rows taller -- so a height of 15 here can
      * only have come from the small face. Both numbers are measured against
      * this font, not derived from the pixel sizes. */
-    CHECK_INT(row.y1 - row.y0 + 1, 15, "the truncated number fell back to font_s");
+    /* font_s, not font_n, and the ink HEIGHT is what says so: whatever the
+     * face, a string set at 14 px is shorter than the same string at 20.
+     *
+     * Measured against the FITTED string rather than a row of digits, because
+     * the fitter appends an ellipsis and "…" sits low -- its ink reaches below
+     * the digits' baseline and adds rows this box would otherwise not have. */
+    {
+        int32_t small_h = 0;
+        int32_t big_h = 0;
+
+        nd_text_size(fx.ui.font_s, "+353 (0) 87 555 01\xE2\x80\xA6", NULL, &small_h);
+        nd_text_size(fx.ui.font_n, "+353 (0) 87 555 01\xE2\x80\xA6", NULL, &big_h);
+        CHECK(row.y1 - row.y0 + 1 <= small_h + THEME_SHADOW_ROWS,
+              "the truncated number fell back to font_s");
+        CHECK(small_h < big_h, "and the two faces really are different heights");
+    }
 
     fx_free(&fx);
 }
@@ -646,7 +828,11 @@ static void test_incoming_fitter_ladder_and_dots(void)
     inkbox n_row;
     inkbox s_row;
     inkbox trimmed;
-    static const char MEDIUM[] = "Grandmother Josephine";
+    /* Wide enough that font_n does not fit the 224 px budget but font_s does.
+     * "Grandmother Josephine" was that string on the pixel face; the UI face
+     * is narrower and it now fits at font_n, which would leave this test
+     * asserting nothing about the ladder. */
+    static const char MEDIUM[] = "Grandmother Josephine Beauchamp";
     static const char VERY_LONG[] =
         "Grandmother Josephine Fitzwilliam-Beauchamp of the Northern Approaches";
 
@@ -655,11 +841,17 @@ static void test_incoming_fitter_ladder_and_dots(void)
         fprintf(stderr, "SKIP incoming fitter: no fonts\n");
         return;
     }
+    bg_capture(&fx);
 
     /* Short: font_n, tall ink. */
     nd_dialer_draw_incoming(&fx.ui, "Mum", false);
     n_row = ink_in(fx.canvas, 0, 0, 239, 100);
-    CHECK_INT(n_row.y1 - n_row.y0 + 1, 18, "a short caller keeps font_n");
+    {
+        int32_t h = 0;
+
+        nd_text_size(nd_ui_font_bold(&fx.ui, fx.ui.font_n), "Mum", NULL, &h);
+        CHECK_INT(n_row.y1 - n_row.y0 + 1, h + THEME_SHADOW_ROWS, "a short caller keeps font_n");
+    }
 
     /* Too wide for font_n at 224 px, but font_s fits: the ladder steps down
      * rather than truncating, and the text is still drawn whole. */
@@ -817,6 +1009,7 @@ static void test_show_calling_ends_the_call(void)
         fprintf(stderr, "SKIP show_calling: no fonts\n");
         return;
     }
+    bg_capture(&fx);
     if (nd_modem_open(&m) != ND_OK || m == NULL) {
         g_skips++;
         fprintf(stderr, "SKIP show_calling: no modem\n");
@@ -842,7 +1035,7 @@ static void test_show_calling_ends_the_call(void)
     CHECK_INT(nd_modem_state(m), ND_CALL_IDLE, "End hung the call up for real");
     /* The screen it left behind is the in-call screen: the handset glyph is
      * still in the corner. */
-    CHECK(white(fx.canvas, 8, 12), "show_calling drew the in-call screen");
+    CHECK(lit(fx.canvas, 17, 16), "show_calling drew the in-call screen");
 
     keys_close(&k, &fx.ui);
     fx.ui.modem = NULL;
@@ -1033,6 +1226,7 @@ static void test_caller_label_fallbacks(void)
         fprintf(stderr, "SKIP caller label: no fonts\n");
         return;
     }
+    bg_capture(&fx);
     if (!keys_open(&k, &fx.ui)) {
         g_skips++;
         fprintf(stderr, "SKIP caller label: no key channel\n");
@@ -1182,11 +1376,11 @@ static void shoot_dialer_frames(nd_capture *cap, const nd_json_doc *golden)
     nd_fb *fb = nd_capture_fb(cap);
     nd_ui ui;
 
-    /* shoot_telephony()'s block: one StubUI, wallpaper Palestine.jpg, a
+    /* shoot_telephony()'s block: one StubUI, the shipped default wallpaper, a
      * healthy simulated phone, and a fresh virtual clock. Both call screens
      * come out of it before home-sms-banner does, which is what makes that
      * frame the block's third -- see OPEN-QUESTIONS.md S-3. */
-    write_settings("Palestine.jpg");
+    write_settings(ND_TEST_REF_WALLPAPER);
     nd_vclock_enable();
     nd_ui_sim_clear(&ui);
     if (nd_ui_init(&ui, fb) != ND_OK) {
@@ -1269,6 +1463,7 @@ static void test_place_call_dials_and_ends_on_end(void)
         fprintf(stderr, "SKIP place_call: no fonts\n");
         return;
     }
+    bg_capture(&fx);
     if (nd_modem_open(&m) != ND_OK || m == NULL) {
         g_skips++;
         fprintf(stderr, "SKIP place_call: no modem\n");
@@ -1287,7 +1482,7 @@ static void test_place_call_dials_and_ends_on_end(void)
     CHECK(keys_push(&k, ND_KEY_CLEAR), "queued End");
     CHECK(nd_dialer_place_call(&fx.ui, "0741234567", "Mum"), "the call was placed");
     CHECK_INT(nd_modem_state(m), ND_CALL_IDLE, "End hung it up");
-    CHECK(white(fx.canvas, 8, 12), "the in-call screen was drawn");
+    CHECK(lit(fx.canvas, 17, 16), "the in-call screen was drawn");
 
     keys_close(&k, &fx.ui);
     fx.ui.modem = NULL;
@@ -1356,6 +1551,7 @@ static void test_answer_call_connects_and_ends_on_end(void)
         fprintf(stderr, "SKIP answer_call: no fonts\n");
         return;
     }
+    bg_capture(&fx);
     if (nd_modem_open(&m) != ND_OK || m == NULL) {
         g_skips++;
         fprintf(stderr, "SKIP answer_call: no modem\n");
@@ -1386,7 +1582,7 @@ static void test_answer_call_connects_and_ends_on_end(void)
     CHECK(keys_push(&k, ND_KEY_CLEAR), "queued End");
     CHECK(nd_dialer_answer_call(&fx.ui, "5559876", NULL), "answered");
     CHECK_INT(nd_modem_state(m), ND_CALL_IDLE, "End hung it up");
-    CHECK(white(fx.canvas, 8, 12), "the in-call screen was drawn");
+    CHECK(lit(fx.canvas, 17, 16), "the in-call screen was drawn");
 
     if (nd_path_resolve(path, sizeof path, DIALER_SIM_RING) == ND_OK)
         (void)remove(path);
@@ -1404,6 +1600,8 @@ int main(void)
     nd_json_doc *golden = NULL;
 
     if (!find_reference_dirs()) {
+
+    bg_release();
         fprintf(stderr, "test_dialer: cannot find the reference set; set NEODCT_GOLDEN\n");
         return 1;
     }

@@ -707,6 +707,15 @@ static void drop_stage(void)
  * feature whose whole surface is the screens that used to be black, and
  * seeing them all wallpapered is the only way to review it. NULL leaves each
  * group with the wallpaper its own recipe asks for. */
+/* The wallpaper every group that has one renders against.
+ *
+ * It was "Palestine.jpg", hard-coded at seven call sites. It is the SHIPPED
+ * DEFAULT now (nd_settings.h, ND_SET_UI_WALLPAPER_DFLT) and named once,
+ * because the reference frames are what a reviewer looks at to decide whether
+ * the theme works and they should therefore show the phone as it actually
+ * boots. --wallpaper still overrides it for reviewing any of the others. */
+#define ND_SHOOT_WALLPAPER "Fruitiger Aero.jpg"
+
 static const char *g_wallpaper_override;
 
 /* --anim N: how many consecutive home frames to write into <out>/anim.
@@ -752,6 +761,17 @@ static void write_settings(const char *wallpaper_name)
         /* Stock wallpapers ship inside the read-only image; only user-added
          * ones live under /NeoDCT/User. */
         (void)fprintf(f, "system.ui.wallpaper=/NeoDCT/System/wallpapers/%s\n", wallpaper_name);
+    } else {
+        /* "NONE" EXPLICITLY, not "leave the key out".
+         *
+         * Omitting it used to mean the same thing, because the shipped default
+         * was itself "NONE" (nd_settings.h). It no longer is: the phone boots
+         * with a wallpaper now, so an absent key means THE DEFAULT WALLPAPER,
+         * and the seven groups that pass NULL here to say "no wallpaper" would
+         * silently render with one. That is what happened to the widget
+         * frames, and it presents as every list widget's reference frame
+         * disagreeing with the fixture that draws the same list. */
+        (void)fputs("system.ui.wallpaper=NONE\n", f);
     }
     for (i = 0u; i < g_n_extra_settings; i++)
         (void)fprintf(f, "%s\n", g_extra_settings[i]);
@@ -862,10 +882,10 @@ static void shoot_home_animation(nd_capture *cap, long n_frames)
     root_on();
 
     /* No write_settings() of its own: --wallpaper (or the home group's
-     * Palestine.jpg) is already in force, and pointing this at a still is a
+     * default) is already in force, and pointing this at a still is a
      * legitimate thing to do -- it produces N identical frames, which is the
      * correct answer for a .jpg. */
-    write_settings("Palestine.jpg");
+    write_settings(ND_SHOOT_WALLPAPER);
     nd_vclock_enable();
     nd_ui_sim_clear(&ui);
     if (nd_ui_init(&ui, fb) != ND_OK) {
@@ -919,7 +939,7 @@ static void shoot_home(nd_capture *cap)
     printf("[shoot] home\n");
 
     /* --- WP + STATUS: wallpaper and a healthy phone --- */
-    write_settings("Palestine.jpg");
+    write_settings(ND_SHOOT_WALLPAPER);
     nd_vclock_enable();
     nd_ui_sim_clear(&ui);
     if (nd_ui_init(&ui, fb) != ND_OK) {
@@ -956,7 +976,7 @@ static void shoot_home(nd_capture *cap)
     /* --- WP, no STATUS: the honest QEMU/dev look, "?" battery and
      * "No Service". This is the only group that leaves the simulation hook
      * alone, and the fallbacks in nd_ui_sim.h are what it renders. --- */
-    write_settings("Palestine.jpg");
+    write_settings(ND_SHOOT_WALLPAPER);
     nd_vclock_enable();
     nd_ui_sim_clear(&ui);
     if (nd_ui_init(&ui, fb) != ND_OK) {
@@ -1009,7 +1029,7 @@ static void shoot_app_selector(nd_capture *cap)
 
     printf("[shoot] app selector\n");
 
-    write_settings("Palestine.jpg");
+    write_settings(ND_SHOOT_WALLPAPER);
     nd_vclock_enable();
     nd_ui_sim_clear(&ui);
     if (nd_ui_init(&ui, fb) != ND_OK) {
@@ -1062,7 +1082,7 @@ static void shoot_telephony(nd_capture *cap)
 
     printf("[shoot] telephony\n");
 
-    write_settings("Palestine.jpg");
+    write_settings(ND_SHOOT_WALLPAPER);
     nd_vclock_enable();
     nd_ui_sim_clear(&ui);
     if (nd_ui_init(&ui, fb) != ND_OK) {
@@ -1220,7 +1240,7 @@ static void shoot_telephony(nd_capture *cap)
  *
  * ============ A FRESH UI PER CASE, AS THE RECIPE HAS ============
  *
- * shoot_docs.py opens a new `with StubUI(wallpaper="Palestine.jpg")` block
+ * shoot_docs.py opens a new `with StubUI(wallpaper=...)` block
  * for every case in shoot_stock_apps, which means a fresh virtual clock and a
  * fresh canvas each time. Both frames here clear every row they occupy, so
  * neither is decided by it today -- but the next app ported into this group
@@ -1523,7 +1543,7 @@ static void shoot_stock_apps(nd_capture *cap)
     for (i = 0u; i < ND_ARRAY_LEN(STOCK_CASES); i++) {
         /* A fresh WP + STATUS UI per case, as every `with StubUI(...)` block
          * in shoot_stock_apps gets. */
-        write_settings("Palestine.jpg");
+        write_settings(ND_SHOOT_WALLPAPER);
         nd_vclock_enable();
         nd_ui_sim_clear(&ui);
         if (nd_ui_init(&ui, fb) != ND_OK) {
@@ -1953,16 +1973,20 @@ static void shoot_widgets(nd_capture *cap)
         }
     }
 
-    /* --- SoftKeyBar, composed by hand in shoot_docs.py: a black screen, a
-     * title, a "3-2" breadcrumb, the divider, then update("Options"). --- */
+    /* --- SoftKeyBar, composed by hand in shoot_docs.py: a screen, a title, a
+     * "3-2" breadcrumb and then update("Options"). --- */
     {
         nd_header header;
 
+        /* The recipe used to fill black and draw the title and the divider
+         * itself, which made this the one frame in the capture that showed
+         * the softkey bar against chrome nothing in the OS draws any more.
+         * The point of the frame is the bar, so what is behind it has to be
+         * what is actually behind it: the chrome background and the same
+         * title plate every screen carries. */
         nd_header_init_int(&header, &ui, 3);
-        (void)nd_draw_rect_fill(ui.draw, ND_RECT(0, 0, ui.w, ui.h), ND_BLACK);
-        (void)nd_draw_text(ui.draw, 5, 0, "Call log", ui.font_xl, ND_WHITE);
-        nd_header_draw(&header, 2);
-        (void)nd_draw_line(ui.draw, 0, 30, ui.w, 30, ND_WHITE, 1);
+        nd_ui_paint_chrome_full(&ui);
+        (void)nd_header_bar(&header, "Call log", 2);
 
         nd_softkey_init(&bar, &ui, false);
         nd_softkey_update(&bar, "Options", true);

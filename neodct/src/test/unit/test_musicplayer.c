@@ -410,18 +410,44 @@ static void test_truncate(void)
     CHECK_STR(api.truncate(out, sizeof out, "Short", fx.font_n, 116), "Short",
               "a title that fits keeps every character and gains nothing");
 
-    CHECK_STR(api.truncate(out, sizeof out, "A Very Long Track Title Indeed", fx.font_n, 116),
-              "A Very...", "20 px title at 116 px");
+    /* ============ THE RULE, NOT THE CHARACTER COUNT ============
+     *
+     * These were spelled out as exact strings -- "A Very...", "Unknown A..."
+     * -- and each was a count of how many characters of the original fit in
+     * 116 px on the pixel face. The UI face is narrower, so every one of them
+     * fits more, and a test carrying the old strings is asserting the
+     * typeface's advance widths rather than the truncator.
+     *
+     * What the truncator promises is the same on any face: the result is a
+     * PREFIX of the original, it ends in three dots, and it fits the budget.
+     * That is what is checked, over the same four strings. */
+    {
+        static const char *const TOO_LONG[] = {
+            "A Very Long Track Title Indeed",
+            "An Extremely Long Artist Name That Will Not Fit", "Greatest Hits Volume Two"};
+        static const int32_t FACE[] = {0, 1, 1}; /* 0 = font_n, 1 = font_s */
+        size_t k;
 
-    CHECK_STR(api.truncate(out, sizeof out, "Unknown Artist", fx.font_s, 116), "Unknown A...",
-              "14 px artist at 116 px -- the DEFAULT artist does not fit");
+        for (k = 0u; k < ND_ARRAY_LEN(TOO_LONG); k++) {
+            const nd_font *f = FACE[k] == 0 ? fx.font_n : fx.font_s;
+            const char *got = api.truncate(out, sizeof out, TOO_LONG[k], f, 116);
+            size_t n = strlen(got);
+            int32_t w = 0;
 
-    CHECK_STR(api.truncate(out, sizeof out,
-                           "An Extremely Long Artist Name That Will Not Fit", fx.font_s, 116),
-              "An Extrem...", "14 px artist, long");
+            CHECK(n > 3u && strcmp(got + n - 3, "...") == 0, "a clipped string ends in three dots");
+            CHECK(strncmp(got, TOO_LONG[k], n - 3u) == 0, "and what precedes them is a prefix");
+            nd_text_size(f, got, &w, NULL);
+            CHECK(w <= 116, "and the whole thing fits the budget");
+            CHECK(strcmp(got, TOO_LONG[k]) != 0, "and it really was clipped");
+        }
+    }
 
-    CHECK_STR(api.truncate(out, sizeof out, "Greatest Hits Volume Two", fx.font_s, 116),
-              "Greatest Hi...", "14 px album at 116 px");
+    /* And the DEFAULT artist now fits, where it did not before: "Unknown
+     * Artist" came to more than 116 px at 14 px on the pixel face and was
+     * shown as "Unknown A...", which is a poor thing for a music player to
+     * say about every untagged file it has. On the UI face it fits whole. */
+    CHECK_STR(api.truncate(out, sizeof out, "Unknown Artist", fx.font_s, 116), "Unknown Artist",
+              "the default artist fits on this face");
 
     /* `while w > max_w and len(t) > 0` -- the length guard is what ends this
      * one, and the result is WIDER than max_w. Ported, because the alternative

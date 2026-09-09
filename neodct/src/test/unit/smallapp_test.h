@@ -52,6 +52,7 @@
 #include <unistd.h>
 
 #include "nd_app.h"
+#include "uifont_test.h"
 #include "nd_capture.h"
 #include "nd_draw.h"
 #include "nd_fb.h"
@@ -66,7 +67,7 @@
 #include "nd_ui.h"
 #include "nd_vclock.h"
 
-#define SA_FONT_REL "overlay/NeoDCT/System/ui/resources/fonts/font.ttf"
+#define SA_FONT_REL ND_TEST_UI_FONT_REL
 
 static int sa_checks;
 static int sa_failures;
@@ -263,6 +264,8 @@ typedef struct {
     nd_font *font_md;
     nd_font *font_n;
     nd_font *font_xl;
+    nd_font *font_n_b;
+    nd_font *font_xl_b;
     nd_capture *cap;
     nd_input_channel ch;
     nd_input *in;
@@ -287,6 +290,8 @@ ND_UNUSED_FN static void sa_fx_free(sa_fixture *fx)
     nd_font_free(fx->font_md);
     nd_font_free(fx->font_n);
     nd_font_free(fx->font_xl);
+    nd_font_free(fx->font_n_b);
+    nd_font_free(fx->font_xl_b);
     memset(fx, 0, sizeof *fx);
     fx->ch.read_fd = -1;
     fx->ch.write_fd = -1;
@@ -295,7 +300,7 @@ ND_UNUSED_FN static void sa_fx_free(sa_fixture *fx)
 /* ============ WHY THE FIXTURE HAS A WALLPAPER ============
  *
  * The frames sa_expect_golden() compares against come out of nd-shoot, whose
- * app group runs every stock app with Palestine.jpg set -- so since the
+ * app group runs every stock app with the shipped default wallpaper set -- so since the
  * framework started drawing the wallpaper behind its own chrome, that is what
  * those reference frames contain. A fixture that renders on black would
  * differ from every one of them in three quarters of its pixels, and the
@@ -348,7 +353,7 @@ ND_UNUSED_FN static void sa_apply_reference_wallpaper(sa_fixture *fx)
         /* shoot_stock_apps()'s wallpaper, so the fixture and the reference
          * frame are looking at the same picture. */
         nd_ui_set_wallpaper(&fx->ui,
-                            nd_ui_load_wallpaper("/NeoDCT/System/wallpapers/Palestine.jpg"));
+                            nd_ui_load_wallpaper(ND_TEST_REF_WALLPAPER_PATH));
     }
 
     (void)nd_path_set_root(saved[0] != '\0' ? saved : NULL);
@@ -364,6 +369,19 @@ ND_UNUSED_FN static bool sa_fx_init(sa_fixture *fx)
     fx->font_md = nd_font_load(sa_font, ND_FONT_PX_MD);
     fx->font_n = nd_font_load(sa_font, ND_FONT_PX_N);
     fx->font_xl = nd_font_load(sa_font, ND_FONT_PX_XL);
+
+    /* The bold pair. Optional -- nd_ui_font_bold() answers the regular
+     * weight for a NULL -- but a fixture that skips it renders every
+     * title a stroke too light and matches no reference frame.
+     * See uifont_test.h. */
+    {
+        char bold[ND_PATH_MAX];
+
+        if (ui_bold_face_path(sa_font, bold, sizeof bold)) {
+            fx->font_n_b = nd_font_load(bold, ND_FONT_PX_N);
+            fx->font_xl_b = nd_font_load(bold, ND_FONT_PX_XL);
+        }
+    }
     if (fx->font_s == NULL || fx->font_md == NULL || fx->font_n == NULL || fx->font_xl == NULL) {
         fprintf(stderr, "smallapp_test: nd_font_load(%s) failed\n", sa_font);
         return false;
@@ -407,6 +425,8 @@ ND_UNUSED_FN static bool sa_fx_init(sa_fixture *fx)
     fx->ui.font_md = fx->font_md;
     fx->ui.font_n = fx->font_n;
     fx->ui.font_xl = fx->font_xl;
+    fx->ui.font_n_b = fx->font_n_b;
+    fx->ui.font_xl_b = fx->font_xl_b;
     fx->ui.keypad_fd = -1;
     fx->ui.input = fx->in;
     /* The core's own bar already exists by the time any app runs, so an app's

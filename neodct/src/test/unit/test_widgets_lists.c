@@ -41,6 +41,7 @@
 #include <unistd.h>
 
 #include "nd_capture.h"
+#include "uifont_test.h"
 #include "nd_draw.h"
 #include "nd_font.h"
 #include "nd_image.h"
@@ -59,7 +60,7 @@
  * Finding the font and the reference set
  * ------------------------------------------------------------------ */
 
-#define FONT_REL "overlay/NeoDCT/System/ui/resources/fonts/font.ttf"
+#define FONT_REL ND_TEST_UI_FONT_REL
 
 static bool file_exists(const char *path)
 {
@@ -130,8 +131,8 @@ static bool resolve_font(char *out, size_t sz)
         (void)nd_strlcpy(out, "neodct/" FONT_REL, sz);
         return true;
     }
-    if (file_exists("/NeoDCT/System/ui/resources/fonts/font.ttf")) {
-        (void)nd_strlcpy(out, "/NeoDCT/System/ui/resources/fonts/font.ttf", sz);
+    if (file_exists(ND_TEST_UI_FONT_ABS)) {
+        (void)nd_strlcpy(out, ND_TEST_UI_FONT_ABS, sz);
         return true;
     }
     return false;
@@ -149,6 +150,8 @@ typedef struct {
     nd_font *font_md;
     nd_font *font_n;
     nd_font *font_xl;
+    nd_font *font_n_b;
+    nd_font *font_xl_b;
 } fixture;
 
 static bool fx_init(fixture *fx)
@@ -164,6 +167,19 @@ static bool fx_init(fixture *fx)
     fx->font_md = nd_font_load(path, ND_FONT_PX_MD);
     fx->font_n = nd_font_load(path, ND_FONT_PX_N);
     fx->font_xl = nd_font_load(path, ND_FONT_PX_XL);
+
+    /* The bold pair. Optional -- nd_ui_font_bold() answers the regular
+     * weight for a NULL -- but a fixture that skips it renders every
+     * title a stroke too light and matches no reference frame.
+     * See uifont_test.h. */
+    {
+        char bold[ND_PATH_MAX];
+
+        if (ui_bold_face_path(path, bold, sizeof bold)) {
+            fx->font_n_b = nd_font_load(bold, ND_FONT_PX_N);
+            fx->font_xl_b = nd_font_load(bold, ND_FONT_PX_XL);
+        }
+    }
     if (fx->font_s == NULL || fx->font_md == NULL || fx->font_n == NULL || fx->font_xl == NULL) {
         fprintf(stderr, "test_widgets_lists: nd_font_load(%s) failed\n", path);
         return false;
@@ -187,6 +203,8 @@ static bool fx_init(fixture *fx)
     fx->ui.font_md = fx->font_md;
     fx->ui.font_n = fx->font_n;
     fx->ui.font_xl = fx->font_xl;
+    fx->ui.font_n_b = fx->font_n_b;
+    fx->ui.font_xl_b = fx->font_xl_b;
     fx->ui.keypad_fd = -1;
     /* Every bar a widget builds for itself is opaque; only the core's own bar
      * is transparent, and this context is not the core. */
@@ -201,6 +219,8 @@ static void fx_free(fixture *fx)
     nd_font_free(fx->font_md);
     nd_font_free(fx->font_n);
     nd_font_free(fx->font_xl);
+    nd_font_free(fx->font_n_b);
+    nd_font_free(fx->font_xl_b);
     memset(fx, 0, sizeof *fx);
 }
 
@@ -379,12 +399,18 @@ static void test_golden_levelselector(fixture *fx)
     nd_levelsel sel;
     nd_softkey bar;
 
-    /* In shoot_docs.py the LevelSelector is drawn straight after the
-     * TextScroller, whose last act is SoftKeyBar.update("More"). The list's
-     * draw() does not touch the softkey strip, so "More" is still there in the
-     * reference frame. Reproduce the inherited strip, not an "OK". */
+    /* In nd-shoot the LevelSelector is drawn straight after the TextScroller,
+     * and a VerticalList's draw() does not touch the softkey strip -- so
+     * whatever the scroller left is still in this frame. Reproduce the
+     * INHERITED strip, not an "OK".
+     *
+     * It says "Back" and not "More". nd_scroller shows its back label on the
+     * LAST page and its more label otherwise, and the snake help text used to
+     * need two pages on the pixel face; on the UI face the same words fit on
+     * one, so the scroller before this frame ends on its last page. The
+     * scroller's paging itself is covered in test_widgets_text. */
     nd_softkey_init(&bar, &fx->ui, false);
-    nd_softkey_update(&bar, "More", false);
+    nd_softkey_update(&bar, "Back", false);
 
     nd_levelsel_init(&sel, &fx->ui, 3, 9, "Level", 6);
     CHECK_INT(sel.count, 9);
@@ -401,13 +427,15 @@ static void test_golden_softkeybar(fixture *fx)
     nd_header h;
     nd_softkey bar;
 
-    /* shoot_docs.py composes this one by hand: a black screen, a title, a
-     * "3-2" breadcrumb, the divider, then SoftKeyBar(ui).update("Options"). */
+    /* nd-shoot composes this one by hand: a screen, a title, a "3-2"
+     * breadcrumb, then SoftKeyBar(ui).update("Options"). The recipe used to
+     * fill black and draw the title and a rule itself, which made this the
+     * one frame in the capture showing the softkey bar against chrome nothing
+     * in the OS draws any more. Match what nd_shoot.c does now: the chrome
+     * background and the shared title plate. */
     nd_header_init_int(&h, &fx->ui, 3);
-    (void)nd_draw_rect_fill(&fx->draw, ND_RECT(0, 0, ND_UI_W, ND_UI_H), ND_BLACK);
-    (void)nd_draw_text(&fx->draw, 5, 0, "Call log", fx->ui.font_xl, ND_WHITE);
-    nd_header_draw(&h, 2);
-    (void)nd_draw_line(&fx->draw, 0, 30, ND_UI_W, 30, ND_WHITE, 1);
+    nd_ui_paint_chrome_full(&fx->ui);
+    (void)nd_header_bar(&h, "Call log", 2);
 
     nd_softkey_init(&bar, &fx->ui, false);
     nd_softkey_update(&bar, "Options", true);
@@ -514,39 +542,178 @@ static void test_header(void)
  * 2c. SoftKeyBar
  * ------------------------------------------------------------------ */
 
-static bool row_is_black(const nd_image *img, int32_t y)
+/* ============ "IS IT BLANK" IS NO LONGER "IS IT BLACK" ============
+ *
+ * These used to ask whether a pixel was (0,0,0), and that was a complete
+ * description of an empty screen when the framework painted black behind
+ * everything. It paints a sky gradient or a wallpaper now, so a blank row is
+ * not black and an unlabelled softkey strip is full of non-zero pixels.
+ *
+ * The question the tests were really asking is "did the widget draw anything
+ * here", and the only way to ask that without naming a colour is to compare
+ * against what the chrome painter would have left. bg_reference() renders
+ * exactly that into a second surface; everything below is expressed against
+ * it.
+ *
+ * The comparison has a TOLERANCE, and it is not slop. The scrim is applied
+ * per paint, so a region cleared twice in one frame is a shade darker than
+ * one cleared once -- deliberately, and identically to how the old
+ * double-black-fill behaved. A couple of levels of difference is that, not a
+ * drawn pixel; a drawn pixel differs by tens. */
+#define BG_TOLERANCE 6
+
+/* Owned by the caller; free with nd_image_free(). NULL only on allocation
+ * failure, which the callers report as a failed check. */
+static nd_image *bg_reference(fixture *fx)
+{
+    nd_image *saved = fx->canvas;
+    nd_image *bg = nd_image_new(saved->w, saved->h, saved->fmt);
+    nd_draw d;
+
+    if (bg == NULL)
+        return NULL;
+    /* Point the context at the scratch surface, paint, put it back. The ui
+     * and its draw context are the fixture's, so this cannot be done by
+     * calling the painter with a different argument -- it takes the ui. */
+    if (nd_draw_bind(&d, bg) != ND_OK) {
+        nd_image_free(bg);
+        return NULL;
+    }
+    fx->ui.canvas = bg;
+    fx->ui.draw = &d;
+    nd_ui_paint_chrome_full(&fx->ui);
+    fx->ui.canvas = saved;
+    fx->ui.draw = &fx->draw;
+    return bg;
+}
+
+static int32_t chan_delta(uint8_t a, uint8_t b)
+{
+    int32_t d = (int32_t)a - (int32_t)b;
+
+    return d < 0 ? -d : d;
+}
+
+static bool px_is_bg(const nd_image *img, const nd_image *bg, int32_t x, int32_t y)
+{
+    nd_color a = nd_image_get_px(img, x, y);
+    nd_color b = nd_image_get_px(bg, x, y);
+
+    return chan_delta(a.r, b.r) <= BG_TOLERANCE && chan_delta(a.g, b.g) <= BG_TOLERANCE &&
+           chan_delta(a.b, b.b) <= BG_TOLERANCE;
+}
+
+/* Nothing but the background across this whole row. */
+static bool row_is_bg(const nd_image *img, const nd_image *bg, int32_t y)
 {
     int32_t x;
 
     for (x = 0; x < img->w; x++) {
-        nd_color c = nd_image_get_px(img, x, y);
-
-        if (c.r != 0u || c.g != 0u || c.b != 0u)
+        if (!px_is_bg(img, bg, x, y))
             return false;
     }
     return true;
 }
 
-static bool strip_has_ink(const nd_image *img)
+/* How many pixels of the softkey strip the widget put something on. Zero is
+ * an unlabelled strip; a label is hundreds. */
+static int32_t strip_drawn(const nd_image *img, const nd_image *bg)
 {
+    int32_t n = 0;
     int32_t x;
     int32_t y;
 
     for (y = 145; y < img->h; y++) {
         for (x = 0; x < img->w; x++) {
-            nd_color c = nd_image_get_px(img, x, y);
-
-            if (c.r != 0u || c.g != 0u || c.b != 0u)
-                return true;
+            if (!px_is_bg(img, bg, x, y))
+                n++;
         }
     }
-    return false;
+    return n;
+}
+
+/* A glossy plate -- a selection lozenge, a title bar, a scrollbar thumb -- as
+ * a predicate rather than a value.
+ *
+ * ============ WHAT ACTUALLY SEPARATES A PLATE FROM ITS GROUND ============
+ *
+ * Not brightness, and not "is it blue". The ground is ND_TH_SKY_*, which is
+ * itself a blue gradient, and it is BRIGHTER than most of a plate rather than
+ * darker -- a lozenge over the sky measures (95,172,229) against a background
+ * of (91,141,173) at the same row. Both of those obvious tests were tried and
+ * both answer yes to the empty screen.
+ *
+ * What is true of every plate and of nothing else on the screen is that it is
+ * far more SATURATED toward blue than the ground: its blue channel leads its
+ * red by a much wider margin. Measured on the shipped palette over the sky:
+ *
+ *     lozenge / thumb body   b - r  =  112 .. 174   (ground: ~80)
+ *     the plate's border     b - r  =   98 .. 102
+ *     its two-row shadow     b - r  =   91
+ *     a scrollbar groove     b - r  =   89
+ *
+ * So the body clears the ground by thirty or more and the three DARK parts of
+ * a plate -- border, shadow, groove -- do not. Thirty is the gap, and it is
+ * measured rather than chosen.
+ *
+ * A plate's FIRST TWO AND LAST ROWS are its border and its white bevel, and
+ * neither is body: sample at least two rows inside whatever is being asked
+ * about, which is why every call below does. */
+/* Anything at all was drawn here. */
+static bool is_drawn(const nd_image *img, const nd_image *bg, int32_t x, int32_t y)
+{
+    return !px_is_bg(img, bg, x, y);
+}
+
+#define PLATE_SATURATION 30
+
+/* How much bluer than its ground this pixel is. Negative for the near-white
+ * parts of a plate, which is what the bevel test below relies on. */
+static int32_t blue_lead(const nd_image *img, const nd_image *bg, int32_t x, int32_t y)
+{
+    nd_color c = nd_image_get_px(img, x, y);
+    nd_color b = nd_image_get_px(bg, x, y);
+
+    return ((int32_t)c.b - (int32_t)c.r) - ((int32_t)b.b - (int32_t)b.r);
+}
+
+static bool is_plate(const nd_image *img, const nd_image *bg, int32_t x, int32_t y)
+{
+    if (px_is_bg(img, bg, x, y))
+        return false;
+    return blue_lead(img, bg, x, y) >= PLATE_SATURATION;
+}
+
+/* ============ THE BEVEL IS WHERE THE PLATE STARTS ============
+ *
+ * nd_theme.h idea 3: every plate draws a white hairline ONE ROW INSIDE its
+ * top edge. It is the only near-white part of a plate, so against a blue
+ * ground its blue-minus-red delta goes sharply NEGATIVE -- measured at -30 to
+ * -67 on the shipped palette, against +14 to +33 for the border above it and
+ * +2 to +98 for the body below.
+ *
+ * That makes it the most precise thing on the screen to pin a plate's
+ * position with: exactly one row below the top edge, one row tall, present on
+ * every plate at every size. A gradient body's saturation varies with where
+ * on the screen it lands -- the same thumb reads +98 at the top of the track
+ * and +64 at the bottom -- so probing the body is how a test ends up with a
+ * threshold that works for one scroll position and not the next.
+ *
+ * The threshold is generous because the bevel's own colour is constant
+ * (197,227,248) while the GROUND's saturation is not: the same hairline reads
+ * -30 against the sky at row 41 and -18 against it at row 1. Anything
+ * negative at all is a bevel, since every other part of a plate -- border
+ * +14, shadow +1, groove +3, body +29 and up -- sits on the positive side. */
+static bool is_plate_bevel(const nd_image *img, const nd_image *bg, int32_t x, int32_t y)
+{
+    return blue_lead(img, bg, x, y) <= -10;
 }
 
 static void test_softkey(void)
 {
     fixture fx;
     nd_softkey bar;
+    nd_image *bg;
 
     if (!fx_init(&fx)) {
         CHECK(false);
@@ -559,38 +726,51 @@ static void test_softkey(void)
     CHECK(!bar.transparent);
     CHECK(!bar.has_text);
 
-    /* A label lights the strip and nothing above it. */
+    bg = bg_reference(&fx);
+    CHECK(bg != NULL);
+    if (bg == NULL) {
+        fx_free(&fx);
+        return;
+    }
+
+    /* A label lights the strip and nothing above it. The plate reaches rows
+     * 147..172 -- it is inset two pixels top and bottom -- so 145 and 174 are
+     * still the background the painter left, which is the same assertion the
+     * old "row_is_black" pair made about a black strip. */
     (void)nd_image_fill(fx.canvas, ND_WHITE);
     nd_softkey_update(&bar, "Select", false);
-    CHECK(strip_has_ink(fx.canvas));
-    CHECK(row_is_black(fx.canvas, 145));
-    CHECK(row_is_black(fx.canvas, 174));
+    CHECK(strip_drawn(fx.canvas, bg) > 0);
+    CHECK(row_is_bg(fx.canvas, bg, 145));
+    CHECK(row_is_bg(fx.canvas, bg, 174));
     CHECK_STR(bar.current_text, "Select");
     CHECK(bar.has_text);
     /* Row 144 is ABOVE the strip and must be untouched -- that is the whole
      * reason a caller can paint the softkey before drawing a list. */
     CHECK_INT(nd_image_get_px(fx.canvas, 0, 144).r, 255);
 
-    /* Both "" and NULL clear the strip and draw nothing. ProgressScreen and
-     * PagedList's empty state depend on it, so this is not an error case. */
+    /* Both "" and NULL clear the strip and draw NOTHING AT ALL -- not even
+     * the plate. ProgressScreen and PagedList's empty state depend on it, so
+     * this is not an error case, and a plate with no word on it would be a
+     * button that does nothing. */
     nd_softkey_update(&bar, "", false);
-    CHECK(!strip_has_ink(fx.canvas));
+    CHECK_INT(strip_drawn(fx.canvas, bg), 0);
     CHECK_STR(bar.current_text, "");
     CHECK(bar.has_text); /* "" is not None */
 
     nd_softkey_update(&bar, "Options", false);
-    CHECK(strip_has_ink(fx.canvas));
+    CHECK(strip_drawn(fx.canvas, bg) > 0);
     nd_softkey_update(&bar, NULL, false);
-    CHECK(!strip_has_ink(fx.canvas));
+    CHECK_INT(strip_drawn(fx.canvas, bg), 0);
     CHECK(!bar.has_text);
 
-    /* Transparent with no wallpaper falls back to black -- which is what the
-     * home screen looks like before one is chosen. */
+    /* Transparent with no wallpaper falls back to the chrome ground -- which
+     * is what the home screen looks like before a picture is chosen. */
     nd_softkey_init(&bar, &fx.ui, true);
     CHECK(bar.transparent);
     (void)nd_image_fill(fx.canvas, ND_WHITE);
     nd_softkey_update(&bar, NULL, false);
-    CHECK(row_is_black(fx.canvas, 150));
+    CHECK(row_is_bg(fx.canvas, bg, 150));
+    nd_image_free(bg);
 
     /* Transparent WITH a wallpaper pastes the wallpaper's own rows 145..174
      * back, so the strip shows the picture rather than a black band. */
@@ -624,19 +804,38 @@ static void test_softkey(void)
  * 2d. VerticalList
  * ------------------------------------------------------------------ */
 
-/* Where the white selection bar is, as a row range, so the test talks about
- * the same thing the spec table does. */
-static bool row_is_selection_bar(const nd_image *img, int32_t y)
+/* Where the selection lozenge is, as a row range, so the test talks about the
+ * same thing the spec table does.
+ *
+ * Sampled at x=120 rather than at x=0: the lozenge is inset four pixels from
+ * the left edge and its corners are rounded, so its first and last rows do
+ * not reach x=0 or x=225 and asserting they do would be asserting the corner
+ * away. x=232 is past selected_right and is checked to be background, which
+ * is what the old x=226 check was for -- the bar must not reach the
+ * scrollbar. */
+/* This row is part of the selection lozenge.
+ *
+ * "Part of" and not "is the body of": a plate's FIRST AND LAST ROWS ARE ITS
+ * BORDER, which is ND_TH_BLUE_DEEP and therefore darker than the ground, so
+ * is_plate() answers no for them. Rows 40 and 69 of a 40..69 lozenge are
+ * exactly those rows, and the old white bar -- which had no border -- is why
+ * this was not a distinction that had to be made before.
+ *
+ * Sampled at x=120 rather than x=0: the lozenge is inset four pixels from the
+ * left edge and its corners are rounded, so its first and last rows do not
+ * reach x=0 and asserting they do would be asserting the corner away. x=232
+ * is past selected_right and must be untouched, which is what the old x=226
+ * check was for -- the bar must not reach the scrollbar. */
+static bool row_is_selection_bar(const nd_image *img, const nd_image *bg, int32_t y)
 {
-    /* x 0..225 inclusive white, 226.. black (the scrollbar column aside). */
-    return nd_image_get_px(img, 0, y).r == 255u && nd_image_get_px(img, 225, y).r == 255u &&
-           nd_image_get_px(img, 226, y).r == 0u;
+    return is_drawn(img, bg, 120, y) && !is_drawn(img, bg, 232, y);
 }
 
 static void test_vlist_layout(void)
 {
     fixture fx;
     nd_vlist list;
+    nd_image *bg;
     int32_t y;
     int32_t lit;
 
@@ -645,67 +844,106 @@ static void test_vlist_layout(void)
         return;
     }
 
+    bg = bg_reference(&fx);
+    CHECK(bg != NULL);
+    if (bg == NULL) {
+        fx_free(&fx);
+        return;
+    }
+
     nd_vlist_init(&list, &fx.ui, "Phonebook", PHONEBOOK, ND_ARRAY_LEN(PHONEBOOK), 1);
     nd_vlist_draw(&list);
 
-    /* Rows at 40, 73, 106 with a 29 px bar: 40..69, 73..102, 106..135. */
-    CHECK(row_is_selection_bar(fx.canvas, 40));
-    CHECK(row_is_selection_bar(fx.canvas, 69));
-    CHECK(!row_is_selection_bar(fx.canvas, 70));
-    CHECK(!row_is_selection_bar(fx.canvas, 39));
+    /* Rows at 40, 73, 106 with a 29 px lozenge: 40..69, 73..102, 106..135.
+     * Unchanged by the theme -- the plate is drawn into exactly the rectangle
+     * the white bar occupied.
+     *
+     * The row AFTER a lozenge is checked at +3 rather than +1, because a
+     * plate casts a two-row drop shadow and those two rows really are drawn
+     * on. That is asserted separately below rather than being written off. */
+    CHECK(row_is_selection_bar(fx.canvas, bg, 40));
+    CHECK(row_is_selection_bar(fx.canvas, bg, 69));
+    CHECK(!row_is_selection_bar(fx.canvas, bg, 72));
+    CHECK(!row_is_selection_bar(fx.canvas, bg, 39));
+
+    /* The body is the theme's blue and the two rows under it are the shadow:
+     * drawn, and DARKER than the ground rather than lighter. Getting these
+     * the wrong way round would be a lozenge that glows downward. */
+    CHECK(is_plate(fx.canvas, bg, 120, 55));
+    CHECK(is_drawn(fx.canvas, bg, 120, 70));
+    CHECK(!is_plate(fx.canvas, bg, 120, 70));
 
     list.selected_index = 1u;
     nd_vlist_draw(&list);
-    CHECK(row_is_selection_bar(fx.canvas, 73));
-    CHECK(row_is_selection_bar(fx.canvas, 102));
-    CHECK(!row_is_selection_bar(fx.canvas, 103));
+    CHECK(row_is_selection_bar(fx.canvas, bg, 73));
+    CHECK(row_is_selection_bar(fx.canvas, bg, 102));
+    CHECK(!row_is_selection_bar(fx.canvas, bg, 105));
 
     list.selected_index = 2u;
     nd_vlist_draw(&list);
-    CHECK(row_is_selection_bar(fx.canvas, 106));
-    CHECK(row_is_selection_bar(fx.canvas, 135));
-    CHECK(!row_is_selection_bar(fx.canvas, 136));
+    CHECK(row_is_selection_bar(fx.canvas, bg, 106));
+    CHECK(row_is_selection_bar(fx.canvas, bg, 135));
+    CHECK(!row_is_selection_bar(fx.canvas, bg, 138));
 
-    /* The divider is row 30 and it is the only row lit at both ends. */
-    CHECK_INT(nd_image_get_px(fx.canvas, 0, 30).r, 255);
-    CHECK_INT(nd_image_get_px(fx.canvas, 239, 30).r, 255);
-    CHECK_INT(nd_image_get_px(fx.canvas, 0, 29).r, 0);
-    CHECK_INT(nd_image_get_px(fx.canvas, 239, 31).r, 0);
+    /* The title bar occupies rows 0..29 across the FULL width and the content
+     * starts below it. It was a one-pixel white rule at row 30 with black
+     * either side of it; the plate is the rule now, so what is asserted is
+     * that the bar is there, that it reaches both edges, and that row 33 --
+     * clear of the plate and of the three-row shadow it casts -- is not part
+     * of it. */
+    CHECK(is_drawn(fx.canvas, bg, 0, 29));
+    CHECK(is_drawn(fx.canvas, bg, 239, 29));
+    CHECK(is_drawn(fx.canvas, bg, 0, 0));
+    CHECK(is_drawn(fx.canvas, bg, 239, 0));
+    /* Its top edge, to the pixel. Sampled at x=120 and not at x=0: a plate's
+      * BORDER is drawn last and covers the whole of its outermost columns, so
+      * at x=0 row 1 is border rather than bevel. */
+    CHECK(is_plate_bevel(fx.canvas, bg, 120, 1));
+    CHECK(!is_drawn(fx.canvas, bg, 0, 36));     /* clear of the bar and its shadow */
 
-    /* The scrollbar track is GREY and ONE column wide -- the only grey in the
-     * framework, and the one track that is not width 2. */
-    list.selected_index = 5u;
-    nd_vlist_draw(&list);
-    CHECK_INT(nd_image_get_px(fx.canvas, 235, 50).r, 128);
-    CHECK_INT(nd_image_get_px(fx.canvas, 235, 50).g, 128);
-    CHECK_INT(nd_image_get_px(fx.canvas, 235, 50).b, 128);
-    CHECK_INT(nd_image_get_px(fx.canvas, 236, 50).r, 0);
-    CHECK_INT(nd_image_get_px(fx.canvas, 234, 50).r, 0);
-
-    /* The notch is x 233..237. At selected 0 with 6 items the step is
-     * (140-40)/5 = 20 exactly, so it sits at y 37..43. */
+    /* The scrollbar. The track is centred on column 235 as it always was --
+     * five columns wide now rather than one, so 233..237 -- and the thumb is
+     * sized to the list rather than being a fixed seven-pixel notch.
+     *
+     * With six items over a 101-row track (40..140) the thumb is
+     * max(10, 101/6) = 16 rows, and the travel is (101-16)/5 = 17 rows a
+     * step. Index 0 puts it at 40..55 and index 5 at 40+85 = 125..140. Both
+     * are computed here the way nd_theme_scrollbar computes them, so the test
+     * fails if the arithmetic changes and not merely if the pixels move. */
     list.selected_index = 0u;
     nd_vlist_draw(&list);
-    lit = 0;
-    /* From 31, not 30: the divider spans the full width and lights this
-     * column too, and it is not part of the notch. */
-    for (y = 31; y < 145; y++) {
-        if (nd_image_get_px(fx.canvas, 237, y).r == 255u)
-            lit++;
-    }
-    CHECK_INT(lit, 7);
-    CHECK_INT(nd_image_get_px(fx.canvas, 233, 37).r, 255);
-    CHECK_INT(nd_image_get_px(fx.canvas, 237, 43).r, 255);
-    CHECK_INT(nd_image_get_px(fx.canvas, 237, 44).r, 0);
-    CHECK_INT(nd_image_get_px(fx.canvas, 232, 40).r, 0);
+    CHECK(is_plate_bevel(fx.canvas, bg, 235, 41)); /* thumb top edge = 40 */
+    CHECK(is_plate(fx.canvas, bg, 235, 50));
+    CHECK(!is_plate(fx.canvas, bg, 235, 60));
+    /* The track is drawn its whole length -- a recessed groove, which is what
+     * a thumb rides in. The old track was a grey line and the assertion was
+     * that column 236 was black; this is the same statement about a track
+     * that has a width. */
+    CHECK(is_drawn(fx.canvas, bg, 235, 100));
+    CHECK(!is_plate(fx.canvas, bg, 235, 100));
+    /* Nothing outside the five-column track. */
+    CHECK(!is_drawn(fx.canvas, bg, 231, 50));
 
-    /* And at the bottom of the list, 40 + 5*20 = 140 -> 137..143. */
+    /* At the last item the thumb is at the bottom: top edge 40 + 5*17 = 125. */
     list.selected_index = 5u;
     nd_vlist_draw(&list);
-    CHECK_INT(nd_image_get_px(fx.canvas, 233, 137).r, 255);
-    CHECK_INT(nd_image_get_px(fx.canvas, 237, 143).r, 255);
-    CHECK_INT(nd_image_get_px(fx.canvas, 237, 136).r, 0);
+    CHECK(is_plate_bevel(fx.canvas, bg, 235, 126));
+    CHECK(is_plate(fx.canvas, bg, 235, 137));
+    CHECK(!is_plate(fx.canvas, bg, 235, 50));
 
+    /* And there is only ONE thumb: with the selection at the bottom, the top
+     * two thirds of the track carry no thumb body at all. A thumb drawn twice,
+     * or one left behind at its old position by a partial repaint, is what
+     * this catches -- and it says so without counting hairlines, of which the
+     * track has several of its own. */
+    lit = 0;
+    for (y = 40; y <= 110; y++) {
+        if (is_plate(fx.canvas, bg, 235, y))
+            lit++;
+    }
+    CHECK_INT(lit, 0);
+
+    nd_image_free(bg);
     fx_free(&fx);
 }
 
@@ -726,9 +964,17 @@ static void test_vlist_preselected_row_scrolls_into_view(void)
 {
     fixture fx;
     nd_vlist list;
+    nd_image *bg;
 
     if (!fx_init(&fx)) {
         CHECK(false);
+        return;
+    }
+
+    bg = bg_reference(&fx);
+    CHECK(bg != NULL);
+    if (bg == NULL) {
+        fx_free(&fx);
         return;
     }
 
@@ -739,9 +985,9 @@ static void test_vlist_preselected_row_scrolls_into_view(void)
     nd_vlist_draw(&list);
 
     CHECK_INT(list.window_start, 3);
-    CHECK(row_is_selection_bar(fx.canvas, 106));
-    CHECK(row_is_selection_bar(fx.canvas, 135));
-    CHECK(!row_is_selection_bar(fx.canvas, 40));
+    CHECK(row_is_selection_bar(fx.canvas, bg, 106));
+    CHECK(row_is_selection_bar(fx.canvas, bg, 135));
+    CHECK(!row_is_selection_bar(fx.canvas, bg, 40));
 
     /* And back the other way, which already worked -- kept so a fix to one
      * direction cannot quietly break the other. */
@@ -749,8 +995,9 @@ static void test_vlist_preselected_row_scrolls_into_view(void)
     nd_vlist_draw(&list);
 
     CHECK_INT(list.window_start, 0);
-    CHECK(row_is_selection_bar(fx.canvas, 40));
+    CHECK(row_is_selection_bar(fx.canvas, bg, 40));
 
+    nd_image_free(bg);
     fx_free(&fx);
 }
 
@@ -762,6 +1009,7 @@ static void test_vlist_notch_truncates(void)
 {
     fixture fx;
     nd_vlist list;
+    nd_image *bg;
     static const char *const SEVEN[] = {"a", "b", "c", "d", "e", "f", "g"};
 
     if (!fx_init(&fx)) {
@@ -769,21 +1017,36 @@ static void test_vlist_notch_truncates(void)
         return;
     }
 
+    bg = bg_reference(&fx);
+    CHECK(bg != NULL);
+    if (bg == NULL) {
+        fx_free(&fx);
+        return;
+    }
+
+    /* Seven items over the 101-row track (40..140): the thumb is
+     * max(10, 101/7) = 14 rows and the travel is (101-14)/6 = 14.5 a step.
+     * Index 1 lands at 40 + trunc(14.5) = 54, so the thumb is 54..67.
+     * ROUNDING instead would put it at 55 and move the whole thumb a pixel,
+     * which is the thing this test exists to catch. */
     nd_vlist_init(&list, &fx.ui, "T", SEVEN, ND_ARRAY_LEN(SEVEN), 9);
     list.selected_index = 1u;
     nd_vlist_draw(&list);
-    CHECK_INT(nd_image_get_px(fx.canvas, 235, 52).r, 128); /* track, not notch */
-    CHECK_INT(nd_image_get_px(fx.canvas, 233, 53).r, 255);
-    CHECK_INT(nd_image_get_px(fx.canvas, 233, 59).r, 255);
-    CHECK_INT(nd_image_get_px(fx.canvas, 233, 60).r, 0);
+    CHECK(!is_plate(fx.canvas, bg, 235, 50));      /* track, not thumb */
+    CHECK(is_plate_bevel(fx.canvas, bg, 235, 55)); /* thumb top edge = 54 */
+    CHECK(is_plate(fx.canvas, bg, 235, 62));
+    CHECK(!is_plate(fx.canvas, bg, 235, 75));
 
-    /* A one-item list has no step at all and pins the notch to the track top. */
+    /* A one-item list has no step at all. The thumb fills the track, which is
+     * what a scrollbar for a list that does not scroll should look like --
+     * the old fixed notch pinned to the top said "you are at the start of
+     * something longer", which was never true. */
     nd_vlist_init(&list, &fx.ui, "T", SEVEN, 1u, 9);
     nd_vlist_draw(&list);
-    CHECK_INT(nd_image_get_px(fx.canvas, 233, 37).r, 255);
-    CHECK_INT(nd_image_get_px(fx.canvas, 233, 43).r, 255);
-    CHECK_INT(nd_image_get_px(fx.canvas, 233, 44).r, 0);
+    CHECK(is_plate_bevel(fx.canvas, bg, 235, 41)); /* top edge still 40 */
+    CHECK(is_drawn(fx.canvas, bg, 235, 138));      /* and it reaches the bottom */
 
+    nd_image_free(bg);
     fx_free(&fx);
 }
 
@@ -870,6 +1133,10 @@ static void test_vlist_keys(void)
 
 /* The title is trimmed so it cannot run underneath the breadcrumb. The bug
  * this fixed produced "Remote Sh<overlap>7-7" on the Remote Shell menu. */
+/* Wider than 178 px at 24 px on the shipped face -- see the note in the body
+ * about why this is not "Remote Shell" any more. */
+#define TOO_LONG_TITLE "Remote Shell Console"
+
 static void test_vlist_title_is_trimmed(void)
 {
     fixture fx;
@@ -885,18 +1152,30 @@ static void test_vlist_title_is_trimmed(void)
         return;
     }
 
-    nd_vlist_init(&list, &fx.ui, "Remote Shell", PHONEBOOK, ND_ARRAY_LEN(PHONEBOOK), 9007);
+    /* ============ WHY NOT "Remote Shell" ============
+     *
+     * That is the app whose menu found this bug, and it was 138 px at 24 px on
+     * the old pixel face against 145 px of room -- comfortably over. On the UI
+     * face it is 142 px against 178, so it now FITS, and a test that trims it
+     * would be asserting nothing: nd_text_fit() would hand back the string
+     * unchanged and both checks would pass whether or not the trimming worked.
+     *
+     * So the string is one that is genuinely too long for the space on the
+     * face the phone actually renders with. The bug being guarded against is
+     * unchanged -- a title running under a right-aligned breadcrumb -- and the
+     * breadcrumb is still the widest one any shipped app produces. */
+    nd_vlist_init(&list, &fx.ui, TOO_LONG_TITLE, PHONEBOOK, ND_ARRAY_LEN(PHONEBOOK), 9007);
     nd_header_init_int(&h, &fx.ui, 9007);
     reserved = nd_header_width(&h, 7);
     avail = 240 - 5 - reserved - 6;
 
     list.selected_index = 6u; /* breadcrumb "9007-7" */
-    (void)nd_text_fit(want, sizeof want, "Remote Shell", fx.ui.font_xl, avail);
+    (void)nd_text_fit(want, sizeof want, TOO_LONG_TITLE, fx.ui.font_xl, avail);
     nd_text_size(fx.ui.font_xl, want, &w, NULL);
     CHECK(w <= avail);
     /* It really does have to trim at this width -- otherwise the test proves
      * nothing about the overlap. */
-    nd_text_size(fx.ui.font_xl, "Remote Shell", &w, NULL);
+    nd_text_size(fx.ui.font_xl, TOO_LONG_TITLE, &w, NULL);
     CHECK(w > avail);
 
     fx_free(&fx);
@@ -1047,6 +1326,7 @@ static void test_pagedlist_layout(void)
 {
     fixture fx;
     nd_pagedlist p;
+    nd_image *bg;
     int32_t x;
     int32_t lit;
     int32_t y;
@@ -1056,30 +1336,41 @@ static void test_pagedlist_layout(void)
         return;
     }
 
+    bg = bg_reference(&fx);
+    CHECK(bg != NULL);
+    if (bg == NULL) {
+        fx_free(&fx);
+        return;
+    }
+
     nd_pagedlist_init(&p, &fx.ui, "Messages", MESSAGES, ND_ARRAY_LEN(MESSAGES), "2", true);
     nd_pagedlist_draw(&p);
 
     /* The scrollbar is WHITE and TWO columns wide -- 235 and 236, the minor
      * axis only, which is the opposite of VerticalList's grey single column. */
-    CHECK_INT(nd_image_get_px(fx.canvas, 235, 100).r, 255);
-    CHECK_INT(nd_image_get_px(fx.canvas, 236, 100).r, 255);
-    CHECK_INT(nd_image_get_px(fx.canvas, 237, 100).r, 0);
-    CHECK_INT(nd_image_get_px(fx.canvas, 234, 100).r, 0);
+    /* PagedList and VerticalList now draw the SAME scrollbar -- both call
+     * nd_theme_scrollbar -- so the two tracks are the same object at two
+     * columns rather than one white width-2 line and one grey width-1 line.
+     * That is a simplification the theme bought and it is worth asserting:
+     * five columns centred on bar_x, nothing either side. */
+    CHECK(is_plate(fx.canvas, bg, 235, 45));
+    CHECK(px_is_bg(fx.canvas, bg, 232, 45));
+    CHECK(px_is_bg(fx.canvas, bg, 238, 45));
 
-    /* Notch x 231..237, at the track top for index 0 -> rows 35..41. */
-    CHECK_INT(nd_image_get_px(fx.canvas, 231, 35).r, 255);
-    CHECK_INT(nd_image_get_px(fx.canvas, 237, 41).r, 255);
-    CHECK_INT(nd_image_get_px(fx.canvas, 231, 42).r, 0);
-    CHECK_INT(nd_image_get_px(fx.canvas, 230, 38).r, 0);
+    /* The thumb over the 98-row track (38..135): three items give
+     * max(10, 98/3) = 32 rows and a travel of (98-32)/2 = 33 a step. Index 0
+     * is 38..69 and index 1 is 38+33 = 71..102. THE STEP TRUNCATES -- 33.0
+     * exactly here, so the next assertion is the one that would catch
+     * rounding. */
+    CHECK(is_plate_bevel(fx.canvas, bg, 235, 39)); /* thumb top edge = 38 */
+    CHECK(is_plate(fx.canvas, bg, 235, 60));
+    CHECK(!is_plate(fx.canvas, bg, 235, 80));
 
-    /* Step for three items is (135-38)/2 = 48.5, so index 1 truncates to
-     * 86.5 -> 83.5..89.5 -> rows 83..89. Rounding would give 84..90. */
     p.selected_index = 1u;
     nd_pagedlist_draw(&p);
-    CHECK_INT(nd_image_get_px(fx.canvas, 231, 83).r, 255);
-    CHECK_INT(nd_image_get_px(fx.canvas, 231, 89).r, 255);
-    CHECK_INT(nd_image_get_px(fx.canvas, 231, 90).r, 0);
-    CHECK_INT(nd_image_get_px(fx.canvas, 231, 82).r, 0);
+    CHECK(is_plate_bevel(fx.canvas, bg, 235, 72)); /* 38 + 33 = 71 */
+    CHECK(is_plate(fx.canvas, bg, 235, 95));
+    CHECK(!is_plate(fx.canvas, bg, 235, 45));
 
     /* THE CENTRING QUIRK: the item is centred inside 223, not 240, so its ink
      * sits left of the true centre. Find the ink span of the single line. */
@@ -1091,7 +1382,7 @@ static void test_pagedlist_layout(void)
 
         for (x = 0; x < 230; x++) {
             for (y = 38; y <= 135; y++) {
-                if (nd_image_get_px(fx.canvas, x, y).r != 0u) {
+                if (!px_is_bg(fx.canvas, bg, x, y)) {
                     if (first < 0)
                         first = x;
                     last = x;
@@ -1101,8 +1392,11 @@ static void test_pagedlist_layout(void)
         }
         CHECK(first > 0 && last > first);
         /* Centred in 240 the left margin would equal the right margin; centred
-         * in 223 the right margin is about 17 px larger. */
-        CHECK((239 - last) - first >= 12);
+         * in 223 the right margin is larger by about half of the 17 px
+         * difference. The exact figure depends on the typeface's ink -- 10 px
+         * on the shipped face -- so what is asserted is the sign and the order
+         * of magnitude, not the pixel. */
+        CHECK((239 - last) - first >= 6);
     }
 
     /* Empty: "No Items" centred in the content band, the root id alone in the
@@ -1110,18 +1404,25 @@ static void test_pagedlist_layout(void)
     nd_pagedlist_init(&p, &fx.ui, "Messages", MESSAGES, 0u, "2", true);
     (void)nd_image_fill(fx.canvas, ND_WHITE);
     nd_pagedlist_draw(&p);
-    CHECK(!strip_has_ink(fx.canvas));
+    CHECK_INT(strip_drawn(fx.canvas, bg), 0);
     lit = 0;
-    for (x = 0; x < 240; x++) {
-        if (nd_image_get_px(fx.canvas, x, 80).r != 0u)
-            lit++;
+    /* A BAND, not one row: "No Items" is centred in the content area by its
+     * own INK height (nd_widgets.h rule 2), so which row it lands on depends
+     * on the typeface. The assertion is "the label is in the middle of the
+     * content area", which is what the screen has to show. */
+    for (y = 80; y <= 100; y++) {
+        for (x = 0; x < 240; x++) {
+            if (!px_is_bg(fx.canvas, bg, x, y))
+                lit++;
+        }
     }
-    CHECK(lit > 0); /* the "No Items" label really is on that row */
+    CHECK(lit > 0);
     /* The empty branch returns before the scrollbar, so there is no track and
-     * no notch at all -- a list with nothing in it has nothing to scroll. */
-    CHECK_INT(nd_image_get_px(fx.canvas, 235, 100).r, 0);
-    CHECK_INT(nd_image_get_px(fx.canvas, 236, 100).r, 0);
+     * no thumb at all -- a list with nothing in it has nothing to scroll. */
+    CHECK(px_is_bg(fx.canvas, bg, 235, 100));
+    CHECK(px_is_bg(fx.canvas, bg, 236, 100));
 
+    nd_image_free(bg);
     fx_free(&fx);
 }
 

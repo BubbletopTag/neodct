@@ -32,6 +32,7 @@
 #include "nd_layout.h"
 #include "nd_log.h"
 #include "nd_paths.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_ui_sim.h"
@@ -336,8 +337,16 @@ static void draw_status_label(nd_ui *ui, const char *text, int32_t icon_x, int32
     nd_ui_text_size(ui, text, ui->font_s, &tw, &th);
     tx = nd_max32(0, icon_x + left - tw - 4);
     ty = icon_y + top + nd_max32(0, ((bottom - top) - th) / 2);
-    (void)nd_draw_text(ui->draw, tx, ty, text, ui->font_s, ND_WHITE);
+    nd_theme_text_light(ui->draw, tx, ty, text, ui->font_s);
 }
+
+/* The glass lozenge behind a centred home-screen label: how far it reaches
+ * past the ink, how round it is, and how much of the wallpaper it lets
+ * through. 200 is opaque enough to read navy type against and translucent
+ * enough that the picture is still visibly the picture. */
+#define ND_LAYOUT_LOZENGE_PAD    8
+#define ND_LAYOUT_LOZENGE_RADIUS 7
+#define ND_LAYOUT_LOZENGE_A      200u
 
 static void render_text_element(nd_ui *ui, const nd_element *el)
 {
@@ -379,7 +388,47 @@ static void render_text_element(nd_ui *ui, const nd_element *el)
     else if (el->anchor == ND_ANCHOR_RIGHT)
         x -= w;
 
-    (void)nd_draw_text(ui->draw, x, y, text, f, el->color);
+    /* ============ THE PLATE UNDER THE CARRIER ============
+     *
+     * The home screen is the one screen with no chrome on it at all -- no
+     * title bar, no list, nothing but the wallpaper and four labels. That was
+     * fine when every wallpaper was dimmed to 30%; at ND_UI_WALLPAPER_BRIGHTNESS
+     * the carrier name is sitting on a photograph, and a shadow alone does not
+     * carry a 12 px string over a bright one.
+     *
+     * So the CENTRED labels -- which is the carrier and the engineering
+     * notice, the two that sit in the middle of the picture -- get a glass
+     * lozenge behind them, sized to the string. The clock, anchored right in
+     * a corner, does not: it is short, it is against the panel edge, and a
+     * plate there would be the only piece of furniture in the corner of an
+     * otherwise bare screen.
+     *
+     * Sized from the ink, so it grows with a long operator name and does not
+     * leave a wide empty capsule around "O2". */
+    if (el->anchor == ND_ANCHOR_CENTER_H && text[0] != '\0') {
+        nd_theme_plate p = nd_theme_plate_glass(ND_LAYOUT_LOZENGE_RADIUS);
+
+        p.body_a = ND_LAYOUT_LOZENGE_A;
+        p.drop_shadow = false;
+        nd_theme_plate_draw(
+            ui->canvas,
+            ND_RECT(x - ND_LAYOUT_LOZENGE_PAD, y - 2, x + w + ND_LAYOUT_LOZENGE_PAD - 1, y + h + 3),
+            &p);
+        /* Dark ink on the light lozenge -- except the engineering notice,
+         * which is authored red and has to stay red: it is the one thing on
+         * this screen that means "every app here runs as root" (nd_ui.c), and
+         * turning it navy for the sake of the palette would be quietly
+         * removing a warning. Red on glass is legible; red on a photograph
+         * was the reason for the plate. */
+        if (el->color.r == ND_TH_INK_LIGHT.r && el->color.g == ND_TH_INK_LIGHT.g &&
+            el->color.b == ND_TH_INK_LIGHT.b)
+            nd_theme_text_dark(ui->draw, x, y, text, f);
+        else
+            nd_theme_text(ui->draw, x, y, text, f, el->color, ND_TH_CHROME_HI);
+        return;
+    }
+
+    nd_theme_text(ui->draw, x, y, text, f, el->color, ND_RGB(0x08, 0x1E, 0x33));
 }
 
 static void render_icon_set_element(nd_ui *ui, const nd_element *el)

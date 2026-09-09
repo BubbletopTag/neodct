@@ -58,6 +58,7 @@
 #include "nd_log.h"
 #include "nd_modem.h"
 #include "nd_text.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
@@ -107,11 +108,21 @@ static int32_t floordiv2(int32_t v)
 /* "Simple fallback icon (you can replace with a PNG later)" -- the Python's
  * own words. Three rectangles: an outline silhouette and the ear and mouth
  * blocks. Called with (8, 10), so the outline lands at (8,12)-(26,20). */
-static void draw_handset_icon(nd_draw *d, int32_t x, int32_t y)
+static void draw_handset_icon(nd_ui *ui, int32_t x, int32_t y)
 {
-    (void)nd_draw_rect_outline(d, ND_RECT(x, y + 2, x + 18, y + 10), ND_WHITE, 1);
-    (void)nd_draw_rect_fill(d, ND_RECT(x + 1, y + 3, x + 5, y + 5), ND_WHITE);
-    (void)nd_draw_rect_fill(d, ND_RECT(x + 13, y + 7, x + 17, y + 9), ND_WHITE);
+    /* Still three rectangles at the same coordinates -- an outline silhouette
+     * and the ear and mouth blocks -- so the icon occupies exactly the pixels
+     * it did. It is green rather than white because this one only ever appears
+     * on a call that is up, and green is what that means everywhere else on
+     * this phone. */
+    nd_theme_plate p = nd_theme_plate_blue(2);
+
+    p.top = ND_TH_GREEN_TOP;
+    p.bot = ND_TH_GREEN_BOT;
+    p.drop_shadow = false;
+    nd_theme_plate_draw(ui->canvas, ND_RECT(x, y + 2, x + 18, y + 10), &p);
+    nd_theme_fill(ui->canvas, ND_RECT(x + 1, y + 3, x + 5, y + 5), ND_TH_CHROME_HI, 220u);
+    nd_theme_fill(ui->canvas, ND_RECT(x + 13, y + 7, x + 17, y + 9), ND_TH_CHROME_HI, 220u);
 }
 
 /* ------------------------------------------------------------------ *
@@ -324,7 +335,7 @@ static void draw_call_frame(nd_ui *ui, const char *number, const char *label, in
      * clear rows 0..content_bottom only. call_screen.py:118. */
     nd_ui_paint_chrome_full(ui);
 
-    draw_handset_icon(d, 8, 10);
+    draw_handset_icon(ui, 8, 10);
 
     /* The top-right clock is COMMENTED OUT at call_screen.py:125-127 and the
      * home layout's own clock element is rendered at the bottom of the
@@ -334,14 +345,14 @@ static void draw_call_frame(nd_ui *ui, const char *number, const char *label, in
 
     label_x = nd_max32(34, nd_trunc32((double)screen_w * 0.23));
     label_y = nd_max32(50, nd_trunc32((double)content_bottom * 0.20));
-    (void)nd_draw_text(d, label_x, label_y, label, label_font, ND_WHITE);
+    nd_theme_text_light(d, label_x, label_y, label, label_font);
 
     /* The number goes directly under the label, fitted into what is left of
      * the width with a 10 px right margin. */
     num_font = fit_number(ui, fitted, sizeof fitted, number != NULL ? number : "",
                           screen_w - label_x - 10, label_font);
     num_y = label_y + 26; /* "Nokia-ish spacing under the label" */
-    (void)nd_draw_text(d, label_x, num_y, fitted, num_font, ND_WHITE);
+    nd_theme_text_light(d, label_x, num_y, fitted, nd_ui_font_bold(ui, num_font));
 
     /* Connected: a running mm:ss under the number, in grey. secs is -1 for
      * the Python's None, which is every state but CONNECTED. */
@@ -350,7 +361,12 @@ static void draw_call_frame(nd_ui *ui, const char *number, const char *label, in
         const nd_font *timer_font = (ui->font_s != NULL) ? ui->font_s : num_font;
 
         if (nd_snprintf(timer_text, sizeof timer_text, "%02d:%02d", secs / 60, secs % 60) == ND_OK)
-            (void)nd_draw_text(d, label_x, num_y + 24, timer_text, timer_font, ND_GRAY);
+            /* Was ND_GRAY -- the only grey in the framework besides the old
+             * scrollbar track, and grey over a colour wallpaper is mud. A
+             * pale sky blue is the same "quieter than the number above"
+             * without leaving the palette. */
+            nd_theme_text(d, label_x, num_y + 24, timer_text, timer_font, ND_TH_SKY_TOP,
+                          ND_RGB(0x08, 0x1E, 0x33));
     }
 
     render_status_chrome(ui, /*with_clock=*/true);
@@ -409,12 +425,19 @@ void nd_dialer_draw_incoming(nd_ui *ui, const char *caller_text, bool blink_on)
     nd_ui_paint_chrome_full(ui);
 
     /* Caller: name or number, centred across the top by INK width, so the
-     * centring shifts with which letters are in it. */
+     * centring shifts with which letters are in it.
+     *
+     * MEASURED WITH THE FACE IT IS DRAWN IN. The fitter picks the size from
+     * the regular weight -- which is right, because that is what has to fit
+     * the width budget -- but the line is set in bold, and bold is wider. A
+     * centring computed from the regular face puts the name a couple of
+     * pixels left of centre, which is small enough to survive a look and is
+     * still wrong. */
     font = fit_caller(ui, fitted, sizeof fitted, caller_text, screen_w - 16);
+    font = nd_ui_font_bold(ui, font);
     w = text_w(font, fitted);
-    (void)nd_draw_text(d, floordiv2(screen_w - w),
-                       nd_max32(18, nd_trunc32((double)content_bottom * 0.18)), fitted, font,
-                       ND_WHITE);
+    nd_theme_text_light(d, floordiv2(screen_w - w),
+                        nd_max32(18, nd_trunc32((double)content_bottom * 0.18)), fitted, font);
 
     /* Flashing "calling" near the bottom left, like the 3310 -- starting just
      * right of the signal column. The 36 is the asset's authored width and it
@@ -425,7 +448,7 @@ void nd_dialer_draw_incoming(nd_ui *ui, const char *caller_text, bool blink_on)
         int32_t calling_x = 7 + nd_trunc32(36.0 * ((double)screen_h / 240.0)) + 6;
         const nd_font *label_font = (ui->font_n != NULL) ? ui->font_n : font;
 
-        (void)nd_draw_text(d, calling_x, content_bottom - 26, "calling", label_font, ND_WHITE);
+        nd_theme_text_light(d, calling_x, content_bottom - 26, "calling", label_font);
     }
 
     /* Status icons stay put, same as the in-call screen. No clock here. */

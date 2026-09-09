@@ -445,9 +445,16 @@ static void test_both_refusals_fit_the_dialog(void)
         size_t needed = 0u;
         size_t fits = 0u;
 
+        /* Longer than the version this replaces: on the pixel face the
+         * shorter text already overflowed, and the UI face fits more per
+         * line. The point is unchanged -- naming the kernel symbols costs the
+         * sentence that tells the reader what to do -- and it is asserted
+         * with the wording it would actually take to name them usefully. */
         nd_msgdialog_init(&dlg, &fx.ui,
-                          "No Bluetooth here.\n\nCONFIG_BT and CONFIG_BT_HCIBTUSB are off."
-                          "\n\nEnabling it needs a reflash.");
+                          "No Bluetooth here.\n\nThe kernel was built without CONFIG_BT and "
+                          "CONFIG_BT_HCIBTUSB, so there is no adapter for the stack to open."
+                          "\n\nEnabling either of them needs a full reflash; an update "
+                          "package cannot carry a kernel.");
         nd_msgdialog_measure(&dlg, &needed, &fits);
         CHECK(needed > fits, "the symbol names do not fit beside the sentence that matters");
     }

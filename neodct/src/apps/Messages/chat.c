@@ -29,6 +29,7 @@
 #include "nd_font.h"
 #include "nd_keycodes.h"
 #include "nd_text.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
@@ -112,21 +113,40 @@ static const char *nz(const char *s)
  * did. Drawn as three rectangles rather than a polygon so the edges land on
  * whole pixels -- nd_draw.h's note about polygon edges at small sizes applies
  * here for the same reason the T9 pencil is plotted per pixel. */
-static void chat_box(nd_draw *d, nd_rect r, nd_color fill, bool outline_only)
-{
-    nd_rect mid = ND_RECT(r.x0, r.y0 + 1, r.x1, r.y1 - 1);
-    nd_rect top = ND_RECT(r.x0 + 1, r.y0, r.x1 - 1, r.y0);
-    nd_rect bot = ND_RECT(r.x0 + 1, r.y1, r.x1 - 1, r.y1);
+/* The chat screens' own header: a shorter plate than the OS-wide one, because
+ * CHAT_HEADER_H is not nd_ui_header_divider_y() -- this app gives the
+ * transcript every row it can and its header is deliberately tighter. Drawn
+ * through the same nd_theme_titlebar so it is the same object at a different
+ * height, with no badge (neither screen has a breadcrumb). */
+/* Corner radii, and the shadow every piece of text on these screens carries.
+ * A bubble is rounder than a list row because it is a smaller object trying to
+ * look softer; 6 and 5 are what read as "speech" and "row" at this size. */
+#define BUBBLE_RADIUS   6
+#define ROW_RADIUS      5
+#define CHAT_INK_SHADOW ND_RGB(0x08, 0x1E, 0x33)
 
-    if (outline_only) {
-        (void)nd_draw_rect_outline(d, mid, fill, 1);
-        (void)nd_draw_rect_fill(d, top, fill);
-        (void)nd_draw_rect_fill(d, bot, fill);
-        return;
-    }
-    (void)nd_draw_rect_fill(d, mid, fill);
-    (void)nd_draw_rect_fill(d, top, fill);
-    (void)nd_draw_rect_fill(d, bot, fill);
+static void chat_header(nd_ui *ui, const char *title)
+{
+    (void)nd_theme_titlebar(ui->canvas, ui->draw, nd_ui_width(ui), CHAT_HEADER_H + 1, title,
+                            nd_ui_font_bold(ui, ui->font_n), NULL, NULL);
+}
+
+/* One speech bubble. `outgoing` picks which of the two it is, and the two are
+ * deliberately different MATERIALS rather than the same shape in two colours:
+ * blue glass for what you sent, white glass for what arrived. That is what
+ * every messaging app of this period did and it is instantly readable, which
+ * the old fill-versus-outline pair also was -- this keeps the property and
+ * spends the colour the theme brought.
+ *
+ * The rectangle passed in is the same one the layout computed, so bubble
+ * widths, wrapping and the scroll arithmetic are all untouched; the corner
+ * radius eats into the corners of that box and nothing else. */
+static void chat_bubble(nd_ui *ui, nd_rect r, bool outgoing)
+{
+    nd_theme_plate p =
+        outgoing ? nd_theme_plate_blue(BUBBLE_RADIUS) : nd_theme_plate_glass(BUBBLE_RADIUS);
+
+    nd_theme_plate_draw(ui->canvas, r, &p);
 }
 
 /* ------------------------------------------------------------------ *
@@ -143,20 +163,17 @@ typedef struct {
 static void draw_scrollbar(nd_ui *ui, size_t first, size_t visible, size_t total, int32_t top,
                            int32_t bottom)
 {
-    nd_draw *d = ui->draw;
     int32_t x = nd_ui_width(ui) - 5;
-    double span;
-    double notch;
 
-    (void)nd_draw_line(d, x, top, x, bottom, ND_GRAY, 1);
-    if (total <= visible)
+    /* This one is indexed by WINDOW POSITION, not by selection, so it takes
+     * the first visible row as its position and the number of scroll stops as
+     * its count -- which is what nd_theme_scrollbar's own truncating notch
+     * arithmetic then works on, exactly as the hand-rolled version did. */
+    if (total <= visible) {
+        nd_theme_scrollbar(ui->canvas, x, top, bottom, 0u, 1u);
         return;
-    span = (double)(total - visible);
-    /* nd_trunc32 and not round(): every scrollbar in this OS truncates, and
-     * one that did not would sit a pixel off the ones beside it. */
-    notch = (double)top + ((double)first / span) * (double)(bottom - top - 6);
-    (void)nd_draw_rect_fill(d, ND_RECT(x - 2, nd_trunc32(notch), x + 2, nd_trunc32(notch) + 6),
-                            ND_WHITE);
+    }
+    nd_theme_scrollbar(ui->canvas, x, top, bottom, first, (total - visible) + 1u);
 }
 
 static void threads_draw(nd_ui *ui, thread_list *tl, nd_softkey *bar)
@@ -170,19 +187,19 @@ static void threads_draw(nd_ui *ui, thread_list *tl, nd_softkey *bar)
 
     nd_ui_paint_chrome_content(ui);
 
-    (void)nd_draw_text(d, CHAT_MARGIN, 1, "Messages", ui->font_n, ND_WHITE);
-    (void)nd_draw_line(d, 0, CHAT_HEADER_H, w, CHAT_HEADER_H, ND_GRAY, 1);
+    chat_header(ui, "Messages");
 
     /* ---- New Message, always the first row ---- */
     y = CHAT_HEADER_H + 3;
     if (on_new) {
-        (void)nd_draw_rect_fill(d, ND_RECT(2, y - 2, w - 8, y + NEW_ROW_H - 4), ND_WHITE);
-        (void)nd_draw_text(d, CHAT_MARGIN + 4, y - 2, "New Message", ui->font_md, ND_BLACK);
-    } else {
-        (void)nd_draw_text(d, CHAT_MARGIN + 4, y - 2, "New Message", ui->font_md, ND_WHITE);
+        nd_theme_plate p = nd_theme_plate_blue(ROW_RADIUS);
+
+        nd_theme_plate_draw(ui->canvas, ND_RECT(2, y - 2, w - 8, y + NEW_ROW_H - 4), &p);
     }
+    nd_theme_text_light(d, CHAT_MARGIN + 4, y - 2, "New Message",
+                        on_new ? nd_ui_font_bold(ui, ui->font_md) : ui->font_md);
     y += NEW_ROW_H;
-    (void)nd_draw_line(d, CHAT_MARGIN, y - 2, w - 8, y - 2, ND_GRAY, 1);
+    nd_theme_divider(ui->canvas, CHAT_MARGIN, w - 8, y - 2, 140u);
 
     /* ---- one row per conversation ---- */
     for (i = 0u; i < (size_t)ROW_VISIBLE; i++) {
@@ -202,12 +219,17 @@ static void threads_draw(nd_ui *ui, thread_list *tl, nd_softkey *bar)
             break;
 
         if (selected) {
-            (void)nd_draw_rect_fill(d, ND_RECT(2, y + 1, w - 8, y + ROW_H - 4), ND_WHITE);
-            name_c = ND_BLACK;
-            prev_c = ND_BLACK;
+            nd_theme_plate p = nd_theme_plate_blue(ROW_RADIUS);
+
+            nd_theme_plate_draw(ui->canvas, ND_RECT(2, y + 1, w - 8, y + ROW_H - 4), &p);
+            name_c = ND_TH_INK_LIGHT;
+            prev_c = ND_TH_CHROME_TOP;
         } else {
-            name_c = ND_WHITE;
-            prev_c = ND_GRAY;
+            name_c = ND_TH_INK_LIGHT;
+            /* The preview is the second line of the row and has to read as
+             * quieter than the name above it. ND_GRAY did that on a black
+             * screen; on a blue one it is mud. */
+            prev_c = ND_TH_SKY_TOP;
         }
 
         /* An unread thread is marked the way the ported inbox marks an unread
@@ -223,7 +245,9 @@ static void threads_draw(nd_ui *ui, thread_list *tl, nd_softkey *bar)
             char fitted[64];
 
             (void)nd_text_ellipsize(fitted, sizeof fitted, name, ui->font_md, w - 22);
-            (void)nd_draw_text(d, CHAT_MARGIN + 4, y + 1, fitted, ui->font_md, name_c);
+            nd_theme_text(d, CHAT_MARGIN + 4, y + 1, fitted,
+                          selected ? nd_ui_font_bold(ui, ui->font_md) : ui->font_md, name_c,
+                          CHAT_INK_SHADOW);
         }
         {
             char fitted[96];
@@ -235,17 +259,17 @@ static void threads_draw(nd_ui *ui, thread_list *tl, nd_softkey *bar)
             else
                 (void)nd_strlcpy(preview, t->preview, sizeof preview);
             (void)nd_text_ellipsize(fitted, sizeof fitted, preview, ui->font_s, w - 22);
-            (void)nd_draw_text(d, CHAT_MARGIN + 4, y + 24, fitted, ui->font_s, prev_c);
+            nd_theme_text(d, CHAT_MARGIN + 4, y + 24, fitted, ui->font_s, prev_c, CHAT_INK_SHADOW);
         }
 
         y += ROW_H;
         if (!selected)
-            (void)nd_draw_line(d, CHAT_MARGIN, y - 2, w - 8, y - 2, ND_GRAY, 1);
+            nd_theme_divider(ui->canvas, CHAT_MARGIN, w - 8, y - 2, 140u);
     }
 
     if (tl->n == 0u) {
-        (void)nd_draw_text(d, CHAT_MARGIN + 4, CHAT_HEADER_H + 40, "No conversations yet.",
-                           ui->font_s, ND_GRAY);
+        nd_theme_text_light(d, CHAT_MARGIN + 4, CHAT_HEADER_H + 40, "No conversations yet.",
+                            ui->font_s);
     }
 
     draw_scrollbar(ui, tl->window, (size_t)ROW_VISIBLE, tl->n, CHAT_HEADER_H + NEW_ROW_H + 4,
@@ -438,22 +462,27 @@ static void chat_draw(nd_ui *ui, chat_view *v, const char *title, nd_softkey *ba
         /* OUTGOING is filled white with black text, INCOMING is an outline
          * with white text. That is the strongest two-way distinction a
          * one-bit-looking panel has, and it survives being photographed. */
-        if (out)
-            chat_box(d, box, ND_WHITE, false);
-        else
-            chat_box(d, box, ND_WHITE, true);
+        chat_bubble(ui, box, out);
 
         /* The selection is a second rule just outside the bubble rather than
          * an inverted fill: inverting an outgoing bubble would make it look
          * incoming. */
         if (selected) {
-            (void)nd_draw_rect_outline(d, ND_RECT(box.x0 - 2, box.y0 - 2, box.x1 + 2, box.y1 + 2),
-                                       ND_GRAY, 1);
+            nd_theme_round_outline(ui->canvas,
+                                   ND_RECT(box.x0 - 2, box.y0 - 2, box.x1 + 2, box.y1 + 2),
+                                   BUBBLE_RADIUS + 2, ND_TH_CHROME_HI, 230u);
         }
 
         for (k = 0u; k < bl->n_lines; k++) {
-            (void)nd_draw_text(d, bx + BUBBLE_PAD_X, y + BUBBLE_PAD_Y + (int32_t)k * BUBBLE_LINE_H,
-                               bl->lines[k], ui->font_s, out ? ND_BLACK : ND_WHITE);
+            int32_t ty = y + BUBBLE_PAD_Y + (int32_t)k * BUBBLE_LINE_H;
+
+            /* Both bubbles are light-ish, so both take dark ink. The old code
+             * flipped between black and white because the two bubbles were
+             * filled and hollow. */
+            if (out)
+                nd_theme_text_light(d, bx + BUBBLE_PAD_X, ty, bl->lines[k], ui->font_s);
+            else
+                nd_theme_text_dark(d, bx + BUBBLE_PAD_X, ty, bl->lines[k], ui->font_s);
         }
         y += bl->h + BUBBLE_GAP;
     }
@@ -470,9 +499,8 @@ static void chat_draw(nd_ui *ui, chat_view *v, const char *title, nd_softkey *ba
         char fitted[64];
 
         (void)nd_text_ellipsize(fitted, sizeof fitted, nz(title), ui->font_n, w - 14);
-        (void)nd_draw_text(d, CHAT_MARGIN, 1, fitted, ui->font_n, ND_WHITE);
+        chat_header(ui, fitted);
     }
-    (void)nd_draw_line(d, 0, CHAT_HEADER_H, w, CHAT_HEADER_H, ND_GRAY, 1);
 
     /* Without this there is no cue at all that the conversation continues off
      * either edge -- the transcript has no row separators to count. */
@@ -483,18 +511,20 @@ static void chat_draw(nd_ui *ui, chat_view *v, const char *title, nd_softkey *ba
     {
         nd_rect box = ND_RECT(4, content_bottom - BOX_H, w - 6, content_bottom - 2);
 
-        if (on_box(v)) {
-            (void)nd_draw_rect_fill(d, box, ND_WHITE);
-            (void)nd_draw_text(d, box.x0 + 5, box.y0 + 2, "Message", ui->font_s, ND_BLACK);
-        } else {
-            (void)nd_draw_rect_outline(d, box, ND_GRAY, 1);
-            (void)nd_draw_text(d, box.x0 + 5, box.y0 + 2, "Message", ui->font_s, ND_GRAY);
-        }
+        /* Focused or not, it is the same well nd_textinput draws -- the
+         * difference is that a focused one is lit and outlined in white.
+         * Making the unfocused state a hollow outline, as it was, now reads
+         * as a disabled control rather than an unfocused one. */
+        nd_theme_round_gradient(ui->canvas, box, 5, ND_TH_GLASS_BOT, ND_TH_GLASS_TOP,
+                                on_box(v) ? 240u : 150u);
+        nd_theme_shadow_band(ui->canvas, box.x0 + 2, box.x1 - 2, box.y0 + 1, 3, 110u);
+        nd_theme_round_outline(ui->canvas, box, 5, on_box(v) ? ND_TH_CHROME_HI : ND_TH_BLUE_DEEP,
+                               on_box(v) ? 230u : 150u);
+        nd_theme_text_dark(d, box.x0 + 5, box.y0 + 2, "Message", ui->font_s);
     }
 
-    if (v->n == 0u) {
-        (void)nd_draw_text(d, CHAT_MARGIN + 4, view_top + 30, "No messages.", ui->font_s, ND_GRAY);
-    }
+    if (v->n == 0u)
+        nd_theme_text_light(d, CHAT_MARGIN + 4, view_top + 30, "No messages.", ui->font_s);
 
     nd_softkey_update(bar, on_box(v) ? "Write" : "Options", true);
 }

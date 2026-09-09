@@ -183,6 +183,20 @@ typedef struct nd_ui {
     nd_font *font_md; /* 18 -- unused by the core, used by apps */
     nd_font *font_n;  /* 20 -- the default face */
     nd_font *font_xl; /* 24 */
+    /* Bold, at the two sizes that carry chrome: a title bar, a selected row,
+     * a softkey label. Not at 14 or 18 -- bold at 14 px on this panel fills
+     * its own counters and comes out as a grey smear, which is something
+     * nd-shoot shows rather than a matter of taste.
+     *
+     * Two more faces is two more glyph caches, and nd_font.h says a fifth
+     * size is a decision rather than a detail. It is: about 190 KB resident
+     * once both are warm, against a 64 MB budget, and it buys the one thing
+     * that separates chrome from content on a screen this small. Both are
+     * NULL when the bold file is missing, and every call site falls back to
+     * the regular weight rather than drawing nothing -- see
+     * nd_ui_font_bold(). */
+    nd_font *font_n_b;  /* 20 bold */
+    nd_font *font_xl_b; /* 24 bold */
 
     /* --- input --- */
     nd_input *input;
@@ -332,6 +346,15 @@ nd_err nd_ui_init_app(nd_ui *ui, nd_fb *fb, int keypad_fd);
 /* ui.get_text_size(text, font) -- INK extents. See nd_font.h; this is a thin
  * forward so widget code reads the way the Python did. */
 void nd_ui_text_size(const nd_ui *ui, const char *text, const nd_font *f, int32_t *w, int32_t *h);
+
+/* The bold companion of `f`, or `f` itself when there is not one.
+ *
+ * Call sites want "the bold version of whatever the caller passed" and must
+ * not care whether the bold file loaded, whether that size has a bold cut, or
+ * whether an app passed a face the core has never seen. Answering all three
+ * here is what keeps thirteen widgets from each growing their own NULL
+ * check. */
+const nd_font *nd_ui_font_bold(const nd_ui *ui, const nd_font *f);
 
 /* ui.get_image(path[, max_size][, scale]) -- cached, RGBA, NULL on any
  * failure. THE RETURNED IMAGE IS OWNED BY THE CACHE: blit from it, do not free

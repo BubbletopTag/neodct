@@ -40,6 +40,7 @@
 #include "nd_draw.h"
 #include "nd_font.h"
 #include "nd_text.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_widgets.h"
@@ -167,8 +168,10 @@ bool nd_progress_draw(nd_progress *p, int64_t done, int64_t total)
     nd_ui_paint_chrome_content(ui);
 
     if (p->header != NULL && p->header[0] != '\0') {
-        (void)nd_draw_text(d, 10, p->header_box.y0, p->header, font_small, ND_WHITE);
-        (void)nd_draw_line(d, 10, p->divider_y, width - 10, p->divider_y, ND_WHITE, 1);
+        nd_theme_text_light(d, 10, p->header_box.y0, p->header, font_small);
+        /* The two-pixel embossed rule of nd_theme.h idea 3, in place of the
+         * one white line. Same y, so the geometry below is untouched. */
+        nd_theme_divider(ui->canvas, 10, width - 10, p->divider_y, 190u);
     }
 
     if (p->step != NULL && p->step[0] != '\0') {
@@ -184,22 +187,45 @@ bool nd_progress_draw(nd_progress *p, int64_t done, int64_t total)
         font = (n_ladder > 0u) ? nd_fit_font(p->step, room, ladder, n_ladder) : NULL;
         if (font != NULL) {
             (void)nd_text_ellipsize(label, sizeof label, p->step, font, room);
-            (void)nd_draw_text(d, centered_x(font, label, p->label_box), p->label_box.y0, label,
-                               font, ND_WHITE);
+            nd_theme_text_light(d, centered_x(font, label, p->label_box), p->label_box.y0, label,
+                                font);
         }
     }
 
-    /* The bar. width=1 outline drawn INSIDE the inclusive box, so the frame
-     * occupies rows 79 and 93 and columns 20 and 220. */
-    (void)nd_draw_rect_outline(d, p->bar_box, ND_WHITE, 1);
-    span = (p->bar_box.x1 - ND_PROGRESS_INSET) - (p->bar_box.x0 + ND_PROGRESS_INSET);
-    filled = nd_trunc32((double)span * (double)percent / 100.0);
-    if (filled > 0) {
-        (void)nd_draw_rect_fill(
-            d,
-            ND_RECT(p->bar_box.x0 + ND_PROGRESS_INSET, p->bar_box.y0 + ND_PROGRESS_INSET,
-                    p->bar_box.x0 + ND_PROGRESS_INSET + filled, p->bar_box.y1 - ND_PROGRESS_INSET),
-            ND_WHITE);
+    /* ============ THE BAR ============
+     *
+     * A recessed glass trough with a glossy fill riding in it. The GEOMETRY IS
+     * UNCHANGED -- p->bar_box and ND_PROGRESS_INSET still decide the trough and
+     * the fill exactly as they did, and `filled` is still the same truncated
+     * arithmetic -- so an update installing at 43% puts its fill on the same
+     * column it always did. Only what is painted into those boxes differs.
+     *
+     * The radius is half the trough's height, which makes it a capsule at any
+     * size; clamp_radius() inside nd_theme caps it if the caller ever gives
+     * this a box too short to round. */
+    {
+        int32_t trough_r = nd_max32(2, nd_rect_h(p->bar_box) / 2);
+        nd_theme_plate fill = nd_theme_plate_blue(nd_max32(1, trough_r - ND_PROGRESS_INSET));
+
+        nd_theme_round_fill(ui->canvas, p->bar_box, trough_r, ND_TH_BLUE_DEEP, 130u);
+        nd_theme_round_outline(ui->canvas, p->bar_box, trough_r, ND_TH_CHROME_HI, 150u);
+
+        span = (p->bar_box.x1 - ND_PROGRESS_INSET) - (p->bar_box.x0 + ND_PROGRESS_INSET);
+        filled = nd_trunc32((double)span * (double)percent / 100.0);
+        if (filled > 0) {
+            /* Green rather than blue. A progress bar is the one control in the
+             * OS whose job is to say "this is going well", and against a blue
+             * trough a blue fill has to be read rather than seen. */
+            fill.top = ND_TH_GREEN_TOP;
+            fill.bot = ND_TH_GREEN_BOT;
+            fill.drop_shadow = false;
+            nd_theme_plate_draw(ui->canvas,
+                                ND_RECT(p->bar_box.x0 + ND_PROGRESS_INSET,
+                                        p->bar_box.y0 + ND_PROGRESS_INSET,
+                                        p->bar_box.x0 + ND_PROGRESS_INSET + filled,
+                                        p->bar_box.y1 - ND_PROGRESS_INSET),
+                                &fill);
+        }
     }
 
     (void)snprintf(reading, sizeof reading, "%d%%", (int)percent);
@@ -210,21 +236,21 @@ bool nd_progress_draw(nd_progress *p, int64_t done, int64_t total)
     if (detail_text[0] != '\0') {
         int32_t detail_w = 0;
 
-        (void)nd_draw_text(d, p->status_box.x0, p->status_box.y0, reading, font_small, ND_WHITE);
+        nd_theme_text_light(d, p->status_box.x0, p->status_box.y0, reading, font_small);
         nd_text_size(font_small, detail_text, &detail_w, NULL);
-        (void)nd_draw_text(d, p->status_box.x1 - detail_w, p->status_box.y0, detail_text,
-                           font_small, ND_WHITE);
+        nd_theme_text_light(d, p->status_box.x1 - detail_w, p->status_box.y0, detail_text,
+                            font_small);
     } else {
-        (void)nd_draw_text(d, centered_x(font_small, reading, p->status_box), p->status_box.y0,
-                           reading, font_small, ND_WHITE);
+        nd_theme_text_light(d, centered_x(font_small, reading, p->status_box), p->status_box.y0,
+                            reading, font_small);
     }
 
     if (p->hint != NULL && p->hint[0] != '\0') {
         char hint[ND_TEXT_LINE_MAX];
 
         (void)nd_text_ellipsize(hint, sizeof hint, p->hint, font_small, width - 16);
-        (void)nd_draw_text(d, centered_x(font_small, hint, p->hint_box), p->hint_box.y0, hint,
-                           font_small, ND_WHITE);
+        nd_theme_text_light(d, centered_x(font_small, hint, p->hint_box), p->hint_box.y0, hint,
+                            font_small);
     }
 
     /* update("") clears the strip and draws nothing -- deliberate, and the

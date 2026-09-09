@@ -50,6 +50,7 @@
 #include "nd_app.h"
 #include "nd_draw.h"
 #include "nd_keycodes.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
@@ -282,7 +283,10 @@ void nd_memory_render(nd_memory *g)
     if (g == NULL || g->ui == NULL || g->ui->draw == NULL)
         return;
 
-    (void)nd_draw_rect_fill(g->ui->draw, ND_RECT(0, 0, g->screen_w, g->screen_h), ND_BLACK);
+    /* See the note in snake.c: a play field may paint its own background, and
+     * the theme's is a deep blue rather than black. */
+    nd_theme_gradient_v(g->ui->canvas, ND_RECT(0, 0, g->screen_w - 1, g->screen_h - 1),
+                        ND_RGB(0x0B, 0x2B, 0x4E), ND_RGB(0x03, 0x0C, 0x1A), 255u);
 
     for (row = 0; row < ND_MEMORY_ROWS; row++) {
         for (col = 0; col < ND_MEMORY_COLS; col++) {
@@ -290,12 +294,23 @@ void nd_memory_render(nd_memory *g)
 
             idx = row * ND_MEMORY_COLS + col;
             if (g->state[idx] == ND_MEMORY_DOWN) {
-                (void)nd_draw_rect_fill(g->ui->draw, rect, ND_WHITE);
+                /* Face down: a blue card back, which is what a card back is. */
+                nd_theme_plate p = nd_theme_plate_blue(3);
+
+                p.drop_shadow = false;
+                nd_theme_plate_draw(g->ui->canvas, rect, &p);
             } else if (g->state[idx] == ND_MEMORY_UP) {
-                (void)nd_draw_rect_outline(g->ui->draw, rect, ND_WHITE, 1);
+                /* Face up: a white card with the glyph inked onto it. The
+                 * glyph is drawn in navy rather than white for the same
+                 * reason every other dark-on-glass label is. */
+                nd_theme_plate p = nd_theme_plate_glass(3);
+
+                p.body_a = 245u;
+                p.drop_shadow = false;
+                nd_theme_plate_draw(g->ui->canvas, rect, &p);
                 nd_memory_draw_glyph(g->ui->draw,
                                      ND_RECT(rect.x0 + 4, rect.y0 + 4, rect.x1 - 4, rect.y1 - 4),
-                                     g->cards[idx], ND_WHITE);
+                                     g->cards[idx], ND_TH_INK_DARK);
             }
             /* "gone" draws nothing at all. */
         }
@@ -304,13 +319,16 @@ void nd_memory_render(nd_memory *g)
     /* The cursor ring lives in the 2 px gutter around the current cell. */
     px = g->board_x + g->cursor_col * g->cell;
     py = g->board_y + g->cursor_row * g->cell;
-    (void)nd_draw_rect_outline(g->ui->draw, ND_RECT(px, py, px + g->cell - 1, py + g->cell - 1),
-                               ND_WHITE, 1);
+    nd_theme_round_outline(g->ui->canvas, ND_RECT(px, py, px + g->cell - 1, py + g->cell - 1), 4,
+                           ND_TH_CHROME_HI, 240u);
 
     idx = g->cursor_row * ND_MEMORY_COLS + g->cursor_col;
     if (g->state[idx] == ND_MEMORY_DOWN) {
-        (void)nd_draw_rect_outline(
-            g->ui->draw, nd_memory_card_rect(g, g->cursor_col, g->cursor_row), ND_BLACK, 1);
+        /* The inner ring, on the card itself. It was black-on-white; on a blue
+         * card back it has to be the dark edge of the palette instead, or the
+         * cursor disappears on exactly the cards you are about to turn. */
+        nd_theme_round_outline(g->ui->canvas, nd_memory_card_rect(g, g->cursor_col, g->cursor_row),
+                               3, ND_TH_BLUE_DEEP, 240u);
     }
 
     (void)nd_ui_present(g->ui);

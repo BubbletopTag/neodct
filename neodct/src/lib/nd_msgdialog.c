@@ -53,6 +53,7 @@
 #include "nd_keycodes.h"
 #include "nd_paths.h"
 #include "nd_text.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_widgets.h"
@@ -68,6 +69,14 @@
 /* Python's // floors; C's / truncates toward zero. Both centring expressions
  * below can go negative -- a message wider than the screen, or a body taller
  * than the space left for it -- and that is exactly where they disagree. */
+/* How far the backdrop is knocked back behind the panel, and how round the
+ * panel's corners are. 120 is enough that the screen underneath reads as
+ * "still there, not in charge"; at 180 it may as well have been cleared, and
+ * the whole point of a modal over the chrome is that you can see what you
+ * were doing. */
+#define ND_MSGDIALOG_BACKDROP_A 120u
+#define ND_MSGDIALOG_RADIUS     10
+
 static int32_t floordiv2(int32_t v)
 {
     return (v >= 0) ? (v / 2) : -(((-v) + 1) / 2);
@@ -342,6 +351,34 @@ static void dialog_draw(nd_msgdialog *d)
     /* 1. Full clear -- rows 0..175, softkey strip included. */
     nd_ui_paint_chrome_full(ui);
 
+    /* 1b. ============ A DIALOG IS A THING ON TOP OF SOMETHING ============
+     *
+     * It used to be white type on a cleared screen, and it was indistinguishable
+     * from any other screen apart from what it said. A modal that does not look
+     * modal is the one place where "it matches the rest of the OS" is the wrong
+     * goal.
+     *
+     * So: the background is knocked back further, and the message sits on a
+     * glass panel with a shadow under it. That is the iOS 6 alert, and it is
+     * also the reason the body text below turns navy -- on a light panel white
+     * type would be gone.
+     *
+     * The panel is inset by half the margin, so the text inside it keeps the
+     * full margin it was measured against and NOTHING IN dialog_layout_of()
+     * HAS TO MOVE. nd_msgdialog_measure() therefore still answers the same
+     * number of lines, which matters: nd-dialogfit and four call sites
+     * (nd_ui.c's cannot-confine notice among them) budget their wording
+     * against it. */
+    nd_theme_fill(ui->canvas, ND_RECT(0, 0, screen_w - 1, nd_ui_height(ui) - 1), ND_TH_BLUE_DEEP,
+                  ND_MSGDIALOG_BACKDROP_A);
+    {
+        int32_t inset = nd_max32(1, d->margin / 2);
+
+        nd_theme_panel(ui->canvas,
+                       ND_RECT(inset, inset, screen_w - 1 - inset, content_bottom - inset),
+                       ND_MSGDIALOG_RADIUS);
+    }
+
     /* 2 to 5b: the icon, the body origin, the look, the wrap and the clip, all
      *          in the one pass nd_msgdialog_measure() also uses. */
     nd_lines_init(&lines, body_store, ND_ARRAY_LEN(body_store));
@@ -360,7 +397,7 @@ static void dialog_draw(nd_msgdialog *d)
     if (d->title != NULL && d->title[0] != '\0' && lay.font_title != NULL) {
         int32_t title_x = d->margin + ((lay.icon != NULL) ? lay.icon->w + 6 : 0);
 
-        (void)nd_draw_text(dr, title_x, d->margin, d->title, lay.font_title, ND_WHITE);
+        nd_theme_text_dark(dr, title_x, d->margin, d->title, nd_ui_font_bold(ui, lay.font_title));
     }
 
     /* No body face at all -- neither font_s nor font_n loaded. The icon and
@@ -386,7 +423,7 @@ static void dialog_draw(nd_msgdialog *d)
             nd_text_size(lay.font_body, line, &lw, NULL);
             x = nd_max32(d->margin, floordiv2(screen_w - lw));
         }
-        (void)nd_draw_text(dr, x, y, line, lay.font_body, ND_WHITE);
+        nd_theme_text_dark(dr, x, y, line, lay.font_body);
         y += line_h;
     }
 

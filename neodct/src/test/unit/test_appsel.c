@@ -53,6 +53,7 @@
 #include <unistd.h>
 
 #include "nd_capture.h"
+#include "uifont_test.h"
 #include "nd_fb.h"
 #include "nd_image.h"
 #include "nd_input.h"
@@ -854,13 +855,24 @@ static void test_empty_list(nd_capture *cap, nd_ui *ui)
     frame = nd_capture_recent(cap, 0u);
     CHECK(frame != NULL, "the empty menu still produces a frame");
     if (frame != NULL) {
-        /* Black background, and the only white is the centred "No Apps": the
-         * scrollbar track at x=232..233 must NOT be there. */
-        nd_color px = nd_image_get_px(frame, 232, 100);
+        /* The empty branch returns before the scrollbar, so the track's
+          * columns carry nothing but the ground. The ground is the sky
+          * gradient rather than a black fill now, and the sky varies with y
+          * and NOT with x -- so "nothing was drawn here" is the track column
+          * matching the same row twenty columns to its left. */
+        nd_color track = nd_image_get_px(frame, 232, 100);
+        nd_color beside = nd_image_get_px(frame, 212, 100);
 
-        CHECK(px.r == 0u && px.g == 0u && px.b == 0u, "no scrollbar on the empty menu");
-        px = nd_image_get_px(frame, 0, 0);
-        CHECK(px.r == 0u, "background filled black without a wallpaper");
+        CHECK(track.r == beside.r && track.g == beside.g && track.b == beside.b,
+              "no scrollbar on the empty menu");
+        /* And the ground really is the sky: blue leads red by a wide margin,
+         * which a black fill did not do and no wallpaper is loaded here. */
+        {
+            nd_color sky = nd_image_get_px(frame, 0, 0);
+
+            CHECK((int32_t)sky.b - (int32_t)sky.r > 30,
+                  "the ground is the sky gradient, not a black fill");
+        }
     }
     (void)nd_capture_save(cap, "menu-empty", nd_capture_recent(cap, 0u));
 }
@@ -881,17 +893,22 @@ static void test_single_item_scrollbar(nd_capture *cap, nd_ui *ui)
         return;
     }
     {
-        nd_color top = nd_image_get_px(frame, 230, 36);
-        nd_color below = nd_image_get_px(frame, 228, 60);
-        nd_color track = nd_image_get_px(frame, 232, 60);
-        nd_color track2 = nd_image_get_px(frame, 233, 60);
-        nd_color past = nd_image_get_px(frame, 232, 136);
+        /* nd_theme_scrollbar's count<=1 branch: the thumb IS the track. A
+         * one-item menu has nothing to scroll, so a marker parked at the top
+         * would be saying "you are at the start of something longer", which
+         * was never true -- the old fixed notch said exactly that. */
+        nd_color at_top = nd_image_get_px(frame, 232, 40);
+        nd_color at_bottom = nd_image_get_px(frame, 232, 130);
+        nd_color beside = nd_image_get_px(frame, 212, 130);
+        nd_color past = nd_image_get_px(frame, 232, 138);
+        nd_color past_beside = nd_image_get_px(frame, 212, 138);
 
-        CHECK(top.r == 255u, "the notch is at the top of the track");
-        CHECK(below.r == 0u, "the notch does not extend down the track");
-        CHECK(track.r == 255u, "the track is drawn at x=232");
-        CHECK(track2.r == 255u, "width 2 grows into the MINOR axis: x=233 too");
-        CHECK(past.r == 0u, "the track stops at y=135 inclusive");
+        CHECK((int32_t)at_top.b - (int32_t)at_top.r > 40, "the thumb starts at the track top");
+        CHECK((int32_t)at_bottom.b - (int32_t)at_bottom.r > 40,
+              "and fills the track: nothing to scroll");
+        CHECK(at_bottom.r != beside.r || at_bottom.b != beside.b, "the track is drawn at x=232");
+        CHECK(past.r == past_beside.r && past.g == past_beside.g && past.b == past_beside.b,
+              "the track stops at y=135 inclusive");
     }
     (void)nd_capture_save(cap, "menu-single", frame);
 }
@@ -917,7 +934,7 @@ static void shoot_menu_frames(nd_capture *cap, const nd_json_doc *golden)
     nd_appsel selector;
     size_t i;
 
-    write_settings("Palestine.jpg", true);
+    write_settings(ND_TEST_REF_WALLPAPER, true);
     nd_vclock_enable();
     nd_ui_sim_clear(&ui);
     if (nd_ui_init(&ui, fb) != ND_OK) {

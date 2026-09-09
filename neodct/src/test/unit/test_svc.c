@@ -48,6 +48,7 @@
 #include <unistd.h>
 
 #include "nd_app.h"
+#include "uifont_test.h"
 #include "nd_battery.h"
 #include "nd_clock.h"
 #include "nd_draw.h"
@@ -65,7 +66,7 @@
 
 #include "platform_test.h"
 
-#define FONT_REL     "overlay/NeoDCT/System/ui/resources/fonts/font.ttf"
+#define FONT_REL     ND_TEST_UI_FONT_REL
 #define SVC_APP_DIR  "/NeoDCT/User/testapps/SvcApp"
 #define SVC_REPORT   "/NeoDCT/User/svcapp-report.txt"
 #define REPORT_BYTES 4096
@@ -312,6 +313,8 @@ typedef struct {
     nd_font *font_md;
     nd_font *font_n;
     nd_font *font_xl;
+    nd_font *font_n_b;
+    nd_font *font_xl_b;
     nd_input *input;
     int write_fd;
 } core_fixture;
@@ -330,6 +333,19 @@ static bool core_init(core_fixture *fx)
     fx->font_md = nd_font_load(path, 18);
     fx->font_n = nd_font_load(path, 20);
     fx->font_xl = nd_font_load(path, 24);
+
+    /* The bold pair. Optional -- nd_ui_font_bold() answers the regular
+     * weight for a NULL -- but a fixture that skips it renders every
+     * title a stroke too light and matches no reference frame.
+     * See uifont_test.h. */
+    {
+        char bold[ND_PATH_MAX];
+
+        if (ui_bold_face_path(path, bold, sizeof bold)) {
+            fx->font_n_b = nd_font_load(bold, ND_FONT_PX_N);
+            fx->font_xl_b = nd_font_load(bold, ND_FONT_PX_XL);
+        }
+    }
     if (fx->font_s == NULL || fx->font_md == NULL || fx->font_n == NULL || fx->font_xl == NULL)
         return false;
 
@@ -360,6 +376,8 @@ static bool core_init(core_fixture *fx)
     fx->ui.font_md = fx->font_md;
     fx->ui.font_n = fx->font_n;
     fx->ui.font_xl = fx->font_xl;
+    fx->ui.font_n_b = fx->font_n_b;
+    fx->ui.font_xl_b = fx->font_xl_b;
     fx->ui.input = fx->input;
     fx->ui.keypad_fd = nd_input_fd(fx->input);
     fx->ui.softkey_exists = true;
@@ -398,6 +416,8 @@ static void core_free(core_fixture *fx)
     nd_font_free(fx->font_md);
     nd_font_free(fx->font_n);
     nd_font_free(fx->font_xl);
+    nd_font_free(fx->font_n_b);
+    nd_font_free(fx->font_xl_b);
     memset(fx, 0, sizeof *fx);
 }
 
