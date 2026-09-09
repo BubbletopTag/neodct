@@ -138,7 +138,10 @@ static void builtin_info(nd_theme_info *out)
     memset(out, 0, sizeof *out);
     (void)nd_strlcpy(out->id, ND_THEME_ID_BUILTIN, sizeof out->id);
     (void)nd_strlcpy(out->name, ND_THEME_NAME_BUILTIN, sizeof out->name);
-    (void)nd_strlcpy(out->version, "built in", sizeof out->version);
+    /* No version and no author. The picker omits both lines when they are
+     * empty, which is right here: the built-in is not a package somebody
+     * released, and "Version built in" is a line that only reads as one
+     * because a field had to be filled. */
     (void)nd_strlcpy(out->desc, "White type on black in the phone's own pixel typeface. Flat, "
                                 "square-cornered and high contrast.",
                      sizeof out->desc);

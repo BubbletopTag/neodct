@@ -65,9 +65,19 @@ def render(theme_dir, theme_id, keep=None):
     shutil.copytree(theme_dir, dst)
     os.makedirs(out, exist_ok=True)
 
-    r = subprocess.run([SHOOT, "--overlay", ov, "--out", out,
-                        "--set", "system.ui.theme=%s" % theme_id],
-                       capture_output=True, text=True)
+    # The theme's OWN wallpaper, when it ships one.
+    #
+    # nd-shoot picks a wallpaper per group from the stock set, and selecting a
+    # theme on a real phone writes the theme's into the setting
+    # (nd_theme_select). Without this the preview shows the new chrome over
+    # the old background -- which is not a screen the owner will ever see, and
+    # on a theme whose wallpaper is half its character it reads as the theme
+    # not working.
+    cmd = [SHOOT, "--overlay", ov, "--out", out, "--set", "system.ui.theme=%s" % theme_id]
+    if os.path.isfile(os.path.join(theme_dir, "wallpaper.jpg")):
+        cmd += ["--set", "system.ui.wallpaper=/NeoDCT/System/themes/%s/wallpaper.jpg"
+                % os.path.basename(theme_dir)]
+    r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         sys.stderr.write(r.stderr)
         die("nd-shoot failed (%d)" % r.returncode)
