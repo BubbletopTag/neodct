@@ -224,33 +224,64 @@ tests/
 A test that needs hardware is not a unit test. Put it in `tests/hw/`, and it runs only
 on the device.
 
-### Golden frames are no longer a gate
+### Screens: snapshot before, snapshot after
 
-The golden-frame reference is the **Python build's output**, captured before any C was
-written, and while the port was in progress a C change that altered pixels failed the
-test. That was the right rule then: it is how "one-to-one" became something a machine
-checked instead of something a person argued about.
+The set in `tests/golden/` is the **Python build's output**, captured at 0.4.0a before
+any C was written. While the port was in progress a C change that altered pixels failed
+the test, and that was the right rule then: it is how "one-to-one" became something a
+machine checked instead of something a person argued about.
 
-The port is done, and the owner has since ruled that the frames have served their
-purpose — applications are now being deliberately redesigned to look *different* from
-the Python, and a rule that fails a build for changing pixels is now a rule against
-doing the work. **A golden frame is not a reason to leave a screen the way it is, and
-it is not something to ask permission about before changing a screen.**
+The port finished. Screens are now deliberately redesigned to look *different* from the
+Python, and they will be redesigned again. So the committed set drifts from the truth
+**by design**, and it is not a description of what the UI is supposed to look like.
+Three things follow, and they are not hedged:
 
-What they are still good for, and why they are kept:
+- A golden frame is never a reason to leave a screen the way it is.
+- It is never something to ask permission about before changing a screen.
+- A mismatch against it is not a finding, not a bug, and not something to raise in a
+  summary or a commit message.
 
-- **Regression, not conformance.** When you change screen A, the frames for screens
-  B through Z are a cheap check that you did not disturb them. The Messages Chat style
-  is the worked example: Classic was untouched, so `app-messages` and
-  `app-messages-inbox` still match, and *that* is the useful signal.
-- A frame you deliberately changed gets **re-cut**, not argued with:
+**The useful check is against your own baseline, not against 0.4.0a.** Capture before
+you touch anything, capture again when you are done, and compare the two:
 
-      ./build/default/bin/nd-shoot --out /tmp/frames
-      python3 neodct/tools/goldenframe.py --compare neodct/tests/golden /tmp/frames
+```sh
+./build/default/bin/nd-shoot --out /tmp/frames-before
+#   ... do the work ...
+./build/default/bin/nd-shoot --out /tmp/frames-after
+python3 neodct/tools/goldenframe.py --compare /tmp/frames-before /tmp/frames-after
+```
 
-  then copy the new PNG over the old one and update `manifest.json`. Say so in the
-  commit message. Do not cut a *new* frame for a *new* screen — a redesigned screen's
-  test is its unit test, not a picture of itself that can only ever agree with it.
+`--compare` takes any two directories `nd-shoot` wrote, so the reference becomes "what
+this tree looked like before I started" instead of "what Python looked like two years
+ago". The frames that moved should be the screens you meant to move; **anything else is
+the finding.** It costs about four seconds and it answers the only question worth
+asking — *did I disturb something I was not looking at?*
+
+That is the whole ritual. There is no step where you compare against `tests/golden/`.
+
+### Re-cutting is a build chore, not a review question
+
+A number of tests — `test_appsel`, `test_widgets_dialogs`, `test_widgets_lists`,
+`test_widgets_text`, `test_messages`, `test_dialer` and others — render a screen and
+compare its digest against `tests/golden/manifest.json`, and fail on a mismatch. So a
+screen change can turn `make test` red.
+
+When it does, re-cut and move on:
+
+```sh
+./build/default/bin/nd-shoot --out /tmp/frames
+python3 neodct/tools/goldenframe.py --compare neodct/tests/golden /tmp/frames
+```
+
+Copy the changed PNGs over the old ones, update the matching `sha256` in
+`manifest.json`, and give it **one line** in the commit message. Do not deliberate about
+it, do not ask about it, and do not write a paragraph explaining it — it is the same
+class of work as updating a hard-coded count, and it deserves the same amount of
+attention.
+
+Do not cut a *new* frame for a *new* screen. A redesigned screen's test is its unit
+test, not a picture of itself that can only ever agree with it. Refreshing the whole
+committed set is a deliberate, separate task and is not part of app work.
 
 ---
 

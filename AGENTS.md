@@ -120,8 +120,22 @@ about two seconds:
 ./build/default/bin/nd-shoot --out DIR
 ./build/default/bin/nd-shoot --out DIR --wallpaper Classroom.gif   # every group
 ./build/default/bin/nd-shoot --out DIR --anim 125                  # a sequence
-python3 neodct/tools/goldenframe.py --compare neodct/tests/golden DIR
 ```
+
+**Snapshot before, snapshot after.** Capture a baseline at the start of a task,
+capture again at the end, and compare the two — `--compare` takes any two
+directories `nd-shoot` wrote, so the reference is this tree an hour ago rather
+than the Python build in 0.4.0a:
+
+```sh
+./build/default/bin/nd-shoot --out /tmp/frames-before
+#   ... do the work ...
+./build/default/bin/nd-shoot --out /tmp/frames-after
+python3 neodct/tools/goldenframe.py --compare /tmp/frames-before /tmp/frames-after
+```
+
+The frames that moved should be the ones you meant to move; anything else is the
+finding.
 
 `--wallpaper` forces one into the six groups whose recipe deliberately has
 none, which is the only way to review a change to the shared background;
@@ -153,8 +167,16 @@ Engineering mode is deliberately not accepted as the gate: it lives in
 
 The C build has its own suite — `cd neodct/src && make test`, and
 `make ASAN=1 test` before you push anything; both run in the sandbox
-described at the top of this section. It includes the golden frames in
-`neodct/tests/golden/`, captured from the Python build during the port.
+described at the top of this section.
+
+Part of that suite still compares rendered digests against
+`neodct/tests/golden/`, the Python build's output captured during the port. That
+set is **not** a description of what the UI should look like — screens are
+deliberately redesigned now, so it drifts by design. Never treat a frame as a
+reason to leave a screen alone, never ask permission over one, and never report
+a mismatch as a finding. When a screen change turns `make test` red, re-cut the
+frame as a chore and give it one line in the commit.
+`docs/c-rewrite/CODING-STANDARDS.md` section 7 has the commands.
 
 **Neither suite can see the confinement.** Every security test in the tree
 checks what the image was *built* to do; none can check what the kernel

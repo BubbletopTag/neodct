@@ -84,32 +84,65 @@ test runs on a QWERTY dev keyboard that has arrows the phone does not.
 Declare the surface in `<name>_app.h` rather than leaving it `static`, so the
 test can reach it.
 
-## Golden frames
+## Screens: snapshot before, snapshot after
 
-**They are a regression net, not a gate.** `CODING-STANDARDS.md` section 7 is
-explicit: applications are being deliberately redesigned, and a rule that fails
-a build for changing pixels is a rule against doing the work. A frame is not a
-reason to leave a screen alone and not something to ask permission about.
+The check that is worth doing compares this tree against *itself*. Capture a
+baseline before you touch anything, capture again when you are done, and diff
+the two:
 
-What they are still good for: when you change screen A, the frames for B..Z are
-a cheap check that you did not disturb them.
+    ./build/default/bin/nd-shoot --out /tmp/frames-before
+    #   ... do the work ...
+    ./build/default/bin/nd-shoot --out /tmp/frames-after
+    python3 neodct/tools/goldenframe.py --compare /tmp/frames-before /tmp/frames-after
 
-Re-cut a frame you changed on purpose:
+`--compare` takes any two directories `nd-shoot` wrote. The frames that moved
+should be the screens you meant to move; **anything else is the finding.** Four
+seconds, and it answers the only question worth asking: did I disturb something
+I was not looking at?
+
+Do this at the start of the task, not at the end. A baseline captured after you
+have already edited three files is not a baseline.
+
+## What `neodct/tests/golden/` is, and is not
+
+It is the Python build's output, captured at 0.4.0a so the C port could be
+checked one-to-one by a machine instead of argued about by people. The port
+finished. Screens are deliberately redesigned now and will be again, so the
+committed set **drifts from the truth by design**.
+
+So, flatly:
+
+- A golden frame is never a reason to leave a screen the way it is.
+- It is never something to ask permission about before changing a screen.
+- A mismatch against it is not a finding, not a bug, and not something to put in
+  a summary.
+
+It is not the baseline for your work. The snapshot above is.
+
+## Re-cutting is a chore, not a question
+
+`test_appsel`, `test_widgets_dialogs`, `test_widgets_lists`, `test_widgets_text`,
+`test_messages`, `test_dialer` and others render a screen and compare its digest
+against `neodct/tests/golden/manifest.json`. So a screen change can turn
+`make test` red. When it does:
 
     ./build/default/bin/nd-shoot --out /tmp/frames
     python3 neodct/tools/goldenframe.py --compare neodct/tests/golden /tmp/frames
 
-then copy the changed PNGs into `neodct/tests/golden/` and update the matching
-`sha256` in its `manifest.json`. Say so in the commit message.
+Copy the changed PNGs into `neodct/tests/golden/`, update the matching `sha256`
+in its `manifest.json`, and give it **one line** in the commit message. Do not
+deliberate, do not ask, do not write a paragraph. It is the same class of work
+as updating a hard-coded count.
 
 **Adding an app moves frames you did not touch.** The app selector's scrollbar
 notch is `(track_bottom - track_top) / (n_apps - 1)`, so every `menu-*` frame
 shifts, and apps sorting after yours have their breadcrumb index bumped.
 `test_appreg` and `test_appsel` hard-code the app counts and the notch position
-and will need updating. This is expected -- do not treat it as breakage.
+and will need updating. Expected, and the same chore -- not breakage.
 
 Do **not** cut a new frame for a new screen. Its test is its unit test, not a
-picture of itself that can only ever agree with it.
+picture of itself that can only ever agree with it. Refreshing the whole
+committed set is a deliberate, separate task and is not part of app work.
 
 ## Seeing a screen
 
