@@ -1,0 +1,700 @@
+#!/bin/sh
+# ndlink -- adb for NeoDCT OS. One CLI, two backends, one verb set.
+#
+#   ndlink [-t qemu|hw] [--json] [--timeout S] [--force] VERB [args]
+#
+# ============ THE RULE THAT MATTERS MOST ============
+#
+# A caller -- human or agent -- must never need to know which target it is
+# talking to. `ndlink shot out.png` means the same thing against QEMU and
+# against a phone on the end of a cable, and any design that leaks the backend
+# into the verb has failed. Everything awkward in this file exists to keep
+# that true.
+#
+# ============ CONTRACTS ============
+#
+#   --json      on EVERY verb, no exceptions. One object, always carrying
+#               {"ok","verb","target"}; errors carry {"ok":false,"error","code"}.
+#               An agent that has to parse prose is a flaky agent.
+#   exit codes  0 success. 1 assertion failed (the command worked, the answer
+#               was no). 2 not implemented on this backend. 3 target
+#               unreachable. 4 lock held. 5 usage. 6 the target ran it and it
+#               failed. These are a contract; do not add meanings.
+#   locking     one flock per target. Two agents driving one phone produce
+#               nonsense that reads like a bug.
+#   --timeout   every verb takes one. An overnight run that wedges is a
+#               wasted night.
+#   idempotence running a verb twice is safe.
+#
+# ============ THE ONE DELIBERATE ASYMMETRY ============
+#
+# `key` reaches QEMU through the QEMU MONITOR and hardware through the devkey
+# socket (nd-key). Those are different mechanisms and they stay different:
+# there is no monitor on a phone, and no guest-side socket reachable from the
+# host under QEMU without networking. Do not try to unify them. Both are
+# reached by the same verb, which is the part that matters.
+#
+# POSIX sh on purpose, matching run_qemu.sh, cloud-test.sh and sdcard.sh.
+# The one helper it shells out to is ndlink-telnet, and its header explains
+# why that is not three lines of shell.
+
+set -eu
+
+ND_VERSION="0.1"
+
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO=$(dirname "$HERE")          # neodct/
+ROOT=$(dirname "$REPO")          # the repo root
+STATE="$ROOT/.ndlink"
+REFS="$STATE/refs"
+TELNET_HELPER="$HERE/ndlink-telnet"
+
+# The bench LAN address the debug link uses. docs/DEBUG_LAN.md is the whole
+# story; .ndlink/target overrides it, written by `ndlink connect`.
+HW_ADDR_DEFAULT="192.168.99.2"
+HW_TELNET_PORT=23
+HW_FTP_PORT=21
+
+TIMEOUT=20
+TARGET=""
+JSON=0
+FORCE=0
+VERB=""
+
+# ------------------------------------------------------------------ #
+# JSON, done by hand because there is no jq on a build host we control
+# ------------------------------------------------------------------ #
+
+# Escape a string for a JSON double-quoted value. Backslash first or it eats
+# the escapes it just added.
+json_escape() {
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
+        -e 's/\t/\\t/g' | awk 'BEGIN{ORS=""} {if (NR>1) printf "\\n"; print}'
+}
+
+# emit_ok VERB [extra-json-fields]
+emit_ok() {
+    _verb=$1
+    shift
+    if [ "$JSON" = 1 ]; then
+        printf '{"ok":true,"verb":"%s","target":"%s"' "$_verb" "${TARGET:-none}"
+        [ $# -gt 0 ] && [ -n "$1" ] && printf ',%s' "$1"
+        printf '}\n'
+    fi
+}
+
+# fail CODE MESSAGE -- prints (JSON or prose) and exits with CODE.
+fail() {
+    _code=$1
+    shift
+    _msg=$*
+    if [ "$JSON" = 1 ]; then
+        printf '{"ok":false,"verb":"%s","target":"%s","error":"%s","code":%s}\n' \
+            "${VERB:-none}" "${TARGET:-none}" "$(json_escape "$_msg")" "$_code"
+    else
+        printf 'ndlink: %s\n' "$_msg" >&2
+    fi
+    exit "$_code"
+}
+
+# ------------------------------------------------------------------ #
+# Target discovery
+# ------------------------------------------------------------------ #
+
+hw_addr() {
+    if [ -f "$STATE/target" ]; then
+        cat "$STATE/target"
+    else
+        printf '%s' "$HW_ADDR_DEFAULT"
+    fi
+}
+
+# A TCP connect test with no nc and no bash /dev/tcp: POSIX sh has neither, so
+# this asks the one thing that is always installed here.
+port_open() {
+    _host=$1
+    _port=$2
+    python3 - "$_host" "$_port" <<'PY' >/dev/null 2>&1
+import socket, sys
+try:
+    s = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=2)
+    s.close()
+except OSError:
+    sys.exit(1)
+PY
+}
+
+hw_reachable() { port_open "$(hw_addr)" "$HW_TELNET_PORT"; }
+
+# QEMU counts as present when run_qemu.sh's monitor socket is there. Without a
+# monitor there is no way to send keys, so a running qemu we cannot drive is
+# not a usable target and saying so early beats failing inside a verb.
+qemu_monitor() { printf '%s' "${NEODCT_MONITOR:-/tmp/ndmon}"; }
+qemu_reachable() { [ -S "$(qemu_monitor)" ]; }
+
+# -t defaults to whichever single target is reachable. Ambiguity is an error,
+# not a guess: picking one silently is how a test run reports a pass against
+# the thing you were not testing.
+resolve_target() {
+    [ -n "$TARGET" ] && return 0
+    _hw=0
+    _q=0
+    hw_reachable && _hw=1
+    qemu_reachable && _q=1
+    if [ "$_hw" = 1 ] && [ "$_q" = 1 ]; then
+        fail 5 "both a phone and QEMU are reachable; say -t hw or -t qemu"
+    elif [ "$_hw" = 1 ]; then
+        TARGET=hw
+    elif [ "$_q" = 1 ]; then
+        TARGET=qemu
+    else
+        fail 3 "no target reachable (no phone at $(hw_addr), no QEMU monitor at $(qemu_monitor))"
+    fi
+}
+
+# ------------------------------------------------------------------ #
+# Locking
+# ------------------------------------------------------------------ #
+
+LOCK_FD=9
+take_lock() {
+    _lock="/tmp/ndlink-$TARGET.lock"
+    [ "$FORCE" = 1 ] && return 0
+    command -v flock >/dev/null 2>&1 || return 0
+    # shellcheck disable=SC2093
+    eval "exec $LOCK_FD>\"\$_lock\""
+    if ! flock -n "$LOCK_FD"; then
+        _holder=$(cat "$_lock" 2>/dev/null || true)
+        [ -n "$_holder" ] || _holder=unknown
+        fail 4 "another ndlink holds $TARGET (pid $_holder); wait, or pass --force"
+    fi
+    printf '%s' "$$" > "$_lock"
+}
+
+# ------------------------------------------------------------------ #
+# Transports
+# ------------------------------------------------------------------ #
+
+# Run a command on the target and print its output. Returns the command's own
+# exit status. Compound commands must use ';' not newlines -- ndlink-telnet
+# sends one line, and a newline would trip the shell's continuation prompt.
+hw_shell() {
+    [ -x "$TELNET_HELPER" ] || fail 3 "missing $TELNET_HELPER"
+    "$TELNET_HELPER" "$(hw_addr)" "$HW_TELNET_PORT" "$TIMEOUT" "$1"
+}
+
+# Pull a file off the phone over ftp. ftpd is running with no login (see
+# docs/DEBUG_LAN.md), so this is anonymous by design.
+hw_pull() {
+    python3 - "$(hw_addr)" "$HW_FTP_PORT" "$1" "$2" "$TIMEOUT" <<'PY'
+import ftplib, sys
+host, port, remote, local, timeout = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], float(sys.argv[5])
+try:
+    f = ftplib.FTP()
+    f.connect(host, port, timeout=timeout)
+    f.login()
+    with open(local, "wb") as fh:
+        f.retrbinary("RETR " + remote, fh.write)
+    f.quit()
+except Exception as e:
+    sys.stderr.write("pull %s: %s\n" % (remote, e))
+    sys.exit(1)
+PY
+}
+
+hw_push() {
+    python3 - "$(hw_addr)" "$HW_FTP_PORT" "$1" "$2" "$TIMEOUT" <<'PY'
+import ftplib, sys
+host, port, local, remote, timeout = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], float(sys.argv[5])
+try:
+    f = ftplib.FTP()
+    f.connect(host, port, timeout=timeout)
+    f.login()
+    with open(local, "rb") as fh:
+        f.storbinary("STOR " + remote, fh)
+    f.quit()
+except Exception as e:
+    sys.stderr.write("push %s: %s\n" % (local, e))
+    sys.exit(1)
+PY
+}
+
+# One connection held open for the whole key sequence. test_card_flow.sh paid
+# for this lesson: a connection per key loses most of them, because the
+# command races the close.
+qemu_monitor_send() {
+    python3 - "$(qemu_monitor)" "$TIMEOUT" "$@" <<'PY'
+import socket, sys, time
+path, timeout = sys.argv[1], float(sys.argv[2])
+cmds = sys.argv[3:]
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(timeout)
+try:
+    s.connect(path)
+except OSError as e:
+    sys.stderr.write("qemu monitor %s: %s\n" % (path, e))
+    sys.exit(3)
+time.sleep(0.2)
+try:
+    s.recv(65536)
+except OSError:
+    pass
+for c in cmds:
+    s.sendall((c + "\n").encode())
+    time.sleep(0.15)
+    try:
+        s.recv(65536)
+    except OSError:
+        pass
+s.close()
+PY
+}
+
+# ------------------------------------------------------------------ #
+# The on-device helpers, and where they live
+# ------------------------------------------------------------------ #
+#
+# nd-grab and nd-key ship in the image at /NeoDCT/System/bin. During bring-up
+# they can also be pushed to /NeoDCT/User/bin, which is mounted rw and
+# deliberately NOT noexec (neodct/initramfs/init:198) -- so a rebuild is not
+# needed to try a new one. Prefer the pushed copy when it is there, because
+# during iteration it is the newer of the two.
+ND_REMOTE_BIN="/NeoDCT/User/bin"
+
+# Emits a command substitution that resolves to a PATH on the phone -- not an
+# if/fi statement. That distinction cost a debugging round: a statement cannot
+# take arguments, so `$(remote_tool nd-grab) out.png` expanded to
+# "... fi out.png", which is a syntax error, and the failure surfaced as the
+# transport losing its framing rather than as anything to do with paths.
+remote_tool() {
+    _t=$1
+    printf '$( [ -x %s/%s ] && echo %s/%s || echo /NeoDCT/System/bin/%s )' \
+        "$ND_REMOTE_BIN" "$_t" "$ND_REMOTE_BIN" "$_t" "$_t"
+}
+
+# ------------------------------------------------------------------ #
+# Verbs
+# ------------------------------------------------------------------ #
+
+verb_devices() {
+    _hw=0
+    _q=0
+    hw_reachable && _hw=1
+    qemu_reachable && _q=1
+    if [ "$JSON" = 1 ]; then
+        printf '{"ok":true,"verb":"devices","target":"%s","devices":[' "${TARGET:-none}"
+        _sep=""
+        if [ "$_hw" = 1 ]; then
+            printf '%s{"target":"hw","state":"up","address":"%s"}' "$_sep" "$(hw_addr)"
+            _sep=","
+        fi
+        if [ "$_q" = 1 ]; then
+            printf '%s{"target":"qemu","state":"up","monitor":"%s"}' "$_sep" "$(qemu_monitor)"
+        fi
+        printf ']}\n'
+    else
+        printf '%-6s %-6s %s\n' TARGET STATE WHERE
+        [ "$_hw" = 1 ] && printf '%-6s %-6s %s\n' hw up "$(hw_addr)"
+        [ "$_q" = 1 ] && printf '%-6s %-6s %s\n' qemu up "$(qemu_monitor)"
+        [ "$_hw" = 0 ] && [ "$_q" = 0 ] && printf 'no targets reachable\n'
+    fi
+    return 0
+}
+
+verb_shell() {
+    [ $# -ge 1 ] || fail 5 "shell needs a command"
+    case "$TARGET" in
+    hw)
+        _out=$(hw_shell "$*") && _rc=0 || _rc=$?
+        ;;
+    qemu)
+        fail 2 "shell on qemu needs guest networking; use -t hw, or the serial console"
+        ;;
+    esac
+    if [ "$JSON" = 1 ]; then
+        printf '{"ok":%s,"verb":"shell","target":"%s","exit":%s,"stdout":"%s"}\n' \
+            "$([ "$_rc" = 0 ] && printf true || printf false)" "$TARGET" "$_rc" \
+            "$(json_escape "$_out")"
+    else
+        [ -n "$_out" ] && printf '%s\n' "$_out"
+    fi
+    # 6 means "the phone ran it and it failed", which is not ndlink failing.
+    [ "$_rc" = 0 ] || exit 6
+    return 0
+}
+
+verb_shot() {
+    _out=${1:-}
+    [ -n "$_out" ] || fail 5 "shot needs an output path"
+    case "$TARGET" in
+    hw)
+        _remote="/tmp/ndlink-shot-$$.png"
+        _cmd="$(remote_tool nd-grab) $_remote 2>/dev/null"
+        hw_shell "$_cmd" >/dev/null || fail 6 "nd-grab failed on the phone"
+        hw_pull "$_remote" "$_out" || fail 6 "could not fetch the screenshot"
+        hw_shell "rm -f $_remote" >/dev/null 2>&1 || true
+        ;;
+    qemu)
+        fail 2 "shot on qemu is not wired up yet (cloud-test.sh panel is the path)"
+        ;;
+    esac
+    [ -s "$_out" ] || fail 6 "screenshot came back empty"
+    _sz=$(wc -c < "$_out" | tr -d ' ')
+    emit_ok shot "\"path\":\"$(json_escape "$_out")\",\"bytes\":$_sz"
+    [ "$JSON" = 1 ] || printf 'wrote %s (%s bytes)\n' "$_out" "$_sz"
+    return 0
+}
+
+verb_digest() {
+    case "$TARGET" in
+    hw) _d=$(hw_shell "$(remote_tool nd-grab) --digest 2>/dev/null") || fail 6 "nd-grab failed" ;;
+    qemu) fail 2 "digest on qemu is not wired up yet" ;;
+    esac
+    _d=$(printf '%s' "$_d" | tr -d ' \n\r')
+    [ -n "$_d" ] || fail 6 "no digest came back"
+    emit_ok digest "\"digest\":\"$_d\""
+    [ "$JSON" = 1 ] || printf '%s\n' "$_d"
+    return 0
+}
+
+verb_key() {
+    [ $# -ge 1 ] || fail 5 "key needs at least one key name"
+    case "$TARGET" in
+    hw)
+        _cmd="$(remote_tool nd-key) $*"
+        _out=$(hw_shell "$_cmd" 2>&1) && _rc=0 || _rc=$?
+        [ "$_rc" = 0 ] || fail 6 "nd-key failed on the phone: $_out"
+        ;;
+    qemu)
+        # The monitor's sendkey takes its own names, not evdev codes, so this
+        # is a translation and not a pass-through. Deliberately small: the
+        # keys a flow actually presses.
+        for _k in "$@"; do
+            case "$(printf '%s' "$_k" | tr 'A-Z' 'a-z')" in
+            menu) _q=m ;;
+            navikey | enter | ok) _q=ret ;;
+            clear | back | c) _q=backspace ;;
+            up) _q=up ;;
+            down) _q=down ;;
+            left) _q=left ;;
+            right) _q=right ;;
+            star | '*') _q=shift ;;
+            hash | '#') _q=backslash ;;
+            0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9) _q=$_k ;;
+            *) fail 5 "key \"$_k\" has no QEMU monitor name" ;;
+            esac
+            qemu_monitor_send "sendkey $_q" || fail 3 "the QEMU monitor did not answer"
+        done
+        ;;
+    esac
+    emit_ok key "\"keys\":\"$(json_escape "$*")\""
+    return 0
+}
+
+verb_push() {
+    [ $# -ge 2 ] || fail 5 "push needs LOCAL and REMOTE"
+    _l=$1
+    _r=$2
+    [ -f "$_l" ] || fail 5 "no such file: $_l"
+    case "$TARGET" in
+    hw)
+        # ftpd cannot create intermediate directories, and a STOR into a
+        # missing one fails with a 5xx that reads like a permission problem.
+        # Make the parent first so the error a caller sees is the real one.
+        _dir=$(dirname "$_r")
+        hw_shell "mkdir -p $_dir" >/dev/null 2>&1 || true
+        hw_push "$_l" "$_r" || fail 6 "could not push $_l"
+        ;;
+    qemu) fail 2 "push on qemu goes through sdcard.sh and the virtiofs share; not wired up yet" ;;
+    esac
+    _sz=$(wc -c < "$_l" | tr -d ' ')
+    emit_ok push "\"local\":\"$(json_escape "$_l")\",\"remote\":\"$(json_escape "$_r")\",\"bytes\":$_sz"
+    [ "$JSON" = 1 ] || printf 'pushed %s -> %s (%s bytes)\n' "$_l" "$_r" "$_sz"
+    return 0
+}
+
+verb_pull() {
+    [ $# -ge 2 ] || fail 5 "pull needs REMOTE and LOCAL"
+    _r=$1
+    _l=$2
+    case "$TARGET" in
+    hw) hw_pull "$_r" "$_l" || fail 6 "could not pull $_r" ;;
+    qemu) fail 2 "pull on qemu goes through sdcard.sh and the virtiofs share; not wired up yet" ;;
+    esac
+    [ -f "$_l" ] || fail 6 "nothing arrived"
+    _sz=$(wc -c < "$_l" | tr -d ' ')
+    emit_ok pull "\"remote\":\"$(json_escape "$_r")\",\"local\":\"$(json_escape "$_l")\",\"bytes\":$_sz"
+    [ "$JSON" = 1 ] || printf 'pulled %s -> %s (%s bytes)\n' "$_r" "$_l" "$_sz"
+    return 0
+}
+
+# connect/disconnect persist the hardware address, so a bench with a phone at
+# a different address does not need -t and an env var on every call.
+verb_connect() {
+    _a=${1:-}
+    [ -n "$_a" ] || fail 5 "connect needs an address"
+    mkdir -p "$STATE"
+    printf '%s' "$_a" > "$STATE/target"
+    emit_ok connect "\"address\":\"$(json_escape "$_a")\""
+    [ "$JSON" = 1 ] || printf 'target is now %s\n' "$_a"
+    return 0
+}
+
+verb_disconnect() {
+    rm -f "$STATE/target"
+    emit_ok disconnect "\"address\":\"$HW_ADDR_DEFAULT\""
+    [ "$JSON" = 1 ] || printf 'target reset to %s\n' "$HW_ADDR_DEFAULT"
+    return 0
+}
+
+verb_logs() {
+    _follow=0
+    [ "${1:-}" = "-f" ] && _follow=1
+    case "$TARGET" in
+    hw)
+        if [ "$_follow" = 1 ]; then
+            fail 2 "logs -f needs a streaming transport; ndlinkd is where that belongs"
+        fi
+        _out=$(hw_shell "tail -n 200 /var/log/messages 2>/dev/null") || fail 6 "cannot read logs"
+        ;;
+    qemu) fail 2 "logs on qemu: read the serial console run_qemu.sh is attached to" ;;
+    esac
+    if [ "$JSON" = 1 ]; then
+        printf '{"ok":true,"verb":"logs","target":"%s","lines":"%s"}\n' \
+            "$TARGET" "$(json_escape "$_out")"
+    else
+        printf '%s\n' "$_out"
+    fi
+    return 0
+}
+
+verb_wait() {
+    _deadline=$(( $(date +%s) + TIMEOUT ))
+    while [ "$(date +%s)" -lt "$_deadline" ]; do
+        if [ "$TARGET" = hw ] && hw_reachable; then
+            emit_ok wait '"state":"up"'
+            [ "$JSON" = 1 ] || printf 'hw is up\n'
+            return 0
+        fi
+        if [ "$TARGET" = qemu ] && qemu_reachable; then
+            emit_ok wait '"state":"up"'
+            [ "$JSON" = 1 ] || printf 'qemu is up\n'
+            return 0
+        fi
+        sleep 1
+    done
+    fail 3 "timed out after ${TIMEOUT}s waiting for $TARGET"
+}
+
+verb_expect() {
+    _name=${1:-}
+    [ -n "$_name" ] || fail 5 "expect needs a reference name"
+    _ref="$REFS/$_name.digest"
+    # NEVER neodct/tests/golden/ -- that is the Python build's output from
+    # 0.4.0a and the tree is twenty-six releases past it. A mismatch there is
+    # not a finding. See the brief, section 8.
+    [ -f "$_ref" ] || fail 5 "no reference \"$_name\" (capture one with: ndlink snapshot $_name)"
+    _want=$(cat "$_ref")
+    case "$TARGET" in
+    hw) _got=$(hw_shell "$(remote_tool nd-grab) --digest 2>/dev/null") || fail 6 "nd-grab failed" ;;
+    qemu) fail 2 "expect on qemu is not wired up yet" ;;
+    esac
+    _got=$(printf '%s' "$_got" | tr -d ' \n\r')
+    if [ "$_got" = "$_want" ]; then
+        emit_ok expect "\"reference\":\"$_name\",\"digest\":\"$_got\",\"match\":true"
+        [ "$JSON" = 1 ] || printf 'expect %s: match\n' "$_name"
+        return 0
+    fi
+    # Exit 1, not 6: the command worked perfectly and the answer was no.
+    if [ "$JSON" = 1 ]; then
+        printf '{"ok":false,"verb":"expect","target":"%s","reference":"%s","expected":"%s","got":"%s","match":false,"code":1}\n' \
+            "$TARGET" "$_name" "$_want" "$_got"
+    else
+        printf 'expect %s: MISMATCH\n  expected %s\n  got      %s\n' "$_name" "$_want" "$_got" >&2
+    fi
+    exit 1
+}
+
+verb_snapshot() {
+    _name=${1:-}
+    [ -n "$_name" ] || fail 5 "snapshot needs a name"
+    mkdir -p "$REFS"
+    case "$TARGET" in
+    hw) _d=$(hw_shell "$(remote_tool nd-grab) --digest 2>/dev/null") || fail 6 "nd-grab failed" ;;
+    qemu) fail 2 "snapshot on qemu is not wired up yet" ;;
+    esac
+    _d=$(printf '%s' "$_d" | tr -d ' \n\r')
+    [ -n "$_d" ] || fail 6 "no digest came back"
+    printf '%s' "$_d" > "$REFS/$_name.digest"
+    # The PNG beside it is for a human deciding whether the reference is
+    # right; only the digest is ever compared.
+    verb_shot "$REFS/$_name.png" >/dev/null 2>&1 || true
+    emit_ok snapshot "\"reference\":\"$_name\",\"digest\":\"$_d\""
+    [ "$JSON" = 1 ] || printf 'snapshot %s: %s\n' "$_name" "$_d"
+    return 0
+}
+
+# doctor is modelled on nd-selftest, which exists for exactly this reason:
+# report what works, what does not, and why -- per target, honestly.
+verb_doctor() {
+    _reach=false
+    _devenv=false
+    _devkey=false
+    _ndgrab=false
+    _ndkey=false
+    _frame=false
+    _ver=""
+    _note=""
+
+    case "$TARGET" in
+    hw)
+        if hw_reachable; then
+            _reach=true
+            _ver=$(hw_shell "cat /NeoDCT/System/version.prop 2>/dev/null | sed -n 's/^system.os.versionnumber=//p'" || printf '')
+            _ver=$(printf '%s' "$_ver" | tr -d ' \n\r')
+            hw_shell "test -f /etc/neodct-devenv" >/dev/null 2>&1 && _devenv=true
+            hw_shell "test -S /run/neodct/devkey" >/dev/null 2>&1 && _devkey=true
+            hw_shell "test -x /NeoDCT/System/bin/nd-grab -o -x $ND_REMOTE_BIN/nd-grab" >/dev/null 2>&1 && _ndgrab=true
+            hw_shell "test -x /NeoDCT/System/bin/nd-key -o -x $ND_REMOTE_BIN/nd-key" >/dev/null 2>&1 && _ndkey=true
+            if [ "$_ndgrab" = true ]; then
+                _d=$(hw_shell "$(remote_tool nd-grab) --digest 2>/dev/null" || printf '')
+                _d=$(printf '%s' "$_d" | tr -d ' \n\r')
+                [ ${#_d} -eq 64 ] && _frame=true
+            fi
+            [ "$_devkey" = false ] && _note="no devkey socket: keys cannot be injected"
+        else
+            _note="no phone answering at $(hw_addr):$HW_TELNET_PORT"
+        fi
+        ;;
+    qemu)
+        qemu_reachable && _reach=true
+        _note="the qemu backend is written but UNVERIFIED -- see docs/NDLINK.md"
+        ;;
+    esac
+
+    if [ "$JSON" = 1 ]; then
+        printf '{"ok":true,"verb":"doctor","target":"%s","reachable":%s,"devenv_marker":%s,"devkey_socket":%s,"nd_grab":%s,"nd_key":%s,"frame_ok":%s,"version":"%s","backend_verified":%s,"note":"%s"}\n' \
+            "$TARGET" "$_reach" "$_devenv" "$_devkey" "$_ndgrab" "$_ndkey" "$_frame" "$_ver" \
+            "$([ "$TARGET" = hw ] && printf true || printf false)" "$(json_escape "$_note")"
+    else
+        printf 'target            %s\n' "$TARGET"
+        printf 'reachable         %s\n' "$_reach"
+        printf 'version           %s\n' "${_ver:-unknown}"
+        printf 'devenv marker     %s\n' "$_devenv"
+        printf 'devkey socket     %s   (true == keys can be injected)\n' "$_devkey"
+        printf 'nd-grab present   %s\n' "$_ndgrab"
+        printf 'nd-key present    %s\n' "$_ndkey"
+        printf 'frame readable    %s\n' "$_frame"
+        [ "$TARGET" = qemu ] && printf 'backend           UNVERIFIED (written, never run)\n'
+        [ -n "$_note" ] && printf 'note              %s\n' "$_note"
+    fi
+    return 0
+}
+
+usage() {
+    cat <<EOF
+ndlink $ND_VERSION -- adb for NeoDCT OS
+
+  ndlink [-t qemu|hw] [--json] [--timeout S] [--force] VERB [args]
+
+Verbs built so far:
+  devices              which targets are reachable
+  doctor               capability report for a target, honestly
+  wait                 block until the target is up
+  shell CMD            run one command, return its output and exit code
+  shot OUT.png         a PNG of the panel
+  digest               the panel's frame digest
+  key KEY...           press keys (MENU, 5, DOWN, NAVIKEY...)
+  logs                 the phone's recent log
+  push LOCAL REMOTE    copy a file to the target
+  pull REMOTE LOCAL    copy a file from the target
+  connect ADDR         remember a hardware address
+  disconnect           forget it
+  snapshot NAME        capture a reference digest into .ndlink/refs
+  expect NAME          assert the panel matches that reference (exit 1 if not)
+
+Exit codes: 0 ok, 1 assertion failed, 2 not implemented on this backend,
+3 target unreachable, 4 lock held, 5 usage, 6 the target failed the command.
+EOF
+}
+
+# ------------------------------------------------------------------ #
+# Argument parsing
+# ------------------------------------------------------------------ #
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+    -t)
+        [ $# -ge 2 ] || { VERB=""; fail 5 "-t needs qemu or hw"; }
+        TARGET=$2
+        shift 2
+        ;;
+    --json)
+        JSON=1
+        shift
+        ;;
+    --timeout)
+        [ $# -ge 2 ] || { VERB=""; fail 5 "--timeout needs seconds"; }
+        TIMEOUT=$2
+        shift 2
+        ;;
+    --force)
+        FORCE=1
+        shift
+        ;;
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    -*)
+        fail 5 "unknown option \"$1\""
+        ;;
+    *)
+        VERB=$1
+        shift
+        break
+        ;;
+    esac
+done
+
+[ -n "$VERB" ] || { usage >&2; exit 5; }
+
+case "$TARGET" in
+"" | hw | qemu) ;;
+*) fail 5 "-t wants qemu or hw, got \"$TARGET\"" ;;
+esac
+
+case "$TIMEOUT" in
+'' | *[!0-9]*) fail 5 "--timeout wants whole seconds" ;;
+esac
+
+# devices is the one verb that must work with nothing reachable -- it is how
+# you find that out.
+case "$VERB" in
+devices | connect | disconnect)
+    # Host-side bookkeeping: these must work with no target reachable, since
+    # finding that out (or fixing it) is what they are for.
+    ;;
+*)
+    resolve_target
+    take_lock
+    ;;
+esac
+
+case "$VERB" in
+devices) verb_devices "$@" ;;
+doctor) verb_doctor "$@" ;;
+wait) verb_wait "$@" ;;
+shell) verb_shell "$@" ;;
+shot) verb_shot "$@" ;;
+digest) verb_digest "$@" ;;
+key) verb_key "$@" ;;
+logs) verb_logs "$@" ;;
+push) verb_push "$@" ;;
+pull) verb_pull "$@" ;;
+connect) verb_connect "$@" ;;
+disconnect) verb_disconnect "$@" ;;
+snapshot) verb_snapshot "$@" ;;
+expect) verb_expect "$@" ;;
+*) fail 5 "unknown verb \"$VERB\" (try --help)" ;;
+esac

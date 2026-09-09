@@ -81,3 +81,9 @@ neodct/overlay/tests/*.mkv
 # commit nor blocks a release tag. The build leaves it out via
 # NEODCT_EXCLUDE_APPS=Tube. Remove this line when Tube is ready to ship.
 neodct/overlay/NeoDCT/System/apps/Tube/
+
+# ndlink's per-developer state. .ndlink/refs/*.digest ARE meant to be
+# committed -- they are the expected screens -- but the connected target
+# and the eyeball PNGs beside each digest are one bench's business.
+.ndlink/target
+.ndlink/refs/*.png

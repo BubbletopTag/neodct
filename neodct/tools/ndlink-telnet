@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""ndlink-telnet -- run ONE command on a NeoDCT phone over telnetd, reliably.
+
+    ndlink-telnet HOST PORT TIMEOUT COMMAND
+        stdout  -> the command's stdout+stderr
+        exit    -> the command's exit status, or 3 if the phone is unreachable
+
+============ WHY THIS IS NOT THREE LINES OF SHELL ============
+
+busybox telnetd hands out an INTERACTIVE shell on a pty. That means:
+
+  * the pty echoes every byte written to it, so the command comes back
+    interleaved with its own output;
+  * there is a prompt, and a continuation prompt for anything multi-line;
+  * nothing frames the output, so "when has the command finished" has no
+    answer except a fixed sleep -- and a fixed sleep is either too short
+    (truncated output) or too slow (unusable in a loop).
+
+`printf ... | telnet host | sed` gets all three wrong at once. Since ndlink
+exists to make hardware testing trustworthy, its own transport must not be the
+flakiest part of it, so the handshake is done properly here:
+
+  1. turn the pty's echo off and blank the prompts, then wait;
+  2. send the command on ONE line, framed by a nonce marker before and a
+     marker-with-status after;
+  3. read until the closing marker, and return exactly what lay between.
+
+The nonce means output that happens to contain the word "done" cannot end the
+read early, and the status marker means the command's real exit code survives
+the trip -- which is what lets `ndlink shell` return 6 for "the phone ran it
+and it failed" rather than a shrug.
+
+Telnet option negotiation (IAC bytes) is stripped rather than answered: the
+server offers, we ignore, and busybox proceeds regardless.
+"""
+
+import socket
+import sys
+import time
+
+IAC = 0xFF
+
+
+def strip_iac(data):
+    """Drop telnet negotiation so it cannot land in the middle of output."""
+    out = bytearray()
+    i = 0
+    while i < len(data):
+        b = data[i]
+        if b == IAC and i + 1 < len(data):
+            c = data[i + 1]
+            if c == IAC:          # escaped 0xFF is a literal byte
+                out.append(IAC)
+                i += 2
+                continue
+            # WILL/WONT/DO/DONT carry an option byte; everything else does not
+            i += 3 if c in (251, 252, 253, 254) else 2
+            continue
+        out.append(b)
+        i += 1
+    return bytes(out)
+
+
+def main():
+    if len(sys.argv) < 5:
+        sys.stderr.write("usage: ndlink-telnet HOST PORT TIMEOUT COMMAND\n")
+        return 5
+    host = sys.argv[1]
+    port = int(sys.argv[2])
+    timeout = float(sys.argv[3])
+    cmd = sys.argv[4]
+
+    nonce = "<<ND%d>>" % (int(time.time() * 1000) % 1000000)
+    end = "<<NDE"
+
+    try:
+        s = socket.create_connection((host, port), timeout=timeout)
+    except OSError as e:
+        sys.stderr.write("ndlink-telnet: %s:%d unreachable: %s\n" % (host, port, e))
+        return 3
+    s.settimeout(timeout)
+
+    try:
+        time.sleep(0.35)
+        s.sendall(b"stty -echo 2>/dev/null; PS1=; PS2=\n")
+        time.sleep(0.35)
+        # One line. A newline inside the command would trip the continuation
+        # prompt, so callers pass compound commands with ';' -- documented in
+        # ndlink's hw_shell().
+        s.sendall(("printf '%%s\\n' '%s'; %s; printf '%s=%%d>>\\n' \"$?\"\n"
+                   % (nonce, cmd, end)).encode())
+
+        buf = bytearray()
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                chunk = s.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            if (end + "=").encode() in strip_iac(bytes(buf)):
+                # Give the tail of the line a moment to arrive, then stop.
+                s.settimeout(0.3)
+                try:
+                    while True:
+                        more = s.recv(4096)
+                        if not more:
+                            break
+                        buf += more
+                except socket.timeout:
+                    pass
+                break
+        try:
+            s.sendall(b"exit\n")
+        except OSError:
+            pass
+    finally:
+        s.close()
+
+    text = strip_iac(bytes(buf)).decode("utf-8", "replace")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    if nonce not in text or (end + "=") not in text:
+        sys.stderr.write("ndlink-telnet: no framing in the reply "
+                         "(phone busy, or telnetd not serving a shell)\n")
+        return 3
+
+    body = text.split(nonce + "\n", 1)[1].split(end + "=", 1)[0]
+    try:
+        rc = int(text.split(end + "=", 1)[1].split(">>", 1)[0])
+    except ValueError:
+        rc = 255
+    if body.endswith("\n"):
+        body = body[:-1]
+    if body:
+        sys.stdout.write(body + "\n")
+    return rc if 0 <= rc < 256 else 255
+
+
+if __name__ == "__main__":
+    sys.exit(main())
