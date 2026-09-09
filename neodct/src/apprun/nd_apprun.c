@@ -99,6 +99,26 @@ int main(int argc, char **argv)
     crash_fd = env_fd(ND_ENV_CRASH_FD);
     keypad_fd = env_fd(ND_ENV_KEYPAD_FD);
 
+    /* The log, for a SYSTEM app only.
+     *
+     * An app's nd_log() goes to the stdout it inherited, which is the core's,
+     * which is the serial port -- so on a phone with no cable an app's log is
+     * as unreachable as the core's was. This puts a system app's lines in
+     * /var/log/messages beside the core's, under the app's own name.
+     *
+     * NOT for an installed app, and the asymmetry is the point: that file is
+     * shared and rotates at 200 KB, so an app the owner downloaded could push
+     * the rest of the phone's log out of it. A .nap keeps exactly the
+     * behaviour it has today. The test is the directory, because that is what
+     * decides trust everywhere else here -- nd_proc.h's app_is_untrusted()
+     * draws the same line at the same place. */
+    if (strncmp(app_dir, ND_PATH_APPS_DIR "/", sizeof ND_PATH_APPS_DIR) == 0 ||
+        strncmp(app_dir, ND_PATH_ENG_APPS_DIR "/", sizeof ND_PATH_ENG_APPS_DIR) == 0) {
+        const char *leaf = strrchr(app_dir, '/');
+
+        (void)nd_log_syslog_open((leaf != NULL && leaf[1] != '\0') ? leaf + 1 : "nd-apprun");
+    }
+
     /* Before anything that can fault, including dlopen. */
     (void)nd_crash_install_child(crash_fd);
     nd_crash_set_entry(entry);

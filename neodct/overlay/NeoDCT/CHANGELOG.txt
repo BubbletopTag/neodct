@@ -21,6 +21,14 @@ described a broken adapter. There was nothing wrong with the adapter. Settings
 was trying to start Bluetooth itself, and Settings has not had the permission
 to do that since 0.5.0a -- it now asks the phone to, which does have it.
 
+The phone keeps its own log. Everything the system printed went to the serial
+port and nowhere else, so on a phone with nothing plugged into it -- which is
+every phone that has been closed up -- there was no log at all, and a fault
+that explained itself in one line explained it to nobody. The log now also
+goes to the phone's own /var/log/messages, alongside the kernel's, where it
+can be read without a cable. The serial console is unchanged for anyone who
+has one.
+
 0.5.15a
 The microphone, the apps you download, and the keys on the keypad.
 

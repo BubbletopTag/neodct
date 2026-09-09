@@ -189,6 +189,47 @@ size_t nd_log_banner_lines(const char *path, char out[][ND_LOG_BANNER_COLS], siz
  * chosen_out when that is non-NULL. */
 nd_err nd_log_redirect_serial(char *chosen_out, size_t chosen_sz);
 
+/* ------------------------------------------------------------------ *
+ * The system log
+ * ------------------------------------------------------------------ *
+ *
+ * Send every line to syslogd as WELL as to stdout/stderr, so there is a copy
+ * of the log on the phone itself.
+ *
+ * ============ WHY A SECOND SINK AND NOT A REDIRECT ============
+ *
+ * nd_log_redirect_serial() puts stdout and stderr on /dev/ttyFIQ0, and on a
+ * phone whose console pads are not soldered that is the whole log going
+ * nowhere -- /NeoDCT/User/logs/core.log reads 0 bytes on a running phone
+ * because the dup2 discards the redirect the boot script set up. Moving the
+ * log off the serial port instead would take it away from the case it was
+ * built for. So both.
+ *
+ * syslogd is already running, writes /var/log/messages, and rotates at
+ * 200 KB on a tmpfs -- and /var/log/messages is the file `ndlink logs`
+ * prints, so this is the log arriving over the debug link.
+ *
+ * NOTHING HAPPENS UNTIL A PROCESS ASKS. A tool, a test or an app that never
+ * calls this behaves exactly as it did. nd-core calls it at boot and
+ * nd-apprun calls it for a system app; an INSTALLED app deliberately does
+ * not, because /var/log/messages is shared and an app the owner downloaded
+ * must not be able to push everything else out of it.
+ *
+ * Sends are non-blocking and a line is dropped rather than waited on: the
+ * callers include the UI thread, and a log daemon that stopped reading must
+ * not be able to stop the phone. Returns ND_ERR_NOTFOUND when there is no
+ * syslogd to talk to, which is not a failure worth acting on -- the caller
+ * ignores it and keeps the serial console it already had.
+ *
+ * Opening twice is ND_OK and changes nothing. */
+nd_err nd_log_syslog_open(const char *ident);
+void nd_log_syslog_close(void);
+
+/* Whether the sink above is open IN THIS PROCESS. For the tests. It is not a
+ * way to ask whether the phone is keeping a log -- a tool that never opened
+ * the sink gets false while nd-core is filling /var/log/messages beside it. */
+bool nd_log_syslog_active(void);
+
 #ifdef __cplusplus
 }
 #endif

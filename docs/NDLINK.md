@@ -56,7 +56,7 @@ forever — an overnight run that wedges is a wasted night.
 | `shot OUT.png` | a PNG of the panel | exit 2 | **tested** |
 | `digest` | the panel's frame digest | exit 2 | **tested** |
 | `key KEY...` | press keys | written, unverified | needs devkey |
-| `logs` | recent log lines | exit 2 | **tested** |
+| `logs [--os] [-n N]` | recent log lines; `--os` drops the kernel's half | exit 2 | **tested** |
 | `snapshot NAME` | capture a reference digest | exit 2 | **tested** |
 | `expect NAME` | assert the panel matches a reference | exit 2 | **tested** |
 | `state` | version, RAM, card, backlight, battery as JSON | exit 2 | **tested** |

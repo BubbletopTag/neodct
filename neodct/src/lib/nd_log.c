@@ -22,6 +22,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include "nd_log.h"
@@ -29,6 +31,13 @@
 
 #define ND_ESC_RESET "\033[0m"
 #define ND_ESC_BOLD  "\033[1m"
+
+/* Defined with the rest of the system-log sink, far below, because that is
+ * where the argument for it belongs. Forward-declared here because the three
+ * emitters that call it come first. */
+static void syslog_emit(int pri, const char *plain);
+#define ND_SYSLOG_PRI_INFO 14 /* user.info */
+#define ND_SYSLOG_PRI_ERR  11 /* user.err  */
 
 /* ------------------------------------------------------------------ *
  * Colour on or off
@@ -291,6 +300,9 @@ void nd_logv(const char *tag, const char *fmt, va_list ap)
 
     (void)nd_log_render(rendered, sizeof rendered, raw);
     emit(stdout, rendered);
+    /* `raw` and not `rendered`: the log file wants the sentence, not the
+     * escape sequences that colour it on a terminal. */
+    syslog_emit(ND_SYSLOG_PRI_INFO, raw);
 }
 
 void nd_log(const char *tag, const char *fmt, ...)
@@ -325,6 +337,7 @@ void nd_log_errv(const char *tag, const char *fmt, va_list ap)
      * painted red, tag included, and not in bold. */
     (void)nd_log_paint(painted, sizeof painted, raw, ND_LOG_ERROR_COLOUR, false);
     emit(stderr, painted);
+    syslog_emit(ND_SYSLOG_PRI_ERR, raw);
 }
 
 void nd_log_err(const char *tag, const char *fmt, ...)
@@ -342,6 +355,7 @@ void nd_log_line(const char *line)
 
     (void)nd_log_render(rendered, sizeof rendered, line);
     emit(stdout, rendered);
+    syslog_emit(ND_SYSLOG_PRI_INFO, line);
 }
 
 /* ------------------------------------------------------------------ *
@@ -399,6 +413,137 @@ size_t nd_log_banner_lines(const char *path, char out[][ND_LOG_BANNER_COLS], siz
         n--;
 
     return n;
+}
+
+/* ------------------------------------------------------------------ *
+ * The system log
+ * ------------------------------------------------------------------ *
+ *
+ * ============ WHY THIS EXISTS ============
+ *
+ * Everything above goes to stdout and stderr, and nd_log_redirect_serial()
+ * points both at /dev/ttyFIQ0. On a phone with a serial cable that is the
+ * right answer and it is the only answer this had for a long time. On a phone
+ * WITHOUT one -- which is every phone that has been closed up, including the
+ * one this was written on, whose console pads are unsoldered -- it means the
+ * operating system's log goes to a device nobody is reading, and there is no
+ * copy of it anywhere. /NeoDCT/User/logs/core.log is 0 bytes on a running
+ * phone for exactly this reason: the boot script points nd-core's stderr at
+ * it and the dup2 above throws that away a moment later.
+ *
+ * What that costs is not hypothetical. Bluetooth would not start because
+ * /run/dbus did not exist; the daemon said so on a stderr going to a dead
+ * port, and finding it took a telnet session and a diagnostic binary
+ * cross-compiled for the phone. One line of log would have done it.
+ *
+ * So every line goes to syslogd as well. busybox syslogd is already running
+ * (S01syslogd), it writes /var/log/messages, /var/log is a symlink onto the
+ * /tmp tmpfs, and it rotates at 200 KB -- so this is bounded, costs no flash
+ * and needs no rotation of its own. And /var/log/messages is the file
+ * `ndlink logs` already prints, so the log arrives over the debug link with
+ * nothing further to build.
+ *
+ * ============ WHY NOT syslog(3) ============
+ *
+ * musl's syslog() sends on a BLOCKING socket. A datagram socket to a syslogd
+ * that has stopped reading blocks the sender, and the callers here include
+ * the UI thread and the modem thread -- so a wedged log daemon would freeze
+ * the phone. That is the same failure the format-card verb was retired for
+ * (nd_svc.c), and it is not worth risking for a log line.
+ *
+ * This sends with MSG_DONTWAIT on a non-blocking socket and DROPS the line if
+ * the kernel will not take it. A log that loses a line under pressure is
+ * strictly better than a phone that stops.
+ *
+ * ============ THE WIRE ============
+ *
+ * "<PRI>ident: text", which is what busybox logger sends and what busybox
+ * syslogd parses. No timestamp: syslogd stamps what it receives, and a
+ * timestamp from here would be the one this phone has BEFORE the clock
+ * service has corrected it. Colour is deliberately not sent -- the escapes
+ * are for a terminal and this is a file somebody greps.
+ */
+
+/* Written once, before any thread exists, and read without a lock for the
+ * same reason nd_svc.c's allowed_ops is: pthread_create() is the barrier.
+ * -1 means "not open", which is the state every process is in unless it
+ * asked, so nothing changes for a test or a tool that never calls open. */
+static int g_syslog_fd = -1;
+static char g_syslog_ident[32];
+
+/* The priorities are LOG_USER (1) << 3 | severity, spelled out at the top of
+ * this file rather than included from <syslog.h>: the only two this uses are
+ * those, and the header would also bring in the blocking syslog(3) that the
+ * paragraph above exists to avoid. */
+static void syslog_emit(int pri, const char *plain)
+{
+    char buf[ND_LOG_LINE_MAX + 64];
+    int n;
+
+    if (g_syslog_fd < 0 || plain == NULL)
+        return;
+
+    n = snprintf(buf, sizeof buf, "<%d>%s: %s", pri, g_syslog_ident, plain);
+    if (n <= 0)
+        return;
+    if ((size_t)n >= sizeof buf)
+        n = (int)sizeof buf - 1;
+
+    /* Every error ignored, deliberately and exhaustively: EAGAIN is the drop
+     * this is designed around, ENOTCONN is a syslogd that has gone away, and
+     * there is nowhere to report either that is not this. Reporting it here
+     * would recurse. */
+    (void)send(g_syslog_fd, buf, (size_t)n, MSG_DONTWAIT | MSG_NOSIGNAL);
+}
+
+nd_err nd_log_syslog_open(const char *ident)
+{
+    struct sockaddr_un addr;
+    char resolved[ND_PATH_MAX];
+    int fd;
+
+    if (g_syslog_fd >= 0)
+        return ND_OK; /* already open; opening twice is not an error */
+    if (ident == NULL || ident[0] == '\0')
+        ident = "NeoDCT";
+
+    if (nd_path_resolve(resolved, sizeof resolved, ND_PATH_DEV_LOG) != ND_OK)
+        return ND_ERR_TOOLONG;
+
+    memset(&addr, 0, sizeof addr);
+    addr.sun_family = AF_UNIX;
+    if (strlen(resolved) >= sizeof addr.sun_path)
+        return ND_ERR_TOOLONG;
+    (void)snprintf(addr.sun_path, sizeof addr.sun_path, "%s", resolved);
+
+    fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return ND_ERR_IO;
+
+    /* CONNECTED, so every later line is one send() with no address, and so a
+     * syslogd that is not there is discovered here -- once, at startup --
+     * rather than on every line for the life of the process. */
+    if (connect(fd, (const struct sockaddr *)&addr, (socklen_t)sizeof addr) < 0) {
+        (void)close(fd);
+        return ND_ERR_NOTFOUND;
+    }
+
+    (void)snprintf(g_syslog_ident, sizeof g_syslog_ident, "%s", ident);
+    g_syslog_fd = fd;
+    return ND_OK;
+}
+
+void nd_log_syslog_close(void)
+{
+    if (g_syslog_fd >= 0)
+        (void)close(g_syslog_fd);
+    g_syslog_fd = -1;
+    g_syslog_ident[0] = '\0';
+}
+
+bool nd_log_syslog_active(void)
+{
+    return g_syslog_fd >= 0;
 }
 
 /* ------------------------------------------------------------------ *

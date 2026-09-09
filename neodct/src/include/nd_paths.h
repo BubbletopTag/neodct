@@ -28,6 +28,11 @@ extern "C" {
 #define ND_PATH_LIB_DIR      "/NeoDCT/System/lib"
 #define ND_PATH_ND_CORE      "/NeoDCT/System/bin/nd-core"
 #define ND_PATH_ND_APPRUN    "/NeoDCT/System/bin/nd-apprun"
+/* The system log socket busybox syslogd listens on. Through nd_path_resolve()
+ * like everything else here, so a test can stand up its own and read what was
+ * sent rather than having to believe the code. */
+#define ND_PATH_DEV_LOG "/dev/log"
+
 #define ND_PATH_APPS_DIR     "/NeoDCT/System/apps"
 #define ND_PATH_ENG_APPS_DIR "/NeoDCT/System/engineering/apps"
 

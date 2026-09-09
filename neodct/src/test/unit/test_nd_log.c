@@ -18,7 +18,12 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 #include "nd_log.h"
 #include "nd_paths.h"
@@ -227,6 +232,87 @@ static void test_path_root(void)
     check_str("resolve unprefixed", buf, "/NeoDCT/x");
 }
 
+/* ============ THE SYSTEM-LOG SINK ============
+ *
+ * Nothing above this point could have caught the fault that put it there: the
+ * log went to a serial port with nothing attached, and every test of the
+ * RENDERING passed the whole time. So this tests the delivery instead. It
+ * stands up a datagram socket where /dev/log would be, under a staged root,
+ * and reads what actually arrives.
+ *
+ * The two claims that matter:
+ *   - the line arrives at all, in the shape busybox syslogd parses
+ *   - it arrives WITHOUT the colour escapes, because this one is a file
+ *     somebody greps and not a terminal
+ */
+static void test_the_system_log_sink(void)
+{
+    char root[] = "/tmp/ndlogXXXXXX";
+    /* Sized to sun_path, not to ND_PATH_MAX: this string has to fit an
+     * AF_UNIX address and the compiler is right to insist the copy cannot
+     * truncate. /tmp/ndlogXXXXXX/dev/log is 22 bytes. */
+    char sockpath[108];
+    char devdir[128];
+    struct sockaddr_un addr;
+    char got[512];
+    ssize_t n;
+    int srv;
+
+    if (mkdtemp(root) == NULL) {
+        (void)fprintf(stderr, "test_nd_log: no temp dir; skipping the syslog sink\n");
+        return;
+    }
+    (void)snprintf(devdir, sizeof devdir, "%s/dev", root);
+    (void)mkdir(devdir, 0755);
+    (void)snprintf(sockpath, sizeof sockpath, "%s%s", root, ND_PATH_DEV_LOG);
+
+    srv = socket(AF_UNIX, SOCK_DGRAM, 0);
+    check_int("syslog: server socket", srv >= 0, 1);
+    if (srv < 0)
+        return;
+    memset(&addr, 0, sizeof addr);
+    addr.sun_family = AF_UNIX;
+    (void)snprintf(addr.sun_path, sizeof addr.sun_path, "%s", sockpath);
+    check_int("syslog: bind", bind(srv, (struct sockaddr *)&addr, sizeof addr) == 0, 1);
+
+    check_int("syslog: root", (int)nd_path_set_root(root), (int)ND_OK);
+    check_int("syslog: open", (int)nd_log_syslog_open("ndtest"), (int)ND_OK);
+    check_int("syslog: active", nd_log_syslog_active() ? 1 : 0, 1);
+
+    /* Colour is ON for this whole file, so a line that arrives clean proves
+     * the sink takes the unpainted text and not what goes to the terminal. */
+    nd_log("MODEM", "hello %d", 42);
+    memset(got, 0, sizeof got);
+    n = recv(srv, got, sizeof got - 1u, 0);
+    check_int("syslog: a line arrived", n > 0, 1);
+    check_str("syslog: info line", got, "<14>ndtest: [MODEM] hello 42");
+
+    nd_log_err("BT", "no dbus");
+    memset(got, 0, sizeof got);
+    n = recv(srv, got, sizeof got - 1u, 0);
+    check_int("syslog: an error arrived", n > 0, 1);
+    check_str("syslog: error line", got, "<11>ndtest: [BT] no dbus");
+
+    /* Closed, and then silent: a process that never opens the sink must
+     * behave exactly as it did before this existed. */
+    nd_log_syslog_close();
+    check_int("syslog: inactive after close", nd_log_syslog_active() ? 1 : 0, 0);
+    nd_log("MODEM", "into the void");
+    check_int("syslog: nothing after close",
+              recv(srv, got, sizeof got - 1u, MSG_DONTWAIT) < 0 ? 1 : 0, 1);
+
+    /* No syslogd to talk to is not a failure the caller has to act on, and it
+     * must leave the sink shut rather than half-open. */
+    (void)unlink(sockpath);
+    check_int("syslog: no daemon", (int)nd_log_syslog_open("ndtest"), (int)ND_ERR_NOTFOUND);
+    check_int("syslog: still inactive", nd_log_syslog_active() ? 1 : 0, 0);
+
+    (void)close(srv);
+    (void)rmdir(devdir);
+    (void)rmdir(root);
+    (void)nd_path_set_root(NULL);
+}
+
 int main(void)
 {
     /* The oracle records the COLOURED form, so force colour on regardless of
@@ -241,6 +327,7 @@ int main(void)
     test_split_tag();
     test_colour_off();
     test_path_root();
+    test_the_system_log_sink();
 
     (void)printf("test_nd_log: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

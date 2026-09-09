@@ -542,6 +542,14 @@ int main(int argc, char **argv)
      *    boot continues on whatever stdout already was. */
     (void)nd_log_redirect_serial(serial, sizeof serial);
 
+    /* 1a. And a copy of the log on the phone, which is the half that survives
+     *     a phone with no serial cable attached. Immediately after the
+     *     redirect and before the banner, so the log starts where the boot
+     *     does. Failure means no syslogd, which is not a reason not to boot --
+     *     the serial console above is unaffected either way. nd_log.h has the
+     *     argument. */
+    (void)nd_log_syslog_open("nd-core");
+
     print_banner();
     install_signals();
     (void)nd_proc_reaper_start();

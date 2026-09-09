@@ -899,13 +899,35 @@ verb_disconnect() {
 
 verb_logs() {
     _follow=0
-    [ "${1:-}" = "-f" ] && _follow=1
+    _os_only=0
+    _lines=200
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        -f) _follow=1 ;;
+        # The phone's own log, without the kernel's. nd-core and the system
+        # apps send their lines to syslogd under their own names (nd_log.h),
+        # so "everything that is not the kernel" is the whole of the test.
+        --os) _os_only=1 ;;
+        -n) shift; _lines=${1:-200} ;;
+        *) fail 5 "logs takes -f, --os or -n N" ;;
+        esac
+        shift
+    done
+    case "$_lines" in
+    '' | *[!0-9]*) fail 5 "-n wants a whole number of lines" ;;
+    esac
     case "$TARGET" in
     hw)
         if [ "$_follow" = 1 ]; then
             fail 2 "logs -f needs a streaming transport; ndlinkd is where that belongs"
         fi
-        _out=$(hw_shell "tail -n 200 /var/log/messages 2>/dev/null") || fail 6 "cannot read logs"
+        if [ "$_os_only" = 1 ]; then
+            _out=$(hw_shell "grep -v ' kernel: ' /var/log/messages 2>/dev/null | tail -n $_lines") ||
+                fail 6 "cannot read logs"
+        else
+            _out=$(hw_shell "tail -n $_lines /var/log/messages 2>/dev/null") ||
+                fail 6 "cannot read logs"
+        fi
         ;;
     qemu) fail 2 "logs on qemu: read the serial console run_qemu.sh is attached to" ;;
     esac
@@ -1068,7 +1090,7 @@ Verbs built so far:
   shot OUT.png         a PNG of the panel
   digest               the panel's frame digest
   key KEY...           press keys (MENU, 5, DOWN, NAVIKEY...)
-  logs                 the phone's recent log
+  logs [--os] [-n N]   the phone's recent log (--os drops the kernel's half)
   state                version, RAM, card, backlight, battery (JSON)
   bugreport [OUT]      one tarball: state, logs, dmesg, screenshot, selftest
   selftest             run nd-selftest and report
