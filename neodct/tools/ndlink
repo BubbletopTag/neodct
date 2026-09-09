@@ -413,6 +413,144 @@ verb_key() {
 # nobody is watching. One tarball, everything a diagnosis starts from, and it
 # keeps going when a piece is missing -- a report that refuses to be written
 # because dmesg was empty is worth nothing at 3am.
+# ---- .nap packages ------------------------------------------------------
+#
+# The package is pushed to /tmp on the target and unpacked by nd-nap, which
+# wraps lib/nd_nap.c -- the same reader Settings uses. Nothing here knows what
+# a .nap contains, on purpose: arch matching, the replace-and-keep-data rule
+# and the id-conflict band are package rules and belong in one place.
+ND_REMOTE_TMP="/tmp"
+
+verb_install() {
+    _in_pkg=${1:-}
+    [ -n "$_in_pkg" ] || fail 5 "install needs a .nap package"
+    [ -f "$_in_pkg" ] || fail 5 "no such file: $_in_pkg"
+    case "$TARGET" in
+    hw) ;;
+    qemu) fail 2 "install on qemu goes through sdcard.sh; not wired up yet" ;;
+    esac
+
+    _in_remote="$ND_REMOTE_TMP/$(basename "$_in_pkg")"
+    hw_push "$_in_pkg" "$_in_remote" || fail 6 "could not push the package"
+    # ftp writes it as root; the installer runs as ndusr and has to read it.
+    hw_shell "chmod 0644 '$_in_remote'" >/dev/null 2>&1 || true
+
+    # --json from nd-nap, passed through: one producer of that object.
+    # AS ndusr, NOT as root. telnetd gives a root shell, and installing as root
+    # produces an app the UI does not own: Settings installs as ndusr, so a
+    # root-installed app has root:root files where every other app has
+    # ndusr:ndusr, and its data/ -- which the app writes as ndusr_ut through
+    # group ndusr_ut -- comes out unwritable. It looks installed and then
+    # misbehaves, which is exactly the class of bug this tool exists to catch.
+    # Measured against a Settings-installed app before this was changed.
+    _in_out=$(hw_shell "su -s /bin/sh ndusr -c \"$(remote_tool nd-nap) --json install '$_in_remote'\" 2>&1") || true
+    _in_json=$(printf '%s' "$_in_out" | tr -d '\r' | grep '^{' | tail -n 1)
+    hw_shell "rm -f '$_in_remote'" >/dev/null 2>&1 || true
+
+    case "$_in_json" in
+    '{"ok":true'*) ;;
+    '{'*)
+        # nd-nap refused it and said why, in the words the phone would show.
+        if [ "$JSON" = 1 ]; then
+            printf '%s\n' "$_in_json"
+        else
+            printf 'ndlink: install refused: %s\n' "$_in_json" >&2
+        fi
+        exit 6
+        ;;
+    *) fail 6 "nd-nap did not answer (is it on the phone?): $_in_out" ;;
+    esac
+
+    if [ "$JSON" = 1 ]; then
+        printf '%s\n' "$_in_json"
+    else
+        printf '%s\n' "$_in_json" | python3 -m json.tool 2>/dev/null || printf '%s\n' "$_in_json"
+    fi
+    return 0
+}
+
+verb_uninstall() {
+    _un_dir=${1:-}
+    [ -n "$_un_dir" ] || fail 5 "uninstall needs an app directory name (see: ndlink apps)"
+    case "$TARGET" in
+    hw) ;;
+    qemu) fail 2 "uninstall on qemu is not wired up yet" ;;
+    esac
+    # As ndusr for the same reason install is: these are the owner's files.
+    _un_out=$(hw_shell "su -s /bin/sh ndusr -c \"$(remote_tool nd-nap) --json remove '$_un_dir'\" 2>&1") || true
+    _un_json=$(printf '%s' "$_un_out" | tr -d '\r' | grep '^{' | tail -n 1)
+    case "$_un_json" in
+    '{"ok":true'*) ;;
+    *)
+        [ "$JSON" = 1 ] && printf '%s\n' "$_un_json"
+        fail 6 "uninstall refused: $_un_json"
+        ;;
+    esac
+    [ "$JSON" = 1 ] && printf '%s\n' "$_un_json" || printf 'removed %s\n' "$_un_dir"
+    return 0
+}
+
+verb_apps() {
+    case "$TARGET" in
+    hw) _ap_out=$(hw_shell "$(remote_tool nd-nap) --json list 2>&1") || true ;;
+    qemu) fail 2 "apps on qemu is not wired up yet" ;;
+    esac
+    _ap_json=$(printf '%s' "$_ap_out" | tr -d '\r' | grep '^{' | tail -n 1)
+    case "$_ap_json" in
+    '{'*) ;;
+    *) fail 6 "nd-nap did not answer (is it on the phone?)" ;;
+    esac
+    if [ "$JSON" = 1 ]; then
+        printf '%s\n' "$_ap_json"
+    else
+        printf '%s\n' "$_ap_json" | python3 -m json.tool 2>/dev/null || printf '%s\n' "$_ap_json"
+    fi
+    return 0
+}
+
+# ---- system updates -----------------------------------------------------
+#
+# THIS DELIVERS A PACKAGE; IT DOES NOT APPLY ONE, and the distinction is the
+# whole of the verb. Applying an update means verifying a signature, writing
+# pending.prop and pending.img and letting the initramfs applier do the write
+# on the next boot -- a chain this tool must not reimplement, because a second
+# implementation of "is this update allowed" is exactly the thing an update
+# system cannot have. adb sideload has the same shape: it hands the package to
+# the updater and the updater decides.
+#
+# So: put the .ndsw where the phone already looks for one, and say what to do
+# next. Settings -> System Update finds it there.
+verb_update() {
+    _up_pkg=${1:-}
+    [ -n "$_up_pkg" ] || fail 5 "update needs a .ndsw package"
+    [ -f "$_up_pkg" ] || fail 5 "no such file: $_up_pkg"
+    case "$_up_pkg" in
+    *.ndsw) ;;
+    *) fail 5 "that is not a .ndsw package" ;;
+    esac
+    case "$TARGET" in
+    hw) ;;
+    qemu) fail 2 "update on qemu goes through sdcard.sh; not wired up yet" ;;
+    esac
+
+    _up_dir="/NeoDCT/User/sdcard/update"
+    hw_shell "test -d $_up_dir" >/dev/null 2>&1 || fail 6 "no $_up_dir on the phone (is a card mounted?)"
+    _up_remote="$_up_dir/$(basename "$_up_pkg")"
+    hw_push "$_up_pkg" "$_up_remote" || fail 6 "could not deliver the package"
+    # The card is the owner's; a root-owned package in it is one the UI running
+    # as ndusr cannot read.
+    hw_shell "chown ndusr:ndusr '$_up_remote' 2>/dev/null; chmod 0640 '$_up_remote'" \
+        >/dev/null 2>&1 || true
+    _up_sz=$(hw_shell "wc -c < '$_up_remote'" 2>/dev/null | tr -d ' \r\n')
+
+    emit_ok update "\"staged\":\"$(json_escape "$_up_remote")\",\"bytes\":${_up_sz:-0},\"applied\":false"
+    if [ "$JSON" != 1 ]; then
+        printf 'delivered %s (%s bytes)\n' "$_up_remote" "${_up_sz:-0}"
+        printf 'NOT applied: open Settings -> System Update on the phone to install it.\n'
+    fi
+    return 0
+}
+
 verb_selftest() {
     case "$TARGET" in
     hw) _st=$(hw_shell "$(remote_tool nd-selftest) 2>&1") || true ;;
@@ -777,6 +915,10 @@ Verbs built so far:
   state                version, RAM, card, backlight, battery (JSON)
   bugreport [OUT]      one tarball: state, logs, dmesg, screenshot, selftest
   selftest             run nd-selftest and report
+  apps                 installed apps on the card
+  install PKG.nap      sideload an app package
+  uninstall DIR        remove an installed app
+  update PKG.ndsw      deliver a system update (does NOT apply it)
   record DIR [N]       N frames into a numbered directory
   diff A B             compare two references (exit 1 if they differ)
   reboot [recovery]    restart, optionally into recovery
@@ -867,6 +1009,10 @@ logs) verb_logs "$@" ;;
 state) verb_state "$@" ;;
 bugreport) verb_bugreport "$@" ;;
 selftest) verb_selftest "$@" ;;
+install) verb_install "$@" ;;
+uninstall) verb_uninstall "$@" ;;
+apps) verb_apps "$@" ;;
+update) verb_update "$@" ;;
 record) verb_record "$@" ;;
 diff) verb_diff "$@" ;;
 reboot) verb_reboot "$@" ;;

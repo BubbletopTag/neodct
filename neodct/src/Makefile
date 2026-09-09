@@ -173,6 +173,7 @@ SELF_SRCS   := $(wildcard tools/nd_selftest*.c)
 KEY_SRCS    := $(wildcard tools/nd_key*.c)
 GRAB_SRCS   := $(wildcard tools/nd_grab*.c)
 STATE_SRCS  := $(wildcard tools/nd_state*.c)
+NAPCLI_SRCS := $(wildcard tools/nd_nap_cli.c)
 # A build-host tool, never installed: see its header.
 DLGFIT_SRCS := $(wildcard tools/nd_dialogfit.c)
 VERIFY_SRCS := $(wildcard tools/nd_verify*.c)
@@ -213,6 +214,7 @@ KEY_LIB_OBJS := $(filter-out $(OBJDIR)/tools/nd_key.o,$(KEY_OBJS))
 GRAB_OBJS   := $(patsubst %.c,$(OBJDIR)/%.o,$(GRAB_SRCS))
 GRAB_LIB_OBJS := $(filter-out $(OBJDIR)/tools/nd_grab.o,$(GRAB_OBJS))
 STATE_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(STATE_SRCS))
+NAPCLI_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(NAPCLI_SRCS))
 VERIFY_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(VERIFY_SRCS))
 PANIC_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(PANIC_SRCS))
 BOOTFB_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(BOOTFB_SRCS))
@@ -252,6 +254,7 @@ TARGETS += $(if $(SELF_SRCS),$(BINDIR)/nd-selftest)
 TARGETS += $(if $(KEY_SRCS),$(BINDIR)/nd-key)
 TARGETS += $(if $(GRAB_SRCS),$(BINDIR)/nd-grab)
 TARGETS += $(if $(STATE_SRCS),$(BINDIR)/nd-state)
+TARGETS += $(if $(NAPCLI_SRCS),$(BINDIR)/nd-nap)
 TARGETS += $(if $(VERIFY_SRCS),$(BINDIR)/nd-verify)
 TARGETS += $(if $(PANIC_SRCS),$(BINDIR)/nd-panic)
 TARGETS += $(if $(BOOTBAR_SRCS),$(BINDIR)/nd-bootbar)
@@ -472,6 +475,14 @@ $(BINDIR)/nd-state: $(STATE_OBJS) $(LIB)
 	$(say) LINK $@
 	$(Q)$(CC) -o $@ $(STATE_OBJS) -L$(LIBDIR) -lneodct $(LDFLAGS_ALL) $(PKG_LIBS) -lm
 
+# ---- nd-nap: .nap packages from a shell ---------------------------
+# Deliberately thin: every rule about what a package may do stays in
+# lib/nd_nap.c, where Settings and this tool both get it.
+$(BINDIR)/nd-nap: $(NAPCLI_OBJS) $(LIB)
+	$(Q)mkdir -p $(dir $@)
+	$(say) LINK $@
+	$(Q)$(CC) -o $@ $(NAPCLI_OBJS) -L$(LIBDIR) -lneodct $(LDFLAGS_ALL) $(PKG_LIBS) -lm
+
 $(BINDIR)/nd-dialogfit: $(DLGFIT_OBJS) $(LIB)
 	$(LINK_BIN)
 
@@ -689,6 +700,7 @@ install: all
 	@# you cannot see.
 	$(Q)$(if $(GRAB_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-grab $(DESTDIR)$(PREFIX)/bin/,:)
 	$(Q)$(if $(STATE_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-state $(DESTDIR)$(PREFIX)/bin/,:)
+	$(Q)$(if $(NAPCLI_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-nap $(DESTDIR)$(PREFIX)/bin/,:)
 	@# nd-panic ships. It is the only part of the UI that runs when nd-core
 	@# is dead, and /bin/run_neodct.sh names it as
 	@#   /NeoDCT/System/bin/nd-panic

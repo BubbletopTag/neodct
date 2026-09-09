@@ -67,6 +67,10 @@ forever — an overnight run that wedges is a wasted night.
 | `record DIR [N]` | N frames into a numbered directory | exit 2 | **tested** |
 | `diff A B` | compare two references | host-side | **tested** |
 | `reboot [recovery]` | restart the phone | exit 2 | written, **not run** |
+| `apps` | installed apps on the card | exit 2 | **tested** |
+| `install PKG.nap` | sideload an app package | exit 2 | **tested** |
+| `uninstall DIR` | remove an installed app | exit 2 | **tested** |
+| `update PKG.ndsw` | deliver a system update | exit 2 | **tested** |
 
 "tested" means run against a real Luckfox Pico Mini over the ethernet debug
 link, not reasoned about.
@@ -193,6 +197,50 @@ before the command, and a marker carrying `$?` after it. That is what lets
 The repo already ships python3 host tooling (`mkupdate.py`, `uistub.py`,
 `mknap.py`, `goldenframe.py`), so this adds no dependency that was not
 already required to build an image.
+
+## Sideloading
+
+`ndlink install PKG.nap` pushes the package to `/tmp` on the phone and unpacks
+it with `nd-nap`, a thin CLI over `lib/nd_nap.c` — the same reader Settings
+uses. Arch matching, name sanitising, replace-and-keep-`data/`, the id-conflict
+band and the rollback when a replacement fails half way all stay in that one
+file. A second implementation of any of it would be a second set of rules for
+what a package may do, which is the one thing a package format must not have.
+
+**It installs as `ndusr`, not as root**, and that is not incidental. telnetd
+hands out a root shell, so the obvious version installed as root and produced
+an app the UI does not own: `root:root` files where every other app has
+`ndusr:ndusr`, and a `data/` directory — which the app writes as `ndusr_ut`
+through group `ndusr_ut` — that comes out unwritable. It looks installed and
+then misbehaves. Measured against a Settings-installed app side by side, which
+is the only way that difference shows up.
+
+```sh
+neodct/tools/mknap.py --app-dir Calculator/ --so luckfox-armv7=Calculator/app.so -o Calc.nap
+ndlink install Calc.nap     # -> {"ok":true,...,"arch_ok":true,"needs_restart":false}
+ndlink apps                 # -> ["Bible","Calculator","PSX"]
+ndlink uninstall Calculator
+```
+
+`nd-nap inspect` exits **1** when the package is fine but built for another
+phone, so a script can tell "bad package" from "wrong phone".
+
+## Updates: `update` delivers, it does not apply
+
+`ndlink update PKG.ndsw` copies the package into `/NeoDCT/User/sdcard/update/`
+with the ownership the owner's UI expects, which is where the phone already
+looks for one. **It does not install it**, and that limit is deliberate.
+
+Applying an update means verifying a signature, writing `pending.prop` and
+`pending.img`, and letting the initramfs applier do the write on the next boot.
+This tool must not reimplement that chain: a second implementation of "is this
+update allowed" is precisely the thing an update system cannot have. `adb
+sideload` has the same shape — it hands the package to the updater and the
+updater decides.
+
+So after `ndlink update`, open **Settings → System Update** on the phone. Once
+the devkey channel ships that last step becomes `ndlink key` presses like any
+other flow.
 
 ## Two shell traps this file already hit
 
