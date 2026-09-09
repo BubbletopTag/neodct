@@ -106,8 +106,21 @@ int nd_input_fd(const nd_input *in);
 
 /* Whether anything is actually behind this input: a matrix, an evdev
  * descriptor or a pipe. False means every read will return nothing -- a dead
- * keypad -- which the core shows on screen rather than a home it cannot drive. */
+ * keypad -- which the core shows on screen rather than a home it cannot drive.
+ *
+ * The developer key channel does NOT count here, deliberately. See
+ * nd_input_devkey_active(). */
 bool nd_input_has_backend(const nd_input *in);
+
+/* True when the developer key channel is bound and being polled -- i.e. this
+ * image carries /etc/neodct-devenv and the socket came up.
+ *
+ * It is reported separately from the backends on purpose. The channel can
+ * drive a phone whose keypad is dead, so it must not be allowed to make
+ * has_backend() say the keypad is fine, nor has_matrix() light the T9
+ * indicator for keys that are being faked. It exists so that `ndlink doctor`
+ * can say "keys can be injected" as its own fact. */
+bool nd_input_devkey_active(const nd_input *in);
 
 /* The one-line reason there is no backend, "" when there is one; never NULL. */
 const char *nd_input_no_backend_reason(const nd_input *in);

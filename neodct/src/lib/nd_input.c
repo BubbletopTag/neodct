@@ -39,6 +39,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -133,6 +136,11 @@ struct nd_input {
     nd_key_event queue[QUEUE_MAX];
     size_t q_head;
     size_t q_len;
+
+    /* The developer key channel: a bound SOCK_DGRAM socket, or -1. It is NOT
+     * a backend -- see devkey_open() for why it deliberately does not change
+     * nd_input_which(), nd_input_has_matrix() or nd_input_has_backend(). */
+    int devkey_fd;
 
     /* Why there is no active backend, in words for the screen -- empty when
      * there is one. Set by try_open_matrix() and finalised in nd_input_open();
@@ -407,6 +415,214 @@ static bool fd_poll_into_queue(nd_input *in, double wait_s)
 }
 
 /* ------------------------------------------------------------------ *
+ * The developer key channel
+ * ------------------------------------------------------------------ *
+ *
+ * A datagram socket the phone can be driven through from outside the UI:
+ * nd-key writes "<keycode> <0|1>" to it and the key arrives in the same queue
+ * the matrix and the evdev descriptor feed. That is the whole mechanism, and
+ * the three decisions inside it are all deliberate.
+ *
+ * ============ WHY NOT UINPUT ============
+ *
+ * Because it has been designed against twice already. Apps never read
+ * /dev/input -- the core reads the keypad and hands each app a pipe
+ * (NEODCT_KEYPAD_FD, nd_app.h) -- so a uinput device reaches nothing an app
+ * can see. Worse, is_our_injector() below exists precisely because on this
+ * phone /dev/input is empty, so the core's own uinput keyboard lands at
+ * event0 and a core that adopted it would read back every key it wrote. And
+ * nd_input only goes looking for evdev when it has NO backend, so a uinput
+ * device created after boot is never picked up anyway. Injecting at the queue
+ * sidesteps all three.
+ *
+ * ============ WHY SOCK_DGRAM ============
+ *
+ * No connection state, no accept loop, no half-open sender to reap, and
+ * several senders can coexist -- a human at a shell and a script can both
+ * press keys without coordinating. One event per datagram means a short read
+ * can never split an event in half, which a stream socket would allow.
+ *
+ * ============ WHY IT IS NOT A BACKEND ============
+ *
+ * nd_input_which(), nd_input_has_matrix() and nd_input_has_backend() are
+ * untouched by this. has_matrix() gates the T9 indicator, which must stay
+ * false on a phone whose keys are being faked; has_backend() drives the
+ * "this phone has no keypad" screen, and a debug channel must not talk the
+ * core out of showing that. The channel is an extra source feeding the same
+ * queue, not a claim about the hardware.
+ */
+
+/* Longer than any legitimate "<code> <edge>" -- ten digits, a space, one
+ * digit, a newline -- and short enough that a sender cannot make the core
+ * allocate. Anything bigger is truncated by recv() and then rejected by the
+ * parser, which is the intended outcome. */
+#define DEVKEY_MSG_MAX 32
+
+/* Bind the channel, or leave it closed. Never fatal: a phone that cannot make
+ * a debug socket must still boot, so every failure here is one log line and a
+ * return. Called only from nd_input_open() -- a wrapped pipe or fd belongs to
+ * its caller and must not grow a listener behind its back. */
+static void devkey_open(nd_input *in)
+{
+    char marker[ND_PATH_MAX];
+    char sock_path[ND_PATH_MAX];
+    struct sockaddr_un addr;
+    int fd;
+
+    /* The gate. The marker lives on the read-only squashfs and is placed only
+     * by a build that asked for it, which is what makes it a gate a running
+     * phone cannot open for itself -- post-build-devenv-marker.sh's header
+     * makes the argument at length. No marker, no socket, and one line so
+     * that its absence is visible rather than mysterious. */
+    if (nd_path_resolve(marker, sizeof marker, ND_PATH_DEVENV_MARKER) != ND_OK)
+        return;
+    if (access(marker, F_OK) != 0) {
+        nd_log(ND_LOG_INPUT, "devkey: no %s; the key channel stays closed", ND_PATH_DEVENV_MARKER);
+        return;
+    }
+
+    if (nd_path_resolve(sock_path, sizeof sock_path, ND_PATH_DEVKEY_SOCK) != ND_OK)
+        return;
+    if (strlen(sock_path) >= sizeof addr.sun_path) {
+        nd_log(ND_LOG_INPUT, "devkey: %s is too long for a unix socket", sock_path);
+        return;
+    }
+
+    /* nd_mkdir_p rather than one mkdir(), and it takes the UNRESOLVED path
+     * because it resolves internally -- the same call nd_btaudio.c makes for
+     * /run/dbus. On the phone /run is a tmpfs that already exists and only
+     * the leaf is created; under a test root neither level exists, and a
+     * single mkdir() of the leaf fails with ENOENT on the missing parent.
+     * That is not merely a test artefact: it is the difference between code
+     * that works because the environment happened to be right and code that
+     * makes it right. */
+    if (nd_mkdir_p(ND_PATH_RUN_DIR, 0755u) != ND_OK) {
+        nd_log(ND_LOG_INPUT, "devkey: cannot create %s", ND_PATH_RUN_DIR);
+        return;
+    }
+
+    /* A socket file left by a previous boot would make bind() fail with
+     * EADDRINUSE even though nothing is listening. /run is a tmpfs so this
+     * should not happen on hardware; it does happen under a test root. */
+    (void)unlink(sock_path);
+
+    fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        nd_log(ND_LOG_INPUT, "devkey: socket: %s", strerror(errno));
+        return;
+    }
+
+    memset(&addr, 0, sizeof addr);
+    addr.sun_family = AF_UNIX;
+    (void)nd_strlcpy(addr.sun_path, sock_path, sizeof addr.sun_path);
+    if (bind(fd, (const struct sockaddr *)&addr, sizeof addr) != 0) {
+        nd_log(ND_LOG_INPUT, "devkey: bind %s: %s", sock_path, strerror(errno));
+        (void)close(fd);
+        return;
+    }
+
+    /* 0600. The socket is a way to press keys on somebody's phone, so it is
+     * owned by whoever the UI runs as and reachable by nobody else. */
+    if (chmod(sock_path, 0600) != 0)
+        nd_log(ND_LOG_INPUT, "devkey: chmod %s: %s", sock_path, strerror(errno));
+
+    in->devkey_fd = fd;
+    nd_log(ND_LOG_INPUT, "devkey: listening on %s", sock_path);
+}
+
+/* Parse one datagram. True with code and pressed filled in, or false for
+ * anything that is not exactly "<int> <0|1>" with optional trailing space.
+ *
+ * Deliberately strict. This is an input the outside world writes, so a
+ * half-understood message is dropped rather than guessed at -- a datagram
+ * that set a key down but whose edge was misread would leave that key stuck
+ * held, and held state is real state that widgets read. */
+static bool devkey_parse(const char *msg, size_t len, int32_t *code, bool *pressed)
+{
+    char buf[DEVKEY_MSG_MAX];
+    char *end = NULL;
+    long parsed_code;
+    long parsed_edge;
+
+    if (len == 0u || len >= sizeof buf)
+        return false;
+    memcpy(buf, msg, len);
+    buf[len] = '\0';
+
+    /* strtol() skips leading whitespace, so " 50 1" would otherwise parse
+     * exactly like "50 1". Requiring a digit first keeps the wire format to
+     * ONE shape: a machine protocol with optional padding is a protocol with
+     * two spellings of every message, and the second one is the one that goes
+     * untested. It also disposes of "+50" and of the negative sentinels
+     * before strtol ever sees them. */
+    if (buf[0] < '0' || buf[0] > '9')
+        return false;
+
+    errno = 0;
+    parsed_code = strtol(buf, &end, 10);
+    if (end == buf || errno != 0)
+        return false;
+    if (*end != ' ' && *end != '\t')
+        return false;
+    while (*end == ' ' || *end == '\t')
+        end++;
+
+    errno = 0;
+    parsed_edge = strtol(end, &end, 10);
+    if (errno != 0 || (parsed_edge != 0 && parsed_edge != 1))
+        return false;
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')
+        end++;
+    if (*end != '\0')
+        return false;
+
+    /* Keycodes are evdev codes; the negative sentinels (ND_KEY_NONE,
+     * ND_KEY_INCOMING_CALL) are ours and must never arrive from outside. */
+    if (parsed_code <= 0 || parsed_code > 0xFFFF)
+        return false;
+
+    *code = (int32_t)parsed_code;
+    *pressed = (parsed_edge == 1);
+    return true;
+}
+
+/* Drain the channel into the queue without blocking. Returns true if anything
+ * arrived. Ordering with the other sources is whatever the queue gives it:
+ * this is called from the same loop, so a channel key and a real key stay in
+ * the order the loop observed them. */
+static bool devkey_poll_into_queue(nd_input *in)
+{
+    bool got_any = false;
+
+    if (in->devkey_fd < 0)
+        return false;
+
+    for (;;) {
+        char msg[DEVKEY_MSG_MAX];
+        ssize_t n;
+        int32_t code = 0;
+        bool pressed = false;
+
+        n = recv(in->devkey_fd, msg, sizeof msg, 0);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            break; /* EAGAIN: nothing left */
+        }
+        if (devkey_parse(msg, (size_t)n, &code, &pressed)) {
+            queue_push(in, code, pressed, now_us());
+            got_any = true;
+        }
+        /* A datagram we could not parse is dropped in silence on purpose: a
+         * sender that spams rubbish must not be able to fill the phone's log
+         * with it. */
+        if (in->q_len >= QUEUE_MAX)
+            break;
+    }
+    return got_any;
+}
+
+/* ------------------------------------------------------------------ *
  * Opening
  * ------------------------------------------------------------------ */
 
@@ -416,6 +632,7 @@ static void input_defaults(nd_input *in)
     size_t col;
 
     in->fd = -1;
+    in->devkey_fd = -1;
     in->backend = ND_INPUT_NONE;
     in->may_reopen = false;
     in->reopen_after_us = 0u;
@@ -927,6 +1144,12 @@ nd_err nd_input_open(nd_input **out)
     else
         nd_log(ND_LOG_INPUT, "Input backend selected: NONE (%s).", in->no_backend);
 
+    /* After the summary line, so the log reads "which backend won" and then
+     * "and the debug channel is open too" rather than interleaving them. A
+     * phone with no backend at all still gets one: driving a phone whose
+     * keypad is broken is exactly what the channel is for. */
+    devkey_open(in);
+
     /* Set last, and for both outcomes: a phone that opened its keyboard can
      * still lose it, and one that has a matrix can still be handed a USB
      * keyboard. See try_reopen_evdev(). */
@@ -975,6 +1198,18 @@ void nd_input_close(nd_input *in)
         nd_matrix_input_close(&in->matrix);
     if (in->owns_fd && in->fd >= 0)
         (void)close(in->fd);
+    if (in->devkey_fd >= 0) {
+        char sock_path[ND_PATH_MAX];
+
+        (void)close(in->devkey_fd);
+        /* Take the socket file with it. A bound AF_UNIX socket leaves its
+         * inode behind on close, and a stale one is what makes the NEXT
+         * bind() fail with EADDRINUSE. devkey_open() unlinks defensively for
+         * the same reason; doing it at both ends means a clean shutdown
+         * leaves nothing and a crash is still recoverable. */
+        if (nd_path_resolve(sock_path, sizeof sock_path, ND_PATH_DEVKEY_SOCK) == ND_OK)
+            (void)unlink(sock_path);
+    }
     free(in);
 }
 
@@ -991,6 +1226,11 @@ bool nd_input_has_matrix(const nd_input *in)
 int nd_input_fd(const nd_input *in)
 {
     return (in != NULL) ? in->fd : -1;
+}
+
+bool nd_input_devkey_active(const nd_input *in)
+{
+    return in != NULL && in->devkey_fd >= 0;
 }
 
 /* An opened nd_input can exist with nothing behind it -- no matrix and no
@@ -1078,6 +1318,14 @@ bool nd_input_read_event(nd_input *in, double timeout_s, nd_key_event *out)
                 continue;
         }
 
+        /* The channel is drained on every pass, next to the matrix scan and
+         * for the same reason: it is a source that has to be asked rather than
+         * one that can wake a wait. Ordering with the other sources is the
+         * order this loop observed them in, which is the only ordering that
+         * means anything when the sources are independent. */
+        if (devkey_poll_into_queue(in))
+            continue;
+
         /* Not there YET, rather than not there at all: the window between
          * devtmpfs making the node and udev making it readable. Rate-limited
          * inside, so this costs one comparison on every phone that already
@@ -1096,12 +1344,18 @@ bool nd_input_read_event(nd_input *in, double timeout_s, nd_key_event *out)
             else
                 slice = (double)(wake - now) / 1e6;
             /* With a matrix present the descriptor must not own the whole
-             * wait: the matrix has to be rescanned at its own cadence. */
-            if (in->have_matrix && (slice < 0.0 || slice > poll_s))
+             * wait: the matrix has to be rescanned at its own cadence. The
+             * channel needs exactly the same treatment and for exactly the
+             * same reason -- a datagram cannot interrupt a ppoll() on the
+             * evdev fd, so a blocking wait there would hold an injected key
+             * until the descriptor happened to say something. Capping the
+             * slice bounds that to one poll interval (5 ms) without changing
+             * what the caller's timeout means. */
+            if ((in->have_matrix || in->devkey_fd >= 0) && (slice < 0.0 || slice > poll_s))
                 slice = poll_s;
             if (fd_poll_into_queue(in, slice))
                 continue;
-        } else if (in->have_matrix) {
+        } else if (in->have_matrix || in->devkey_fd >= 0) {
             uint64_t nap = (uint64_t)ND_READ_POLL_US;
 
             now = now_us();

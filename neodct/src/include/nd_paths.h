@@ -205,9 +205,28 @@ unsigned long nd_appgen_value(void);
 
 /* ---- volatile state ---------------------------------------------- */
 #define ND_PATH_SDCARD_STATE "/run/neodct/sdcard.prop"
+#define ND_PATH_RUN_DIR      "/run/neodct"
 #define ND_PATH_MODEM_LOCK   "/tmp/neodct-modem.lock"
 #define ND_PATH_BANNER       "/etc/neodct-banner"
 #define ND_PATH_COLORS_SH    "/etc/neodct-colors.sh"
+
+/* ---- the developer key channel ------------------------------------ */
+
+/* The marker that says this image was built for a developer. Placed only by
+ * neodct/scripts/post-build-devenv-marker.sh under NEODCT_DEVENV_IMAGE=1, and
+ * it lives on the read-only squashfs precisely so a running phone cannot
+ * create it. Everything gated on it inherits that property; see the header of
+ * that script for why a gate reachable from writable storage is the wrong
+ * shape (SECURITY-AUDIT.md section 4 Q5).
+ *
+ * PentestPersist spells this literal itself
+ * (apps/PentestPersist/pentest_persist_app.h). It is named here because
+ * nd_input is the second user and a third would be a typo waiting to happen. */
+#define ND_PATH_DEVENV_MARKER "/etc/neodct-devenv"
+
+/* The datagram socket nd_input listens on for injected keys, and that nd-key
+ * writes to. Under /run, which is a tmpfs, so it cannot outlive a boot. */
+#define ND_PATH_DEVKEY_SOCK "/run/neodct/devkey"
 
 /* ---- devices ------------------------------------------------------ */
 #define ND_PATH_FB         "/dev/fb0"
