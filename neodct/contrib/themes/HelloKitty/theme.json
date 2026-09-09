@@ -17,6 +17,7 @@
     "reflection":        true,
     "scrim":             false,
     "pixel_font":        false,
+    "game_colour":      true,
     "wallpaper_dim":     100,
     "app_wallpaper_dim": 90
   },

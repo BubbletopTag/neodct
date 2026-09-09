@@ -69,6 +69,7 @@ signature colour even in a theme with no blue in it.
 | `bar_top` `bar_bot` `bar_ink` | the title bar and the softkey strip, and the type on them |
 | `sel_ink` | type standing on the selection -- white over glass, black over an inverted row |
 | `warn_ink` | a warning in type: the home screen's "Eng. Mode" line |
+| `green_*` `amber_*` `red_*` | a confirmation, a warning and a fault -- and Snake's pieces |
 | `blue_deep` | the 1 px dark cut around every plate and divider |
 | `glass_top` `glass_bot` | the frosted panel content sits on |
 | `chrome_hi` `chrome_top` `chrome_bot` | bezels, the bevel hairline, the scrollbar track |
@@ -121,6 +122,7 @@ inheriting somebody else's gloss.
 | `reflection` | the icon standing on a glossy floor |
 | `scrim` | the readability wash laid over a wallpaper |
 | `pixel_font` | draw with the pixel face rather than the UI face |
+| `game_colour` | colour in the games -- see below |
 | `wallpaper_dim` | 0-100, how far the wallpaper is dimmed on the home screen |
 | `app_wallpaper_dim` | the same inside an app, where there is more to read |
 
@@ -132,6 +134,15 @@ owner who has tuned it keeps their value across a theme change.
 
 A theme that ships `fonts/ui.ttf` uses it whatever `pixel_font` says -- "the
 pixel face unless I brought my own" needs no third setting.
+
+`game_colour` is a switch rather than a palette entry because monochrome and
+colour distinguish things differently, not just prettily. Snake's food and its
+body are told apart by SHAPE when there is one ink -- an outlined cell against
+filled ones, which is how the phone has always drawn it -- and by hue when
+there is a palette to spend. Given one ink, a filled apple and a filled snake
+are the same square, so no set of colour names can express the choice. Off, the
+game is pixel-for-pixel the one the phone shipped; on, the field takes the
+theme's `blue_deep` and the pieces go red and green.
 
 ### Alphas
 

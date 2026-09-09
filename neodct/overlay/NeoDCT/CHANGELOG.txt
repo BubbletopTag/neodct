@@ -27,6 +27,10 @@ pixel typeface, which is now the built-in "Classic" theme rather than
 something baked into the software. The glossy Frutiger Aero look from the
 0.5.16a preview is available as a theme you install.
 
+Snake is black and white again on the stock phone, exactly as it was. It had
+gained a green snake and a red apple; those now come with a theme, and the
+phone's own game is the one it always was.
+
 Fixed: on the engineering Modem and Fuel Gauge screens, and in a few other
 places, the smaller grey labels were drawn in the same colour as the
 background and could not be seen at all. Twenty of them.

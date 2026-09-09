@@ -251,6 +251,19 @@ typedef struct {
      * that ships its own fonts/ui.ttf overrides this either way. */
     bool pixel_font;
 
+    /* Colour in the games, and it is a STRUCTURAL switch rather than a
+     * palette entry because monochrome and colour distinguish things
+     * differently. Snake's food and its body are told apart by SHAPE when
+     * there is one ink -- an outlined cell against a filled one, which is how
+     * the phone has always drawn it -- and by HUE when there is a palette to
+     * spend, red against green. A theme cannot express that by naming
+     * colours: given one ink, a filled apple and a filled snake are the same
+     * square.
+     *
+     * Off in the built-in, so the stock phone plays the game it always
+     * played. */
+    bool game_colour;
+
     /* How far the wallpaper is dimmed, 0-100, before anything is drawn on it.
      *
      * THE OTHER HALF OF THE SCRIM DECISION, and it has to move with it. A
@@ -291,6 +304,7 @@ extern const nd_theme_style *nd_theme_style_of;
 #define ND_TH_REFLECTION    (nd_theme_style_of->reflection)
 #define ND_TH_SCRIM         (nd_theme_style_of->scrim)
 #define ND_TH_PIXEL_FONT    (nd_theme_style_of->pixel_font)
+#define ND_TH_GAME_COLOUR   (nd_theme_style_of->game_colour)
 #define ND_TH_WALLPAPER_DIM (nd_theme_style_of->wallpaper_dim)
 #define ND_TH_APP_WALLPAPER_DIM (nd_theme_style_of->app_wallpaper_dim)
 
