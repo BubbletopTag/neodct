@@ -170,6 +170,8 @@ APPRUN_SRCS := $(wildcard apprun/*.c)
 MEDIA_SRCS  := $(wildcard mediawidget/*.c)
 SHOOT_SRCS  := $(wildcard tools/nd_shoot*.c)
 SELF_SRCS   := $(wildcard tools/nd_selftest*.c)
+KEY_SRCS    := $(wildcard tools/nd_key*.c)
+GRAB_SRCS   := $(wildcard tools/nd_grab*.c)
 # A build-host tool, never installed: see its header.
 DLGFIT_SRCS := $(wildcard tools/nd_dialogfit.c)
 VERIFY_SRCS := $(wildcard tools/nd_verify*.c)
@@ -204,6 +206,11 @@ MEDIA_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(MEDIA_SRCS))
 SHOOT_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(SHOOT_SRCS))
 DLGFIT_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(DLGFIT_SRCS))
 SELF_OBJS   := $(patsubst %.c,$(OBJDIR)/%.o,$(SELF_SRCS))
+KEY_OBJS    := $(patsubst %.c,$(OBJDIR)/%.o,$(KEY_SRCS))
+# Everything in nd-key except its main(), which is what test_ndkey links.
+KEY_LIB_OBJS := $(filter-out $(OBJDIR)/tools/nd_key.o,$(KEY_OBJS))
+GRAB_OBJS   := $(patsubst %.c,$(OBJDIR)/%.o,$(GRAB_SRCS))
+GRAB_LIB_OBJS := $(filter-out $(OBJDIR)/tools/nd_grab.o,$(GRAB_OBJS))
 VERIFY_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(VERIFY_SRCS))
 PANIC_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(PANIC_SRCS))
 BOOTFB_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(BOOTFB_SRCS))
@@ -240,6 +247,8 @@ TARGETS += $(if $(MEDIA_SRCS),$(BINDIR)/neodct-play)
 TARGETS += $(if $(SHOOT_SRCS),$(BINDIR)/nd-shoot)
 TARGETS += $(if $(DLGFIT_SRCS),$(BINDIR)/nd-dialogfit)
 TARGETS += $(if $(SELF_SRCS),$(BINDIR)/nd-selftest)
+TARGETS += $(if $(KEY_SRCS),$(BINDIR)/nd-key)
+TARGETS += $(if $(GRAB_SRCS),$(BINDIR)/nd-grab)
 TARGETS += $(if $(VERIFY_SRCS),$(BINDIR)/nd-verify)
 TARGETS += $(if $(PANIC_SRCS),$(BINDIR)/nd-panic)
 TARGETS += $(if $(BOOTBAR_SRCS),$(BINDIR)/nd-bootbar)
@@ -435,6 +444,23 @@ $(BINDIR)/nd-shoot: $(SHOOT_OBJS) $(LIB)
 $(BINDIR)/nd-selftest: $(SELF_OBJS) $(LIB)
 	$(LINK_BIN)
 
+# ---- nd-key: press keys through the developer key channel ----------
+# Links libneodct for nd_keycode_for_name(), nd_kpsetup_targets[] and
+# nd_path_resolve(); the socket work is a dozen lines of AF_UNIX in main().
+$(BINDIR)/nd-key: $(KEY_OBJS) $(LIB)
+	$(Q)mkdir -p $(dir $@)
+	$(say) LINK $@
+	$(Q)$(CC) -o $@ $(KEY_OBJS) -L$(LIBDIR) -lneodct $(LDFLAGS_ALL) $(PKG_LIBS) -lm
+
+# ---- nd-grab: a PNG of the panel ----------------------------------
+# Links libneodct for nd_image, the PNG writer and nd_capture_digest(): the
+# digest must be the same bytes goldenframe.py compares, so it comes from
+# the one implementation rather than a second one here.
+$(BINDIR)/nd-grab: $(GRAB_OBJS) $(LIB)
+	$(Q)mkdir -p $(dir $@)
+	$(say) LINK $@
+	$(Q)$(CC) -o $@ $(GRAB_OBJS) -L$(LIBDIR) -lneodct $(LDFLAGS_ALL) $(PKG_LIBS) -lm
+
 $(BINDIR)/nd-dialogfit: $(DLGFIT_OBJS) $(LIB)
 	$(LINK_BIN)
 
@@ -526,6 +552,21 @@ $(TESTDIR)/%: $(OBJDIR)/test/unit/%.o $(HARNESS_OBJ) $(LIB)
 # objects have to come in directly. nd_recui.o is left out -- it has main().
 # libneodct still comes along, for platform_test.h and for the PNG writer the
 # test dumps its frames through; the two halves never call each other.
+# test_ndkey needs nd_key.h, which lives beside the tool rather than in
+# include/ -- it is the tool's own contract, not the OS's.
+$(OBJDIR)/test/unit/test_ndkey.o: CPPFLAGS_ALL += -Itools
+$(OBJDIR)/test/unit/test_ndgrab.o: CPPFLAGS_ALL += -Itools
+
+$(TESTDIR)/test_ndkey: $(OBJDIR)/test/unit/test_ndkey.o $(KEY_LIB_OBJS) $(HARNESS_OBJ) $(LIB)
+	$(Q)mkdir -p $(dir $@)
+	$(say) LINK $@
+	$(Q)$(CC) -o $@ $< $(KEY_LIB_OBJS) $(HARNESS_OBJ) -L$(LIBDIR) -lneodct $(LDFLAGS_ALL) $(PKG_LIBS) -lm
+
+$(TESTDIR)/test_ndgrab: $(OBJDIR)/test/unit/test_ndgrab.o $(GRAB_LIB_OBJS) $(HARNESS_OBJ) $(LIB)
+	$(Q)mkdir -p $(dir $@)
+	$(say) LINK $@
+	$(Q)$(CC) -o $@ $< $(GRAB_LIB_OBJS) $(HARNESS_OBJ) -L$(LIBDIR) -lneodct $(LDFLAGS_ALL) $(PKG_LIBS) -lm
+
 $(TESTDIR)/test_recui: $(OBJDIR)/test/unit/test_recui.o $(RECUI_LIB_OBJS) $(HARNESS_OBJ) $(LIB)
 	$(Q)mkdir -p $(dir $@)
 	$(say) LINK $@
@@ -630,6 +671,12 @@ install: all
 	@# really shut out of the databases. It is ~65 kB against libneodct,
 	@# which is already mapped, and it only reads.
 	$(Q)$(if $(SELF_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-selftest $(DESTDIR)$(PREFIX)/bin/,:)
+	@# nd-key goes on the phone: driving it over the debug link is the
+	@# point, and on a phone whose keypad is broken it is the only input.
+	$(Q)$(if $(KEY_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-key $(DESTDIR)$(PREFIX)/bin/,:)
+	@# nd-grab likewise: a screenshot is the other half of driving a phone
+	@# you cannot see.
+	$(Q)$(if $(GRAB_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-grab $(DESTDIR)$(PREFIX)/bin/,:)
 	@# nd-panic ships. It is the only part of the UI that runs when nd-core
 	@# is dead, and /bin/run_neodct.sh names it as
 	@#   /NeoDCT/System/bin/nd-panic
