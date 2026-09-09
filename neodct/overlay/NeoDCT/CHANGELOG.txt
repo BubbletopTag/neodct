@@ -1,33 +1,24 @@
 # NeoDCT OS Changelog
 
-0.5.16a-dev
-A development build. The debug link now follows engineering mode.
+0.5.16a
+Bluetooth, the battery meter, and a log you can actually read.
 
-Ethernet, and the telnet, FTP and screen-sharing services on it, now only come
-up when Engineering Mode is on in Settings. With it off the phone puts no
-address on the ethernet port at all and starts nothing, which is what a phone
-that is not being worked on should do. Turning Engineering Mode on and
-plugging in a cable is now the whole of enabling it; there is no longer a
-rebuild in the way.
+Bluetooth switches on. Enable in BT Audio has never worked on this phone -- it
+said "Bluetooth would not start / I/O error", which describes a broken
+adapter, and the adapter was fine. Settings was trying to start Bluetooth
+itself, and it has not had the permission to do that since it stopped running
+as root; it now asks the phone to.
 
-The battery gauge works. It reported nothing at all on some phones -- no
-percentage, no low-battery warning and no protective shutdown -- because the
-gauge sleeps between readings and the first one after it wakes was being
-thrown away. It is now retried, which is all it needed.
-
-Bluetooth switches on. Enable in BT Audio has never worked on this phone: it
-said "Bluetooth would not start" and gave "I/O error" as the reason, which
-described a broken adapter. There was nothing wrong with the adapter. Settings
-was trying to start Bluetooth itself, and Settings has not had the permission
-to do that since 0.5.0a -- it now asks the phone to, which does have it.
-
-The phone keeps its own log. Everything the system printed went to the serial
-port and nowhere else, so on a phone with nothing plugged into it -- which is
-every phone that has been closed up -- there was no log at all, and a fault
-that explained itself in one line explained it to nobody. The log now also
-goes to the phone's own /var/log/messages, alongside the kernel's, where it
-can be read without a cable. The serial console is unchanged for anyone who
-has one.
+- Bluetooth enables, finds nearby devices, and switches off again.
+- The battery meter works. The gauge sleeps between readings and the first
+  reading after it wakes was being thrown away, so some phones showed no
+  percentage, no low-battery warning and no protective shutdown.
+- The phone keeps its own log, in /var/log/messages, instead of sending it
+  only to a serial port that is usually not connected to anything.
+- Switching Bluetooth off no longer leaves sound pointed at the wrong card.
+- "Bluetooth would not start" now fits on the screen and says why.
+- Ethernet and the developer services on it follow Engineering Mode: with it
+  off the phone puts no address on the port and starts nothing.
 
 0.5.15a
 The microphone, the apps you download, and the keys on the keypad.
