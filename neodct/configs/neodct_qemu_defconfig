@@ -91,6 +91,16 @@ BR2_PACKAGE_UQMI=y
 BR2_PACKAGE_NETSURF=y
 BR2_PACKAGE_NETSURF_FRAMEBUFFER=y
 
+# --- nd-vncd: a VNC server for the panel (developer tool) ---
+# libvncserver is a plain C library, no X: nd-vncd (neodct/src/vncd) reads
+# /dev/fb0 -- the vfb the UI draws into and neodct_displayd mirrors to the
+# ST7789 -- and serves it. TIGHTPNG selects jpeg and libpng, both already in
+# the image for the browser and the codecs, so it costs nothing here and is
+# what makes noVNC (HTML5) clients fast. libvncserver also pulls lzo and
+# takes DES from the OpenSSL already present. See docs/DEBUG_LAN.md.
+BR2_PACKAGE_LIBVNCSERVER=y
+BR2_PACKAGE_LIBVNCSERVER_TIGHTPNG=y
+
 # --- Immutable system (squashfs root + dm-verity + SD cards) ---
 # The squashfs is the real root from now on; rootfs.ext4 is kept for the
 # moment so the old direct-boot flow still works during the transition.

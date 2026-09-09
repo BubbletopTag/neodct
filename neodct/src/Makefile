@@ -183,6 +183,7 @@ BOOTBAR_SRCS := $(wildcard tools/nd_bootbar.c tools/nd_bootbar_ui.c)
 # the committed 1-bit tables in tools/nd_bootfont.c.
 GENFONT_SRCS := $(wildcard tools/gen_bootfont.c)
 DISPLAYD_SRCS := $(wildcard displayd/*.c)
+VNCD_SRCS   := $(wildcard vncd/*.c)
 RECUI_SRCS  := $(wildcard recovery/*.c)
 TEST_SRCS   := $(wildcard test/unit/*.c)
 
@@ -212,6 +213,7 @@ GENFONT_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(GENFONT_SRCS))
 # links against.
 BOOTBAR_LIB_OBJS := $(filter-out $(OBJDIR)/tools/nd_bootbar.o,$(BOOTBAR_OBJS)) $(BOOTFB_OBJS)
 DISPLAYD_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(DISPLAYD_SRCS))
+VNCD_OBJS   := $(patsubst %.c,$(OBJDIR)/%.o,$(VNCD_SRCS))
 RECUI_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(RECUI_SRCS))
 
 # The recovery UI's library half, without main(). test_recui links these
@@ -243,6 +245,7 @@ TARGETS += $(if $(PANIC_SRCS),$(BINDIR)/nd-panic)
 TARGETS += $(if $(BOOTBAR_SRCS),$(BINDIR)/nd-bootbar)
 TARGETS += $(if $(GENFONT_SRCS),$(BINDIR)/gen-bootfont)
 TARGETS += $(if $(DISPLAYD_SRCS),$(BINDIR)/neodct_displayd)
+TARGETS += $(if $(VNCD_SRCS),$(BINDIR)/nd-vncd)
 TARGETS += $(if $(RECUI_SRCS),$(BINDIR)/nd-recui)
 TARGETS += $(APP_SOS)
 
@@ -361,6 +364,30 @@ $(BINDIR)/neodct_displayd: $(DISPLAYD_OBJS)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)printf '  %-7s %s\n' 'LINK' '$@'
 	$(Q)$(CC) $(DISPLAYD_OBJS) -o $@ $(SANFLAGS) $(NEODCT_LDFLAGS) $(LDFLAGS)
+
+# ---- nd-vncd: the framebuffer VNC server (developer tool) ----------
+#
+# Like neodct_displayd it is a standalone fb reader that does NOT link
+# libneodct, and for the same reason it is built WITHOUT -Wconversion: the
+# pixel packing is byte arithmetic that trips it, and libvncserver's own
+# headers trip -Wconversion/-Wsign-conversion too. Everything else in the
+# warning set, including -Werror, still applies -- the filter is over the whole
+# assembled flag set (WARNINGS + NEODCT_CFLAGS), exactly as DISPLAYD_CFLAGS
+# learned to be, so the cross build buildroot drives is covered and not just a
+# host make. Links libvncserver; its own NEEDED entries pull jpeg/png/lzo/z.
+VNCD_CFLAGS := $(filter-out -Wconversion -Wsign-conversion, \
+	$(WARNINGS) $(OPTFLAGS) $(SANFLAGS) $(NEODCT_CFLAGS) $(CFLAGS)) \
+	-D_GNU_SOURCE -MMD -MP
+
+$(OBJDIR)/vncd/%.o: vncd/%.c
+	$(Q)mkdir -p $(dir $@)
+	$(Q)printf '  %-7s %s\n' 'CC' '$<'
+	$(Q)$(CC) $(VNCD_CFLAGS) $(CPPFLAGS) -c $< -o $@
+
+$(BINDIR)/nd-vncd: $(VNCD_OBJS)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)printf '  %-7s %s\n' 'LINK' '$@'
+	$(Q)$(CC) $(VNCD_OBJS) -o $@ $(SANFLAGS) $(NEODCT_LDFLAGS) $(LDFLAGS) -lvncserver
 
 # ---- nd-recui: the on-screen recovery UI ---------------------------
 #
@@ -615,6 +642,10 @@ install: all
 	@# so installing here is all it takes for the initramfs to keep working.
 	$(Q)$(if $(DISPLAYD_SRCS),$(INSTALL) -d $(DESTDIR)$(PREFIX)/hw,:)
 	$(Q)$(if $(DISPLAYD_SRCS),$(INSTALL) -m 0755 $(BINDIR)/neodct_displayd $(DESTDIR)$(PREFIX)/hw/,:)
+	@# nd-vncd: a developer tool, installed to bin/ next to nd-selftest and
+	@# nd-panic. S42debuglan starts it; it is harmless without a client and
+	@# binds only the debug address. See docs/DEBUG_LAN.md.
+	$(Q)$(if $(VNCD_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-vncd $(DESTDIR)$(PREFIX)/bin/,:)
 	@# neodct-play goes where the BROWSER looks for it, not where it would
 	@# be tidiest. netsurf-neodct/.../neodct_media.h has
 	@#   #define NEODCT_MEDIA_PLAYER "/NeoDCT/System/core/MediaWidget/neodct-play"

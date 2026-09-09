@@ -28,12 +28,13 @@ CONFIG_UBIDETACH=y
 CONFIG_UBIMKVOL=y
 
 # telnetd, for the ethernet debug link -- 13 kb, started by
-# /etc/init.d/S42telnet, which brings eth0 up on 192.168.99.2 and binds the
-# daemon to that one address. See docs/DEBUG_LAN.md.
+# /etc/init.d/S42debuglan, which brings eth0 up on 192.168.99.2 and binds this
+# and ftpd (below) to that one address. See docs/DEBUG_LAN.md.
 #
 # UNGATED AND KNOWN TO BE: it runs on any image that boots with an eth0, which
 # is a proof-of-concept decision taken with the tradeoff understood. What is
-# behind it is an unauthenticated cleartext root shell, so no image that
+# behind it is an unauthenticated cleartext root shell -- and, via ftpd,
+# unauthenticated root-level file read/write -- so no image that
 # leaves the bench may carry it. The intended gate is the engineering-mode
 # marker (/etc/neodct-devenv, post-build-devenv-marker.sh) -- absent unless
 # the build asks for it and uncreatable by a running phone, which is the

@@ -1,0 +1,22 @@
+From: NeoDCT build
+Subject: [PATCH] cmake: raise minimum required from 3.4 to 3.5
+
+libvncserver 0.9.14 declares cmake_minimum_required(VERSION 3.4). CMake 4.0
+removed compatibility with a minimum below 3.5 and aborts at configure:
+
+    Compatibility with CMake < 3.5 has been removed from CMake.
+
+A host with CMake >= 4 (current Arch, among others) therefore cannot build
+this package at all. 3.5 is a floor the project's CMakeLists already satisfies
+-- nothing in it uses a pre-3.5 behaviour -- so the bump is mechanical and
+changes no build logic. Upstream has not tagged a release with the fix.
+
+Signed-off-by: NeoDCT build <noreply@neodct>
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,4 +1,4 @@
+-cmake_minimum_required(VERSION 3.4)
++cmake_minimum_required(VERSION 3.5)
+ 
+ project(LibVNCServer VERSION 0.9.14 LANGUAGES C)
+ include(CheckFunctionExists)

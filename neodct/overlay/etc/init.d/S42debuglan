@@ -52,6 +52,10 @@
 IFACE=eth0
 TELNET_PIDFILE=/run/telnetd.pid
 FTP_PIDFILE=/run/ftpd.pid
+VNC_PIDFILE=/run/nd-vncd.pid
+
+# nd-vncd serves /dev/fb0 -- a live view of the panel -- to a VNC client.
+VNCD=/NeoDCT/System/bin/nd-vncd
 
 # ftpd serves this directory. It is run as root, so it chroots here -- "/" is
 # the whole rootfs, which is the point. FileZilla lands at /.
@@ -170,9 +174,24 @@ case "$1" in
         else
             say "failed to start ftpd/tcpsvd"
         fi
+
+        # --- nd-vncd: a live view of the panel --------------------------------
+        # --bind ADDR is the same eth0-only restriction (nd-vncd also sets
+        # ipv6port=0, so it is never on the modem). View-only; 10 fps to suit
+        # the 10 Mbit/s link and idle to ~zero with no client attached. Present
+        # only on a developer image; absent is normal, so do not warn.
+        if [ -x "$VNCD" ]; then
+            if start-stop-daemon --start --quiet --background \
+                    --make-pidfile --pidfile "$VNC_PIDFILE" \
+                    --exec "$VNCD" -- --bind "$ADDR" --fps 10; then
+                say "vnc panel view on $ADDR:5900 -- view-only, 10 fps, $IFACE only"
+            else
+                say "failed to start nd-vncd"
+            fi
+        fi
         ;;
     stop)
-        for pf in "$TELNET_PIDFILE" "$FTP_PIDFILE"; do
+        for pf in "$TELNET_PIDFILE" "$FTP_PIDFILE" "$VNC_PIDFILE"; do
             [ -f "$pf" ] || continue
             start-stop-daemon --stop --quiet --pidfile "$pf"
             rm -f "$pf"

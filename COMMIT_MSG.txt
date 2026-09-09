@@ -5013,3 +5013,116 @@ lands that is a thing to remember rather than a thing the build enforces.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01C2y5FofcBs4EWi7vk9LX2b
+
+================================================================================
+
+ftp onto the debug link too, and fold both daemons into one script
+
+Owner wants file access over the same ethernet link: pull logs off the phone,
+push a freshly built test binary on. busybox ftpd, no login, rooted at /.
+CONFIG_FTPD + FEATURE_FTPD_WRITE + ACCEPT_BROKEN_LIST + AUTHENTICATION, plus
+CONFIG_TCPSVD, in the shared fragment -- no defconfig moved.
+
+NO LOGIN, and the username is decorative -- this is stated plainly rather than
+sold as "user neodct, no password". ftpd -A skips the login exchange, and the
+main loop then answers every USER and every PASS with 230 (networking/ftpd.c),
+so FileZilla's `USER neodct` succeeds and it never asks for a password -- but
+so would any name. Verified in source before wiring it up, not assumed.
+FEATURE_FTPD_AUTHENTICATION is left ON (the -A flag lives behind it); -A is the
+single supported mode either way, so this avoids recompiling the auth out.
+
+tcpsvd, not inetd, is what binds it. ftpd has no socket of its own -- it is an
+inetd-style service on stdin/stdout. busybox inetd is already in the image and
+could host it, but it reads the bind address from /etc/inetd.conf, and on a
+read-only rootfs that file cannot follow a `neodct.telnet=` override. tcpsvd
+takes the address as an argument, so the init script stays the one source of
+truth. `tcpsvd <addr> 21 ftpd -A -w /`.
+
+S42telnet -> S42debuglan. One script now owns the whole link: it brings the
+address up once, confirms it is on eth0 once, and starts BOTH daemons bound to
+it. A second script would either duplicate the address bring-up or depend on
+ordering, and would race the same on_iface check. The -b / bound-address
+invariant is unchanged and now covers both: telnetd -b ADDR, tcpsvd ADDR, each
+re-checked against eth0 and each failing closed at bind (telnetd's
+create_and_bind_stream_or_die, tcpsvd's bind -> EADDRNOTAVAIL). There is still
+no path that puts either daemon on wwan0.
+
+docs/DEBUG_LAN.md retitled and extended: ftp usage (FileZilla: plain FTP, any
+user, blank password, land at /), the "username is decorative" truth, why
+tcpsvd rather than inetd, and the bind invariant now written for both daemons.
+The fragment comment and HARDWARE_NOTES cross-ref updated for the rename.
+
+Still ungated, still bench-only, still the engineering-mode marker as the gate
+that is coming -- now gating a root shell AND root file access, which raises
+the stakes of shipping it by accident but not the shape of the fix.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01C2y5FofcBs4EWi7vk9LX2b
+
+================================================================================
+
+nd-vncd: a VNC view of the panel on the debug link
+
+Third thing on the ethernet debug LAN, from the NDVNCD writeup: a VNC server
+that serves /dev/fb0 so a developer or an agent can watch the real screen with
+no serial cable and no camera. ~300 lines on libvncserver, built into the
+image at /NeoDCT/System/bin/nd-vncd, started by S42debuglan bound to the same
+eth0 address as telnet and ftp, 10 fps to suit the 10 Mbit/s link. View-only.
+
+It is the display daemon turned inside out: neodct_displayd reads fb0, probes
+the pixel format, mmaps it and diffs frames to push dirty rectangles to the
+ST7789 over SPI; nd-vncd does the same read/probe/diff and pushes the rectangle
+to VNC clients instead. The fb-probe, the two-pass dirty-rect and the pixel
+conversion are lifted from that proven code, which is the point -- the writeup
+says copy it, do not reinvent it.
+
+THE RED/BLUE TRAP the writeup leads with: pixel order is read from
+fb_var_screeninfo (red.offset < blue.offset -> swap), never assumed, because
+vfb declares R G B x while everything else declares B G R x, and NeoDCT once
+assumed wrong in both halves so they agreed with each other and not the driver.
+nd-vncd follows the same detection nd_displayd was fixed to use; --swap-rb
+inverts it for a driver that lies. A comment block in the source carries the
+whole story.
+
+NEVER ON THE MODEM, the one non-provisional invariant, same as telnet/ftp:
+--bind pins the IPv4 socket to the eth0 address, and ipv6port=0 means
+libvncserver opens no IPv6 listener at all (sockets.c only binds TCP6 when
+ipv6port>0). Default --bind is loopback, so a hand-run with no args cannot
+expose the screen. S42debuglan re-confirms the address is on eth0 before
+starting it.
+
+Cost control for the 10 Mbit/s link and the single core: dirty-rect diff so an
+unchanged screen sends nothing; no polling at all with no client (blocks in
+rfbProcessEvents); adaptive backoff to ~2 fps after ~3s of no change. 168 KB
+intermediate RGBX buffer, converted into once per dirty rect, so libvncserver
+sees one fixed format instead of a 16/32-bpp x channel-order matrix.
+
+Input is a deliberately unwired seam. A uinput device fed from VNC keys does
+NOT work here: apps read NEODCT_KEYPAD_FD (a pipe from the core), not
+/dev/input, and nd_input.c:768 is_our_injector() refuses the core's own uinput
+device. Key injection belongs at the core's key source (a dev channel gated on
+/etc/neodct-devenv), so screen->kbdAddEvent is left unset with a comment
+pointing at where it goes. View-only is correct for v1, not a shortcut.
+
+Build wiring:
+  * BR2_PACKAGE_LIBVNCSERVER=y + _TIGHTPNG=y in both defconfigs (and the
+    buildroot/configs copies test_defconfig_copies.py guards -- synced, diffed
+    identical). TIGHTPNG pulls jpeg+libpng, already in the image.
+  * A buildroot patch, board/qemu/patches/libvncserver/0001-cmake-minimum-
+    required-3.5.patch: libvncserver 0.9.14 declares cmake_minimum_required
+    3.4, and CMake 4 (current Arch) aborts below 3.5. One-line floor bump, no
+    build-logic change. Without it the package does not configure on this host.
+  * neodct/src/Makefile: a vncd/ block mirroring displayd's, built WITHOUT
+    -Wconversion for the same reason (byte packing + libvncserver headers),
+    -Werror and the rest of the set kept. Links -lvncserver; installs to
+    $(PREFIX)/bin.
+
+Ungated, per the owner's call for this PoC, matching telnet/ftp: runs wherever
+S42debuglan starts it, with --bind as the safety. nd-vncd --require-devenv and
+a marker test on S42debuglan's start) case are the one-line gate when wanted.
+
+docs/DEBUG_LAN.md extended for all three daemons; the file is now the single
+reference for the debug link.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01C2y5FofcBs4EWi7vk9LX2b
