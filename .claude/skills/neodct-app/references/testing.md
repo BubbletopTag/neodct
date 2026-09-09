@@ -110,6 +110,10 @@ checked one-to-one by a machine instead of argued about by people. The port
 finished. Screens are deliberately redesigned now and will be again, so the
 committed set **drifts from the truth by design**.
 
+0.4.0a to 0.5.15a is twenty-six releases and only a few weeks -- alpha releases
+land fast here. Do not read the short calendar gap as freshness: the drift is
+counted in releases, not days.
+
 So, flatly:
 
 - A golden frame is never a reason to leave a screen the way it is.

@@ -231,10 +231,14 @@ any C was written. While the port was in progress a C change that altered pixels
 the test, and that was the right rule then: it is how "one-to-one" became something a
 machine checked instead of something a person argued about.
 
-The port finished. Screens are now deliberately redesigned to look *different* from the
-Python, and they will be redesigned again. So the committed set drifts from the truth
-**by design**, and it is not a description of what the UI is supposed to look like.
-Three things follow, and they are not hedged:
+The port finished. The frames are from 0.4.0a and this tree is on 0.5.15a — **twenty-six
+releases**, which at this project's alpha cadence is a matter of weeks. Do not read that
+short calendar gap as freshness: drift here is measured in releases, not in days, and a
+set that is only weeks old can already describe a UI that no longer exists.
+
+Screens are deliberately redesigned now and will be redesigned again, so the committed
+set drifts from the truth **by design**, and it is not a description of what the UI is
+supposed to look like. Three things follow, and they are not hedged:
 
 - A golden frame is never a reason to leave a screen the way it is.
 - It is never something to ask permission about before changing a screen.
@@ -252,10 +256,10 @@ python3 neodct/tools/goldenframe.py --compare /tmp/frames-before /tmp/frames-aft
 ```
 
 `--compare` takes any two directories `nd-shoot` wrote, so the reference becomes "what
-this tree looked like before I started" instead of "what Python looked like two years
-ago". The frames that moved should be the screens you meant to move; **anything else is
-the finding.** It costs about four seconds and it answers the only question worth
-asking — *did I disturb something I was not looking at?*
+this tree looked like before I started" instead of "what Python looked like at 0.4.0a".
+The frames that moved should be the screens you meant to move; **anything else is the
+finding.** It costs about four seconds and it answers the only question worth asking —
+*did I disturb something I was not looking at?*
 
 That is the whole ritual. There is no step where you compare against `tests/golden/`.
 

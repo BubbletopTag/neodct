@@ -5,10 +5,13 @@ before any C was written. While the port was in progress these images were the
 definition of correct: the C build was right exactly when it reproduced them pixel
 for pixel.
 
-**That is over.** The port is done and screens are deliberately redesigned now — the
-Music library, the Messages Chat style — and they will be redesigned again. This set
-drifts from the truth **by design**. It is not a description of what the UI should
-look like, and:
+**That is over.** These frames are from 0.4.0a; the tree is on 0.5.15a — twenty-six
+releases, which at this project's alpha cadence is a matter of weeks. Do not read that
+short calendar gap as freshness: drift here is counted in releases, not days.
+
+The port is done and screens are deliberately redesigned now — the Music library, the
+Messages Chat style — and they will be redesigned again. This set drifts from the truth
+**by design**. It is not a description of what the UI should look like, and:
 
 - a frame here is never a reason to leave a screen the way it is;
 - it is never something to ask permission about before changing a screen;
