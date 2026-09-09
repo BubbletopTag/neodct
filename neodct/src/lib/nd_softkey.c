@@ -153,6 +153,7 @@ void nd_softkey_update(nd_softkey *bar, const char *text, bool present)
         nd_rect plate = ND_RECT(2, bar->y_start + 2, screen_w - 3, screen_h - 3);
         int32_t w = 0;
         int32_t h = 0;
+        nd_rect ink;
 
         if (bar->transparent) {
             /* Glass over the home screen's wallpaper. The border stays
@@ -166,10 +167,25 @@ void nd_softkey_update(nd_softkey *bar, const char *text, bool present)
 
         /* The INK height, so a label of "OK" and a label of "Options" do not
          * sit on the same row. That is what the screens look like today, and
-         * it is nd_widgets.h rule 2. */
+         * it is nd_widgets.h rule 2.
+         *
+         * MINUS THE BOX'S OWN ORIGIN, which is the part the rest of the OS
+         * leaves out. nd_text_size() measures the ink; nd_draw_text() places
+         * the LAYOUT origin, and the ink starts bbox.y0 rows below it. Centre
+         * the ink height at the draw position and the word lands that far
+         * low -- four rows on this face, which nobody could see while the
+         * label floated on the background and everybody can see now that
+         * there is a plate around it to be off-centre within.
+         *
+         * Only here. Forty other places in the widget code centre by ink
+         * extents alone, that is what those screens have always looked like,
+         * and correcting them wholesale is a different change from this one.
+         * This is the control the NaviKey presses; it is the one that has to
+         * look machined. */
         nd_ui_text_size(ui, text, f, &w, &h);
-        nd_theme_text_light(ui->draw, floordiv2(screen_w - w),
-                            plate.y0 + floordiv2(nd_rect_h(plate) - h), text, f);
+        nd_text_bbox(f, text, &ink);
+        nd_theme_text_light(ui->draw, floordiv2(screen_w - w) - ink.x0,
+                            plate.y0 + floordiv2(nd_rect_h(plate) - h) - ink.y0, text, f);
     }
 
     if (text != NULL) {

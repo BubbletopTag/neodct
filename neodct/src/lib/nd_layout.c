@@ -340,13 +340,24 @@ static void draw_status_label(nd_ui *ui, const char *text, int32_t icon_x, int32
     nd_theme_text_light(ui->draw, tx, ty, text, ui->font_s);
 }
 
-/* The glass lozenge behind a centred home-screen label: how far it reaches
- * past the ink, how round it is, and how much of the wallpaper it lets
- * through. 200 is opaque enough to read navy type against and translucent
- * enough that the picture is still visibly the picture. */
-#define ND_LAYOUT_LOZENGE_PAD    8
-#define ND_LAYOUT_LOZENGE_RADIUS 7
-#define ND_LAYOUT_LOZENGE_A      200u
+/* ============ THE CENTRED LABELS WEAR NO FURNITURE ============
+ *
+ * The carrier name and the engineering notice sit in the middle of the
+ * wallpaper with nothing else near them, and a glass lozenge was tried behind
+ * each -- sized to the ink, so it grew with the operator name. It read as two
+ * badges stuck onto the photograph: the home screen is the one screen in the
+ * OS with no chrome on it, and putting the only two plates on the phone there
+ * made the picture look like a backdrop rather than the screen.
+ *
+ * So they are bare type, and the contrast comes from the shadow alone. It is
+ * a DARKER shadow than the rest of the screen uses and still only one row --
+ * two rows and three-across were both tried against this wallpaper and both
+ * lost the letterforms: at 12 px the strokes are thin enough that any shadow
+ * wide enough to be a halo is also wide enough to fill the counters, and
+ * "Tello" came out as a smudge in the shape of a word. One row of something
+ * near-black separates the glyphs from the picture and leaves them sharp,
+ * which is the whole job. */
+#define ND_LAYOUT_LABEL_SHADOW ND_RGB(0x04, 0x10, 0x1E)
 
 static void render_text_element(nd_ui *ui, const nd_element *el)
 {
@@ -388,43 +399,14 @@ static void render_text_element(nd_ui *ui, const nd_element *el)
     else if (el->anchor == ND_ANCHOR_RIGHT)
         x -= w;
 
-    /* ============ THE PLATE UNDER THE CARRIER ============
-     *
-     * The home screen is the one screen with no chrome on it at all -- no
-     * title bar, no list, nothing but the wallpaper and four labels. That was
-     * fine when every wallpaper was dimmed to 30%; at ND_UI_WALLPAPER_BRIGHTNESS
-     * the carrier name is sitting on a photograph, and a shadow alone does not
-     * carry a 12 px string over a bright one.
-     *
-     * So the CENTRED labels -- which is the carrier and the engineering
-     * notice, the two that sit in the middle of the picture -- get a glass
-     * lozenge behind them, sized to the string. The clock, anchored right in
-     * a corner, does not: it is short, it is against the panel edge, and a
-     * plate there would be the only piece of furniture in the corner of an
-     * otherwise bare screen.
-     *
-     * Sized from the ink, so it grows with a long operator name and does not
-     * leave a wide empty capsule around "O2". */
+    /* The carrier and the engineering notice, the two labels in the middle of
+     * the picture, take the heavier shadow. The clock does not: it is anchored
+     * into a corner, under the status scrim, and it has never had trouble
+     * being read. The authored colour is kept in both cases -- the engineering
+     * notice is red because it means "every app here runs as root" (nd_ui.c),
+     * and it stays red. */
     if (el->anchor == ND_ANCHOR_CENTER_H && text[0] != '\0') {
-        nd_theme_plate p = nd_theme_plate_glass(ND_LAYOUT_LOZENGE_RADIUS);
-
-        p.body_a = ND_LAYOUT_LOZENGE_A;
-        p.drop_shadow = false;
-        nd_theme_plate_draw(
-            ui->canvas,
-            ND_RECT(x - ND_LAYOUT_LOZENGE_PAD, y - 2, x + w + ND_LAYOUT_LOZENGE_PAD - 1, y + h + 3),
-            &p);
-        /* Dark ink on the light lozenge -- except the engineering notice,
-         * which is authored red and has to stay red: it is the one thing on
-         * this screen that means "every app here runs as root" (nd_ui.c), and
-         * turning it navy for the sake of the palette would be quietly
-         * removing a warning. Red on glass is legible; red on a photograph
-         * was the reason for the plate. */
-        if (el->color.r == ND_TH_INK_LIGHT.r && el->color.g == ND_TH_INK_LIGHT.g &&
-            el->color.b == ND_TH_INK_LIGHT.b)
-            nd_theme_text_dark(ui->draw, x, y, text, f);
-        else
-            nd_theme_text(ui->draw, x, y, text, f, el->color, ND_TH_CHROME_HI);
+        nd_theme_text(ui->draw, x, y, text, f, el->color, ND_LAYOUT_LABEL_SHADOW);
         return;
     }
 
