@@ -108,10 +108,28 @@ static nd_color layout_colour(const char *s)
     size_t i;
     nd_color c;
 
+    /* ============ TWO NAMES ARE THE THEME'S, NOT PILLOW'S ============
+     *
+     * ui_home.json says "white" for the carrier line and the clock, and "red"
+     * for the engineering-mode warning. Those were literal colours because
+     * the interface was white on black when the file was written -- "white"
+     * has always MEANT "the foreground ink", and "red" has meant "a warning".
+     *
+     * Under a theme with a pale background, resolving them literally is white
+     * type on a pale ground: the home screen's carrier name and clock wash
+     * out while every other string on the phone is legible. So the two names
+     * that carry a role resolve to the palette, and the rest of Pillow's
+     * table stays literal for anything that really does want a fixed colour.
+     *
+     * A layout that wants exact white can still spell "#FFFFFF". */
     if (s == NULL || s[0] == '\0')
-        return ND_WHITE;
+        return ND_TH_INK_LIGHT;
     if (s[0] == '#' && parse_hex_colour(s, &c))
         return c;
+    if (strcmp(s, "white") == 0)
+        return ND_TH_INK_LIGHT;
+    if (strcmp(s, "red") == 0)
+        return ND_TH_WARN_INK;
     for (i = 0u; i < ND_ARRAY_LEN(named); i++) {
         if (strcmp(s, named[i].name) == 0)
             return ND_RGB(named[i].r, named[i].g, named[i].b);

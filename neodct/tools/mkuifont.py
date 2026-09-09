@@ -1,40 +1,42 @@
 #!/usr/bin/env python3
-"""mkuifont.py -- build the UI typeface from an upstream face.
+"""mkuifont.py -- build a theme's UI typeface from an upstream face.
 
-The phone ships two typefaces and they are not interchangeable:
+The phone itself ships ONE typeface: font.ttf, Nokia Cellphone FC, 16 KB, a
+bitmap-style pixel face. It is pinned by neodct/tests/golden/font/fontref.json
+BY SHA-256, because that file is the evidence that the C FreeType path renders
+the same pixels Pillow did, and gen_bootfont bakes the initramfs boot bar's
+1-bit tables out of it. It is the built-in look's face and it may not be
+disturbed by anything here.
 
-  font.ttf   Nokia Cellphone FC, 16 KB, a bitmap-style pixel face. It is
-             pinned by neodct/tests/golden/font/fontref.json BY SHA-256,
-             because that file is the evidence that the C FreeType path
-             renders the same pixels Pillow did. gen_bootfont also bakes the
-             initramfs boot bar's 1-bit tables out of it. Neither has anything
-             to do with how the UI looks, and neither may be disturbed.
+A THEME may bring its own, as fonts/ui.ttf and fonts/ui-bold.ttf inside the
+theme directory (docs/THEMES.md). That is what this script builds, and it
+exists because two things have to happen together and doing either by hand
+goes wrong:
 
-  aero.ttf   The UI face. A humanist/neo-grotesque sans, because the Frutiger
-             Aero chrome in nd_theme.c is glass and gradients and a pixel
-             face fights it -- letterforms with hard 90-degree corners on a
-             surface that is trying to look wet.
+  1. SUBSETTING. A full upstream face is 400-700 KB per weight. The phone has
+     128 MB of NAND for the entire rootfs and 64 MB of RAM, the card is not
+     much freer, and nothing on it renders Cyrillic, Greek, Hebrew, Arabic or
+     CJK -- the UI is English and the user data is names and SMS. Cutting to
+     Latin plus the punctuation the OS actually draws takes a pair from about
+     825 KB to about 60 KB, and a theme is something an owner copies onto a
+     card.
 
-This script produces the second from a system font, and exists because two
-things have to happen together and doing either by hand goes wrong:
+  2. RENAMING. Most of the faces worth using are under SIL OFL 1.1 with a
+     Reserved Font Name, and a subset is a derivative work. Shipping a
+     modified face under its original name would be a licence violation, so
+     the name table is rewritten. This is the part that is easy to forget and
+     impossible to notice afterwards. --family is what it is rewritten TO, and
+     it must not contain the upstream's reserved name.
 
-  1. SUBSETTING. Upstream Liberation Sans is 411 KB per weight. The phone has
-     128 MB of NAND for the entire rootfs and 64 MB of RAM, and nothing on it
-     renders Cyrillic, Greek, Hebrew, Arabic or CJK -- the UI is English and
-     the user data is names and SMS. Cutting to Latin plus the punctuation
-     the OS actually draws takes the pair from 825 KB to about 60 KB.
+Build a theme's pair:
 
-  2. RENAMING. Liberation is a Reserved Font Name under SIL OFL 1.1, and a
-     subset is a derivative work. Shipping a modified face still called
-     "Liberation Sans" would be a licence violation, so the name table is
-     rewritten. This is the part that is easy to forget and impossible to
-     notice afterwards.
+    python3 neodct/tools/mkuifont.py --family "NeoDCT Kitty Rounded" \
+        --out neodct/contrib/themes/HelloKitty/fonts \
+        Baloo2-Regular.ttf Baloo2-Bold.ttf
 
-Regenerate:
-
-    python3 neodct/tools/mkuifont.py \
-        /usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf \
-        /usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf
+Ship the upstream licence next to it as fonts/LICENSE.txt; this script does
+not copy it, because only the person who fetched the face knows where it came
+from.
 
 Needs fonttools on the build host only; nothing on the phone reads this.
 """
@@ -42,13 +44,9 @@ Needs fonttools on the build host only; nothing on the phone reads this.
 import os
 import sys
 
-FONT_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "..", "overlay", "NeoDCT", "System", "ui", "resources", "fonts")
-
-# The family name the phone's face is known by. It must not contain
-# "Liberation" -- see the module docstring.
-FAMILY = "NeoDCT Aero Sans"
+# Where a theme's pair goes by default, and the names the loader looks for.
+DEFAULT_OUT = "."
+OUT_NAMES = ("ui.ttf", "ui-bold.ttf")
 
 # What the phone can be asked to draw.
 #
@@ -98,7 +96,7 @@ def wanted_codepoints():
     return cps
 
 
-def build(src, dst, subfamily):
+def build(src, dst, subfamily, family):
     from fontTools import subset
     from fontTools.ttLib import TTFont
 
@@ -122,13 +120,13 @@ def build(src, dst, subfamily):
 
     # Rename AFTER subsetting: the subsetter copies the name table through,
     # and it is the saved file that has to carry the derivative name.
-    full = FAMILY if subfamily == "Regular" else FAMILY + " " + subfamily
+    full = family if subfamily == "Regular" else family + " " + subfamily
     psname = full.replace(" ", "")
     tt = TTFont(dst)
     for rec in tt["name"].names:
         nid = rec.nameID
         if nid == 1:
-            rec.string = FAMILY
+            rec.string = family
         elif nid == 2:
             rec.string = subfamily
         elif nid == 4:
@@ -146,20 +144,32 @@ def build(src, dst, subfamily):
 
 
 def main(argv):
-    if len(argv) != 3:
-        sys.stderr.write(__doc__)
-        return 2
+    import argparse
 
-    os.makedirs(FONT_DIR, exist_ok=True)
-    for src, name, sub in ((argv[1], "aero.ttf", "Regular"),
-                           (argv[2], "aero-bold.ttf", "Bold")):
-        dst = os.path.join(FONT_DIR, name)
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter,
+                                 epilog=__doc__)
+    ap.add_argument("regular", help="the upstream regular weight")
+    ap.add_argument("bold", nargs="?", help="the upstream bold weight; optional -- "
+                                            "nd_ui_font_bold() falls back to the regular")
+    ap.add_argument("--family", required=True,
+                    help="the family name to rewrite the subset to; must not carry the "
+                         "upstream's reserved font name")
+    ap.add_argument("--out", default=DEFAULT_OUT, help="directory to write ui.ttf into")
+    args = ap.parse_args(argv)
+
+    os.makedirs(args.out, exist_ok=True)
+    pairs = [(args.regular, OUT_NAMES[0], "Regular")]
+    if args.bold:
+        pairs.append((args.bold, OUT_NAMES[1], "Bold"))
+    for src, name, sub in pairs:
+        dst = os.path.join(args.out, name)
         before = os.path.getsize(src)
-        after = build(src, dst, sub)
+        after = build(src, dst, sub, args.family)
         print(f"{name}: {before:,} -> {after:,} bytes "
               f"({100 * after // before}%)  {len(wanted_codepoints())} codepoints")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    sys.exit(main(sys.argv[1:]))

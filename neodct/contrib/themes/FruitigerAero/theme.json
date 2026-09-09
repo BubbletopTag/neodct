@@ -32,6 +32,7 @@
     "bar_bot":     "#0A4A9B",
     "bar_ink":     "#FFFFFF",
     "sel_ink":     "#FFFFFF",
+    "warn_ink":    "#FF0000",
 
     "glass_top":   "#F2F9FF",
     "glass_bot":   "#C6DFF2",

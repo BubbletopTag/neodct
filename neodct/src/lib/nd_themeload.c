@@ -64,7 +64,8 @@ static const nd_theme_palette builtin_palette = {
     /* the background */
     ND_RGB(0x00, 0x00, 0x00), ND_RGB(0x00, 0x00, 0x00),
     /* green, amber, red: the battery and the warnings, which stay legible
-     * colours even here -- a red fault has to read as one */
+     * colours even here -- a red fault has to read as one. The WARNING LINE
+     * is warn_ink below and not this pair; see the header. */
     ND_RGB(0x2E, 0xCC, 0x40), ND_RGB(0x2E, 0xCC, 0x40),
     ND_RGB(0xFF, 0xB0, 0x00), ND_RGB(0xFF, 0xB0, 0x00), ND_RGB(0xFF, 0x41, 0x36),
     ND_RGB(0xFF, 0x41, 0x36),
@@ -72,6 +73,8 @@ static const nd_theme_palette builtin_palette = {
     ND_RGB(0x00, 0x00, 0x00), ND_RGB(0x00, 0x00, 0x00), ND_RGB(0xFF, 0xFF, 0xFF),
     /* type standing on the selection: black, because the lozenge is white */
     ND_RGB(0x00, 0x00, 0x00),
+    /* the warning line, pure red -- what the phone has always drawn it in */
+    ND_RGB(0xFF, 0x00, 0x00),
     /* Ink. ink_dark is "type on a glass panel", and this theme's glass IS the
      * black background -- there is no light plate anywhere in it -- so the
      * type on one has to be WHITE. Leaving it black is how the calculator's
@@ -281,6 +284,7 @@ static void read_palette(const nd_json_val *pal, nd_theme_palette *p)
     read_colour(pal, "bar_bot", &p->bar_bot);
     read_colour(pal, "bar_ink", &p->bar_ink);
     read_colour(pal, "sel_ink", &p->sel_ink);
+    read_colour(pal, "warn_ink", &p->warn_ink);
     read_colour(pal, "ink_dark", &p->ink_dark);
     read_colour(pal, "ink_light", &p->ink_light);
     read_colour(pal, "ink_muted", &p->ink_muted);

@@ -164,6 +164,17 @@ typedef struct {
      * White in a glass theme, black in an inverting one. */
     nd_color sel_ink;
 
+    /* A warning IN TYPE -- the home screen's "Eng. Mode" line, and anything
+     * else ui_home.json marks "red".
+     *
+     * Its own field rather than red_bot, which it briefly shared. Those are
+     * two unrelated jobs: red_top/red_bot are the gradient of a fault PLATE
+     * (and of Snake's food pellet), while this is a colour a string is drawn
+     * in and has to be legible against the background rather than pretty
+     * against a plate. Sharing them meant a theme could not make its warning
+     * pure red without making its fault plates flat. */
+    nd_color warn_ink;
+
     /* Ink. Dark type on a light plate is navy rather than black, because pure
      * black against a blue-white gradient reads as a hole punched in it. */
     nd_color ink_dark;
@@ -335,6 +346,7 @@ const nd_theme_style *nd_theme_style_builtin(void);
 #define ND_TH_BAR_BOT (nd_theme_pal->bar_bot)
 #define ND_TH_BAR_INK (nd_theme_pal->bar_ink)
 #define ND_TH_SEL_INK (nd_theme_pal->sel_ink)
+#define ND_TH_WARN_INK (nd_theme_pal->warn_ink)
 
 /* Ink. */
 #define ND_TH_INK_DARK  (nd_theme_pal->ink_dark)

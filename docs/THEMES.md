@@ -68,6 +68,7 @@ signature colour even in a theme with no blue in it.
 | `blue_hi` `blue_top` `blue_mid` `blue_bot` | the signature colour: the selected row, a progress fill, an accent |
 | `bar_top` `bar_bot` `bar_ink` | the title bar and the softkey strip, and the type on them |
 | `sel_ink` | type standing on the selection -- white over glass, black over an inverted row |
+| `warn_ink` | a warning in type: the home screen's "Eng. Mode" line |
 | `blue_deep` | the 1 px dark cut around every plate and divider |
 | `glass_top` `glass_bot` | the frosted panel content sits on |
 | `chrome_hi` `chrome_top` `chrome_bot` | bezels, the bevel hairline, the scrollbar track |
@@ -79,9 +80,14 @@ signature colour even in a theme with no blue in it.
 | `text_sheen` | the highlight under dark type, the letterpress effect |
 | `scrim_ink` | the readability wash laid over a wallpaper |
 
-`text_shadow` and `scrim_ink` are worth setting even in a small theme. Both
-are navy in the stock look because navy darkens a blue interface without
-desaturating it, and navy under pink type reads as a bruise.
+`text_shadow` and `scrim_ink` are worth setting even in a small theme.
+
+**`ink_light` is "type over the background", not "white type".** A theme with
+a light background should make it dark and set `text_shadow` to a pale halo --
+white type on a pale ground is the one mistake that makes a pretty palette
+unreadable, and it is what the Hello Kitty theme does the other way round from
+Frutiger Aero. The bars and the selection have their own ink, so they keep
+white type either way.
 
 ### Structure
 
