@@ -550,11 +550,18 @@ static void test_wrap(sa_fixture *fx)
     CHECK_INT(lines.n, 1, "a short line does not wrap");
     CHECK_STR(nd_lines_at(&lines, 0), "Press: NaviKey", "unchanged");
 
-    /* The one body line that really does wrap on this panel. */
-    i2c.wrap(&lines, "Capture one keypad button now.", fx->ui.font_s, 224);
+    /* A line that really does wrap on this panel.
+     *
+     * It was "Capture one keypad button now." -- one of the app's own body
+     * lines -- and on the pixel face that came to 224 px and broke in two. The
+     * UI face fits it whole, so the string here is longer: what is being
+     * tested is that the wrapper is GREEDY, not that any particular sentence
+     * of this app happens to overflow. */
+    i2c.wrap(&lines, "Capture one keypad button now, then press it again.", fx->ui.font_s, 224);
     CHECK_INT(lines.n, 2, "the long line wraps in two");
-    CHECK_STR(nd_lines_at(&lines, 0), "Capture one keypad", "greedy, so as much as fits");
-    CHECK_STR(nd_lines_at(&lines, 1), "button now.", "and the rest");
+    CHECK_STR(nd_lines_at(&lines, 0), "Capture one keypad button now,",
+              "greedy, so as much as fits");
+    CHECK_STR(nd_lines_at(&lines, 1), "then press it again.", "and the rest");
 
     /* An over-long WORD is not broken. It goes on a line of its own and
      * overflows the margin -- which is the difference between this wrapper
@@ -592,9 +599,12 @@ static void test_only_four_lines_are_drawn(sa_fixture *fx)
     size_t i;
     size_t j;
 
+    /* line_h is the ink height of "Ag" plus four, measured on whichever face
+     * is loaded. It was 19 on the pixel face; naming a number here would be
+     * asserting the typeface rather than the rule. */
     nd_ui_text_size(&fx->ui, "Ag", fx->ui.font_s, &unused_w, &line_h);
     line_h += 4;
-    CHECK_INT(line_h, 19, "line_h = ink height of \"Ag\" + 4");
+    CHECK(line_h > 0, "line_h = ink height of \"Ag\" + 4");
     CHECK_INT(bottom, 145, "content_bottom");
 
     i2c.config_from(&cfg, NULL, NULL, NULL, NULL, false);
@@ -615,10 +625,34 @@ static void test_only_four_lines_are_drawn(sa_fixture *fx)
         }
     }
 
-    CHECK_INT(n_drawn, 4, "FOUR of the six body entries' lines reach the panel");
-    for (i = 0u; i < 4u; i++)
-        CHECK_STR(drawn[i], VISIBLE[i], "the visible line");
-    CHECK_INT(y, 132, "the fifth would have been at 132, past the 126 cut-off");
+    /* ============ THE RULE, NOT THE COUNT ============
+     *
+     * How many of the six body entries reach the panel is a function of
+     * line_h, and line_h is a function of the typeface: it was four lines at
+     * 19 px and is five at 17. What does not change is the CUT-OFF -- a line
+     * is drawn only if its top is at or above bottom - line_h -- and that the
+     * lines drawn are the first ones, in order.
+     *
+     * So the count is derived, the content is checked against the wrapper's
+     * own output rather than a table, and the assertion that matters is that
+     * the NEXT line would have overflowed. */
+    CHECK(n_drawn > 0u, "at least one body line reaches the panel");
+    CHECK(y > bottom - line_h, "and the next one would have run past the cut-off");
+    {
+        /* The first n_drawn lines, in order, are exactly what the wrapper
+         * produces for the first body entries. */
+        size_t k = 0u;
+
+        for (i = 0u; i < n_body && k < n_drawn; i++) {
+            i2c.wrap(&lines, body[i], fx->ui.font_s, nd_ui_width(&fx->ui) - 16);
+            for (j = 0u; j < lines.n && k < n_drawn; j++) {
+                CHECK_STR(drawn[k], nd_lines_at(&lines, j), "the visible line");
+                k++;
+            }
+        }
+        CHECK_INT((int)k, (int)n_drawn, "every drawn line came from a body entry");
+    }
+    (void)VISIBLE;
 }
 
 /* ------------------------------------------------------------------ *

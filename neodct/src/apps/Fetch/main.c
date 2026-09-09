@@ -44,6 +44,7 @@
 #include "nd_storage.h"
 #include "nd_t9.h"
 #include "nd_text.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_widgets.h"
@@ -90,11 +91,13 @@ static void say_working(nd_ui *ui, const char *what)
     int32_t w = 0;
     int32_t h = 0;
 
-    (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, nd_ui_width(ui), nd_ui_content_bottom(ui)),
-                            ND_BLACK);
+    /* The chrome background, not a black fill: AGENTS.md's Conventions reserve
+     * a literal fill for a surface that is not chrome, and this is a status
+     * screen over the phone's own wallpaper. */
+    nd_ui_paint_chrome_content(ui);
     nd_text_size(ui->font_n, what, &w, &h);
-    (void)nd_draw_text(ui->draw, (nd_ui_width(ui) - w) / 2, (nd_ui_content_bottom(ui) - h) / 2,
-                       what, ui->font_n, ND_WHITE);
+    nd_theme_text_light(ui->draw, (nd_ui_width(ui) - w) / 2, (nd_ui_content_bottom(ui) - h) / 2,
+                        what, ui->font_n);
     nd_softkey_init(&bar, ui, false);
     nd_softkey_update(&bar, "", true);
     (void)nd_ui_present(ui);

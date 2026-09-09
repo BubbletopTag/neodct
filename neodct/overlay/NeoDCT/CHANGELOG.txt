@@ -1,7 +1,34 @@
 # NeoDCT OS Changelog
 
 0.5.16a-dev
-A development build. The debug link now follows engineering mode.
+A new look across the whole phone, and a debug link that follows
+engineering mode.
+
+The whole interface has been redrawn. Nothing is flat any more: titles, list
+rows, buttons and dialogs are glossy plates with a light source at the top, a
+sheen filling their upper half and a white bevel one pixel inside every edge.
+Text carries a soft shadow below it so it stays readable over a photograph.
+The old look was white type on black, which was easy to read and said nothing;
+this one is the phone saying what it is.
+
+The home screen shows the wallpaper properly. It used to be dimmed to under a
+third of its brightness so that white text could sit on top of it, which made
+every wallpaper look like the same dark smudge. The text now has its own
+shading -- a scrim under the status row and a shadow under each line -- so the
+picture behind it can be nearly full brightness and still be read against.
+Inside an app the picture is dimmed further, because there is far more type
+there to read.
+
+Every app has a new icon, and the shipped wallpaper is one of the family.
+
+The interface has its own typeface. The phone previously drew its menus in the
+same pixel face the startup screen uses, which is pinned to the boot loader and
+cannot be changed. That face is still there and still does that job; the menus
+are now drawn in a rounded sans with a bold weight for titles, which is what
+makes a plate look like a button rather than a rectangle with a word on it.
+
+The battery and signal indicators were redrawn to match, and the battery now
+changes colour as it empties -- green, then amber at two bars, then red at one.
 
 Ethernet, and the telnet, FTP and screen-sharing services on it, now only come
 up when Engineering Mode is on in Settings. With it off the phone puts no

@@ -54,6 +54,7 @@
 #include "nd_draw.h"
 #include "nd_font.h"
 #include "nd_image.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_widgets.h"
@@ -114,28 +115,61 @@ void nd_softkey_update(nd_softkey *bar, const char *text, bool present)
         }
     } else {
         /* OPAQUE. Still opaque: nd_ui_paint_chrome() either blits the
-         * wallpaper's own rows 145..175 or fills black, and both cover
+         * wallpaper's own rows 145..175 or paints the sky, and both cover
          * whatever the widget above left in the strip -- a scrolling list or
          * a game's graphics still cannot show through.
          *
-         * It has to be the chrome background rather than black, because the
-         * widget that just cleared rows 0..145 used the chrome background
-         * too, and a black band under a wallpapered list is a seam a third of
-         * the way up the phone. The literal (0, y_start, w, h) is
+         * It has to be the chrome background rather than a flat fill, because
+         * the widget that just cleared rows 0..145 used the chrome background
+         * too, and a mismatched band under a wallpapered list is a seam a
+         * third of the way up the phone. The literal (0, y_start, w, h) is
          * Pillow-inclusive and therefore one row and one column past the
          * canvas; both are clipped, which is what Pillow does too. */
         nd_ui_paint_chrome(ui, ND_RECT(0, bar->y_start, screen_w, screen_h));
     }
 
+    /* ============ THE BAR IS A CONTROL NOW, NOT A CAPTION ============
+     *
+     * It used to be one word in white, floating on whatever was behind it,
+     * and that was right for a phone whose whole UI was floating white words.
+     * With the theme in, a label with no plate under it is the only thing on
+     * the screen that is not sitting on something, and it reads as left over
+     * rather than as the button the NaviKey presses.
+     *
+     * So: a glossy plate across the strip, inset two pixels so the panel's
+     * own edge shows either side of it. TRANSPARENCY IS PRESERVED AND STILL
+     * MEANS SOMETHING -- the core's bar (the only transparent one, see the
+     * header) gets a translucent plate that the wallpaper shows through, and
+     * every other bar gets an opaque one. That distinction was the whole
+     * reason the flag exists and it survives the reskin intact.
+     *
+     * An EMPTY LABEL STILL DRAWS NOTHING AT ALL, plate included. ProgressScreen
+     * and PagedList's empty state clear the strip on purpose and a plate with
+     * no word on it would be a button that does nothing -- worse than the bare
+     * background they asked for. */
     if (text != NULL && text[0] != '\0' && ui->font_n != NULL) {
+        const nd_font *f = nd_ui_font_bold(ui, ui->font_n);
+        nd_theme_plate p = nd_theme_plate_blue(6);
+        nd_rect plate = ND_RECT(2, bar->y_start + 2, screen_w - 3, screen_h - 3);
         int32_t w = 0;
         int32_t h = 0;
 
+        if (bar->transparent) {
+            /* Glass over the home screen's wallpaper. The border stays
+             * opaque; it is what keeps the shape readable over a busy
+             * picture, and a translucent border on a translucent body leaves
+             * the whole control looking like a smudge. */
+            p.body_a = 180u;
+            p.sheen_a = 70u;
+        }
+        nd_theme_plate_draw(ui->canvas, plate, &p);
+
         /* The INK height, so a label of "OK" and a label of "Options" do not
-         * sit on the same row. That is what the screens look like today. */
-        nd_ui_text_size(ui, text, ui->font_n, &w, &h);
-        (void)nd_draw_text(ui->draw, floordiv2(screen_w - w),
-                           bar->y_start + floordiv2(bar->height - h), text, ui->font_n, ND_WHITE);
+         * sit on the same row. That is what the screens look like today, and
+         * it is nd_widgets.h rule 2. */
+        nd_ui_text_size(ui, text, f, &w, &h);
+        nd_theme_text_light(ui->draw, floordiv2(screen_w - w),
+                            plate.y0 + floordiv2(nd_rect_h(plate) - h), text, f);
     }
 
     if (text != NULL) {

@@ -42,6 +42,7 @@
 #include "nd_app.h"
 #include "nd_draw.h"
 #include "nd_keycodes.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
@@ -242,25 +243,43 @@ void nd_snake_render(nd_snake *g)
     if (g == NULL || g->ui == NULL || g->ui->draw == NULL)
         return;
 
-    /* The WHOLE screen, softkey band included. */
-    (void)nd_draw_rect_fill(g->ui->draw, ND_RECT(0, 0, g->screen_w, g->screen_h), ND_BLACK);
+    /* The WHOLE screen, softkey band included. A play field is one of the
+     * three surfaces AGENTS.md says may fill their own background rather than
+     * calling the chrome painter -- but "its own" no longer has to mean black.
+     * A deep blue-to-black gradient keeps every bit of the contrast the game
+     * needs and stops it being the one screen that left the palette. */
+    nd_theme_gradient_v(g->ui->canvas, ND_RECT(0, 0, g->screen_w - 1, g->screen_h - 1),
+                        ND_RGB(0x0B, 0x2B, 0x4E), ND_RGB(0x03, 0x0C, 0x1A), 255u);
 
     (void)nd_snprintf(score, sizeof score, "%d", g->score);
-    (void)nd_draw_text(g->ui->draw, 4, 1, score, g->ui->font_md, ND_WHITE);
+    nd_theme_text_light(g->ui->draw, 4, 1, score, nd_ui_font_bold(g->ui, g->ui->font_md));
 
-    (void)nd_draw_rect_outline(g->ui->draw,
-                               ND_RECT(g->board_x - 2, g->board_y - 2, g->board_x + g->board_w + 1,
-                                       g->board_y + g->board_h + 1),
-                               ND_WHITE, 1);
+    nd_theme_round_outline(g->ui->canvas,
+                           ND_RECT(g->board_x - 2, g->board_y - 2, g->board_x + g->board_w + 1,
+                                   g->board_y + g->board_h + 1),
+                           3, ND_TH_CHROME_HI, 190u);
 
+    /* The food is red and the snake is green, which is the oldest colour
+     * convention in this genre and was simply unavailable before. */
     if (g->has_food) {
-        (void)nd_draw_rect_outline(g->ui->draw, nd_snake_cell_rect(g, g->food.x, g->food.y),
-                                   ND_WHITE, 1);
+        nd_theme_plate p = nd_theme_plate_blue(2);
+
+        p.top = ND_TH_RED_TOP;
+        p.bot = ND_TH_RED_BOT;
+        p.drop_shadow = false;
+        nd_theme_plate_draw(g->ui->canvas, nd_snake_cell_rect(g, g->food.x, g->food.y), &p);
     }
 
     for (i = 0u; i < g->n_body; i++) {
-        (void)nd_draw_rect_fill(g->ui->draw, nd_snake_cell_rect(g, g->body[i].x, g->body[i].y),
-                                ND_WHITE);
+        nd_theme_plate p = nd_theme_plate_blue(2);
+
+        /* The head is lighter than the rest, so which way it is going is
+         * readable at a glance on a 240 px panel. */
+        p.top = (i == 0u) ? ND_RGB(0xD6, 0xF7, 0x9B) : ND_TH_GREEN_TOP;
+        p.bot = (i == 0u) ? ND_TH_GREEN_TOP : ND_TH_GREEN_BOT;
+        p.drop_shadow = false;
+        p.border_a = 150u;
+        nd_theme_plate_draw(g->ui->canvas, nd_snake_cell_rect(g, g->body[i].x, g->body[i].y), &p);
     }
 
     (void)nd_ui_present(g->ui);

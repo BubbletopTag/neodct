@@ -53,6 +53,7 @@
 #include "nd_draw.h"
 #include "nd_font.h"
 #include "nd_keycodes.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
@@ -291,7 +292,12 @@ int app_run(nd_ui *ui)
 
         /* Clears rows 0..content_bottom inclusive, so the softkey strip
          * below keeps whatever was there. */
-        (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, screen_w, content_bottom), ND_BLACK);
+        /* The cube's own field. A benchmark wants every millisecond and the
+         * darkest ground it can get, so this one keeps a flat fill -- but the
+         * theme's deep blue rather than black, so it is recognisably the same
+         * OS. */
+        nd_theme_fill(ui->canvas, ND_RECT(0, 0, screen_w - 1, content_bottom),
+                      ND_RGB(0x03, 0x0C, 0x1A), 255u);
 
         for (i = 0; i < ND_CUBEBENCH_N_VERTICES; i++) {
             double r[3];
@@ -321,14 +327,14 @@ int app_run(nd_ui *ui)
         if (n < 0 || (size_t)n >= sizeof fps_text)
             (void)nd_strlcpy(fps_text, "FPS ?", sizeof fps_text);
 
-        (void)nd_draw_text(ui->draw, 6, 4, "3D Cube", ui->font_s, ND_WHITE);
+        nd_theme_text_light(ui->draw, 6, 4, "3D Cube", ui->font_s);
 
         nd_ui_text_size(ui, fps_text, ui->font_s, &tw, &th);
-        (void)nd_draw_text(ui->draw, screen_w - tw - 6, 16, fps_text, ui->font_s, ND_WHITE);
+        nd_theme_text_light(ui->draw, screen_w - tw - 6, 16, fps_text, ui->font_s);
 
         nd_ui_text_size(ui, "BACK/OK to exit", ui->font_s, &tw, &th);
-        (void)nd_draw_text(ui->draw, floordiv(screen_w - tw, 2), content_bottom - th - 4,
-                           "BACK/OK to exit", ui->font_s, ND_GRAY);
+        nd_theme_text(ui->draw, floordiv(screen_w - tw, 2), content_bottom - th - 4,
+                      "BACK/OK to exit", ui->font_s, ND_TH_SKY_TOP, ND_RGB(0x08, 0x1E, 0x33));
 
         /* present=False: the softkey bar is painted into the same frame the
          * cube is in, and the one commit below puts both on the panel. */

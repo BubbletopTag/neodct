@@ -46,6 +46,7 @@
 #include FT_FREETYPE_H
 
 #include "nd_app.h"
+#include "uifont_test.h"
 #include "nd_capture.h"
 #include "nd_draw.h"
 #include "nd_font.h"
@@ -57,7 +58,7 @@
 #include "nd_vclock.h"
 #include "nd_widgets.h"
 
-#define FONT_REL "overlay/NeoDCT/System/ui/resources/fonts/font.ttf"
+#define FONT_REL ND_TEST_UI_FONT_REL
 
 /* The eight characters PERFORMANCE.md timed: `"FPS %.1f" % 60.0`. Eight is
  * the number the 75% share was measured over, so the comparison only holds if
@@ -214,6 +215,8 @@ typedef struct {
     nd_font *font_md;
     nd_font *font_n;
     nd_font *font_xl;
+    nd_font *font_n_b;
+    nd_font *font_xl_b;
     nd_capture *cap;
 } fixture;
 
@@ -225,6 +228,19 @@ static bool fx_init(fixture *fx, size_t ring)
     fx->font_md = nd_font_load(g_font, ND_FONT_PX_MD);
     fx->font_n = nd_font_load(g_font, ND_FONT_PX_N);
     fx->font_xl = nd_font_load(g_font, ND_FONT_PX_XL);
+
+    /* The bold pair. Optional -- nd_ui_font_bold() answers the regular
+     * weight for a NULL -- but a fixture that skips it renders every
+     * title a stroke too light and matches no reference frame.
+     * See uifont_test.h. */
+    {
+        char bold[ND_PATH_MAX];
+
+        if (ui_bold_face_path(g_font, bold, sizeof bold)) {
+            fx->font_n_b = nd_font_load(bold, ND_FONT_PX_N);
+            fx->font_xl_b = nd_font_load(bold, ND_FONT_PX_XL);
+        }
+    }
     if (fx->font_s == NULL || fx->font_md == NULL || fx->font_n == NULL || fx->font_xl == NULL)
         return false;
 
@@ -255,6 +271,8 @@ static bool fx_init(fixture *fx, size_t ring)
     fx->ui.font_md = fx->font_md;
     fx->ui.font_n = fx->font_n;
     fx->ui.font_xl = fx->font_xl;
+    fx->ui.font_n_b = fx->font_n_b;
+    fx->ui.font_xl_b = fx->font_xl_b;
     fx->ui.keypad_fd = -1;
     fx->ui.input = NULL; /* read_keypress(0) returns ND_KEY_NONE at once */
     fx->ui.softkey_exists = true;
@@ -272,6 +290,8 @@ static void fx_free(fixture *fx)
     nd_font_free(fx->font_md);
     nd_font_free(fx->font_n);
     nd_font_free(fx->font_xl);
+    nd_font_free(fx->font_n_b);
+    nd_font_free(fx->font_xl_b);
     memset(fx, 0, sizeof *fx);
 }
 
@@ -637,10 +657,65 @@ static void bench_glyph_cache(double cached_text_ms)
 }
 
 /* The claim that makes the cache free rather than a trade: a glyph taken out
- * of the arena is the same bitmap FreeType would have produced now. If it
+ * of the arena carries the same ink FreeType would have produced now. If it
  * were not, every golden frame would be a coin toss. Checked over all 95
  * printable ASCII characters at all four sizes rather than over the eight
- * that happen to be in the label. */
+ * that happen to be in the label.
+ *
+ * ============ THE CACHE STORES THE TIGHT INK BOX ============
+ *
+ * nd_font.h is explicit that a cached glyph is ink_w x ink_h with an ink_dx /
+ * ink_dy offset -- slot_ink_box() trims every fully transparent row and
+ * column off FreeType's bitmap, which is what makes ink_dx meaningful and
+ * what nd_text_size() measures.
+ *
+ * So a comparison against FT_Bitmap's raw width and rows is only correct for
+ * a face whose glyphs happen to have no blank edge columns. font.ttf, a pixel
+ * face, is such a font; aero.ttf is not, and against it this test reported
+ * 'X', 'Y', 'k', 'w', '5' and '?' as one column too narrow at various sizes.
+ * Every one of those was the cache being right and the test measuring the
+ * wrong box -- which is worth stating at length, because "the glyph cache is
+ * off by a pixel" is an alarming thing to read and it was never true. */
+/* slot_ink_box() from lib/nd_font.c, which is static there. Duplicated rather
+ * than exported: the point of this test is to check the cache against an
+ * INDEPENDENT reading of FreeType's output, and sharing the implementation
+ * would make it agree with itself. */
+static bool ink_box(const FT_Bitmap *bm, nd_rect *out)
+{
+    int32_t w = (int32_t)bm->width;
+    int32_t h = (int32_t)bm->rows;
+    int32_t x0 = w;
+    int32_t y0 = h;
+    int32_t x1 = -1;
+    int32_t y1 = -1;
+    int32_t x;
+    int32_t y;
+
+    if (bm->buffer == NULL || w <= 0 || h <= 0 || bm->pixel_mode != FT_PIXEL_MODE_GRAY)
+        return false;
+
+    for (y = 0; y < h; y++) {
+        const uint8_t *row = bm->buffer + (ptrdiff_t)y * (ptrdiff_t)bm->pitch;
+
+        for (x = 0; x < w; x++) {
+            if (row[x] == 0u)
+                continue;
+            if (x < x0)
+                x0 = x;
+            if (x > x1)
+                x1 = x;
+            if (y < y0)
+                y0 = y;
+            if (y > y1)
+                y1 = y;
+        }
+    }
+    if (x1 < 0)
+        return false;
+    *out = ND_RECT(x0, y0, x1, y1);
+    return true;
+}
+
 static void test_cache_is_pixel_identical(void)
 {
     static const int32_t PX[] = {ND_FONT_PX_S, ND_FONT_PX_MD, ND_FONT_PX_N, ND_FONT_PX_XL};
@@ -669,6 +744,7 @@ static void test_cache_is_pixel_identical(void)
             const nd_glyph *g = nd_font_glyph(f, cp);
             FT_UInt idx = FT_Get_Char_Index(face, (FT_ULong)cp);
             FT_Bitmap *bm;
+            nd_rect box;
             int32_t y;
 
             if (g == NULL || FT_Load_Glyph(face, idx, FT_LOAD_DEFAULT) != 0 ||
@@ -677,7 +753,16 @@ static void test_cache_is_pixel_identical(void)
                 break;
             }
             bm = &face->glyph->bitmap;
-            if ((int32_t)bm->width != g->ink_w || (int32_t)bm->rows != g->ink_h) {
+            if (!ink_box(bm, &box)) {
+                /* No ink at all -- a space, or .notdef. The cache agrees by
+                 * storing nothing and still reporting the advance. */
+                if (g->ink_w != 0 || g->ink_h != 0 || g->coverage != NULL) {
+                    all_equal = false;
+                    break;
+                }
+                continue;
+            }
+            if (nd_rect_w(box) != g->ink_w || nd_rect_h(box) != g->ink_h) {
                 all_equal = false;
                 break;
             }
@@ -686,10 +771,11 @@ static void test_cache_is_pixel_identical(void)
                 break;
             }
             for (y = 0; y < g->ink_h; y++) {
-                const uint8_t *want = bm->buffer + (ptrdiff_t)y * (ptrdiff_t)bm->pitch;
+                const uint8_t *want = bm->buffer + (ptrdiff_t)(y + box.y0) * (ptrdiff_t)bm->pitch +
+                                      box.x0;
                 const uint8_t *got = g->coverage + (size_t)y * (size_t)g->ink_w;
 
-                if (g->ink_w > 0 && memcmp(want, got, (size_t)g->ink_w) != 0) {
+                if (memcmp(want, got, (size_t)g->ink_w) != 0) {
                     all_equal = false;
                     break;
                 }

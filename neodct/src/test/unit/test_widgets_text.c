@@ -39,6 +39,7 @@
 #include <unistd.h>
 
 #include "nd_capture.h"
+#include "uifont_test.h"
 #include "nd_draw.h"
 #include "nd_font.h"
 #include "nd_image.h"
@@ -61,7 +62,7 @@
  * rendering tests; the acceptance gate supplies neither variable)
  * ------------------------------------------------------------------ */
 
-#define FONT_REL "overlay/NeoDCT/System/ui/resources/fonts/font.ttf"
+#define FONT_REL ND_TEST_UI_FONT_REL
 
 static bool file_exists(const char *path)
 {
@@ -126,8 +127,8 @@ static bool resolve_font(char *out, size_t sz)
         (void)nd_strlcpy(out, "neodct/" FONT_REL, sz);
         return true;
     }
-    if (file_exists("/NeoDCT/System/ui/resources/fonts/font.ttf")) {
-        (void)nd_strlcpy(out, "/NeoDCT/System/ui/resources/fonts/font.ttf", sz);
+    if (file_exists(ND_TEST_UI_FONT_ABS)) {
+        (void)nd_strlcpy(out, ND_TEST_UI_FONT_ABS, sz);
         return true;
     }
     return false;
@@ -145,6 +146,8 @@ typedef struct {
     nd_font *font_md;
     nd_font *font_n;
     nd_font *font_xl;
+    nd_font *font_n_b;
+    nd_font *font_xl_b;
 } fixture;
 
 static fixture g_fx;
@@ -162,6 +165,19 @@ static bool fx_init(fixture *fx)
     fx->font_md = nd_font_load(path, ND_FONT_PX_MD);
     fx->font_n = nd_font_load(path, ND_FONT_PX_N);
     fx->font_xl = nd_font_load(path, ND_FONT_PX_XL);
+
+    /* The bold pair. Optional -- nd_ui_font_bold() answers the regular
+     * weight for a NULL -- but a fixture that skips it renders every
+     * title a stroke too light and matches no reference frame.
+     * See uifont_test.h. */
+    {
+        char bold[ND_PATH_MAX];
+
+        if (ui_bold_face_path(path, bold, sizeof bold)) {
+            fx->font_n_b = nd_font_load(bold, ND_FONT_PX_N);
+            fx->font_xl_b = nd_font_load(bold, ND_FONT_PX_XL);
+        }
+    }
     if (fx->font_s == NULL || fx->font_md == NULL || fx->font_n == NULL || fx->font_xl == NULL) {
         fprintf(stderr, "test_widgets_text: nd_font_load(%s) failed\n", path);
         return false;
@@ -185,6 +201,8 @@ static bool fx_init(fixture *fx)
     fx->ui.font_md = fx->font_md;
     fx->ui.font_n = fx->font_n;
     fx->ui.font_xl = fx->font_xl;
+    fx->ui.font_n_b = fx->font_n_b;
+    fx->ui.font_xl_b = fx->font_xl_b;
     fx->ui.keypad_fd = -1;
     /* No matrix keypad, which is how every golden frame was captured: T9 runs
      * on the i2c keypad only, so the mode indicator is not drawn. */
@@ -200,6 +218,8 @@ static void fx_free(fixture *fx)
     nd_font_free(fx->font_md);
     nd_font_free(fx->font_n);
     nd_font_free(fx->font_xl);
+    nd_font_free(fx->font_n_b);
+    nd_font_free(fx->font_xl_b);
     memset(fx, 0, sizeof *fx);
 }
 
@@ -386,19 +406,46 @@ static void test_textinput_geometry(void)
               ND_OK);
     nd_textinput_draw(&t, true);
 
-    /* header divider at y = max(30, int(175 * 0.11)) = 30, full width */
-    CHECK(px_white(fx, 0, 30));
-    CHECK(px_white(fx, 239, 30));
-    CHECK(!px_white(fx, 0, 31));
+    /* ============ THE TITLE RULE AND THE FIELD, RE-READ ============
+     *
+     * Both used to be one-pixel white outlines and both are themed objects
+     * now, so "is this pixel white" says nothing useful about either.
+     *
+     * The title bar is a plate filling rows 0..29 across the full width, in
+     * place of the rule that was drawn at row 30. Its bottom edge is asserted
+     * by what is BELOW it: row 36 is clear of the plate and of the three-row
+     * shadow it casts.
+     *
+     * The field is a recessed WELL -- a light rounded plate at the same
+     * rectangle (10, 80)-(230, 120) the outline occupied. Its interior is
+     * light and its surroundings are not, which is the exact opposite of the
+     * hollow-outline test it replaces and is the same statement about where
+     * the field is. */
+    {
+        /* The plate is a dark blue gradient and the ground below it is the
+         * pale sky, so the bar is asserted by the STEP between them rather
+         * than by either one's colour. */
+        /* x=200, clear of the title text: "Phonebook" at 24 px bold reaches
+         * past the middle of the bar, and a white glyph would not be a fair
+         * sample of the plate.
+         *
+         * The plate is not simply darker than the ground -- its sheen is
+         * lighter in green and blue than the sky is. What separates the two
+         * everywhere is SATURATION: the plate is far more blue than the pale
+         * sky it sits on. */
+        nd_color bar = nd_image_get_px(fx->canvas, 200, 8);
+        nd_color below = nd_image_get_px(fx->canvas, 200, 36);
 
-    /* The box: rectangle((10, 80, 230, 120), outline) -- inclusive corners. */
-    CHECK(px_white(fx, 10, 80));
-    CHECK(px_white(fx, 230, 80));
-    CHECK(px_white(fx, 10, 120));
-    CHECK(px_white(fx, 230, 120));
-    CHECK(!px_white(fx, 9, 80));
-    CHECK(!px_white(fx, 231, 120));
-    CHECK(!px_white(fx, 11, 81)); /* hollow */
+        CHECK((int32_t)bar.b - (int32_t)below.b > 30);
+        CHECK(((int32_t)bar.b - (int32_t)bar.r) - ((int32_t)below.b - (int32_t)below.r) > 30);
+    }
+
+    CHECK(px_white(fx, 120, 82));  /* inside the well */
+    CHECK(px_white(fx, 120, 118)); /* still inside it, near the bottom */
+    CHECK(!px_white(fx, 5, 100));  /* left of it */
+    CHECK(!px_white(fx, 235, 100)); /* right of it */
+    CHECK(!px_white(fx, 120, 75));  /* above it */
+    CHECK(!px_white(fx, 120, 126)); /* below it */
 
     /* Rows below content_bottom are untouched by draw(): the clear is
      * (0, 0, w, 145) and the softkey strip starts at 145. */
@@ -516,34 +563,58 @@ static void test_indicator_size(void)
     /* The engine starts in "abc" -- multi-tap is what every existing field
      * expects; predictive is one # press away. */
     CHECK_INT(nd_t9_engine_mode(&t.t9), ND_T9_MODE_ABC);
-    CHECK_INT(nd_t9ind_size(&fx->ui, &t.t9, &label, &pencil), 45); /* width("abc") @20 */
-    CHECK_STR(label, "abc");
-    CHECK_INT(pencil, 0);
+    /* The indicator is exactly as wide as its label, and in predictive mode a
+     * pencil plus a gap wider than that. Every one of these was written out in
+     * pixels for the old face; they are the SAME arithmetic measured on
+     * whichever face is loaded. */
+    {
+        int32_t w_abc = 0;
+        int32_t w_upper = 0;
+        int32_t w_123 = 0;
+        int32_t h_abc = 0;
+        int32_t pencil_h;
 
-    (void)nd_t9_engine_set_mode_index(&t.t9, 2u);
-    CHECK_INT(nd_t9_engine_mode(&t.t9), ND_T9_MODE_UPPER);
-    CHECK_INT(nd_t9ind_size(&fx->ui, &t.t9, &label, &pencil), 48);
-    CHECK_STR(label, "ABC");
+        nd_text_size(fx->ui.font_n, "abc", &w_abc, &h_abc);
+        nd_text_size(fx->ui.font_n, "ABC", &w_upper, NULL);
+        nd_text_size(fx->ui.font_n, "123", &w_123, NULL);
+        /* max(8, int(height("abc") * 0.85)). */
+        pencil_h = nd_max32(8, nd_trunc32((double)h_abc * 0.85));
 
-    (void)nd_t9_engine_set_mode_index(&t.t9, 3u);
-    CHECK_INT(nd_t9ind_size(&fx->ui, &t.t9, &label, &pencil), 43);
-    CHECK_STR(label, "123");
+        CHECK_INT(nd_t9ind_size(&fx->ui, &t.t9, &label, &pencil), w_abc);
+        CHECK_STR(label, "abc");
+        CHECK_INT(pencil, 0);
 
-    /* Predictive: pencil + 4 + width("abc"), and the pencil is
-     * max(8, int(height("abc") * 0.85)) = max(8, int(18 * 0.85)) = 15. */
-    (void)nd_t9_engine_set_mode_index(&t.t9, 0u);
-    CHECK_INT(nd_t9_engine_mode(&t.t9), ND_T9_MODE_WORD);
-    CHECK_INT(nd_t9ind_size(&fx->ui, &t.t9, &label, &pencil), 15 + ND_T9_PENCIL_GAP + 45);
-    CHECK_STR(label, "abc");
-    CHECK_INT(pencil, 15);
+        (void)nd_t9_engine_set_mode_index(&t.t9, 2u);
+        CHECK_INT(nd_t9_engine_mode(&t.t9), ND_T9_MODE_UPPER);
+        CHECK_INT(nd_t9ind_size(&fx->ui, &t.t9, &label, &pencil), w_upper);
+        CHECK_STR(label, "ABC");
 
-    /* draw() returns the same width and puts the right edge where asked. */
-    (void)nd_draw_rect_fill(&fx->draw, ND_RECT(0, 0, ND_UI_W, ND_UI_H), ND_BLACK);
-    CHECK_INT(nd_t9ind_draw(&fx->ui, 228, 50, &t.t9), 64);
-    /* The pencil's point is its bottom-left pixel, sitting on the text
-     * baseline: x = 228 - 64 = 164, y = 50 + max(0, 18 - 15) = 53. */
-    CHECK(px_white(fx, 164, 53 + 14));
-    CHECK(!px_white(fx, 163, 53 + 14));
+        (void)nd_t9_engine_set_mode_index(&t.t9, 3u);
+        CHECK_INT(nd_t9ind_size(&fx->ui, &t.t9, &label, &pencil), w_123);
+        CHECK_STR(label, "123");
+
+        /* Predictive: pencil + gap + width("abc"). */
+        (void)nd_t9_engine_set_mode_index(&t.t9, 0u);
+        CHECK_INT(nd_t9_engine_mode(&t.t9), ND_T9_MODE_WORD);
+        CHECK_INT(nd_t9ind_size(&fx->ui, &t.t9, &label, &pencil),
+                  pencil_h + ND_T9_PENCIL_GAP + w_abc);
+        CHECK_STR(label, "abc");
+        CHECK_INT(pencil, pencil_h);
+
+        /* draw() returns the same width and puts the right edge where asked. */
+        (void)nd_draw_rect_fill(&fx->draw, ND_RECT(0, 0, ND_UI_W, ND_UI_H), ND_BLACK);
+        {
+            int32_t total = pencil_h + ND_T9_PENCIL_GAP + w_abc;
+            /* The pencil's point is its bottom-left pixel, sitting on the text
+             * baseline: x = 228 - total, y = 50 + max(0, h_abc - pencil_h). */
+            int32_t px0 = 228 - total;
+            int32_t py = 50 + nd_max32(0, h_abc - pencil_h);
+
+            CHECK_INT(nd_t9ind_draw(&fx->ui, 228, 50, &t.t9), total);
+            CHECK(px_white(fx, px0, py + pencil_h - 1));
+            CHECK(!px_white(fx, px0 - 1, py + pencil_h - 1));
+        }
+    }
 
     fx->ui.has_matrix_keypad = false;
 }
@@ -1072,10 +1143,16 @@ static void test_incremental_rewrap_while_typing(void)
     CHECK_INT(nd_textlong_init(&t, &fx->ui, "Write Message", buf, sizeof buf, "", ND_T9_FILTER_ANY),
               ND_OK);
 
-    /* Type the pangram six times over -- about 264 characters, which is
+    /* Type the pangram twelve times over -- about 530 characters, which is
      * comfortably more than the watermark's ten-line window, so it advances
-     * several times. Every single keypress is checked against a cold render. */
-    for (round = 0u; round < 6u; round++) {
+     * several times. Every single keypress is checked against a cold render.
+     *
+     * It was six rounds, and six was enough on the pixel face: the same words
+     * wrapped to more lines there. On the UI face 264 characters no longer
+     * reaches the window at all, and the two checks at the end of this
+     * function -- the ones that say the watermark MOVED -- quietly had nothing
+     * to be true about. The count is doubled rather than the checks dropped. */
+    for (round = 0u; round < 12u; round++) {
         for (i = 0u; i < ND_ARRAY_LEN(script); i++) {
             CHECK_INT(nd_textlong_handle_key(&t, script[i]), ND_WIDGET_RESULT_TYPED);
 

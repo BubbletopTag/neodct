@@ -79,6 +79,7 @@
 #include "nd_storage.h"
 #include "nd_svc.h"
 #include "nd_text.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_widgets.h"
@@ -300,11 +301,13 @@ static void bt_say_working(nd_ui *ui, const char *what)
     int32_t w = 0;
     int32_t h = 0;
 
-    (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, nd_ui_width(ui), nd_ui_content_bottom(ui)),
-                            ND_BLACK);
+    /* The chrome background, not a black fill. AGENTS.md's Conventions: a
+    * literal black fill is right only for a surface that is not chrome, and
+    * a transient "Working..." over the phone's own wallpaper is chrome. */
+    nd_ui_paint_chrome_content(ui);
     nd_text_size(ui->font_n, what, &w, &h);
-    (void)nd_draw_text(ui->draw, (nd_ui_width(ui) - w) / 2, (nd_ui_content_bottom(ui) - h) / 2,
-                       what, ui->font_n, ND_WHITE);
+    nd_theme_text_light(ui->draw, (nd_ui_width(ui) - w) / 2, (nd_ui_content_bottom(ui) - h) / 2,
+                        what, ui->font_n);
     nd_softkey_init(&bar, ui, false);
     nd_softkey_update(&bar, "", true);
 }
@@ -487,8 +490,8 @@ static void show_bt_audio(nd_ui *ui)
                  * The adapter is the thing being switched on; if it did not
                  * come up there is nothing further worth trying. */
                 if (power != ND_OK) {
-                    (void)nd_infoscreen_show(ui, "Bluetooth would not start",
-                                             nd_strerror(power), "Back");
+                    (void)nd_infoscreen_show(ui, "Bluetooth would not start", nd_strerror(power),
+                                             "Back");
                 } else if (nd_btaudio_cmd_build(&cmd, "power", "on", 0) == ND_OK) {
                     (void)nd_btaudio_run(&cmd, NULL, 0u);
                 }
@@ -1199,7 +1202,6 @@ void nd_setapp_draw_about(nd_ui *ui)
     int32_t screen_w;
     int32_t content_bottom;
     int32_t header_y;
-    int32_t line_pad;
     int32_t y;
     int32_t w = 0;
     int32_t h = 0;
@@ -1240,11 +1242,20 @@ void nd_setapp_draw_about(nd_ui *ui)
 
     nd_ui_paint_chrome_full(ui);
 
+    /* The About screen centres its title and insets its rule, unlike every
+     * other screen -- it is a nameplate, not a navigation bar. So it keeps
+     * doing both, on a plate: nd_theme_titlebar draws the plate with no title,
+     * and the centred string goes on afterwards. */
+    (void)nd_theme_titlebar(ui->canvas, d, screen_w, header_y, NULL, NULL, NULL, NULL);
     nd_ui_text_size(ui, TITLE, ui->font_n, &w, &h);
-    (void)nd_draw_text(d, floordiv2(screen_w - w), 12, TITLE, ui->font_n, ND_WHITE);
+    nd_theme_text_light(d, floordiv2(screen_w - w), (header_y - h) / 2, TITLE,
+                        nd_ui_font_bold(ui, ui->font_n));
 
-    line_pad = nd_max32(10, (int32_t)((double)screen_w * 0.12)); /* 28 */
-    (void)nd_draw_line(d, line_pad, header_y, screen_w - line_pad, header_y, ND_WHITE, 1);
+    /* The inset rule this screen used to draw under its title is gone: the
+     * plate is the rule now, and it runs the full width like every other bar
+     * in the OS. The 28 px inset it used was the only thing distinguishing
+     * this header from a navigation one, and the centred nameplate above
+     * already says that better. */
 
     y = header_y + 12;
 
@@ -1259,7 +1270,7 @@ void nd_setapp_draw_about(nd_ui *ui)
             nd_ui_text_size(ui, line, ui->font_s, &w, &h);
             if (y > content_bottom - 18)
                 break;
-            (void)nd_draw_text(d, floordiv2(screen_w - w), y, line, ui->font_s, ND_WHITE);
+            nd_theme_text_light(d, floordiv2(screen_w - w), y, line, ui->font_s);
             y += 16;
         }
         y += 6;
@@ -1270,21 +1281,22 @@ void nd_setapp_draw_about(nd_ui *ui)
             char label[96];
 
             (void)nd_snprintf(label, sizeof label, "Version: %s", version_number);
-            (void)nd_draw_text(d, 10, y, label, ui->font_s, ND_GRAY);
+            nd_theme_text(d, 10, y, label, ui->font_s, ND_TH_SKY_TOP, ND_RGB(0x08, 0x1E, 0x33));
         }
         /* The += 16 is OUTSIDE the `if y <=` in the Python too: a version
          * number that did not fit still costs its row. */
         y += 16;
     }
     if (y <= content_bottom - 18)
-        (void)nd_draw_text(d, 10, y, "Build time:", ui->font_s, ND_GRAY);
+        nd_theme_text(d, 10, y, "Build time:", ui->font_s, ND_TH_SKY_TOP, ND_RGB(0x08, 0x1E, 0x33));
     y += 16;
 
     nd_setapp_wrap_text(&lines, ui, build_time, screen_w - 20, ui->font_s);
     for (i = 0u; i < lines.n && i < 2u; i++) {
         if (y > content_bottom - 18)
             break;
-        (void)nd_draw_text(d, 10, y, nd_lines_at(&lines, i), ui->font_s, ND_GRAY);
+        nd_theme_text(d, 10, y, nd_lines_at(&lines, i), ui->font_s, ND_TH_SKY_TOP,
+                      ND_RGB(0x08, 0x1E, 0x33));
         y += 16;
     }
 

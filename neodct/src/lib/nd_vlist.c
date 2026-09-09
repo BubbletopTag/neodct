@@ -24,14 +24,19 @@
  * ============ FOUR NUMBERS THAT DECIDE THE PIXELS ============
  *
  *   line_height = max(28, content_height // 3) = 33   rows at 40, 73, 106
- *   item_height = max(24, line_height - 4)     = 29   the white bar's height
- *   selected_right = max(20, bar_x - 10)       = 225  the bar stops short of
- *                                                     the scrollbar
- *   the scrollbar track is GREY (128,128,128) and width 1 -- the only grey
- *   pixels in the entire framework. Every other track is white and width 2.
+ *   item_height = max(24, line_height - 4)     = 29   the lozenge's height
+ *   selected_right = max(20, bar_x - 10)       = 225  it stops short of the
+ *                                                     scrollbar
+ *   bar_x = screen_w - 5                       = 235  the scrollbar's centre
  *
- * The notch position is a FLOAT that Pillow truncates. Rounding it instead
- * moves the notch a pixel on most list lengths.
+ * All four survived the theme unchanged, which was the point: the rows are
+ * where they were and only what is painted into them differs. What went is
+ * the selection's white-fill-black-text inversion (a glossy blue lozenge now)
+ * and the grey width-1 scrollbar track (a glass groove, nd_theme_scrollbar).
+ *
+ * The notch position is still a FLOAT that truncates -- it moved into
+ * nd_theme_scrollbar but it did not change. Rounding it instead moves the
+ * notch a pixel on most list lengths.
  *
  * ============ HOLD-TO-REPEAT ============
  *
@@ -56,6 +61,7 @@
 #include "nd_font.h"
 #include "nd_keycodes.h"
 #include "nd_text.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_widgets.h"
@@ -101,9 +107,9 @@ void nd_vlist_draw(nd_vlist *l)
     int32_t track_bottom;
     const nd_font *item_font;
     char title[ND_TEXT_LINE_MAX];
+    char badge[32];
     size_t max_start;
     size_t i;
-    double notch_y;
 
     if (l == NULL || l->ui == NULL || l->ui->draw == NULL)
         return;
@@ -117,15 +123,21 @@ void nd_vlist_draw(nd_vlist *l)
     /* 1. Clear -- rows 0..content_bottom only. See the header comment. */
     nd_ui_paint_chrome_content(ui);
 
-    /* 2. Title, trimmed so it cannot run under the right-aligned breadcrumb,
-     *    and drawn at y = 0 -- every other widget's title sits at y = 5. */
+    /* 2. The title bar. The title used to be white type at y=0 with a
+     *    one-pixel rule under it at y=30; it is now a glossy plate occupying
+     *    exactly those rows, so the geometry every list below it was tuned
+     *    against is unchanged and only the pixels differ. The breadcrumb goes
+     *    in as the plate's badge rather than being drawn separately, which is
+     *    what stops the two disagreeing about vertical centring.
+     *
+     *    The title is still trimmed against the breadcrumb's reserved width
+     *    first: nd_theme_titlebar draws what it is given, deliberately, since
+     *    only the caller knows whether the right answer here is to trim. */
     reserved = nd_header_width(&l->header, (int32_t)l->selected_index + 1);
     (void)nd_text_fit(title, sizeof title, l->title, ui->font_xl, screen_w - 5 - reserved - 6);
-    (void)nd_draw_text(d, 5, 0, title, ui->font_xl, ND_WHITE);
-    nd_header_draw(&l->header, (int32_t)l->selected_index + 1);
-
-    /* 3. Divider. */
-    (void)nd_draw_line(d, 0, header_y, screen_w, header_y, ND_WHITE, 1);
+    nd_header_text_for(&l->header, (int32_t)l->selected_index + 1, badge, sizeof badge);
+    (void)nd_theme_titlebar(ui->canvas, d, screen_w, header_y, title,
+                            nd_ui_font_bold(ui, ui->font_xl), badge, ui->font_n);
 
     /* 4. Row metrics, recomputed every frame exactly as the Python does. */
     y_start = header_y + 10;
@@ -171,27 +183,38 @@ void nd_vlist_draw(nd_vlist *l)
         text_y = y + nd_max32(0, (item_height - text_h) / 2);
 
         if (item_idx == l->selected_index) {
-            (void)nd_draw_rect_fill(d, ND_RECT(0, y, selected_right, y + item_height), ND_WHITE);
-            (void)nd_draw_text(d, 10, text_y, item_text, item_font, ND_BLACK);
+            /* ============ THE SELECTION IS A LOZENGE ============
+             *
+             * It was a hard white rectangle running from x=0 with black text
+             * on it -- an inversion, which is what a monochrome list has to
+             * do. The theme has colour to spend, so the selected row becomes
+             * the same glossy blue plate the title bar and the softkey are
+             * made of: one control language, three sizes.
+             *
+             * It starts at x=4 rather than x=0. A lozenge flush against the
+             * left edge has nowhere to put its rounded corner and comes out
+             * looking clipped; four pixels is the least that reads as a shape
+             * sitting on the screen rather than bleeding off it. `item_height`
+             * and `selected_right` are untouched, so the rows are where they
+             * always were. */
+            nd_theme_plate p = nd_theme_plate_blue(6);
+
+            nd_theme_plate_draw(ui->canvas, ND_RECT(4, y, selected_right, y + item_height), &p);
+            nd_theme_text_light(d, 12, text_y, item_text, nd_ui_font_bold(ui, item_font));
         } else {
-            (void)nd_draw_text(d, 10, text_y, item_text, item_font, ND_WHITE);
+            nd_theme_text_light(d, 12, text_y, item_text, item_font);
         }
     }
 
-    /* 5. Scrollbar: grey, width 1. The only grey in the framework. */
+    /* 5. Scrollbar. The track was a 1 px grey line -- the only grey in the
+     *    framework -- with a 7 px white notch riding on it. It is a recessed
+     *    glass groove with a glossy thumb now, and nd_theme_scrollbar keeps
+     *    the same centre column and the same track extent so nothing that
+     *    computed a layout around `bar_x` has moved. The notch's truncating
+     *    arithmetic lives in there too (nd_widgets.h rule 3). */
     track_top = y_start;
     track_bottom = nd_max32(track_top, content_bottom - 5);
-    (void)nd_draw_line(d, bar_x, track_top, bar_x, track_bottom, ND_GRAY, 1);
-
-    if (l->n_items > 1u) {
-        double step = (double)(track_bottom - track_top) / (double)(l->n_items - 1u);
-        notch_y = (double)track_top + ((double)l->selected_index * step);
-    } else {
-        notch_y = (double)track_top;
-    }
-    (void)nd_draw_rect_fill(
-        d, ND_RECT(bar_x - 2, nd_trunc32(notch_y - 3.0), bar_x + 2, nd_trunc32(notch_y + 3.0)),
-        ND_WHITE);
+    nd_theme_scrollbar(ui->canvas, bar_x, track_top, track_bottom, l->selected_index, l->n_items);
 
     (void)nd_ui_present(ui);
 }

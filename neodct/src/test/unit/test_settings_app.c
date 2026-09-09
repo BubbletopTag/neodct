@@ -578,6 +578,37 @@ static bool px_is(const nd_image *img, int32_t x, int32_t y, uint8_t r, uint8_t 
     return c.r == r && c.g == g && c.b == b;
 }
 
+static int32_t chan_delta(uint8_t a, uint8_t b)
+{
+    int32_t d = (int32_t)a - (int32_t)b;
+
+    return d < 0 ? -d : d;
+}
+
+/* Whether this pixel differs from the same column further down the screen.
+ *
+ * The ground behind app chrome is a wallpaper or the sky, and neither is
+ * uniform -- but both vary far more slowly than a plate's edge does, so a row
+ * inside the title bar and a row below it are a reliable pair. Used to say
+ * "the bar is here and it is not here".
+ *
+ * The comparison is the LARGEST of the three channel deltas, not the blue
+ * one. Blue alone was enough while the shipped wallpaper was a dark
+ * starburst; against a photograph of a blue sky it stopped separating the two
+ * rows at the screen's edges, where the pixel sampled is not the plate's face
+ * but its dark border -- (19,66,121) over a ground of (108,116,118), which is
+ * three units of blue apart and eighty-nine units of red. The bar was drawn
+ * correctly the whole time and the assertion still failed. */
+static bool px_differs_from_row(const nd_image *img, int32_t x, int32_t y_a, int32_t y_b)
+{
+    nd_color a = nd_image_get_px(img, x, y_a);
+    nd_color b = nd_image_get_px(img, x, y_b);
+    int32_t d = nd_max32(chan_delta(a.r, b.r), nd_max32(chan_delta(a.g, b.g),
+                                                        chan_delta(a.b, b.b)));
+
+    return d > 25;
+}
+
 static void test_about(void)
 {
     sa_fixture fx;
@@ -604,44 +635,41 @@ static void test_about(void)
 
     CHECK_INT(nd_capture_frames_drawn(fx.cap), 1, "the bar's present=False plus one fb.update");
 
-    /* The divider spans line_pad .. screen_w - line_pad INCLUSIVE, because
-     * Pillow's line() draws both endpoints. */
-    CHECK(px_is(fx.canvas, line_pad, header_y, 255, 255, 255), "the divider starts at line_pad");
-    CHECK(px_is(fx.canvas, 240 - line_pad, header_y, 255, 255, 255),
-          "and ends at screen_w - line_pad");
-    /* Just past each end the divider must not have drawn -- so the pixel
-     * there is whatever the framework painted as the background, and the same
-     * goes for the top-left corner. That used to be spelled "is black", which
-     * stopped being the background when the framework started drawing the
-     * wallpaper behind app chrome. Asking the UI what it would have painted
-     * says the same thing on either. */
-    {
-        const nd_image *bg = nd_ui_chrome_wallpaper(&fx.ui);
-        nd_color c;
+    /* ============ THE INSET RULE IS A FULL-WIDTH PLATE NOW ============
+     *
+     * The About screen used to draw its own divider from line_pad to
+     * screen_w - line_pad, which was the only inset rule in the OS and the
+     * only thing distinguishing this header from a navigation one. It is a
+     * title plate across the full width, and the centred nameplate above the
+     * body says "this is About" better than an inset line did.
+     *
+     * line_pad is still computed above and still checked, because the value
+     * is what the Python's layout used and a reader comparing the two sources
+     * should find it. It simply no longer decides a pixel.
+     *
+     * What is asserted instead is that the bar is THERE and spans the whole
+     * width -- at both edges, which the inset rule never reached. */
+    CHECK(px_differs_from_row(fx.canvas, 0, 8, 40), "the bar reaches the left edge");
+    CHECK(px_differs_from_row(fx.canvas, 239, 8, 40), "and the right edge");
+    CHECK(px_differs_from_row(fx.canvas, 120, 8, 40), "and the middle");
+    CHECK(!px_differs_from_row(fx.canvas, 0, 40, 44), "and stops well above row 44");
 
-#define BG_AT(X, Y) (bg != NULL ? nd_image_get_px(bg, (X), (Y)) : ND_BLACK)
-        c = BG_AT(line_pad - 1, header_y);
-        CHECK(px_is(fx.canvas, line_pad - 1, header_y, c.r, c.g, c.b),
-              "one pixel left of it is background, not divider");
-        c = BG_AT(240 - line_pad + 1, header_y);
-        CHECK(px_is(fx.canvas, 240 - line_pad + 1, header_y, c.r, c.g, c.b),
-              "one pixel right of it is background, not divider");
-        c = BG_AT(0, 0);
-        CHECK(px_is(fx.canvas, 0, 0, c.r, c.g, c.b), "the screen was cleared first");
-#undef BG_AT
-    }
-
-    /* The body is grey (128,128,128); a fully-covered pixel of it is exactly
-     * that, since the text is composited onto black. */
+    /* The version and build lines are QUIETER than the name above them. They
+     * were ND_GRAY, which was the only way to say that on a black screen;
+     * they are the palette's pale sky now, and what is checked is the
+     * relationship rather than a triple. */
     for (y = header_y + 12; y < 145 && !any_grey; y++) {
         for (x = 0; x < 240; x++) {
-            if (px_is(fx.canvas, x, y, 128, 128, 128)) {
+            nd_color c = nd_image_get_px(fx.canvas, x, y);
+
+            /* Pale, blue-leaning, and not the near-white the headline is. */
+            if (c.b > 150u && c.b > c.r + 40u && c.r < 200u) {
                 any_grey = true;
                 break;
             }
         }
     }
-    CHECK(any_grey, "the version/build lines are drawn in grey");
+    CHECK(any_grey, "the version/build lines are drawn quieter than the name");
 
     /* SoftKeyBar("Back") owns rows 145..174. */
     for (y = 145; y < 175 && !any_white_in_bar; y++) {

@@ -300,10 +300,21 @@ static void test_refuses_without_the_hook(void)
     CHECK_INT(api.run(&fx.ui), 0, "the refusal path still returns 0");
     CHECK_INT(nd_capture_frames_drawn(fx.cap), 1, "one frame: the dialog, and no readout");
     /* The dialog fills every row, including the softkey strip a readout would
-     * have left as "QStart". Row 0 of a readout is the "FuelGauge" title's
-     * band; here the top-left corner is the warning triangle's transparent
-     * margin, i.e. black. */
-    CHECK(nd_image_get_px(fx.canvas, 120, 0).r == 0u, "no title bar was drawn");
+     * have left as "QStart".
+     *
+     * What is on screen is asserted from the middle rather than from row 0. A
+     * readout's row 0 was black and a dialog's was the warning triangle's
+     * transparent margin, which was also black -- the old check happened to
+     * pass for the right reason and would have passed for the wrong one too.
+     * A dialog's middle is its GLASS PANEL, which is far lighter than
+     * anything a readout puts there, and that is a difference neither screen
+     * can fake. */
+    {
+        nd_color mid = nd_image_get_px(fx.canvas, 120, 90);
+
+        CHECK((int32_t)mid.r + (int32_t)mid.g + (int32_t)mid.b > 500,
+              "the dialog's panel is on screen, not a readout");
+    }
     nd_vclock_disable();
 
     /* And with no battery at all -- an app process, where nd_ui.h says the

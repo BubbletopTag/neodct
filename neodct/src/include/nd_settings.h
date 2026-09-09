@@ -46,11 +46,31 @@ extern "C" {
 #define ND_SETTINGS_SYSTEM_PREFIX "system.os."
 
 /* ---- SettingsStorage.DEFAULTS, verbatim ---- */
-#define ND_SET_AUDIO_RINGTOME_DFLT   "/NeoDCT/System/tones/Low.mp3"
-#define ND_SET_UI_WALLPAPER_DFLT     "NONE"
+#define ND_SET_AUDIO_RINGTOME_DFLT "/NeoDCT/System/tones/Low.mp3"
+/* Was "NONE", verbatim from the Python's SettingsStorage.DEFAULTS, and this
+ * is a deliberate divergence from it.
+ *
+ * "NONE" was right for a monochrome OS: a phone that booted to white type on
+ * black and let its owner add a picture if they wanted one. The theme's
+ * ground is not black any more (nd_ui_paint_chrome paints a sky), so a
+ * first boot with no wallpaper is no longer plain -- it is just missing the
+ * one asset the rest of the look was drawn to sit on.
+ *
+ * Anyone who preferred the empty ground still has it: the wallpaper picker's
+ * first entry is "None", and choosing it writes "NONE" here. Every other
+ * shipped wallpaper is one row further down the same list. */
+#define ND_SET_UI_WALLPAPER_DFLT     "/NeoDCT/System/wallpapers/Fruitiger Aero.jpg"
 #define ND_SET_UI_ENG_MODE_DFLT      "ON"
 #define ND_SET_UI_WP_EVERYWHERE_DFLT "ON"
-#define ND_SET_UI_WP_APP_DIM_DFLT    "0.75"
+/* Was 0.75, on top of a home wallpaper already dimmed to 0.3 -- so chrome sat
+ * at an effective 0.225 and the picture behind a list was barely a texture.
+ *
+ * The home dim is ND_UI_WALLPAPER_BRIGHTNESS now (0.88, see nd_ui.c), so 0.68
+ * puts chrome at an effective 0.60 -- nearly three times what the old build
+ * gave it, and still a visible step down from the home screen. That step is
+ * the whole reason there are two numbers: the home screen is where the
+ * picture is the point, and a screen with a list of words on it is not. */
+#define ND_SET_UI_WP_APP_DIM_DFLT    "0.68"
 #define ND_SET_OS_VERSIONNUMBER_DFLT "0.3.1a"
 #define ND_SET_OS_VERSIONNAME_DFLT   "NeoDCT System v0.3.1a"
 #define ND_SET_OS_PLATFORM_DFLT      "unknown"
