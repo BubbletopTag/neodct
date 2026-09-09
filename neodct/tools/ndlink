@@ -42,7 +42,15 @@ set -eu
 
 ND_VERSION="0.1"
 
-HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Resolve $0 through any symlinks BEFORE taking its directory. ndlink is meant
+# to be symlinked into ~/.local/bin, and dirname of the symlink is that bin
+# directory -- where ndlink-telnet is not. Without this, ndlink on PATH fails
+# with "missing .../ndlink-telnet" and the cause is entirely non-obvious.
+ND_SELF=$0
+if command -v readlink >/dev/null 2>&1; then
+    ND_SELF=$(readlink -f -- "$0" 2>/dev/null || printf '%s' "$0")
+fi
+HERE=$(CDPATH= cd -- "$(dirname -- "$ND_SELF")" && pwd)
 REPO=$(dirname "$HERE")          # neodct/
 ROOT=$(dirname "$REPO")          # the repo root
 STATE="$ROOT/.ndlink"
@@ -521,6 +529,15 @@ verb_apps() {
 # So: put the .ndsw where the phone already looks for one, and say what to do
 # next. Settings -> System Update finds it there.
 verb_update() {
+    _up_install=0
+    _up_open=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --install) _up_install=1; shift ;;
+        --open) _up_open=1; shift ;;
+        *) break ;;
+        esac
+    done
     _up_pkg=${1:-}
     [ -n "$_up_pkg" ] || fail 5 "update needs a .ndsw package"
     [ -f "$_up_pkg" ] || fail 5 "no such file: $_up_pkg"
@@ -543,10 +560,62 @@ verb_update() {
         >/dev/null 2>&1 || true
     _up_sz=$(hw_shell "wc -c < '$_up_remote'" 2>/dev/null | tr -d ' \r\n')
 
+    if [ "$_up_install" = 1 ]; then
+        # nd-stage does exactly what the Update app does on confirm: verify the
+        # signature, check the package is for this phone, write pending.prop.
+        # The boot-time applier re-checks the signature with the verifier and
+        # key built into the KERNEL image, so nothing here is trusted twice.
+        _up_out=$(hw_shell "$(remote_tool nd-stage) --json '$_up_remote' 2>&1") || true
+        _up_json=$(printf '%s' "$_up_out" | tr -d '\r' | grep '^{' | tail -n 1)
+        case "$_up_json" in
+        '{"ok":true'*) ;;
+        '{'*)
+            [ "$JSON" = 1 ] && printf '%s\n' "$_up_json"
+            fail 6 "staging refused: $_up_json"
+            ;;
+        *) fail 6 "nd-stage did not answer (is it on the phone?): $_up_out" ;;
+        esac
+
+        # The pushed copies under /NeoDCT/User/bin shadow whatever the new
+        # rootfs ships -- remote_tool prefers them on purpose, which is right
+        # during iteration and wrong the moment an update lands. Clearing them
+        # here means the phone comes back running the tools it was built with.
+        hw_shell "rm -rf /NeoDCT/User/bin /NeoDCT/User/lib" >/dev/null 2>&1 || true
+
+        hw_shell "sync; (sleep 1; reboot) >/dev/null 2>&1 &" >/dev/null 2>&1 || true
+        emit_ok update "\"staged\":\"$(json_escape "$_up_remote")\",\"bytes\":${_up_sz:-0},\"applied\":\"rebooting\""
+        if [ "$JSON" != 1 ]; then
+            printf 'staged %s and rebooting.\n' "$_up_remote"
+            printf 'The applier installs it during boot; give it a minute or two.\n'
+        fi
+        return 0
+    fi
+
+    if [ "$_up_open" = 1 ]; then
+        # Walk the menu to the Update app. The position is DERIVED from the
+        # phone's own manifests rather than hard-coded, because the menu is
+        # sorted by each app's "id" and installing anything renumbers it.
+        _up_pos=$(hw_shell "for d in /NeoDCT/System/apps/*/ /NeoDCT/User/sdcard/apps/*/; do [ -f \"\$d/manifest.json\" ] || continue; i=\$(sed -n 's/.*\"id\"[^0-9]*\([0-9]*\).*/\1/p' \"\$d/manifest.json\" | head -1); [ -n \"\$i\" ] && echo \"\$i \$(basename \$d)\"; done | sort -n | grep -n ' Update\$' | cut -d: -f1" 2>/dev/null | tr -d ' \r\n')
+        case "$_up_pos" in
+        '' | *[!0-9]*) fail 6 "could not work out where the Update app sits in the menu" ;;
+        esac
+        verb_key MENU >/dev/null 2>&1 || fail 6 "cannot press keys (no devkey socket -- see doctor)"
+        _up_i=1
+        while [ "$_up_i" -lt "$_up_pos" ]; do
+            verb_key DOWN >/dev/null 2>&1 || fail 6 "key press failed part way down the menu"
+            _up_i=$((_up_i + 1))
+        done
+        verb_key NAVIKEY >/dev/null 2>&1 || fail 6 "could not open the app"
+        emit_ok update "\"staged\":\"$(json_escape "$_up_remote")\",\"opened\":true,\"menu_position\":$_up_pos"
+        [ "$JSON" = 1 ] || printf 'delivered %s and opened the Update app (position %s)\n' "$_up_remote" "$_up_pos"
+        return 0
+    fi
+
     emit_ok update "\"staged\":\"$(json_escape "$_up_remote")\",\"bytes\":${_up_sz:-0},\"applied\":false"
     if [ "$JSON" != 1 ]; then
         printf 'delivered %s (%s bytes)\n' "$_up_remote" "${_up_sz:-0}"
-        printf 'NOT applied: open Settings -> System Update on the phone to install it.\n'
+        printf 'NOT applied. --install stages it and reboots; --open walks the menu to\n'
+        printf 'the Update app; or open Settings -> System Update yourself.\n'
     fi
     return 0
 }
@@ -918,7 +987,7 @@ Verbs built so far:
   apps                 installed apps on the card
   install PKG.nap      sideload an app package
   uninstall DIR        remove an installed app
-  update PKG.ndsw      deliver a system update (does NOT apply it)
+  update PKG.ndsw      deliver a system update (add --install to apply it)
   record DIR [N]       N frames into a numbered directory
   diff A B             compare two references (exit 1 if they differ)
   reboot [recovery]    restart, optionally into recovery

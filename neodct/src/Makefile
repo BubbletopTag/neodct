@@ -174,6 +174,11 @@ KEY_SRCS    := $(wildcard tools/nd_key*.c)
 GRAB_SRCS   := $(wildcard tools/nd_grab*.c)
 STATE_SRCS  := $(wildcard tools/nd_state*.c)
 NAPCLI_SRCS := $(wildcard tools/nd_nap_cli.c)
+# nd-stage links the Update app's OWN package reader and stager, so there is
+# one implementation of "is this package allowed" and this is a second caller
+# of it rather than a second copy.
+STAGE_SRCS  := $(wildcard tools/nd_stage.c)
+STAGE_APP_SRCS := $(wildcard apps/Update/service.c apps/Update/staging.c)
 # A build-host tool, never installed: see its header.
 DLGFIT_SRCS := $(wildcard tools/nd_dialogfit.c)
 VERIFY_SRCS := $(wildcard tools/nd_verify*.c)
@@ -215,6 +220,7 @@ GRAB_OBJS   := $(patsubst %.c,$(OBJDIR)/%.o,$(GRAB_SRCS))
 GRAB_LIB_OBJS := $(filter-out $(OBJDIR)/tools/nd_grab.o,$(GRAB_OBJS))
 STATE_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(STATE_SRCS))
 NAPCLI_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(NAPCLI_SRCS))
+STAGE_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(STAGE_SRCS) $(STAGE_APP_SRCS))
 VERIFY_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(VERIFY_SRCS))
 PANIC_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(PANIC_SRCS))
 BOOTFB_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(BOOTFB_SRCS))
@@ -255,6 +261,7 @@ TARGETS += $(if $(KEY_SRCS),$(BINDIR)/nd-key)
 TARGETS += $(if $(GRAB_SRCS),$(BINDIR)/nd-grab)
 TARGETS += $(if $(STATE_SRCS),$(BINDIR)/nd-state)
 TARGETS += $(if $(NAPCLI_SRCS),$(BINDIR)/nd-nap)
+TARGETS += $(if $(STAGE_SRCS),$(BINDIR)/nd-stage)
 TARGETS += $(if $(VERIFY_SRCS),$(BINDIR)/nd-verify)
 TARGETS += $(if $(PANIC_SRCS),$(BINDIR)/nd-panic)
 TARGETS += $(if $(BOOTBAR_SRCS),$(BINDIR)/nd-bootbar)
@@ -483,6 +490,13 @@ $(BINDIR)/nd-nap: $(NAPCLI_OBJS) $(LIB)
 	$(say) LINK $@
 	$(Q)$(CC) -o $@ $(NAPCLI_OBJS) -L$(LIBDIR) -lneodct $(LDFLAGS_ALL) $(PKG_LIBS) -lm
 
+# ---- nd-stage: record a .ndsw for the boot-time applier ------------
+$(OBJDIR)/tools/nd_stage.o: CPPFLAGS_ALL += -Iapps/Update
+$(BINDIR)/nd-stage: $(STAGE_OBJS) $(LIB)
+	$(Q)mkdir -p $(dir $@)
+	$(say) LINK $@
+	$(Q)$(CC) -o $@ $(STAGE_OBJS) -L$(LIBDIR) -lneodct $(LDFLAGS_ALL) $(PKG_LIBS) -lm
+
 $(BINDIR)/nd-dialogfit: $(DLGFIT_OBJS) $(LIB)
 	$(LINK_BIN)
 
@@ -701,6 +715,7 @@ install: all
 	$(Q)$(if $(GRAB_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-grab $(DESTDIR)$(PREFIX)/bin/,:)
 	$(Q)$(if $(STATE_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-state $(DESTDIR)$(PREFIX)/bin/,:)
 	$(Q)$(if $(NAPCLI_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-nap $(DESTDIR)$(PREFIX)/bin/,:)
+	$(Q)$(if $(STAGE_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-stage $(DESTDIR)$(PREFIX)/bin/,:)
 	@# nd-panic ships. It is the only part of the UI that runs when nd-core
 	@# is dead, and /bin/run_neodct.sh names it as
 	@#   /NeoDCT/System/bin/nd-panic

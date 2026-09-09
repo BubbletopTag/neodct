@@ -1,5 +1,20 @@
 # NeoDCT OS Changelog
 
+0.5.16a-dev
+A development build. The debug link now follows engineering mode.
+
+Ethernet, and the telnet, FTP and screen-sharing services on it, now only come
+up when Engineering Mode is on in Settings. With it off the phone puts no
+address on the ethernet port at all and starts nothing, which is what a phone
+that is not being worked on should do. Turning Engineering Mode on and
+plugging in a cable is now the whole of enabling it; there is no longer a
+rebuild in the way.
+
+The battery gauge works. It reported nothing at all on some phones -- no
+percentage, no low-battery warning and no protective shutdown -- because the
+gauge sleeps between readings and the first one after it wakes was being
+thrown away. It is now retried, which is all it needed.
+
 0.5.15a
 The microphone, the apps you download, and the keys on the keypad.
 

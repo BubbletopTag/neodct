@@ -34,20 +34,45 @@
 # -- CGNAT is an addressing accident, not a firewall, and it changes when the
 # APN, the carrier or the SIM does. A bound socket does not care.
 #
-# ============ AND THE ONE THAT IS, FOR NOW ============
+# ============ THE GATE: ENGINEERING MODE ============
 #
-# This is deliberately NOT gated: it runs on any image that boots with an
-# eth0. A proof-of-concept decision made with the tradeoff understood -- what
-# is behind it is an unauthenticated cleartext root shell AND unauthenticated
-# root-level file read/write, and no image that leaves the bench may carry it.
+# Nothing here starts unless system.ui.engineering_mode=ON in
+# /NeoDCT/User/settings.prop. No engineering mode, no address on eth0, no
+# telnet, no ftp, no VNC, one log line, boot continues.
 #
-# The intended gate is the existing engineering-mode marker (/etc/neodct-devenv,
-# see neodct/scripts/post-build-devenv-marker.sh, which is absent unless the
-# build asks for it and cannot be created by a running phone). Wrapping the
-# start) case in a test for that file is the whole change when that lands.
+# ============ WHY A SETTING AND NOT A BUILD FLAG ============
 #
-# Until then `neodct.telnet=off` on the kernel cmdline turns the link off, and
-# `neodct.telnet=<addr>[/<len>]` moves it.
+# The stricter gate is /etc/neodct-devenv: it lives on the read-only squashfs
+# under dm-verity, so a running phone cannot create it. That is the better
+# property in the abstract and it is deliberately NOT what this uses. The
+# owner's reasoning, recorded because a future reader will otherwise "fix"
+# this back:
+#
+#   * The thing a build-time gate protects against is software on the phone
+#     turning the debug link on. Every user-installed app runs as ndusr_ut, in
+#     a private mount namespace, and CANNOT READ settings.prop, let alone write
+#     it. Verified on the phone rather than assumed:
+#         su ndusr_ut -c 'cat /NeoDCT/User/settings.prop'  -> Permission denied
+#         su ndusr_ut -c 'ls /NeoDCT/User/'                -> Permission denied
+#     settings.prop is 0640 ndusr:ndusr inside a 0751 ndusr directory, so the
+#     untrusted set cannot even list the directory it sits in.
+#
+#   * Reaching the link needs three deliberate acts, not one: enable
+#     engineering mode in Settings, physically attach ethernet, and run ndlink
+#     on the computer at the other end. None of them happens by accident.
+#
+#   * This is alpha software with one user, and a switch that needs a rebuild
+#     and a reflash to flip is a switch nobody flips. A gate that is too
+#     expensive to use gets left on permanently, which is worse than this.
+#
+# So the trade is understood and made on purpose: a gate the owner can flip
+# from the phone's own Settings, protected by the same DAC boundary that
+# already keeps untrusted apps away from the owner's data. If that boundary
+# ever weakens -- if anything untrusted gains read access to settings.prop --
+# this gate weakens with it, and that is the thing to watch.
+#
+# `neodct.telnet=off` on the kernel cmdline still forces it off regardless,
+# and `neodct.telnet=<addr>[/<len>]` still moves the address.
 
 IFACE=eth0
 TELNET_PIDFILE=/run/telnetd.pid
@@ -89,6 +114,19 @@ esac
 
 say() { printf '[DEBUGLAN] %s\n' "$*"; }
 
+# The settings file the UI owns. Absent on a phone whose first boot has not
+# finished writing one, which reads as "not engineering mode" and is the right
+# default: the link stays off until somebody deliberately turns it on.
+ND_SETTINGS=/NeoDCT/User/settings.prop
+
+engineering_mode() {
+    [ -r "$ND_SETTINGS" ] || return 1
+    # Anchored, and matching the whole value: a key called
+    # system.ui.engineering_mode_something, or a value of OFF, must not turn
+    # the debug link on by being a prefix of the thing being looked for.
+    grep -q '^system\.ui\.engineering_mode=ON[[:space:]]*$' "$ND_SETTINGS" 2>/dev/null
+}
+
 # True when $1 is an IPv4 address currently on $IFACE. This is the check that
 # keeps the daemons off the modem: it asks about ONE named interface, so an
 # address that belongs to wwan0 can never satisfy it.
@@ -100,6 +138,14 @@ case "$1" in
     start)
         if [ -z "$ADDR" ]; then
             say "disabled by neodct.telnet=$TOKEN"
+            exit 0
+        fi
+
+        # THE GATE. Before the interface, before any daemon, before anything
+        # opens a socket -- so a phone that is not in engineering mode never
+        # even puts an address on eth0.
+        if ! engineering_mode; then
+            say "engineering mode is off; the debug link stays down"
             exit 0
         fi
         if [ ! -e "/sys/class/net/$IFACE" ]; then
