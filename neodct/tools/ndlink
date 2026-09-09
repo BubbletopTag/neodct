@@ -266,8 +266,14 @@ ND_REMOTE_BIN="/NeoDCT/User/bin"
 # take arguments, so `$(remote_tool nd-grab) out.png` expanded to
 # "... fi out.png", which is a syntax error, and the failure surfaced as the
 # transport losing its framing rather than as anything to do with paths.
+ND_REMOTE_LIB="/NeoDCT/User/lib"
 remote_tool() {
     _t=$1
+    # LD_LIBRARY_PATH so a libneodct pushed alongside the binary is the one it
+    # loads. Without it a freshly cross-compiled tool silently runs against the
+    # library baked into the read-only rootfs, and a fix you just pushed does
+    # not appear -- which looks exactly like the fix not working.
+    printf 'LD_LIBRARY_PATH=%s ' "$ND_REMOTE_LIB"
     printf '$( [ -x %s/%s ] && echo %s/%s || echo /NeoDCT/System/bin/%s )' \
         "$ND_REMOTE_BIN" "$_t" "$ND_REMOTE_BIN" "$_t" "$_t"
 }
@@ -388,6 +394,29 @@ verb_key() {
         ;;
     esac
     emit_ok key "\"keys\":\"$(json_escape "$*")\""
+    return 0
+}
+
+verb_state() {
+    case "$TARGET" in
+    hw) _j=$(hw_shell "$(remote_tool nd-state) 2>/dev/null") || fail 6 "nd-state failed" ;;
+    qemu) fail 2 "state on qemu needs guest networking; not wired up yet" ;;
+    esac
+    # nd-state already emits JSON, so --json passes it straight through rather
+    # than re-wrapping it -- one producer of that object, not two.
+    # nd-state shares stdout with nd_log's banner lines, so take the object
+    # rather than assuming the whole stream is one. Last match wins: the JSON
+    # is the last thing printed.
+    _j=$(printf '%s' "$_j" | tr -d '\r' | grep '^{' | tail -n 1)
+    case "$_j" in
+    '{'*) ;;
+    *) fail 6 "nd-state did not return JSON (is it on the phone?)" ;;
+    esac
+    if [ "$JSON" = 1 ]; then
+        printf '%s\n' "$_j"
+    else
+        printf '%s\n' "$_j" | python3 -m json.tool 2>/dev/null || printf '%s\n' "$_j"
+    fi
     return 0
 }
 
@@ -606,6 +635,7 @@ Verbs built so far:
   digest               the panel's frame digest
   key KEY...           press keys (MENU, 5, DOWN, NAVIKEY...)
   logs                 the phone's recent log
+  state                version, RAM, card, backlight, battery (JSON)
   push LOCAL REMOTE    copy a file to the target
   pull REMOTE LOCAL    copy a file from the target
   connect ADDR         remember a hardware address
@@ -690,6 +720,7 @@ shot) verb_shot "$@" ;;
 digest) verb_digest "$@" ;;
 key) verb_key "$@" ;;
 logs) verb_logs "$@" ;;
+state) verb_state "$@" ;;
 push) verb_push "$@" ;;
 pull) verb_pull "$@" ;;
 connect) verb_connect "$@" ;;
