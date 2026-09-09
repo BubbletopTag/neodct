@@ -514,7 +514,7 @@ void nd_theme_text(nd_draw *d, int32_t x, int32_t y, const char *utf8, const nd_
 
 void nd_theme_text_light(nd_draw *d, int32_t x, int32_t y, const char *utf8, const nd_font *f)
 {
-    nd_theme_text(d, x, y, utf8, f, ND_TH_INK_LIGHT, ND_RGB(0x08, 0x1E, 0x33));
+    nd_theme_text(d, x, y, utf8, f, ND_TH_INK_LIGHT, ND_TH_TEXT_SHADOW);
 }
 
 void nd_theme_text_dark(nd_draw *d, int32_t x, int32_t y, const char *utf8, const nd_font *f)
@@ -523,7 +523,7 @@ void nd_theme_text_dark(nd_draw *d, int32_t x, int32_t y, const char *utf8, cons
      * drop shadow: on a light plate the engraved reading comes from a
      * highlight below the stroke, which is the opposite of what light type
      * over a photograph wants. */
-    nd_theme_text(d, x, y, utf8, f, ND_TH_INK_DARK, ND_RGB(0xFF, 0xFF, 0xFF));
+    nd_theme_text(d, x, y, utf8, f, ND_TH_INK_DARK, ND_TH_TEXT_SHEEN);
 }
 
 /* ------------------------------------------------------------------ *
@@ -736,6 +736,6 @@ void nd_theme_scrim(nd_image *img, nd_rect paint, int32_t ramp_y0, int32_t ramp_
     /* Not black: a neutral wash over a blue-green sky greys it, and the whole
      * palette is trying to stay in one family. A very dark blue darkens
      * without desaturating. */
-    nd_theme_gradient_fade_ramped(img, paint, ramp_y0, ramp_y1, ND_RGB(0x04, 0x14, 0x28), alpha_top,
+    nd_theme_gradient_fade_ramped(img, paint, ramp_y0, ramp_y1, ND_TH_SCRIM_INK, alpha_top,
                                   alpha_bot);
 }

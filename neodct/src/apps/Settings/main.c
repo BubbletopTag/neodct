@@ -515,9 +515,13 @@ static void show_bt_audio(nd_ui *ui)
     }
 }
 
+/* "Theme" sits next to "Wallpaper" because they are the same question asked
+ * twice -- what the phone looks like -- and an owner who has just changed one
+ * is the owner most likely to want the other. It is second rather than first
+ * because Wallpaper is the older habit. */
 const char *const nd_setapp_menu[ND_SETAPP_MENU_ITEMS] = {
-    "Wallpaper", "Memory card",      "Install apps", "Messages Style",
-    "BT Audio",  "Engineering Mode", "About"};
+    "Wallpaper", "Theme",            "Memory card", "Install apps",
+    "Messages Style", "BT Audio",    "Engineering Mode", "About"};
 
 /* ------------------------------------------------------------------ *
  * Install apps -- the strings
@@ -2203,6 +2207,45 @@ static void show_install_apps(nd_ui *ui)
  * run()
  * ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ *
+ * Theme
+ * ------------------------------------------------------------------ */
+
+/* The picker owns the whole interaction -- it previews by applying, and it
+ * persists what it applies -- so there is nothing here but the frame around
+ * it and the notice afterwards.
+ *
+ * The notice matters more than it looks. Applying a theme changes THIS
+ * process immediately and every other process when it next starts, so the
+ * phone the owner is holding is half-changed until they leave Settings: the
+ * home screen behind them is still the old look. Saying so is the difference
+ * between a feature and a bug report. */
+static void show_theme_menu(nd_ui *ui)
+{
+    nd_themepicker picker;
+    nd_msgdialog dialog;
+    int32_t chosen;
+
+    if (nd_themepicker_init(&picker, ui) != ND_OK) {
+        nd_msgdialog_init(&dialog, ui, "No themes found.");
+        (void)nd_msgdialog_show(&dialog);
+        return;
+    }
+
+    chosen = nd_themepicker_show(&picker);
+    if (chosen == ND_WIDGET_BACK || nd_app_should_exit())
+        return;
+
+    {
+        char message[ND_THEME_NAME_MAX + 64];
+
+        (void)nd_snprintf(message, sizeof message, "Theme set to\n%s.\nLeave Settings to see\nthe rest of the phone.",
+                          picker.themes[chosen].name);
+        nd_msgdialog_init(&dialog, ui, message);
+        (void)nd_msgdialog_show(&dialog);
+    }
+}
+
 int app_run(nd_ui *ui)
 {
     if (ui == NULL)
@@ -2224,16 +2267,18 @@ int app_run(nd_ui *ui)
         if (selection == 0)
             show_wallpaper_menu(ui);
         else if (selection == 1)
-            show_memory_card(ui);
+            show_theme_menu(ui);
         else if (selection == 2)
-            show_install_apps(ui);
+            show_memory_card(ui);
         else if (selection == 3)
-            show_messages_style(ui);
+            show_install_apps(ui);
         else if (selection == 4)
-            show_bt_audio(ui);
+            show_messages_style(ui);
         else if (selection == 5)
-            show_engineering_mode(ui);
+            show_bt_audio(ui);
         else if (selection == 6)
+            show_engineering_mode(ui);
+        else if (selection == 7)
             show_about(ui);
 
         if (nd_app_should_exit())

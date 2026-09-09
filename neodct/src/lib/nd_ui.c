@@ -404,11 +404,30 @@ static const char *clean_image_path(const char *path, char *buf, size_t buf_sz)
 static const nd_image *ui_get_image(nd_ui *ui, const char *path, int32_t max_size, double scale)
 {
     char clean[ND_PATH_MAX];
+    char themed[ND_PATH_MAX];
     const char *use;
 
     if (ui == NULL || ui->image_cache == NULL || path == NULL)
         return NULL;
     use = clean_image_path(path, clean, sizeof clean);
+
+    /* ============ THE ONE PLACE A THEME REPLACES A PICTURE ============
+     *
+     * Every image the interface draws arrives here: app icons, the status
+     * sprites named in ui_home.json, the envelope, the placeholder, the
+     * engineering tile. So the theme override is one call in one function
+     * rather than a resolve at each of the twenty call sites -- and, more to
+     * the point, an app icon that did not exist when the theme was written
+     * gets themed anyway, because the lookup happens when the icon is opened
+     * rather than when the theme is installed.
+     *
+     * Below the cache deliberately: the themed path is what gets cached, so a
+     * hit costs nothing extra and switching theme changes the key rather than
+     * needing the cache flushed. nd_theme_resource() leaves `themed` usable
+     * whatever happens, so the false branch is not an error path. */
+    if (nd_theme_resource(use, themed, sizeof themed))
+        use = themed;
+
     return nd_imgcache_get(ui->image_cache, use, max_size, scale);
 }
 
@@ -1914,15 +1933,25 @@ static void ui_font_paths(char *ui_face, size_t ui_sz, char *bold, size_t bold_s
      * root twice and every probe answers no -- which presents as the theme
      * silently rendering in the old pixel face, since the fallback below is
      * doing exactly what it was asked to. */
-    if (!nd_path_is_file(ND_PATH_UI_FONT) ||
-        nd_path_resolve(ui_face, ui_sz, ND_PATH_UI_FONT) != ND_OK) {
+    /* THE THEME GETS FIRST REFUSAL, and it is asked here rather than at
+     * nd_font_load() because this function already owns the "which file is
+     * the UI face" question -- the fallback to font.ttf below is the same
+     * decision. A theme that ships no face resolves to the system one and
+     * nothing downstream can tell the difference.
+     *
+     * nd_theme_resource() answers a VIRTUAL path, which is what the existence
+     * test wants; the resolve to a real path happens after, as before. */
+    char want[ND_PATH_MAX];
+
+    (void)nd_theme_resource(ND_PATH_UI_FONT, want, sizeof want);
+    if (!nd_path_is_file(want) || nd_path_resolve(ui_face, ui_sz, want) != ND_OK) {
         if (nd_path_resolve(ui_face, ui_sz, ND_PATH_FONT) != ND_OK)
             ui_face[0] = '\0';
         else
             nd_log(ND_LOG_UI, "No UI face; falling back to font.ttf.");
     }
-    if (!nd_path_is_file(ND_PATH_UI_FONT_BOLD) ||
-        nd_path_resolve(bold, bold_sz, ND_PATH_UI_FONT_BOLD) != ND_OK)
+    (void)nd_theme_resource(ND_PATH_UI_FONT_BOLD, want, sizeof want);
+    if (!nd_path_is_file(want) || nd_path_resolve(bold, bold_sz, want) != ND_OK)
         bold[0] = '\0';
 }
 
@@ -2054,7 +2083,18 @@ static nd_err ui_common_init(nd_ui *ui, nd_fb *fb)
     /* --- step 11 --- */
     ui->state = ND_UI_STATE_HOME;
 
-    /* --- step 12 --- */
+    /* --- step 12 --- *
+     *
+     * THE THEME IS LOADED BEFORE THE FONTS, and the order is load-bearing:
+     * ui_load_fonts() asks nd_theme_resource() which face to open, and a
+     * theme applied after this point would leave the phone drawing a pink
+     * interface in the stock typeface until something restarted it.
+     *
+     * Every process does this, the core and each app alike -- see the note in
+     * nd_theme.h about why the active theme is process-local rather than
+     * shared. It costs one settings read and, when a theme is set, one JSON
+     * parse of a file measured in hundreds of bytes. */
+    nd_theme_load_active();
     ui_load_fonts(ui);
     nd_bench_mark("ui_common: 4 faces");
 

@@ -49,6 +49,7 @@
 
 #include "nd_t9.h"
 #include "nd_text.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 
@@ -644,6 +645,37 @@ bool nd_detailpage_handle_key(nd_detailpage *p, int32_t key);
 
 /* Returns the key that dismissed the page. */
 int32_t nd_detailpage_show(nd_detailpage *p);
+
+/* ================================================================== *
+ * ThemePicker -- nd_detailpage, paged, one theme per page
+ * ================================================================== *
+ *
+ * The screen the owner changes the look from. It is nd_detailpage with * and
+ * # turning the pages, and the page it is showing is drawn IN THE THEME IT IS
+ * OFFERING -- moving onto a theme applies it to this process, so the chrome
+ * around the description is the preview. nd_themepicker.c explains why that
+ * is the honest way to preview a look and a swatch is not.
+ *
+ * Leaving without choosing puts the previous theme back, so a browse costs
+ * the owner nothing.
+ */
+typedef struct {
+    nd_ui *ui;
+    nd_theme_info themes[ND_THEME_MAX_FOUND];
+    size_t n;
+    size_t sel;
+    char entry_id[ND_THEME_ID_MAX]; /* the look on entry, restored on cancel */
+} nd_themepicker;
+
+/* Reads the installed themes and parks the selection on the active one.
+ * ND_ERR_NOTFOUND when there are none at all, which cannot happen on a phone
+ * -- the built-in is always in the list -- but is worth a caller's check. */
+nd_err nd_themepicker_init(nd_themepicker *p, nd_ui *ui);
+
+/* Runs until the owner chooses or backs out. Returns the index of the theme
+ * applied, or ND_WIDGET_BACK. Applying persists it (nd_theme_select), so the
+ * caller has nothing to write. */
+int32_t nd_themepicker_show(nd_themepicker *p);
 
 /* ================================================================== *
  * The T9 mode indicator (drawn by both text widgets)

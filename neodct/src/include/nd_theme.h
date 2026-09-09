@@ -56,6 +56,7 @@
 #include "nd_draw.h"
 #include "nd_font.h"
 #include "nd_image.h"
+#include "nd_paths.h"
 #include "nd_types.h"
 
 #ifdef __cplusplus
@@ -69,71 +70,179 @@ extern "C" {
  * Sampled from the icon set this theme was built around, so a drawn plate and
  * a shipped PNG sit in the same family rather than merely near each other.
  * Pairs are TOP first, BOTTOM second -- see idea 1.
+ *
+ * ============ WHY THESE ARE NO LONGER #defines ============
+ *
+ * They were twenty-six constants and the look was therefore a property of the
+ * BINARY: changing a colour meant a cross build, an update package and a
+ * reflash. A theme the owner installs cannot work that way, so the constants
+ * became FIELDS of a struct that is loaded at startup and can be replaced
+ * while the phone is running.
+ *
+ * The names did not change, and that is the point. `ND_TH_BLUE_TOP` still
+ * spells the same thing at all twenty-seven call sites across the OS; it now
+ * reads the active palette instead of a literal the compiler folded in. So a
+ * widget written against the old header keeps working, an app compiled last
+ * month keeps working, and nothing had to be touched to make the whole
+ * interface themeable. The alternative -- passing a palette pointer into
+ * every draw function -- would have been a hundred-file diff for the same
+ * pixels.
+ *
+ * WHAT THIS COSTS: one load from a global pointer where there used to be an
+ * immediate. It is a macro over an extern pointer rather than a function call
+ * precisely because some of these are read PER PIXEL -- the sheen loop in
+ * nd_theme_plate_draw() is the hot one -- and a call there would be felt on a
+ * Cortex-A7. Where a colour is read inside a pixel loop this file hoists it
+ * into a local first; that is a rule for new code in here, not an accident.
+ *
+ * WHAT THIS DOES NOT CHANGE: the default values below are byte-for-byte the
+ * ones that were compiled in, so a phone with no theme installed renders the
+ * frames it always did. The golden set is the proof and it did not move.
  */
+
+/* Every colour the interface is made of, in one replaceable object.
+ *
+ * Field order is the order the old #defines were written in, because
+ * nd_theme.c's parser walks a table keyed by these names and a reader
+ * comparing the two should not have to hunt. */
+typedef struct {
+    /* The signature blue. Title bars, the selection lozenge, the softkey. */
+    nd_color blue_hi;   /* lit top edge          */
+    nd_color blue_top;
+    nd_color blue_mid;  /* where the gloss stops */
+    nd_color blue_bot;
+    nd_color blue_deep; /* the cut under a plate */
+
+    /* Glass: the frosted panel content sits on. Light, cool, barely there. */
+    nd_color glass_top;
+    nd_color glass_bot;
+
+    /* Chrome, for the bezel around a panel and the scrollbar track. */
+    nd_color chrome_hi;
+    nd_color chrome_top;
+    nd_color chrome_bot;
+
+    /* The sky. What a screen with no wallpaper stands on -- the OS used to
+     * fill black there, and black is the one colour this theme has nothing to
+     * say in: a glass plate over black reads as a grey box rather than a
+     * pane. */
+    nd_color sky_top;
+    nd_color sky_bot;
+
+    /* Aero green, for a confirmation and the battery when it is healthy. */
+    nd_color green_top;
+    nd_color green_bot;
+
+    /* Amber and red, for a warning and a fault. Same construction, other
+     * hues. */
+    nd_color amber_top;
+    nd_color amber_bot;
+    nd_color red_top;
+    nd_color red_bot;
+
+    /* Ink. Dark type on a light plate is navy rather than black, because pure
+     * black against a blue-white gradient reads as a hole punched in it. */
+    nd_color ink_dark;
+    nd_color ink_light;
+    nd_color ink_muted;
+
+    /* The two colours idea 4 is drawn with. They were literals inside
+     * nd_theme_text_light() and _dark(), which made them the only part of the
+     * look a theme could not reach -- and the shadow under white type is
+     * exactly what a pink theme needs to restate, because navy under pink
+     * reads as a bruise. */
+    nd_color text_shadow; /* under light ink */
+    nd_color text_sheen;  /* under dark ink  */
+
+    /* What the readability wash is made of. A very dark blue darkens without
+     * desaturating, which is the whole reason the scrim is not black -- and
+     * it is a per-theme decision for the same reason: a pink interface washed
+     * with navy reads as a bruise. */
+    nd_color scrim_ink;
+
+    /* How hard the scrim leans on the picture, at the top of the region it is
+     * painted over and at the bottom. 96 is where 20 px white type with its
+     * shadow stays legible over the busiest shipped wallpaper -- measured
+     * with nd-shoot against Classroom.gif, which is the brightest of the six.
+     * 0 at the bottom is not an approximation: the scrim has to reach zero
+     * somewhere inside the content area, or the softkey strip below shows a
+     * step where it stopped. */
+    uint8_t scrim_top_a;
+    uint8_t scrim_bot_a;
+
+    /* How hard the app selector leans on its wallpaper. Lighter than a list
+     * screen's, because the only things standing on it are a title plate, one
+     * icon and a softkey -- and the icon is the point of the screen. */
+    uint8_t appsel_scrim_a;
+
+    /* The shadow under light type, and the highlight under dark type.
+     * Coverage, not colour: both are composited at shadow_a. */
+    uint8_t shadow_a;
+    uint8_t sheen_a;
+} nd_theme_palette;
+
+/* The active palette. Never NULL -- it points at the built-in Frutiger Aero
+ * values until nd_theme_load() replaces it, and back at them when a theme is
+ * removed. Read it through the ND_TH_* names below rather than directly; the
+ * indirection is what lets a future palette gain a field without every caller
+ * learning about it.
+ *
+ * OWNED BY nd_theme.c. A caller must not free it and must not keep the
+ * pointer across an nd_theme_apply(), which is why nothing in the tree stores
+ * it in a struct. */
+extern const nd_theme_palette *nd_theme_pal;
+
+/* The built-in look, for a caller that needs the defaults regardless of what
+ * is installed -- the theme picker's "Frutiger Aero" entry, and the reset
+ * path when a theme file turns out to be unreadable. */
+const nd_theme_palette *nd_theme_palette_builtin(void);
 
 /* The signature blue. Title bars, the selection lozenge, the softkey. */
-#define ND_TH_BLUE_HI   ND_RGB(0x5C, 0xC3, 0xF5) /* lit top edge      */
-#define ND_TH_BLUE_TOP  ND_RGB(0x2A, 0x9B, 0xE8)
-#define ND_TH_BLUE_MID  ND_RGB(0x0F, 0x6C, 0xC8) /* where the gloss stops */
-#define ND_TH_BLUE_BOT  ND_RGB(0x0A, 0x4A, 0x9B)
-#define ND_TH_BLUE_DEEP ND_RGB(0x06, 0x2E, 0x63) /* the cut under a plate */
+#define ND_TH_BLUE_HI   (nd_theme_pal->blue_hi)   /* lit top edge      */
+#define ND_TH_BLUE_TOP  (nd_theme_pal->blue_top)
+#define ND_TH_BLUE_MID  (nd_theme_pal->blue_mid)  /* where the gloss stops */
+#define ND_TH_BLUE_BOT  (nd_theme_pal->blue_bot)
+#define ND_TH_BLUE_DEEP (nd_theme_pal->blue_deep) /* the cut under a plate */
 
 /* Glass: the frosted panel content sits on. Light, cool, barely there. */
-#define ND_TH_GLASS_TOP ND_RGB(0xF2, 0xF9, 0xFF)
-#define ND_TH_GLASS_BOT ND_RGB(0xC6, 0xDF, 0xF2)
+#define ND_TH_GLASS_TOP (nd_theme_pal->glass_top)
+#define ND_TH_GLASS_BOT (nd_theme_pal->glass_bot)
 
 /* Chrome, for the bezel around a panel and the scrollbar track. */
-#define ND_TH_CHROME_HI  ND_RGB(0xFF, 0xFF, 0xFF)
-#define ND_TH_CHROME_TOP ND_RGB(0xDA, 0xE7, 0xF2)
-#define ND_TH_CHROME_BOT ND_RGB(0x8E, 0xA8, 0xBE)
+#define ND_TH_CHROME_HI  (nd_theme_pal->chrome_hi)
+#define ND_TH_CHROME_TOP (nd_theme_pal->chrome_top)
+#define ND_TH_CHROME_BOT (nd_theme_pal->chrome_bot)
 
-/* The sky. What a screen with no wallpaper stands on -- the OS used to fill
- * black there, and black is the one colour this theme has nothing to say in:
- * a glass plate over black reads as a grey box rather than a pane. */
-#define ND_TH_SKY_TOP ND_RGB(0x9E, 0xDC, 0xF7)
-#define ND_TH_SKY_BOT ND_RGB(0x14, 0x4E, 0x8F)
+/* The sky. What a screen with no wallpaper stands on. */
+#define ND_TH_SKY_TOP (nd_theme_pal->sky_top)
+#define ND_TH_SKY_BOT (nd_theme_pal->sky_bot)
 
 /* Aero green, for a confirmation and the battery when it is healthy. */
-#define ND_TH_GREEN_TOP ND_RGB(0x9E, 0xE8, 0x4A)
-#define ND_TH_GREEN_BOT ND_RGB(0x3D, 0x9A, 0x14)
+#define ND_TH_GREEN_TOP (nd_theme_pal->green_top)
+#define ND_TH_GREEN_BOT (nd_theme_pal->green_bot)
 
-/* Amber and red, for a warning and a fault. Same construction, other hues. */
-#define ND_TH_AMBER_TOP ND_RGB(0xFF, 0xD9, 0x5C)
-#define ND_TH_AMBER_BOT ND_RGB(0xD8, 0x88, 0x0A)
-#define ND_TH_RED_TOP   ND_RGB(0xFF, 0x8A, 0x7A)
-#define ND_TH_RED_BOT   ND_RGB(0xB4, 0x1C, 0x14)
+/* Amber and red, for a warning and a fault. */
+#define ND_TH_AMBER_TOP (nd_theme_pal->amber_top)
+#define ND_TH_AMBER_BOT (nd_theme_pal->amber_bot)
+#define ND_TH_RED_TOP   (nd_theme_pal->red_top)
+#define ND_TH_RED_BOT   (nd_theme_pal->red_bot)
 
-/* Ink. Dark type on a light plate is navy rather than black, because pure
- * black against a blue-white gradient reads as a hole punched in it. */
-#define ND_TH_INK_DARK  ND_RGB(0x0C, 0x2A, 0x47)
-#define ND_TH_INK_LIGHT ND_RGB(0xFF, 0xFF, 0xFF)
-#define ND_TH_INK_MUTED ND_RGB(0x5B, 0x7C, 0x99)
+/* Ink. */
+#define ND_TH_INK_DARK  (nd_theme_pal->ink_dark)
+#define ND_TH_INK_LIGHT (nd_theme_pal->ink_light)
+#define ND_TH_INK_MUTED (nd_theme_pal->ink_muted)
 
-/* How hard the scrim leans on the picture, at the top of the region it is
- * painted over and at the bottom. 96 is where 20 px white type with its
- * shadow stays legible over the busiest shipped wallpaper -- measured with
- * nd-shoot against Classroom.gif, which is the brightest of the six. 0 at the
- * bottom is not an approximation: the scrim has to reach zero somewhere
- * inside the content area, or the softkey strip below shows a step where it
- * stopped.
- *
- * Lives here rather than in nd_ui.c because DetailPage needs it too -- it
- * paints its scrolling column into a scratch surface and has to apply the
- * same wash by hand, shifted into the column's own coordinates. Two files
- * agreeing by copying a number is how a seam appears halfway down a screen.
- */
-#define ND_TH_SCRIM_TOP_A 96u
-#define ND_TH_SCRIM_BOT_A 0u
+/* The two colours idea 4 is drawn with. */
+#define ND_TH_TEXT_SHADOW (nd_theme_pal->text_shadow)
+#define ND_TH_TEXT_SHEEN  (nd_theme_pal->text_sheen)
+#define ND_TH_SCRIM_INK   (nd_theme_pal->scrim_ink)
 
-/* How hard the app selector leans on its wallpaper. Lighter than a list
- * screen's, because the only things standing on it are a title plate, one
- * icon and a softkey -- and the icon is the point of the screen. */
-#define ND_TH_APPSEL_SCRIM_A 70u
-
-/* The shadow under light type, and the highlight under dark type. Coverage,
- * not colour: both are composited at ND_TH_SHADOW_A. */
-#define ND_TH_SHADOW_A 150u
-#define ND_TH_SHEEN_A  110u
+/* The scrim, the selector's lighter scrim, and the two type coverages. */
+#define ND_TH_SCRIM_TOP_A    (nd_theme_pal->scrim_top_a)
+#define ND_TH_SCRIM_BOT_A    (nd_theme_pal->scrim_bot_a)
+#define ND_TH_APPSEL_SCRIM_A (nd_theme_pal->appsel_scrim_a)
+#define ND_TH_SHADOW_A       (nd_theme_pal->shadow_a)
+#define ND_TH_SHEEN_A        (nd_theme_pal->sheen_a)
 
 /* ------------------------------------------------------------------ *
  * Fills
@@ -346,6 +455,198 @@ void nd_theme_glow(nd_image *img, int32_t cx, int32_t cy, int32_t radius, nd_col
  * background is the case that note exists for. */
 void nd_theme_scrim(nd_image *img, nd_rect paint, int32_t ramp_y0, int32_t ramp_y1,
                     uint8_t alpha_top, uint8_t alpha_bot);
+
+/* ================================================================== *
+ * Themes -- the look as an object the owner can install
+ * ================================================================== *
+ *
+ * Everything above draws. This part decides WHAT it draws with, and it is the
+ * whole of "the framework is patchable": a theme is a directory, the palette
+ * above is loaded out of it, and the resources the OS opens by name are
+ * looked for inside it first.
+ *
+ * ============ A THEME IS A DIRECTORY, NOT A FORMAT ============
+ *
+ *     <theme>/theme.json          the palette, and what else is present
+ *     <theme>/fonts/ui.ttf        optional, replaces the UI face
+ *     <theme>/fonts/ui-bold.ttf   optional
+ *     <theme>/icons/<App>.png     optional, one per app directory NAME
+ *     <theme>/img/...             optional, mirrors ui/resources/img
+ *     <theme>/wallpaper.jpg       optional
+ *     <theme>/preview.png         optional, what the picker shows
+ *
+ * EVERY PART IS OPTIONAL EXCEPT theme.json, and a missing part means "keep
+ * what the system has". That is what makes a theme small: a recolour is nine
+ * lines of JSON and nothing else, and it still themes an app installed from a
+ * card last week, because the lookup is by name at open time rather than a
+ * table baked at build time.
+ *
+ * ============ WHERE THEY LIVE ============
+ *
+ * Built-in themes are under ND_PATH_THEMES_DIR on the read-only image.
+ * Installed ones are under ND_PATH_USER_THEMES_DIR on the card, beside apps/
+ * -- the same partition, the same removability, and the same reasoning as
+ * nd_paths.h gives for apps living there rather than on the user partition.
+ *
+ * A theme is DATA and never code: no .so, nothing executed, nothing that
+ * cares which arch the phone is. That is why installing one needs no
+ * confinement argument of its own, and why a .nap holding a theme carries no
+ * "arch" -- see nd_nap.h.
+ *
+ * ============ AND WHY THE ACTIVE ONE IS A PROCESS-LOCAL ============
+ *
+ * Process-per-app: the core and every running app each hold their own copy of
+ * the palette, loaded by nd_ui_init() from the same setting. There is no
+ * shared page and no IPC, because there does not need to be -- a theme change
+ * is rare, the setting is the single source of truth, and an app that started
+ * before the change reads the old value until it exits. The alternative, a
+ * signal to every process, buys a repaint of screens nobody is looking at.
+ *
+ * The one process where it must change WITHOUT a restart is the one doing the
+ * changing, which is why nd_theme_apply() exists at all: the picker previews
+ * a theme by applying it and drawing a frame.
+ */
+
+#define ND_THEME_ID_MAX      32
+#define ND_THEME_NAME_MAX    48
+#define ND_THEME_AUTHOR_MAX  48
+#define ND_THEME_VERSION_MAX 24
+#define ND_THEME_DESC_MAX    256
+
+/* Enough for the built-in plus everything a card can sensibly hold. The
+ * selector is a list a person scrolls with two keys; a phone with thirty-two
+ * themes on it has a different problem. */
+#define ND_THEME_MAX_FOUND 32
+
+/* The built-in look's id. Not a directory -- there is no theme.json for it,
+ * because its values are the compiled-in defaults and a file that merely
+ * restated them would be a second place to get them wrong. */
+#define ND_THEME_ID_BUILTIN   "aero"
+#define ND_THEME_NAME_BUILTIN "Frutiger Aero"
+
+/* What theme.json is called inside a theme directory. */
+#define ND_THEME_MANIFEST "theme.json"
+#define ND_THEME_PREVIEW  "preview.png"
+
+/* One theme, as read off the disk. Flat and copyable: the picker holds an
+ * array of these and a preview must not depend on a file still being open. */
+typedef struct {
+    char id[ND_THEME_ID_MAX];
+    char name[ND_THEME_NAME_MAX];
+    char author[ND_THEME_AUTHOR_MAX];
+    char version[ND_THEME_VERSION_MAX];
+    char desc[ND_THEME_DESC_MAX];
+
+    /* The directory this was read from, ND_ROOT-relative like every other
+     * path in the tree. Empty for the built-in, which has none. */
+    char dir[ND_PATH_MAX];
+
+    bool builtin;
+
+    /* The palette, fully resolved: every field the file did not mention has
+     * already been filled in from the built-in, so a caller never has to ask
+     * whether a colour was specified. */
+    nd_theme_palette palette;
+
+    /* Which optional parts this theme actually ships. Recorded at read time
+     * so the picker can say "icons and a wallpaper" without stat()ing seven
+     * paths per keypress. */
+    bool has_font;
+    bool has_font_bold;
+    bool has_icons;
+    bool has_img;
+    bool has_wallpaper;
+    bool has_preview;
+} nd_theme_info;
+
+/* Reads <dir>/theme.json. Fields the file omits keep their built-in values,
+ * so a nine-line theme is legal and a malformed one is REJECTED rather than
+ * half-applied -- a palette with three of its colours parsed is worse than no
+ * theme at all.
+ *
+ * ND_ERR_NOTFOUND when there is no theme.json, ND_ERR_INVAL when it is not
+ * usable. `out` is untouched on failure. */
+nd_err nd_theme_read(const char *dir, nd_theme_info *out);
+
+/* Every theme the phone can offer, built-in first and then the card, sorted
+ * by name within each. Returns how many were written, at most `max`.
+ *
+ * A directory that does not parse is SKIPPED with a log line rather than
+ * failing the walk: one bad theme on a card must not cost the owner the
+ * picker. */
+size_t nd_theme_list(nd_theme_info *out, size_t max);
+
+/* Finds one by id. False when no such theme is installed. */
+bool nd_theme_find(const char *id, nd_theme_info *out);
+
+/* Makes `t` the active look OF THIS PROCESS, immediately: the palette pointer
+ * above starts answering `t`'s values and every subsequent draw uses them.
+ * Does NOT persist and does NOT reload fonts -- a caller that wants the new
+ * face has to ask nd_ui for it, because fonts are the UI's to own.
+ *
+ * Copies what it needs; `t` may be a stack temporary. Passing NULL restores
+ * the built-in. */
+void nd_theme_apply(const nd_theme_info *t);
+
+/* The active theme. Never NULL; the built-in until something replaces it. */
+const nd_theme_info *nd_theme_active(void);
+
+/* Reads the persisted choice (ND_SET_UI_THEME) and applies it. What every
+ * process calls at startup -- the core through nd_ui_init(), an app through
+ * the same path -- so that one setting is the only thing deciding the look.
+ *
+ * An id naming a theme that is no longer installed falls back to the built-in
+ * rather than failing: a card pulled out must not leave the phone unable to
+ * draw. */
+void nd_theme_load_active(void);
+
+/* Persists `id` as the choice and applies it here. The setting is written
+ * FIRST, because a process that applied a theme it failed to record would
+ * show the owner a change that vanishes at the next boot with nothing to say
+ * why. */
+nd_err nd_theme_select(const char *id);
+
+/* ------------------------------------------------------------------ *
+ * Resource override
+ * ------------------------------------------------------------------ *
+ *
+ * The one call every resource open goes through. Given the SYSTEM path of a
+ * resource -- the constant in nd_paths.h, or an app's icon.png -- it writes
+ * the path that should actually be opened: the active theme's version if that
+ * theme ships one, and otherwise the path it was given, unchanged.
+ *
+ * So a call site becomes one line longer and stops caring that themes exist:
+ *
+ *     char path[ND_PATH_MAX];
+ *     nd_theme_resource(ND_PATH_UI_FONT, path, sizeof path);
+ *
+ * The mapping, which is deliberately small and by PREFIX rather than a table
+ * of every file:
+ *
+ *   .../ui/resources/fonts/aero.ttf       -> <theme>/fonts/ui.ttf
+ *   .../ui/resources/fonts/aero-bold.ttf  -> <theme>/fonts/ui-bold.ttf
+ *   .../ui/resources/img/<rest>           -> <theme>/img/<rest>
+ *   <anything>/apps/<Name>/icon.png       -> <theme>/icons/<Name>.png
+ *
+ * The icon rule is by shape and not by root on purpose: it catches
+ * /NeoDCT/System/apps, the engineering apps, AND the card's apps, so a theme
+ * covers an app the owner installed without knowing it exists.
+ *
+ * Returns true when the path was overridden. The output is always a usable
+ * path -- on any failure it is the input -- so a caller that ignores the
+ * return value is still correct. */
+bool nd_theme_resource(const char *system_path, char *out, size_t out_sz);
+
+/* The active theme's wallpaper, if it ships one. False leaves `out` empty.
+ *
+ * nd_theme_select() writes this into the wallpaper setting, so choosing a
+ * theme DOES replace the background -- but only when the theme ships one, so
+ * a pure recolour leaves the owner's photograph alone. The reasoning, and
+ * what it costs, is at the call site in nd_themeload.c. */
+bool nd_theme_wallpaper(char *out, size_t out_sz);
+
+/* <dir>/preview.png, for the picker. False when the theme has none. */
+bool nd_theme_preview_path(const nd_theme_info *t, char *out, size_t out_sz);
 
 #ifdef __cplusplus
 }

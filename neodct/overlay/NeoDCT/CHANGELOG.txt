@@ -1,5 +1,32 @@
 # NeoDCT OS Changelog
 
+0.6.0a-dev
+Themes. The phone's look is now something you install and change, not
+something the software was built with.
+
+There is a new screen at Settings -> Theme. It shows one theme per page --
+press * and # to turn the pages -- and each page is drawn IN the theme it is
+offering, so you are looking at the real thing at full size rather than a
+swatch beside a name. Press NaviKey to keep the one on screen. Press C and
+the phone goes back to the look it had, so trying them all costs nothing.
+
+A theme is a small folder: the colours, and optionally a typeface, the app
+icons, the battery and signal indicators, and a wallpaper. Anything a theme
+leaves out stays as it was, so a theme that only recolours the phone is a
+handful of lines and still works on an app installed last week.
+
+Themes are installed the way apps are: copy the .nap onto the memory card and
+open Settings -> Install apps. Unlike an app, a theme is usable the moment it
+is installed -- there is nothing to restart. Changing a theme changes the
+screen you are on straight away; the rest of the phone follows as you leave
+Settings.
+
+Two themes ship in the box: the Frutiger Aero look the phone already had,
+and Hello Kitty.
+
+Nothing about the existing look changed. A phone with no theme installed
+draws exactly the pixels it drew before, which is checked frame by frame.
+
 0.5.16a-dev
 A new look across the whole phone, and a debug link that follows
 engineering mode.

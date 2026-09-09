@@ -60,6 +60,7 @@ extern "C" {
  * first entry is "None", and choosing it writes "NONE" here. Every other
  * shipped wallpaper is one row further down the same list. */
 #define ND_SET_UI_WALLPAPER_DFLT     "/NeoDCT/System/wallpapers/Fruitiger Aero.jpg"
+#define ND_SET_UI_THEME_DFLT         "aero"
 #define ND_SET_UI_ENG_MODE_DFLT      "ON"
 #define ND_SET_UI_WP_EVERYWHERE_DFLT "ON"
 /* Was 0.75, on top of a home wallpaper already dimmed to 0.3 -- so chrome sat
@@ -82,6 +83,7 @@ extern "C" {
 /* In DEFAULTS */
 #define ND_SET_AUDIO_RINGTONE   "system.audio.ringtone"
 #define ND_SET_UI_WALLPAPER     "system.ui.wallpaper"
+#define ND_SET_UI_THEME         "system.ui.theme"
 #define ND_SET_UI_ENGINEERING   "system.ui.engineering_mode"
 #define ND_SET_OS_VERSIONNUMBER "system.os.versionnumber"
 #define ND_SET_OS_VERSIONNAME   "system.os.versionname"

@@ -71,6 +71,23 @@ extern "C" {
 #define ND_PATH_CARD_DIR      "/NeoDCT/User/sdcard"
 #define ND_PATH_USER_APPS_DIR "/NeoDCT/User/sdcard/apps"
 
+/* ============ AND WHERE A THEME LIVES ============
+ *
+ * The same split, for the same reasons. Built-in themes are part of the
+ * signed read-only image; installed ones are on the card beside apps/,
+ * because a theme is removable media by nature too and because the user
+ * partition is eight megabytes it needs for databases.
+ *
+ * The difference from apps/ is that NOTHING HERE IS EXECUTED. A theme is
+ * JSON, PNGs and a TTF -- data the UI reads, never code the phone runs -- so
+ * the confinement argument above simply does not apply to it, and a theme on
+ * a card a stranger wrote can at worst make the phone ugly or, if its font is
+ * corrupt, make text fail to draw. FreeType is the only parser that sees
+ * anything from here that is not a picture, and it sees the same file whether
+ * it came from a card or the image. */
+#define ND_PATH_THEMES_DIR      "/NeoDCT/System/themes"
+#define ND_PATH_USER_THEMES_DIR "/NeoDCT/User/sdcard/themes"
+
 /* ============ THE NOTE THE INSTALLER LEAVES ============
  *
  * A counter, bumped by nd_nap_install(), that says "the set of installed apps

@@ -183,18 +183,21 @@ static void test_bt_lines_connected(void)
 static void test_strings(void)
 {
     CHECK_STR(api.menu[0], "Wallpaper", "the root menu's first row");
-    CHECK_STR(api.menu[1], "Memory card", "second");
+    /* "Theme" is the other half of the same question -- what the phone looks
+     * like -- so it sits with Wallpaper rather than at the end. */
+    CHECK_STR(api.menu[1], "Theme", "second");
+    CHECK_STR(api.menu[2], "Memory card", "third");
     /* "Install apps" is the card's other job and sits with it. */
-    CHECK_STR(api.menu[2], "Install apps", "third");
+    CHECK_STR(api.menu[3], "Install apps", "fourth");
     /* WAS four rows. "Messages Style" is new and sits before the two
      * engineering-ish rows, so the Python's own four keep their order. */
-    CHECK_STR(api.menu[3], "Messages Style", "fourth");
+    CHECK_STR(api.menu[4], "Messages Style", "fifth");
     /* "BT Audio" sits before the engineering rows for the reason "Messages
      * Style" does: it is something an owner uses, not something a developer
      * toggles, and the two engineering-ish rows stay last. */
-    CHECK_STR(api.menu[4], "BT Audio", "fifth");
-    CHECK_STR(api.menu[5], "Engineering Mode", "sixth");
-    CHECK_STR(api.menu[6], "About", "seventh");
+    CHECK_STR(api.menu[5], "BT Audio", "sixth");
+    CHECK_STR(api.menu[6], "Engineering Mode", "seventh");
+    CHECK_STR(api.menu[7], "About", "eighth");
 
     /* The install screen's own strings. The help has to say what a .nap is
      * and where one goes, because there is no manual. */
@@ -764,10 +767,11 @@ static void test_wallpaper_writes_the_setting(void)
  * reason ND_SETAPP_ENG_KEY is asserted equal to ND_SET_UI_ENGINEERING. */
 static void test_messages_style_writes_the_setting(void)
 {
-    /* 4 picks "Messages Style" -- it was 3 until "Install apps" went in
-     * above it; then 2 picks "Chat" and 1 picks "Classic". */
-    static const int32_t PICK_CHAT[] = {ND_KEY_4, ND_KEY_2};
-    static const int32_t PICK_CLASSIC[] = {ND_KEY_4, ND_KEY_1};
+    /* 5 picks "Messages Style" -- it was 3 until "Install apps" went in
+     * above it and 4 until "Theme" did; then 2 picks "Chat" and 1 picks
+     * "Classic". */
+    static const int32_t PICK_CHAT[] = {ND_KEY_5, ND_KEY_2};
+    static const int32_t PICK_CLASSIC[] = {ND_KEY_5, ND_KEY_1};
     int rc = -1;
     uint64_t frames = 0u;
 
@@ -784,15 +788,15 @@ static void test_messages_style_writes_the_setting(void)
 
 static void test_engineering_mode_writes_the_setting(void)
 {
-    /* 6 picks "Engineering Mode" off the root list. It has moved three
+    /* 7 picks "Engineering Mode" off the root list. It has moved four
      * times now: third to fourth when Messages Style was added, fourth to
-     * fifth when BT Audio was, fifth to SIXTH when Install apps was. Then 2
-     * picks "Off" and 1 picks "On". VerticalList's digit shortcuts are
-     * 1-based, so a row moving is a keystroke changing -- which is the whole
-     * reason this test drives the real widget rather than calling the
-     * handler directly. */
-    static const int32_t TURN_OFF[] = {ND_KEY_6, ND_KEY_2};
-    static const int32_t TURN_ON[] = {ND_KEY_6, ND_KEY_1};
+     * fifth when BT Audio was, fifth to sixth when Install apps was, and
+     * sixth to SEVENTH when Theme was. Then 2 picks "Off" and 1 picks "On".
+     * VerticalList's digit shortcuts are 1-based, so a row moving is a
+     * keystroke changing -- which is the whole reason this test drives the
+     * real widget rather than calling the handler directly. */
+    static const int32_t TURN_OFF[] = {ND_KEY_7, ND_KEY_2};
+    static const int32_t TURN_ON[] = {ND_KEY_7, ND_KEY_1};
     int rc = -1;
     uint64_t frames = 0u;
 
@@ -811,7 +815,7 @@ static void test_engineering_mode_writes_the_setting(void)
  * claim is that both screens appear and that the app comes back. */
 static void test_memory_card_absent(void)
 {
-    static const int32_t OPEN_CARD[] = {ND_KEY_2};
+    static const int32_t OPEN_CARD[] = {ND_KEY_3};
     int rc = -1;
     uint64_t frames = 0u;
 
@@ -926,7 +930,7 @@ static void test_the_install_dialogs_fit(void)
  * screen makes, one row down. */
 static void test_install_apps_absent(void)
 {
-    static const int32_t OPEN_INSTALL[] = {ND_KEY_3};
+    static const int32_t OPEN_INSTALL[] = {ND_KEY_4};
     int rc = -1;
     uint64_t frames = 0u;
 
