@@ -144,17 +144,27 @@ int main(int argc, char **argv)
         return bail(why[0] != '\0' ? why : "this update is for another phone", 6);
     }
 
-    /* Unsigned is refused outright rather than warned about. The Update app
-     * shows a "Not signed" badge and lets the owner decide; a tool that stages
-     * without a person present has nobody to ask. */
-    if (!nd_upd_package_signed(pkg)) {
-        nd_upd_package_close(pkg);
-        return bail("the package carries no signature", 6);
-    }
+    /* VERIFY FIRST, THEN ASK. nd_upd_package_signed() is not "does this
+     * package contain a signature" -- it is "has the signature been checked
+     * and passed", and service.c only sets it inside verify_signature() on
+     * success. Testing it beforehand therefore always answers false, which is
+     * how this tool first refused a package it had just built and signed
+     * itself. The Update app calls verify directly and uses `signed` only for
+     * the badge it draws afterwards; this does the same.
+     *
+     * Unsigned is refused outright here rather than warned about. The app
+     * shows the same warning and lets engineering mode click past it, because
+     * there is a person present to decide; a tool that stages unattended has
+     * nobody to ask, and an image nobody signed is how a phone ends up unable
+     * to boot with no way to talk it out of that afterwards. */
     why[0] = '\0';
     if (nd_upd_package_verify_signature(pkg, key_path, why, sizeof why) != ND_UPDSVC_OK) {
         nd_upd_package_close(pkg);
         return bail(why[0] != '\0' ? why : "the release signature did not check out", 6);
+    }
+    if (!nd_upd_package_signed(pkg)) {
+        nd_upd_package_close(pkg);
+        return bail("the signature verified but was not recorded; refusing", 6);
     }
 
     image_bytes = nd_upd_package_image_size(pkg);
