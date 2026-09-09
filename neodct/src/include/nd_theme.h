@@ -505,6 +505,22 @@ void nd_theme_shadow_band(nd_image *img, int32_t x0, int32_t x1, int32_t y, int3
  * Text
  * ------------------------------------------------------------------ */
 
+/* The y to hand a text call so that a string's INK sits centred in a band
+ * `height` tall.
+ *
+ * nd_widgets.h rule 2 says centre by the ink extents, and the half of it that
+ * is easy to forget is that nd_draw_text's y is the ASCENDER LINE: the ink
+ * begins bbox.y0 rows lower. Centring the ink HEIGHT and passing that as the
+ * y puts every string that far too low.
+ *
+ * It read as a slight offset while the phone had two faces with bearings of 2
+ * and 4 rows. A theme may bring any face it likes, and one with a bearing of
+ * 8 pushes a 30-row title bar's own title off the bottom of it -- so anything
+ * centring text in a BAND, where there is an edge to clip against, uses this.
+ * The forty-odd places that centre inside the open content area are left as
+ * they are, deliberately; see the note in nd_softkey.c. */
+int32_t nd_theme_ink_centre_y(const nd_font *f, const char *utf8, int32_t height);
+
 /* Text with the shadow of idea 4. `shadow` is composited at ND_TH_SHADOW_A
  * one pixel BELOW the glyph, then the ink is drawn on top.
  *

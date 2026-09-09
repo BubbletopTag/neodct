@@ -196,8 +196,22 @@ void nd_appsel_draw(nd_appsel *s)
          * under the page number on the right. "Remote Shell" at 24 px bold is
          * the string that found this. */
         (void)nd_text_fit(fitted, sizeof fitted, current->name, tf, screen_w - 2 * (badge_w + 12));
-        nd_ui_text_size(ui, fitted, tf, &w, &h);
-        nd_theme_text_light(d, floordiv2(screen_w - w), (header_y - h) / 2, fitted, tf);
+        nd_ui_text_size(ui, fitted, tf, &w, NULL);
+        /* Centred in the title band by the INK BOX, bearing included -- this
+         * band has an edge to clip against and a face with a large bearing
+         * pushes the name off it. See nd_theme_ink_centre_y(). */
+        /* BAR ink, not content ink. The selector draws this title itself
+         * rather than handing it to nd_theme_titlebar (only the caller knows
+         * how to trim it against the badge), and in doing so it was reaching
+         * for ink_light -- "type over the background" -- while the badge
+         * beside it, drawn by the title bar, used bar_ink.
+         *
+         * The two are the same colour in a theme whose type is white
+         * everywhere, so it never showed. Under a theme with a pale ground
+         * and dark content type it is a charcoal app name sitting next to a
+         * white page number on the same pink plate. */
+        nd_theme_text_bar(d, floordiv2(screen_w - w),
+                          nd_theme_ink_centre_y(tf, fitted, header_y), fitted, tf);
     }
 
     /* 3. The icon: a glow, the picture, then its reflection. */
@@ -254,8 +268,13 @@ void nd_appsel_draw(nd_appsel *s)
         nd_rect plate = ND_RECT(2, content_bottom + 2, screen_w - 3, screen_h - 3);
 
         nd_theme_plate_draw(ui->canvas, plate, &p);
-        nd_ui_text_size(ui, "Select", f, &w, &h);
-        nd_theme_text_bar(d, floordiv2(screen_w - w), plate.y0 + floordiv2(nd_rect_h(plate) - h),
+        /* Positioned exactly as nd_softkey_update() positions its label --
+         * ink box, bearing subtracted. The two bars are side by side every
+         * time the menu is opened from the home screen, and this one drifting
+         * by a couple of rows is the seam the comment above is about. */
+        nd_ui_text_size(ui, "Select", f, &w, NULL);
+        nd_theme_text_bar(d, floordiv2(screen_w - w),
+                          plate.y0 + nd_theme_ink_centre_y(f, "Select", nd_rect_h(plate)),
                           "Select", f);
     }
 

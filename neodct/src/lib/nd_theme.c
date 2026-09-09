@@ -24,6 +24,7 @@
  * screen gradient: 42,000 branch pairs against none.
  */
 
+#include "nd_text.h"
 #include "nd_theme.h"
 
 #include <string.h>
@@ -673,12 +674,47 @@ void nd_theme_panel(nd_image *img, nd_rect r, int32_t radius)
 
     nd_theme_plate_draw(img, r, &p);
 
-    /* A second, tighter hairline just inside the border: the bezel. It is
+    
+/* A second, tighter hairline just inside the border: the bezel. It is
      * what makes the panel read as a pane of glass in a frame rather than a
      * painted rectangle, and it costs one outline. */
     if (r.x1 - r.x0 > 4 && r.y1 - r.y0 > 4)
         nd_theme_round_outline(img, ND_RECT(r.x0 + 1, r.y0 + 1, r.x1 - 1, r.y1 - 1),
                                nd_max32(0, radius - 1), ND_TH_CHROME_HI, 90u);
+}
+
+/* The y to hand nd_draw_text so that a string's INK sits centred in a band
+ * `height` tall.
+ *
+ * ============ THE BEARING IS NOT OPTIONAL ============
+ *
+ * nd_widgets.h rule 2 says centre by the ink extents and not the line height,
+ * and this used to do half of that: it took the ink HEIGHT from
+ * nd_text_size() and then passed the result to nd_draw_text as the y -- which
+ * is the ASCENDER LINE, not the top of the ink (nd_draw.h says so in
+ * capitals). The ink therefore landed bbox.y0 rows lower than intended, every
+ * time, on every title in the OS.
+ *
+ * It went unnoticed for as long as the phone had two typefaces with small top
+ * bearings: 2 rows on the pixel face and 4 on the Aero one, which reads as a
+ * title sitting slightly low rather than as a bug. A theme is allowed to
+ * bring any face it likes, and the first one that did -- Baloo 2, whose
+ * ascent leaves room for Devanagari -- has a bearing of 8. Its title came out
+ * 14 rows below the top of a 30-row bar with its descenders CLIPPED OFF the
+ * bottom edge.
+ *
+ * Subtracting the bearing is the whole fix, and it is font-independent: any
+ * face, any size, any string. */
+int32_t nd_theme_ink_centre_y(const nd_font *f, const char *utf8, int32_t height)
+{
+    nd_rect bb;
+    int32_t ih = 0;
+
+    if (f == NULL || utf8 == NULL)
+        return 0;
+    nd_text_size(f, utf8, NULL, &ih);
+    nd_text_bbox(f, utf8, &bb);
+    return (height - ih) / 2 - bb.y0;
 }
 
 int32_t nd_theme_titlebar(nd_image *img, nd_draw *d, int32_t w, int32_t bar_h, const char *title,
@@ -705,22 +741,15 @@ int32_t nd_theme_titlebar(nd_image *img, nd_draw *d, int32_t w, int32_t bar_h, c
         nd_theme_shadow_band(img, 0, w - 1, bar_h, 3, 130u);
 
     if (d != NULL && title != NULL && title[0] != '\0' && title_font != NULL) {
-        int32_t th = 0;
-
-        /* Centred on the bar by the string's OWN ink height, per rule 2 in
-         * nd_widgets.h -- a title of "Tones" and one of "Messages" have
-         * different ink boxes and centring on the line height would sit them
-         * on different rows. */
-        nd_text_size(title_font, title, NULL, &th);
-        nd_theme_text_bar(d, 8, (bar_h - th) / 2, title, title_font);
+        nd_theme_text_bar(d, 8, nd_theme_ink_centre_y(title_font, title, bar_h), title, title_font);
     }
 
     if (d != NULL && badge != NULL && badge[0] != '\0' && badge_font != NULL) {
         int32_t bw = 0;
-        int32_t bh = 0;
 
-        nd_text_size(badge_font, badge, &bw, &bh);
-        nd_theme_text_bar(d, w - 6 - bw, (bar_h - bh) / 2, badge, badge_font);
+        nd_text_size(badge_font, badge, &bw, NULL);
+        nd_theme_text_bar(d, w - 6 - bw, nd_theme_ink_centre_y(badge_font, badge, bar_h), badge,
+                          badge_font);
     }
 
     /* +3 for the shadow band, so a caller laying out from the returned row

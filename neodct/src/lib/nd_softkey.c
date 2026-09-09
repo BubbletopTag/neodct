@@ -177,11 +177,17 @@ void nd_softkey_update(nd_softkey *bar, const char *text, bool present)
          * label floated on the background and everybody can see now that
          * there is a plate around it to be off-centre within.
          *
-         * Only here. Forty other places in the widget code centre by ink
-         * extents alone, that is what those screens have always looked like,
-         * and correcting them wholesale is a different change from this one.
-         * This is the control the NaviKey presses; it is the one that has to
-         * look machined. */
+         * Here, the title bar and the app selector's two bands -- everything
+         * that centres text inside a BAR. Those got it when a theme brought a
+         * face whose bearing is 8 rows and the title came out clipped against
+         * the bottom of a 30-row bar; nd_theme_ink_centre_y() is the shared
+         * form of what this line does by hand.
+         *
+         * The forty-odd places that centre inside the open CONTENT area still
+         * go by ink extents alone. That is what those screens have always
+         * looked like, there is no edge for a bearing to push them over, and
+         * correcting them wholesale is still a different change from this
+         * one. */
         nd_ui_text_size(ui, text, f, &w, &h);
         nd_text_bbox(f, text, &ink);
         nd_theme_text_bar(ui->draw, floordiv2(screen_w - w) - ink.x0,
