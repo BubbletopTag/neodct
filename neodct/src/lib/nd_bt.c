@@ -303,9 +303,23 @@ static nd_err errno_to_err(void)
     switch (errno) {
     case ENODEV:
         return ND_ERR_NOTFOUND;
+    /* ND_ERR_PERM, AND THE WORD ON THE SCREEN IS WHY.
+     *
+     * These two used to answer ND_ERR_IO, so the one failure this module has
+     * on a phone -- HCIDEVUP from a process that is not root -- reached the
+     * owner as "I/O error". That sentence describes a broken dongle. It sent
+     * a whole evening after the hardware: re-seating the adapter, reading the
+     * firmware log, measuring the USB port. Nothing was wrong with any of it.
+     *
+     * The privilege boundary is the single most likely thing to be in the way
+     * here (nd_bt.h: every write to the controller needs CAP_NET_ADMIN, and
+     * the UI stopped being root at 0.5.0a), so it is the one error this must
+     * name correctly. ND_ERR_PERM was already in use in the branch just below
+     * for a broker refusal -- the same failure, reported two different ways
+     * depending on which side of the delegation it happened on. */
     case EPERM:
     case EACCES:
-        return ND_ERR_IO;
+        return ND_ERR_PERM;
     default:
         return ND_ERR_HARDWARE;
     }

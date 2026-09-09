@@ -132,8 +132,16 @@ nd_err nd_btaudio_cmd_build(nd_btaudio_cmd *out, const char *verb, const char *a
  * Moving the sound
  * ------------------------------------------------------------------ */
 
-/* What the speaker route was, kept while the earbuds have the default. */
-#define ND_BTAUDIO_ASOUND_SAVED "/run/asound.conf.speaker"
+/* What the speaker route was, kept while the earbuds have the default.
+ *
+ * IN A DIRECTORY, and not "/run/asound.conf.speaker" beside the file it
+ * copies. /run is a 0755 root:root tmpfs and this is written by the app or
+ * the core, both ndusr, which may rewrite the asound.conf S17audio handed it
+ * but may not CREATE a sibling -- so for as long as it lived there the save
+ * failed on every phone and nothing checked. S17audio makes this directory
+ * over to ndusr at boot for exactly that. */
+#define ND_BTAUDIO_ASOUND_DIR   "/run/asound.d"
+#define ND_BTAUDIO_ASOUND_SAVED ND_BTAUDIO_ASOUND_DIR "/speaker.conf"
 
 /* route_to(): point ALSA's "default" at `addr`, or back at the speaker when
  * `addr` is NULL.
@@ -177,6 +185,13 @@ nd_err nd_btaudio_daemons_start(void);
 /* stop(): all three, and the routing goes back to the speaker. */
 void nd_btaudio_daemons_stop(int card);
 
+/* kill(): the three daemons and nothing else -- no routing, no card.
+ *
+ * The half of stop() that needs root, which is why it has a name of its own:
+ * an app asks the core for it (nd_svc_bt_stop) and writes asound.conf itself,
+ * because that file is on the user partition and is the app's to write. */
+void nd_btaudio_daemons_kill(void);
+
 /* bluealsa, started when a device connects and stopped when it goes. */
 nd_err nd_btaudio_bluealsa_start(void);
 
@@ -186,6 +201,15 @@ int nd_btaudio_run(const nd_btaudio_cmd *cmd, char *capture, size_t cap_n);
 
 /* True when an adapter exists and is UP. */
 bool nd_btaudio_adapter_up(void);
+
+/* Is that pid a process that is still running?
+ *
+ * Exposed for the reason nd_svc.h exposes its mask test: this one answer has
+ * been wrong twice, in opposite directions, and both times the symptom was
+ * somewhere else entirely -- a zombie counted as a running daemon, and a root
+ * daemon counted as dead because ndusr may not signal it. A test can ask it
+ * directly rather than having to stand up three daemons to find out. */
+bool nd_btaudio__pid_alive(long pid);
 
 #ifdef __cplusplus
 }

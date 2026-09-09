@@ -7,6 +7,8 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include "nd_btaudio.h"
 
@@ -364,6 +366,46 @@ static void test_route_back_with_nothing_saved_writes_the_speaker(void)
     CHECK(strstr(back, "bluealsa") == NULL);
 }
 
+/* ============ THE LIVENESS TEST ITSELF ============
+ *
+ * still_running() decides whether each daemon came up, and it has been wrong
+ * twice. A zombie -- a child that exited and has not been waited for -- is
+ * what a bluetoothd that cannot own its bus name becomes, and kill(pid, 0)
+ * says yes to one; that is how "Bluetooth started" was reported for five
+ * releases about a stack that had not. The opposite error is on the phone
+ * only, so it is named here and proved there: kill(pid, 0) from ndusr against
+ * a root daemon answers EPERM, and reading /proc does not.
+ *
+ * SIGCHLD is left alone deliberately. The default disposition does not reap,
+ * which is what makes the zombie below reachable. */
+static void test_a_zombie_is_not_a_running_daemon(void)
+{
+    pid_t kid = fork();
+    int st = 0;
+
+    if (kid == 0)
+        _exit(0);
+    CHECK(kid > 0);
+    if (kid <= 0)
+        return;
+
+    /* Wait for it to actually be gone without reaping it: waitpid(WNOWAIT)
+     * leaves the child waitable, so it stays a zombie afterwards. */
+    CHECK_INT(waitid(P_PID, (id_t)kid, NULL, WEXITED | WNOWAIT), 0);
+    CHECK(!nd_btaudio__pid_alive((long)kid));
+
+    /* And this process, which certainly is running. */
+    CHECK(nd_btaudio__pid_alive((long)getpid()));
+
+    /* A pid nothing could be. */
+    CHECK(!nd_btaudio__pid_alive(0));
+    CHECK(!nd_btaudio__pid_alive(-1));
+
+    (void)waitpid(kid, &st, 0);
+    /* Reaped now, so not even a zombie. */
+    CHECK(!nd_btaudio__pid_alive((long)kid));
+}
+
 int main(void)
 {
     RUN(test_speaker_route_matches_the_boot_script);
@@ -385,5 +427,6 @@ int main(void)
     RUN(test_route_to_earbuds_saves_the_speaker_route);
     RUN(test_route_back_restores_what_was_saved);
     RUN(test_route_back_with_nothing_saved_writes_the_speaker);
+    RUN(test_a_zombie_is_not_a_running_daemon);
     return pt_report("test_btaudio");
 }

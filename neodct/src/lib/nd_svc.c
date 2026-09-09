@@ -69,6 +69,8 @@
 #include "nd_app.h"
 #include "nd_battery.h"
 #include "nd_broker.h"
+#include "nd_bt.h"
+#include "nd_btaudio.h"
 #include "nd_clock.h"
 #include "nd_log.h"
 #include "nd_modem.h"
@@ -113,7 +115,26 @@ typedef enum {
      * each of them a short bounded answer. */
     SVC_OP_FORMAT_START = 10,
     SVC_OP_FORMAT_POLL = 11,
-    SVC_OP_FORMAT_CANCEL = 12
+    SVC_OP_FORMAT_CANCEL = 12,
+    /* Appended, so no number an existing build sends changes meaning.
+     *
+     * Bluetooth is three root daemons and one ioctl, and Settings -- which is
+     * what drives Bluetooth -- has been ndusr since 0.5.0a. Both halves were
+     * written to delegate and neither delegation ever fired from an app:
+     * nd_bt_power() and nd_btaudio.c's spawn_quiet() both ask
+     * nd_broker_default(), which the core sets in ITSELF and not in the app it
+     * launches. So the app forked dbus-daemon and bluetoothd as ndusr (they
+     * exited within the second, leaving two zombies) and then did HCIDEVUP
+     * without CAP_NET_ADMIN, which the owner read on the screen as an I/O
+     * error about a dongle that was in perfect health.
+     *
+     * These verbs move the work to the process that actually holds the
+     * broker. Everything else Bluetooth needs already works as ndusr: the
+     * shipped bus policy lets any user send to org.bluez, so bluetoothctl --
+     * scan, pair, trust, connect -- is unchanged and still runs in the app. */
+    SVC_OP_BT_START = 13,
+    SVC_OP_BT_STOP = 14,
+    SVC_OP_BT_AUDIO_START = 15
 } svc_op;
 
 /* nd_svc.h states the untrusted set in prose and spells it as bit numbers,
@@ -469,6 +490,9 @@ static bool valid_request(const svc_req *r)
     case SVC_OP_FORMAT_START:
     case SVC_OP_FORMAT_POLL:
     case SVC_OP_FORMAT_CANCEL:
+    case SVC_OP_BT_START:
+    case SVC_OP_BT_STOP:
+    case SVC_OP_BT_AUDIO_START:
         return true;
     /* SVC_OP_FORMAT_CARD_RETIRED falls through to the refusal with everything
      * else this build does not serve. See the enum for what it used to do to
@@ -841,6 +865,79 @@ static bool clock_set_bounded(time_t when)
         return false;
     }
     return nd_clock_set(when, "set by hand in the Clock app");
+}
+
+/* ------------------------------------------------------------------ *
+ * Bluetooth: the two things that have to happen as root
+ * ------------------------------------------------------------------ *
+ *
+ * Both of these run in the CORE, which is the whole point of the verbs that
+ * reach them: nd_broker_default() is set here and nowhere else, so this is
+ * the only process in which nd_btaudio.c's spawn and nd_bt_power()'s ioctl
+ * take the privileged path they were written to take.
+ *
+ * They are short. daemons_start() waits about 1.8s for two daemons to come up
+ * and bluealsa about 0.8s, all of it fixed sleeps rather than an unbounded
+ * wait on a child -- which is the line the retired format verb crossed and
+ * these do not. See SVC_OP_FORMAT_CARD_RETIRED for what happens past it.
+ */
+
+static bool bt_start(void)
+{
+    nd_err rc = nd_btaudio_daemons_start();
+
+    if (rc != ND_OK) {
+        nd_log_err(ND_LOG_BTAUDIO, "App service: the Bluetooth stack would not start: %s",
+                   nd_strerror(rc));
+        return false;
+    }
+
+    /* AND THE ADAPTER, HERE, rather than leaving it to the bluetoothctl the
+     * app runs afterwards. bluetoothd does power the controller up on its own
+     * and an app can ask it to over the bus, but neither says anything about
+     * an adapter that is not there or will not come up -- the app would get a
+     * cheerful answer from a daemon talking to nothing. This is the one place
+     * with both the broker and the ioctl, so this is where that question gets
+     * a real answer to carry back.
+     *
+     * EALREADY is not a failure and nd_bt_power_local() already folds it into
+     * ND_OK, so an adapter bluetoothd has just switched on comes through here
+     * as success. */
+    rc = nd_bt_power(0u, true);
+    if (rc != ND_OK) {
+        nd_log_err(ND_LOG_BTAUDIO, "App service: hci0 would not come up: %s", nd_strerror(rc));
+        return false;
+    }
+    nd_log(ND_LOG_BTAUDIO, "App service: Bluetooth started");
+    return true;
+}
+
+static bool bt_stop(void)
+{
+    /* THE DAEMONS FIRST. bluetoothd owns the controller while it runs and
+     * switches it straight back on -- taking hci0 down underneath it leaves
+     * the adapter up and the menu still reading "Disable" on a phone whose
+     * Bluetooth was just switched off.
+     *
+     * The routing back to the speaker is NOT here: asound.conf lives on the
+     * user partition and belongs to whoever asked, so the app writes it
+     * before calling this. nd_btaudio_daemons_stop() is still the pair of
+     * them together for a caller that is doing both. */
+    nd_btaudio_daemons_kill();
+    (void)nd_bt_power(0u, false);
+    nd_log(ND_LOG_BTAUDIO, "App service: Bluetooth stopped");
+    return true;
+}
+
+static bool bt_audio_start(void)
+{
+    nd_err rc = nd_btaudio_bluealsa_start();
+
+    if (rc != ND_OK) {
+        nd_log_err(ND_LOG_BTAUDIO, "App service: bluealsa would not start: %s", nd_strerror(rc));
+        return false;
+    }
+    return true;
 }
 
 /* Set only by nd_svc_format_simulate(); the barriers are the ones the halt
@@ -1486,6 +1583,25 @@ static void serve(nd_ui *ui, uint32_t allowed_ops, const svc_req *req, svc_resp 
     case SVC_OP_LAYOUT_CARD:
         out->present = 1u;
         out->ok = layout_card() ? 1u : 0u;
+        return;
+
+    /* No service object here either: Bluetooth is not a pointer the core
+     * holds, it is three daemons and a controller. Always present; `ok` is
+     * the whole answer, and the reason a false one happened is in the log
+     * under the BTAUDIO tag rather than on the wire. */
+    case SVC_OP_BT_START:
+        out->present = 1u;
+        out->ok = bt_start() ? 1u : 0u;
+        return;
+
+    case SVC_OP_BT_STOP:
+        out->present = 1u;
+        out->ok = bt_stop() ? 1u : 0u;
+        return;
+
+    case SVC_OP_BT_AUDIO_START:
+        out->present = 1u;
+        out->ok = bt_audio_start() ? 1u : 0u;
         return;
 
     case SVC_OP_SEND_SMS:
@@ -2335,6 +2451,63 @@ bool nd_svc_layout_card(void)
         return layout_card();
 
     if (svc_call(SVC_OP_LAYOUT_CARD, NULL, NULL, &resp, ND_SVC_LAYOUT_TIMEOUT_S) != SVC_ST_OK)
+        return false;
+    return resp.ok != 0u;
+}
+
+/* ------------------------------------------------------------------ *
+ * Bluetooth
+ * ------------------------------------------------------------------ *
+ *
+ * The same three-way shape as everything above: in the core, do it; in an app
+ * with a socket, ask; in an app without one, refuse and say so. What is
+ * different is that the middle case is not an optimisation here -- it is the
+ * only thing that works. An app doing this itself gets two dead daemons and
+ * EPERM, which is what it did until now. */
+bool nd_svc_bt_start(void)
+{
+    svc_resp resp;
+
+    if (app_without_a_channel()) {
+        nd_log_err(ND_LOG_BTAUDIO, "an app with no service socket asked to start Bluetooth");
+        return false;
+    }
+    if (g_client_fd < 0)
+        return bt_start();
+
+    if (svc_call(SVC_OP_BT_START, NULL, NULL, &resp, ND_SVC_BT_TIMEOUT_S) != SVC_ST_OK)
+        return false;
+    return resp.ok != 0u;
+}
+
+bool nd_svc_bt_stop(void)
+{
+    svc_resp resp;
+
+    if (app_without_a_channel()) {
+        nd_log_err(ND_LOG_BTAUDIO, "an app with no service socket asked to stop Bluetooth");
+        return false;
+    }
+    if (g_client_fd < 0)
+        return bt_stop();
+
+    if (svc_call(SVC_OP_BT_STOP, NULL, NULL, &resp, ND_SVC_BT_TIMEOUT_S) != SVC_ST_OK)
+        return false;
+    return resp.ok != 0u;
+}
+
+bool nd_svc_bt_audio_start(void)
+{
+    svc_resp resp;
+
+    if (app_without_a_channel()) {
+        nd_log_err(ND_LOG_BTAUDIO, "an app with no service socket asked to start bluealsa");
+        return false;
+    }
+    if (g_client_fd < 0)
+        return bt_audio_start();
+
+    if (svc_call(SVC_OP_BT_AUDIO_START, NULL, NULL, &resp, ND_SVC_BT_TIMEOUT_S) != SVC_ST_OK)
         return false;
     return resp.ok != 0u;
 }

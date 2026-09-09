@@ -2316,7 +2316,10 @@ static void test_the_untrusted_mask_is_the_read_only_pair(void)
         OP_LAYOUT_CARD = 9,
         OP_FORMAT_START = 10,
         OP_FORMAT_POLL = 11,
-        OP_FORMAT_CANCEL = 12
+        OP_FORMAT_CANCEL = 12,
+        OP_BT_START = 13,
+        OP_BT_STOP = 14,
+        OP_BT_AUDIO_START = 15
     };
 
     /* The two that only ever read. */
@@ -2336,6 +2339,13 @@ static void test_the_untrusted_mask_is_the_read_only_pair(void)
     CHECK(!nd_svc__op_allowed(ND_SVC_OPS_UNTRUSTED, OP_FORMAT_CANCEL));
     CHECK(!nd_svc__op_allowed(ND_SVC_OPS_UNTRUSTED, OP_FORMAT_CARD_RETIRED));
 
+    /* The three Bluetooth verbs. Each of them starts a root daemon or moves
+     * the controller, and an installed app has no business doing either --
+     * least of all switching the radio on and leaving it on. */
+    CHECK(!nd_svc__op_allowed(ND_SVC_OPS_UNTRUSTED, OP_BT_START));
+    CHECK(!nd_svc__op_allowed(ND_SVC_OPS_UNTRUSTED, OP_BT_STOP));
+    CHECK(!nd_svc__op_allowed(ND_SVC_OPS_UNTRUSTED, OP_BT_AUDIO_START));
+
     /* BATTERY_QUICKSTART is the one that looks like a read and is not: it
      * WRITES to the fuel gauge, telling it to re-learn the cell. An app that
      * called it in a loop would leave the owner with a meter that lies. */
@@ -2346,6 +2356,7 @@ static void test_the_untrusted_mask_is_the_read_only_pair(void)
     CHECK(nd_svc__op_allowed(ND_SVC_OPS_ALL, OP_SEND_SMS));
     CHECK(nd_svc__op_allowed(ND_SVC_OPS_ALL, OP_POWEROFF));
     CHECK(nd_svc__op_allowed(ND_SVC_OPS_ALL, OP_FORMAT_CANCEL));
+    CHECK(nd_svc__op_allowed(ND_SVC_OPS_ALL, OP_BT_START));
 
     /* Op 0 is not an operation, and a mask is 32 bits: an op at or above 32
      * has no bit to test and shifting by it would be undefined. Nothing sends
@@ -2412,6 +2423,9 @@ static void test_an_untrusted_socket_carries_only_reads(core_fixture *fx)
     CHECK(!nd_svc_set_clock((time_t)1893456000)); /* 2030, comfortably in range */
     CHECK(!nd_svc_format_card());
     CHECK(!nd_svc_layout_card());
+    CHECK(!nd_svc_bt_start());
+    CHECK(!nd_svc_bt_stop());
+    CHECK(!nd_svc_bt_audio_start());
 
     nd_svc_client_close();
     nd_svc_server_stop(s);
@@ -2449,6 +2463,17 @@ static void test_an_app_with_no_socket_is_not_the_core(void)
     CHECK(!nd_svc_poweroff());
     CHECK(!nd_svc_set_clock((time_t)1893456000)); /* 2030, comfortably in range */
     CHECK(!nd_svc_format_card());
+
+    /* And Bluetooth, which is the same trap with a fresh set of consequences:
+     * acting locally here means forking dbus-daemon and bluetoothd out of an
+     * app that cannot own their bus names, and then HCIDEVUP without
+     * CAP_NET_ADMIN. All three of those "worked" from the app's point of view
+     * for five releases -- two daemons that exited into zombies and one EPERM
+     * the app reported as an I/O error -- because nobody had asked whether the
+     * broker the code delegates to was ever set in an app. */
+    CHECK(!nd_svc_bt_start());
+    CHECK(!nd_svc_bt_stop());
+    CHECK(!nd_svc_bt_audio_start());
 }
 
 int main(void)

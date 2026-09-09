@@ -247,8 +247,13 @@ nd_err nd_btaudio_route_to(const char *addr, int card)
          * saved yet. Connecting a second device while the first is still the
          * default must not overwrite the SPEAKER route with an earbud one and
          * leave nothing to come back to. */
-        if (!nd_path_exists(ND_BTAUDIO_ASOUND_SAVED))
+        if (!nd_path_exists(ND_BTAUDIO_ASOUND_SAVED)) {
+            /* The directory first. On the phone S17audio has already made it
+             * and handed it to ndusr; this is for a root caller and for the
+             * tests, where /run is a staged directory with nothing in it. */
+            (void)nd_mkdir_p(ND_BTAUDIO_ASOUND_DIR, 0755u);
             (void)copy_conf(ND_BTAUDIO_ASOUND, ND_BTAUDIO_ASOUND_SAVED);
+        }
 
         rc = nd_btaudio_asound_text(text, sizeof text, addr, card);
         if (rc != ND_OK)
@@ -351,9 +356,61 @@ static bool spawn_quiet(const char *path, const char *const *argv, pid_t *pid_ou
     return true;
 }
 
+/* ============ WHY THIS IS /proc AND NOT kill(pid, 0) ============
+ *
+ * It was kill(pid, 0), and that answer is wrong in both directions here.
+ *
+ * WRONG FOR A LIVE DAEMON. Once these three are started through the broker
+ * they are root's, and dbus-daemon drops further still to the `dbus` user.
+ * The process asking is the core, which is ndusr -- and kill(2) does its
+ * permission check for signal 0 as well, so the honest answer for a running
+ * daemon is EPERM. Measured on the phone: dbus-daemon visible in ps, and
+ * `kill -0` from ndusr saying "Operation not permitted". Bluetooth would not
+ * start because the code decided the bus it had just started was dead.
+ *
+ * WRONG FOR A DEAD ONE. A child that has exited and not been waited for is a
+ * zombie, and kill(pid, 0) succeeds on a zombie. That is the failure this
+ * check was added to catch in the first place -- a bluetoothd that could not
+ * own its bus name and exited half a second later, reported as a success.
+ *
+ * /proc/PID/stat answers both. It is readable by anyone, so the uid boundary
+ * does not come into it, and its state field distinguishes a zombie from a
+ * process that is genuinely there. The comm field can contain spaces and
+ * parentheses, so the state is found after the LAST ')' rather than by
+ * counting fields. */
 static bool still_running(pid_t pid)
 {
-    return pid > 0 && kill(pid, 0) == 0;
+    char path[64];
+    char buf[512];
+    const char *close_paren;
+    FILE *f;
+    size_t n;
+
+    if (pid <= 0)
+        return false;
+
+    /* The literal path, NOT through nd_path_resolve(): a staged test root has
+     * no /proc, and the pids in question are the real kernel's either way. */
+    if (nd_snprintf(path, sizeof path, "/proc/%ld/stat", (long)pid) != ND_OK)
+        return false;
+    f = fopen(path, "rb");
+    if (f == NULL)
+        return false; /* reaped, or never there */
+
+    n = fread(buf, 1u, sizeof buf - 1u, f);
+    (void)fclose(f);
+    buf[n] = '\0';
+
+    close_paren = strrchr(buf, ')');
+    if (close_paren == NULL || close_paren[1] == '\0')
+        return false; /* unparseable is not evidence of life */
+    /* "... ) S ..." -- one space, then the state letter. */
+    return close_paren[2] != 'Z' && close_paren[2] != 'X';
+}
+
+bool nd_btaudio__pid_alive(long pid)
+{
+    return still_running((pid_t)pid);
 }
 
 nd_err nd_btaudio_daemons_start(void)
@@ -381,12 +438,28 @@ nd_err nd_btaudio_daemons_start(void)
     (void)nd_mkdir_p("/NeoDCT/User/.bluetooth", 0755u);
 
     if (!still_running(g_dbus)) {
+        /* Best effort, and NOT what makes this work on the phone: /run is a
+         * root-owned 0755 tmpfs and this process is ndusr, so here it fails.
+         * S16btusb creates the directory at boot for exactly that reason.
+         * This stays for a caller that IS root -- a test, or a core running
+         * without a drop -- where it is the whole of the setup. */
         (void)nd_mkdir_p("/run/dbus", 0755u);
         if (!spawn_quiet(BTAUDIO_DBUS, DBUS_ARGV, &g_dbus)) {
             nd_log_err(ND_LOG_BTAUDIO, "no dbus-daemon; Bluetooth audio needs it");
             return ND_ERR_NOTFOUND;
         }
         nap(0.6); /* the bus has to be listening before bluetoothd dials it */
+        /* A SUCCESSFUL FORK IS NOT A RUNNING DAEMON, and this is where that
+         * cost the most. dbus-daemon --system binds a socket in a root-owned
+         * /run and then drops to `messagebus`; run without privilege it exits
+         * in well under this nap. The old code asked fork() and nothing else,
+         * so Bluetooth reported itself started and then failed at every later
+         * step with an error about the step rather than about this. */
+        if (!still_running(g_dbus)) {
+            nd_log_err(ND_LOG_BTAUDIO, "dbus-daemon exited at once; it needs root");
+            g_dbus = -1;
+            return ND_ERR_PERM;
+        }
     }
     if (!still_running(g_bluetoothd)) {
         if (!spawn_quiet(BTAUDIO_BLUETOOTHD, BTD_ARGV, &g_bluetoothd)) {
@@ -394,6 +467,15 @@ nd_err nd_btaudio_daemons_start(void)
             return ND_ERR_NOTFOUND;
         }
         nap(1.2); /* it registers on the bus before bluetoothctl can talk */
+        /* Same check, and the same cause: the shipped policy in
+         * /usr/share/dbus-1/system.d/bluetooth.conf grants own="org.bluez" to
+         * <policy user="root"> and to nobody else, so a bluetoothd that is not
+         * root cannot claim its bus name and gives up immediately. */
+        if (!still_running(g_bluetoothd)) {
+            nd_log_err(ND_LOG_BTAUDIO, "bluetoothd exited at once; it needs root");
+            g_bluetoothd = -1;
+            return ND_ERR_PERM;
+        }
     }
     nd_log(ND_LOG_BTAUDIO, "dbus and bluetoothd up");
     return ND_OK;
@@ -441,6 +523,13 @@ nd_err nd_btaudio_bluealsa_start(void)
         return ND_ERR_NOTFOUND;
     }
     nap(0.8);
+    /* It owns org.bluealsa, which the bus grants to root alone -- so this is
+     * the third daemon that a fork() alone says nothing about. */
+    if (!still_running(g_bluealsa)) {
+        nd_log_err(ND_LOG_BTAUDIO, "bluealsa exited at once; it needs root");
+        g_bluealsa = -1;
+        return ND_ERR_PERM;
+    }
     nd_log(ND_LOG_BTAUDIO, "bluealsa up (a2dp-source)");
     return ND_OK;
 }
@@ -451,7 +540,19 @@ void nd_btaudio_daemons_stop(int card)
      * leaves every later open failing on a PCM that no longer exists, which
      * looks like broken audio rather than like Bluetooth being off. */
     (void)nd_btaudio_route_to(NULL, card);
+    nd_btaudio_daemons_kill();
+}
 
+/* THE PRIVILEGED HALF ON ITS OWN.
+ *
+ * The two halves of stopping Bluetooth belong to different processes now.
+ * Writing asound.conf is a file under the user partition and the app that
+ * asked can do it; killing three root daemons is the core's, because the core
+ * is what started them (nd_svc_bt_stop). Splitting them here rather than
+ * duplicating the kill in nd_svc.c keeps the pids -- which are static to this
+ * file -- with the only code that ever sets them. */
+void nd_btaudio_daemons_kill(void)
+{
     if (still_running(g_bluealsa))
         (void)nd_proc_terminate(g_bluealsa, 1.0, NULL);
     if (still_running(g_bluetoothd))
@@ -461,7 +562,7 @@ void nd_btaudio_daemons_stop(int card)
     g_bluealsa = -1;
     g_bluetoothd = -1;
     g_dbus = -1;
-    nd_log(ND_LOG_BTAUDIO, "daemons stopped, sound back on the speaker");
+    nd_log(ND_LOG_BTAUDIO, "daemons stopped");
 }
 
 int nd_btaudio_run(const nd_btaudio_cmd *cmd, char *capture, size_t cap_n)

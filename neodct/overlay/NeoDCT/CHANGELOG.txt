@@ -15,6 +15,12 @@ percentage, no low-battery warning and no protective shutdown -- because the
 gauge sleeps between readings and the first one after it wakes was being
 thrown away. It is now retried, which is all it needed.
 
+Bluetooth switches on. Enable in BT Audio has never worked on this phone: it
+said "Bluetooth would not start" and gave "I/O error" as the reason, which
+described a broken adapter. There was nothing wrong with the adapter. Settings
+was trying to start Bluetooth itself, and Settings has not had the permission
+to do that since 0.5.0a -- it now asks the phone to, which does have it.
+
 0.5.15a
 The microphone, the apps you download, and the keys on the keypad.
 

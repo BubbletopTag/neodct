@@ -40,6 +40,23 @@ case "$1" in
         # says "could not connect" about earbuds it just paired with.
         mkdir -p /NeoDCT/User/.bluetooth /NeoDCT/User/.bluealsa 2>/dev/null
 
+        # AND THE DIRECTORY THE SYSTEM BUS BINDS ITS SOCKET IN.
+        #
+        # dbus-daemon --system creates /run/dbus/system_bus_socket and does
+        # NOT create /run/dbus; without it the daemon exits at once. It is
+        # started on demand rather than at boot (nd_btaudio.h has the memory
+        # argument), and by then the process asking is the core, which is
+        # ndusr -- /run is a root-owned 0755 tmpfs, so its own mkdir is
+        # refused. Root has to have made this while root was still around,
+        # which is here.
+        #
+        # This is the same shape as /run/neodct/input in run_neodct.sh and
+        # /run/asound.conf's owner in S17audio: the drop keeps taking away
+        # the last step of things that used to be nobody's problem. It cost a
+        # whole diagnosis to find, because a dbus-daemon that cannot bind says
+        # so on a stderr that goes to /dev/null.
+        mkdir -p /run/dbus 2>/dev/null
+
         [ -d "$BTUSB" ] || exit 0
 
         found=

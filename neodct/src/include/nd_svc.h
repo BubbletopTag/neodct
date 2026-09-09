@@ -127,6 +127,12 @@ extern "C" {
 #define ND_SVC_LAYOUT_WAIT_S    30.0
 #define ND_SVC_LAYOUT_TIMEOUT_S 40.0
 
+/* An app waiting for Bluetooth to come up or go away. The core's own worst
+ * case is the two fixed settling naps in nd_btaudio.c -- 0.6s for dbus and
+ * 1.2s for bluetoothd -- plus two spawns through the broker; fifteen seconds
+ * is a core that has stopped answering, not a slow start. */
+#define ND_SVC_BT_TIMEOUT_S 15.0
+
 /* How long the core waits for its service thread after the app has gone.
  * Past this the thread is detached to finish its in-flight request and free
  * itself: there is no way to abort a CMGS already on the wire, and freezing
@@ -577,6 +583,62 @@ bool nd_svc_format_card(void);
  * in the menu either way; it just cannot save anything until the card is
  * next mounted, which Settings says. */
 bool nd_svc_layout_card(void);
+
+/* ------------------------------------------------------------------ *
+ * Bluetooth
+ * ------------------------------------------------------------------ *
+ *
+ * Every part of Bluetooth that needs uid 0, and no part that does not.
+ *
+ * ============ WHAT WENT WRONG WITHOUT THESE ============
+ *
+ * Settings drives Bluetooth and has been ndusr since 0.5.0a. Four things it
+ * did needed root, and all four were written to delegate to the broker:
+ *
+ *   dbus-daemon --system   binds a socket in a root-owned /run
+ *   bluetoothd             owns org.bluez, which the shipped bus policy
+ *                          grants to <policy user="root"> and nobody else
+ *   bluealsa               owns org.bluealsa, granted the same way
+ *   HCIDEVUP on hci0       needs CAP_NET_ADMIN
+ *
+ * The delegation was `if (nd_broker_default() != NULL)`, and the core sets
+ * that in ITSELF, after forking the broker -- never in the app it launches.
+ * So in Settings the pointer was always NULL and the else branch always ran:
+ * the two daemons were forked as ndusr and were gone within the second, and
+ * the ioctl returned EPERM. What the owner saw was "Bluetooth would not
+ * start / I/O error", because nd_bt.c mapped EPERM to ND_ERR_IO -- an error
+ * about the dongle, for a dongle with nothing wrong with it.
+ *
+ * These verbs put the work in the process that holds the broker. It is the
+ * same shape as the halt and the format before them, and for the same reason.
+ *
+ * ============ WHAT IS DELIBERATELY NOT HERE ============
+ *
+ * bluetoothctl. Scanning, pairing, trusting and connecting all go through
+ * bluetoothd over the system bus, and the shipped policy has
+ * <policy context="default"><allow send_destination="org.bluez"/> -- so they
+ * work as ndusr, measured on the phone, and stay in the app where the person
+ * pressing the keys is. A verb for them would be a second copy of the pairing
+ * flow living in the core for no gain.
+ *
+ * asound.conf is not here either: it is on the user partition and is the
+ * app's to write. An app switching Bluetooth off routes audio back to the
+ * speaker itself and then calls nd_svc_bt_stop() for the daemons. */
+
+/* dbus and bluetoothd up, then hci0 up. false if any of that failed; the
+ * reason is in the log under BTAUDIO. Starting an already-started stack is
+ * success and costs one kill(pid, 0) per daemon. */
+bool nd_svc_bt_start(void);
+
+/* The three daemons down, then hci0 down -- in that order, because
+ * bluetoothd switches the controller back on underneath a caller who does it
+ * the other way round. Does NOT touch the audio routing; see above. */
+bool nd_svc_bt_stop(void);
+
+/* bluealsa, which is started when a device connects rather than with the
+ * rest: it is the biggest of the three daemons and useless until there is
+ * something to play to. */
+bool nd_svc_bt_audio_start(void);
 
 /* ------------------------------------------------------------------ *
  * The halt simulation -- TESTS ONLY, in the sense nd_ui_sim.h means it

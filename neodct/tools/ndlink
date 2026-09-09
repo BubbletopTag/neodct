@@ -531,14 +531,20 @@ verb_apps() {
 verb_update() {
     _up_install=0
     _up_open=0
+    _up_pkg=
+    # Flags ANYWHERE, not only in front. `ndlink update pkg.ndsw --install` is
+    # how it reads in the help and is how a person types it; the loop used to
+    # stop at the first non-flag, so that form pushed 50 MB and then said it
+    # had not installed anything.
     while [ $# -gt 0 ]; do
         case "$1" in
-        --install) _up_install=1; shift ;;
-        --open) _up_open=1; shift ;;
-        *) break ;;
+        --install) _up_install=1 ;;
+        --open) _up_open=1 ;;
+        -*) fail 5 "update does not take $1" ;;
+        *) [ -n "$_up_pkg" ] && fail 5 "update takes one package"; _up_pkg=$1 ;;
         esac
+        shift
     done
-    _up_pkg=${1:-}
     [ -n "$_up_pkg" ] || fail 5 "update needs a .ndsw package"
     [ -f "$_up_pkg" ] || fail 5 "no such file: $_up_pkg"
     case "$_up_pkg" in
@@ -659,9 +665,18 @@ verb_watch() {
                 printf 'opening %s on %s\n' "$_w_v" "$_w_addr"
                 [ "$_w_viewonly" = 1 ] || printf 'Keys go to the phone: arrows, Enter=NaviKey, Backspace=C, 0-9, * and #\n'
             fi
-            # Replace this process: the viewer is the point, and leaving ndlink
-            # in the middle would hold the target lock for as long as the
-            # window is open.
+            # DROP THE LOCK BEFORE EXEC. exec replaces the process but keeps
+            # its file descriptors, and flock lives on the descriptor -- so the
+            # viewer inherited the target lock and held it for as long as the
+            # window was open, which blocked every other ndlink command against
+            # that phone. A viewer you leave open all afternoon must not be a
+            # mutex on the phone it is showing.
+            #
+            # (An earlier comment here claimed exec avoided this. It does not,
+            # and the first thing that happened after shipping it was a `shell`
+            # refused with "another ndlink holds hw" whose holder was
+            # vncviewer.)
+            eval "exec $LOCK_FD>&-" 2>/dev/null || true
             exec "$_w_v" "$_w_addr"
         fi
     done
@@ -903,22 +918,31 @@ verb_logs() {
     return 0
 }
 
+# WITHOUT resolve_target, and an empty TARGET means "whichever arrives".
+#
+# This verb exists to be used on a phone that is not answering yet -- straight
+# after a reboot or an update, which is the only time anybody types it. Going
+# through resolve_target made it refuse to start for exactly the reason it had
+# been asked to run: `ndlink wait` after an update answered "no target
+# reachable" in about a second, having waited for nothing.
 verb_wait() {
     _deadline=$(( $(date +%s) + TIMEOUT ))
     while [ "$(date +%s)" -lt "$_deadline" ]; do
-        if [ "$TARGET" = hw ] && hw_reachable; then
-            emit_ok wait '"state":"up"'
+        if [ "$TARGET" != qemu ] && hw_reachable; then
+            TARGET=hw
+            emit_ok wait '"state":"up","target":"hw"'
             [ "$JSON" = 1 ] || printf 'hw is up\n'
             return 0
         fi
-        if [ "$TARGET" = qemu ] && qemu_reachable; then
-            emit_ok wait '"state":"up"'
+        if [ "$TARGET" != hw ] && qemu_reachable; then
+            TARGET=qemu
+            emit_ok wait '"state":"up","target":"qemu"'
             [ "$JSON" = 1 ] || printf 'qemu is up\n'
             return 0
         fi
         sleep 1
     done
-    fail 3 "timed out after ${TIMEOUT}s waiting for $TARGET"
+    fail 3 "timed out after ${TIMEOUT}s waiting for ${TARGET:-a target}"
 }
 
 verb_expect() {
@@ -1121,9 +1145,12 @@ esac
 # devices is the one verb that must work with nothing reachable -- it is how
 # you find that out.
 case "$VERB" in
-devices | connect | disconnect | diff)
+devices | connect | disconnect | diff | wait)
     # Host-side bookkeeping: these must work with no target reachable, since
-    # finding that out (or fixing it) is what they are for.
+    # finding that out (or fixing it) is what they are for. `wait` is here for
+    # the strongest version of that reason -- an unreachable target is its
+    # whole subject -- and it takes no lock either, because polling a port is
+    # not use of a phone that somebody else may be holding.
     ;;
 *)
     resolve_target

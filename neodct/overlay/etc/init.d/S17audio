@@ -56,7 +56,30 @@ CONF="$NEODCT_ASOUND_CONF"
 #
 # Silent when there is no ndusr -- an image built without
 # BR2_ROOTFS_USERS_TABLES runs everything as root and needs none of this.
+# AND THE DIRECTORY BESIDE IT, for the same reason and it was missed.
+#
+# nd_btaudio_route_to() does not only rewrite asound.conf: before it points
+# "default" at earbuds it SAVES the boot-time file, so disconnecting restores
+# the exact bytes rather than guessing them again. That save is a second file,
+# and the paragraph above says why ndusr cannot create one in /run -- so the
+# save silently failed on every phone, and disconnecting fell through to the
+# regenerate path.
+#
+# Which would be harmless if the two agreed about the answer. They do not:
+# this script picks the card with a usbid (find_usb_card, card 1 here) and
+# nd_btaudio.c's fallback picks the first card with a capture device (card 0,
+# the onboard codec that is wired to nothing). Measured on the phone --
+# switching Bluetooth off left "default" pointing at silence.
+#
+# A directory, not a chown of a file that does not exist yet: the save is
+# created and removed as devices come and go, and ndusr has to be able to do
+# both. 0755 so ndusr_ut can still read what is in it.
+ASOUND_DIR=/run/asound.d
+
 conf_owner() {
+    mkdir -p "$ASOUND_DIR" 2>/dev/null
+    chown "$NEODCT_ASOUND_OWNER:$NEODCT_ASOUND_OWNER" "$ASOUND_DIR" 2>/dev/null
+    chmod 0755 "$ASOUND_DIR" 2>/dev/null
     [ -e "$CONF" ] || return 0
     chown "$NEODCT_ASOUND_OWNER:$NEODCT_ASOUND_OWNER" "$CONF" 2>/dev/null
     chmod 0644 "$CONF" 2>/dev/null

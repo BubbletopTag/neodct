@@ -414,7 +414,7 @@ static void bt_scan_and_pair(nd_ui *ui)
 
     /* bluealsa has to be listening before the connection completes, or the
      * A2DP transport arrives with nothing to hand it to. */
-    (void)nd_btaudio_bluealsa_start();
+    (void)nd_svc_bt_audio_start();
 
     if (nd_btaudio_cmd_build(&cmd, "connect", devices[choice].addr, 0) == ND_OK)
         (void)nd_btaudio_run(&cmd, NULL, 0u);
@@ -473,29 +473,55 @@ static void show_bt_audio(nd_ui *ui)
             bt_say_working(ui, "Starting...");
             if (nd_ui_present(ui) != ND_OK)
                 return;
-            if (nd_btaudio_daemons_start() != ND_OK) {
-                (void)nd_infoscreen_show(ui, "No Bluetooth stack", NULL, "Back");
+            /* THE CORE, NOT THIS PROCESS. Three root daemons and one
+             * CAP_NET_ADMIN ioctl, none of which this app has been able to do
+             * since 0.5.0a -- it forked two daemons that died on the spot and
+             * then got EPERM from HCIDEVUP, and reported the whole thing as
+             * "I/O error". nd_svc.h has the trace. */
+            if (!nd_svc_bt_start()) {
+                /* A MessageDialog and not an InfoScreen, which is where this
+                 * sentence used to go. InfoScreen centres one line of each
+                 * font and does not wrap, so it drew "Bluetooth would not
+                 * start" off both edges of a 240 px panel as "etooth would
+                 * not st" -- visible in the owner's own photograph of the
+                 * failure. Measured with nd-dialogfit: 3 lines of a 5-line
+                 * budget. */
+                nd_msgdialog dialog;
+
+                nd_msgdialog_init(&dialog, ui,
+                                  "Bluetooth would not start. The phone could not bring "
+                                  "the adapter up.");
+                (void)nd_msgdialog_show(&dialog);
             } else {
                 nd_btaudio_cmd cmd;
-                nd_err power = nd_bt_power(0u, true);
 
-                /* NOT discarded any more. This return was thrown away, and
-                 * from 0.5.0a it was a failure every time: the ioctl needs
-                 * CAP_NET_ADMIN and this app is ndusr. The screen went back to
-                 * the menu with Bluetooth still off and said nothing at all,
-                 * which is the whole reason it took a hardware report to find.
-                 * The adapter is the thing being switched on; if it did not
-                 * come up there is nothing further worth trying. */
-                if (power != ND_OK) {
-                    (void)nd_infoscreen_show(ui, "Bluetooth would not start",
-                                             nd_strerror(power), "Back");
-                } else if (nd_btaudio_cmd_build(&cmd, "power", "on", 0) == ND_OK) {
+                /* bluetoothctl, and it stays here: it talks to bluetoothd over
+                 * the system bus, which the shipped policy opens to every
+                 * user, so this works as ndusr. The adapter is already up --
+                 * nd_svc_bt_start() did that -- and this is bluetoothd's own
+                 * view of it catching up. */
+                if (nd_btaudio_cmd_build(&cmd, "power", "on", 0) == ND_OK)
                     (void)nd_btaudio_run(&cmd, NULL, 0u);
-                }
             }
         } else if (enabled && choice == 0) {
-            nd_btaudio_daemons_stop(bt_speaker_card());
-            (void)nd_bt_power(0u, false);
+            /* The routing here and the daemons there. asound.conf is in
+             * /run and is this app's to write; the three daemons and hci0 are
+             * the core's, for the reason the start path gives. Routing FIRST,
+             * so nothing is left pointing at a bluealsa PCM that has stopped
+             * existing.
+             *
+             * ONLY IF SOMETHING IS CONNECTED. Switching Bluetooth off after
+             * merely switching it on had nothing to route back -- and
+             * rewriting the file anyway is not free, because with no saved
+             * copy route_to() regenerates it from bt_speaker_card(), which
+             * answers card 0 where S17audio wrote card 1. Measured on the
+             * phone: Disable left "default" on the onboard codec, which is
+             * wired to nothing, so the phone went silent. Leaving a file
+             * alone that this app never changed is both the fix and the
+             * smaller claim. */
+            if (connected)
+                (void)nd_btaudio_route_to(NULL, bt_speaker_card());
+            (void)nd_svc_bt_stop();
         } else if (enabled && choice == 1) {
             bt_scan_and_pair(ui);
         } else if (enabled && choice == 2 && connected) {
