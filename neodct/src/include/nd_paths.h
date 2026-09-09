@@ -225,8 +225,21 @@ unsigned long nd_appgen_value(void);
 #define ND_PATH_DEVENV_MARKER "/etc/neodct-devenv"
 
 /* The datagram socket nd_input listens on for injected keys, and that nd-key
- * writes to. Under /run, which is a tmpfs, so it cannot outlive a boot. */
-#define ND_PATH_DEVKEY_SOCK "/run/neodct/devkey"
+ * writes to. Under /run, which is a tmpfs, so it cannot outlive a boot.
+ *
+ * IN ITS OWN DIRECTORY, and that is not tidiness. nd-core drops to ndusr
+ * before the UI starts, so the process that binds this socket is ndusr -- and
+ * /run/neodct is root:root 0755, where ndusr cannot create anything. The
+ * socket therefore never appeared on a real phone while every host test
+ * passed, because a test runs as one user and never crosses that boundary.
+ *
+ * Giving /run/neodct itself to ndusr would have been the smaller change and
+ * the wrong one: sdcard.prop lives there, is written by root at boot and read
+ * by the UI, and a UI that can unlink and replace it can forge the card's
+ * state. So the socket gets a subdirectory of its own, created by root in
+ * run_neodct.sh and handed to ndusr, 0700. */
+#define ND_PATH_DEVKEY_DIR  "/run/neodct/input"
+#define ND_PATH_DEVKEY_SOCK "/run/neodct/input/devkey"
 
 /* ---- devices ------------------------------------------------------ */
 #define ND_PATH_FB         "/dev/fb0"

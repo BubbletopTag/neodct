@@ -841,6 +841,45 @@ static void section_devices(const nd_priv_id *usr, const nd_priv_id *ut)
     expect_deny(ut, ND_PRIV_USER_UT, P_RDWR, "/dev/uinput",
                 ND_PRIV_USER_UT " CANNOT inject keys through /dev/uinput"
                 " (see the browser section for the other half)");
+
+    /* ============ THE DEVELOPER KEY CHANNEL ============
+     *
+     * Asked here because it is the one thing in this tree that a host test
+     * structurally cannot check. The socket is bound by the UI, and the UI is
+     * ndusr by then -- so what decides whether it exists is whether root
+     * handed ndusr a directory to bind in. A unit test runs as one user and
+     * never crosses that boundary; this one did not, and the socket was
+     * silently absent on the phone while test_devkey passed ninety checks.
+     *
+     * Only meaningful on an image built with the marker, so its absence is a
+     * SKIP and never a failure. */
+    {
+        struct stat st;
+
+        if (access(ND_PATH_DEVENV_MARKER, F_OK) != 0) {
+            report(R_SKIP, "the developer key channel",
+                   "no " ND_PATH_DEVENV_MARKER " -- not a developer image");
+        } else if (stat(ND_PATH_DEVKEY_DIR, &st) != 0) {
+            report(R_FAIL, ND_PATH_DEVKEY_DIR " exists",
+                   "missing; run_neodct.sh creates it before nd-core drops privilege");
+        } else if (usr != NULL && st.st_uid != usr->uid) {
+            report(R_FAIL, ND_PATH_DEVKEY_DIR " belongs to " ND_PRIV_USER,
+                   "owned by uid %ld; the UI binds its socket here AFTER dropping to uid %ld",
+                   (long)st.st_uid, (long)usr->uid);
+        } else {
+            report(R_PASS, ND_PATH_DEVKEY_DIR " belongs to " ND_PRIV_USER, "uid %ld",
+                   (long)st.st_uid);
+            if (stat(ND_PATH_DEVKEY_SOCK, &st) != 0)
+                report(R_FAIL, "the developer key channel is listening",
+                       "no socket at " ND_PATH_DEVKEY_SOCK " -- nd-key cannot reach the UI");
+            else if (!S_ISSOCK(st.st_mode))
+                report(R_FAIL, "the developer key channel is listening",
+                       ND_PATH_DEVKEY_SOCK " is not a socket");
+            else
+                report(R_PASS, "the developer key channel is listening", "%s",
+                       ND_PATH_DEVKEY_SOCK);
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ *

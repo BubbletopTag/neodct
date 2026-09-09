@@ -53,6 +53,24 @@ clear > /dev/tty0
 # and there is no interpreter on the phone to read it.
 CORE_LOG=/NeoDCT/User/logs/core.log
 mkdir -p /NeoDCT/User/logs 2>/dev/null || CORE_LOG=/tmp/core.log
+
+# The developer key channel's directory, made HERE because this script is still
+# root and nd-core is not by the time it needs it.
+#
+# nd-core drops to ndusr before the UI starts, and the UI is what binds the
+# socket -- but /run/neodct is root:root 0755, so the bind failed with EACCES
+# on every real phone while every host test passed, because a test runs as one
+# user and never crosses that boundary. Root makes the directory and hands it
+# over; the socket itself is created by the UI inside it.
+#
+# Its own directory rather than /run/neodct, and 0700 rather than group-write:
+# sdcard.prop lives in /run/neodct, is written by root at boot and read by the
+# UI, and a UI that could unlink it could forge the card's state.
+if [ -d /run ]; then
+    mkdir -p /run/neodct/input 2>/dev/null || true
+    chown ndusr:ndusr /run/neodct/input 2>/dev/null || true
+    chmod 0700 /run/neodct/input 2>/dev/null || true
+fi
 [ -f "$CORE_LOG" ] && mv -f "$CORE_LOG" "$CORE_LOG.1" 2>/dev/null
 
 # Optional developer environment, on the WRITABLE partition. The rootfs is a

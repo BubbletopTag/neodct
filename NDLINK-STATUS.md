@@ -254,3 +254,57 @@ first time something fails overnight.
    thing to look for with a meter.
 5. Gating: `nd-vncd --require-devenv` exists, and wrapping `S42debuglan`'s
    `start)` in a marker test is the one-line version for telnet/ftp/vnc.
+
+---
+
+## 8. Later session: gating, sideloading, and an update installed over the link
+
+**The phone now runs 0.5.16a-dev, installed entirely over the debug link.** No
+maskrom, no serial cable, no card swap: build, sign, deliver over ftp, stage
+with `nd-stage`, reboot. The boot-time applier verified the signature with the
+key built into the kernel image and wrote the new rootfs.
+
+Also landed: `ndlink` on `$PATH` at `~/.local/bin` (it resolves `$0` through
+symlinks now, or it cannot find its own transport helper); `install`/`uninstall`
+/`apps` for `.nap` packages; `update --install` and `update --open`; and the
+debug link gated on engineering mode.
+
+### Bugs the hardware found that a host test could not
+
+1. **`ndlink install` ran as root and produced apps the UI does not own.**
+   telnetd gives a root shell, so packages installed `root:root` where every
+   other app on the card is `ndusr:ndusr`, and a `data/` directory the app
+   writes as `ndusr_ut` would have come out unwritable. Only visible because a
+   Settings-installed app sat next to it to compare. Installs as `ndusr` now.
+
+2. **`ndlink reboot` reported success against a phone that never rebooted.**
+   The transport runs one command then exits its shell, which SIGHUPs the job
+   it just backgrounded. `setsid` did not fix it either -- measured, not
+   theorised. A plain foreground `reboot` takes the phone down in under a
+   second, so the verb does that and treats the lost connection as expected.
+   This surfaced on the first real use, with an update staged and waiting.
+
+3. **`nd_upd_package_signed()` is not "has a signature".** It is "the signature
+   has been verified", set only inside `verify_signature()` on success. Testing
+   it beforehand always answers false, so `nd-stage` refused a package it had
+   just built and signed itself.
+
+4. **THE BIG ONE: the devkey socket never appeared on hardware while
+   `test_devkey` passed 90 checks.** nd-core drops to `ndusr` before the UI
+   starts, so the process binding the socket is `ndusr` -- and `/run/neodct` is
+   `root:root 0755`. `bind()` got EACCES on every real phone. A host test runs
+   as one user and structurally cannot cross that boundary.
+
+   Fixed by giving the socket its own directory, `/run/neodct/input`, created
+   by root in `run_neodct.sh` and handed to `ndusr` at 0700. Deliberately not
+   by giving `ndusr` `/run/neodct` itself: `sdcard.prop` lives there, is
+   written by root at boot and read by the UI, and a UI that can unlink it can
+   forge the card's state.
+
+   **`nd-selftest` now checks it on the phone**, because that is the only place
+   the check means anything. It is in the `devices` section next to the other
+   privilege-drop grants.
+
+That fourth one is the whole argument for this tool in one bug: ninety green
+checks, a clean build, a correct design, and a feature that did not exist on
+the only machine that matters.

@@ -582,10 +582,9 @@ verb_update() {
         # here means the phone comes back running the tools it was built with.
         hw_shell "rm -rf /NeoDCT/User/bin /NeoDCT/User/lib" >/dev/null 2>&1 || true
 
-        # setsid for the reason spelled out in verb_reboot: a bare & is killed
-        # when the transport's shell exits, and the reboot never happens.
-        hw_shell "sync; setsid sh -c 'sleep 2; reboot' >/dev/null 2>&1 </dev/null &" \
-            >/dev/null 2>&1 || true
+        # Foreground, for the reason spelled out in verb_reboot: the detached
+        # forms report success and leave the phone running.
+        hw_shell "sync; reboot" >/dev/null 2>&1 || true
         emit_ok update "\"staged\":\"$(json_escape "$_up_remote")\",\"bytes\":${_up_sz:-0},\"applied\":\"rebooting\""
         if [ "$JSON" != 1 ]; then
             printf 'staged %s and rebooting.\n' "$_up_remote"
@@ -697,18 +696,21 @@ verb_reboot() {
         hw_shell "mkdir -p /NeoDCT/User/.ndsys; : > /NeoDCT/User/.ndsys/boot_recovery; sync" \
             >/dev/null || fail 6 "could not arm recovery"
     fi
-    # setsid, NOT a bare `&`. The transport runs one command and then exits the
-    # shell, and exiting SIGHUPs the job it just backgrounded -- so
-    # `(sleep 1; reboot) &` is killed before reboot ever runs, and the verb
-    # reports success against a phone that is still up. That is exactly what
-    # happened the first time this was used for real, on an update that then
-    # sat staged and uninstalled. Detaching from the session is what makes the
-    # delayed reboot outlive the connection that asked for it.
+    # PLAIN AND IN THE FOREGROUND. Two cleverer versions of this line did not
+    # reboot the phone at all, and both reported success:
     #
-    # The delay is so the reply reaches us before the phone goes; the caller
-    # sees the verb succeed rather than a lost connection.
-    hw_shell "sync; setsid sh -c 'sleep 2; reboot' >/dev/null 2>&1 </dev/null &" \
-        >/dev/null 2>&1 || true
+    #   (sleep 1; reboot) &        the transport exits its shell straight
+    #                              after, which SIGHUPs the job it just
+    #                              backgrounded and kills it before reboot runs
+    #   setsid sh -c '...reboot'   detached, and still did not fire; measured,
+    #                              not theorised -- uptime was untouched
+    #
+    # while a bare `reboot` typed at the same shell took the phone down in
+    # under a second. So this asks for the thing that works and accepts the
+    # consequence: the connection dies mid-command, hw_shell reports a lost
+    # transport, and that is EXPECTED here rather than a failure. There is
+    # nothing left to talk to either way.
+    hw_shell "sync; reboot" >/dev/null 2>&1 || true
     emit_ok reboot "\"mode\":\"${_rb_mode:-normal}\""
     [ "$JSON" = 1 ] || printf 'reboot requested (%s)\n' "${_rb_mode:-normal}"
     return 0

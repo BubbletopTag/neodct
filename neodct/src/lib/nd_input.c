@@ -496,10 +496,12 @@ static void devkey_open(nd_input *in)
      * That is not merely a test artefact: it is the difference between code
      * that works because the environment happened to be right and code that
      * makes it right. */
-    if (nd_mkdir_p(ND_PATH_RUN_DIR, 0755u) != ND_OK) {
-        nd_log(ND_LOG_INPUT, "devkey: cannot create %s", ND_PATH_RUN_DIR);
-        return;
-    }
+    /* Best effort: on the phone run_neodct.sh has already made this and given
+     * it to ndusr, because by the time this runs the UI is no longer root and
+     * cannot create it under root's /run/neodct. Under a test root neither
+     * level exists and this is what makes them. A failure here is not fatal --
+     * the bind below reports the real problem with the real errno. */
+    (void)nd_mkdir_p(ND_PATH_DEVKEY_DIR, 0700u);
 
     /* A socket file left by a previous boot would make bind() fail with
      * EADDRINUSE even though nothing is listening. /run is a tmpfs so this
