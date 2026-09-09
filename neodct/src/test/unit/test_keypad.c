@@ -31,10 +31,13 @@
  * and a column bit reading LOW in one of those reads is a pressed key.
  */
 
+#include <errno.h>
 #include <fcntl.h>
 #include <pwd.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -784,6 +787,157 @@ static void test_a_non_root_writer_keeps_its_own_keymap(void)
  * The keycode tables
  * ------------------------------------------------------------------ */
 
+/* ============ THE EMULATOR AND THE PHONE CLASSIFY THE SAME FAULT
+ * ============ DIFFERENTLY, AND THIS TEST IS WHERE THAT IS WRITTEN DOWN
+ *
+ * This is documentation with an exit status. It is NOT a fix, and the thing
+ * it pins is a divergence that must NOT be papered over.
+ *
+ * An expander that does not answer reaches this code as two different
+ * failures depending on which machine is underneath:
+ *
+ *   THE PHONE. The rk3x controller NAKs, i2c_master_send() returns a negative
+ *   errno, i2cdev_write() sets errno to ENXIO or EREMOTEIO, nd_pcf8575.c
+ *   records it, and nd_input_classify_open_failure() calls it TRANSIENT -- so
+ *   try_reopen_matrix() runs the bounded self-heal and a keypad whose rail was
+ *   still rising comes back.
+ *
+ *   THE EMULATOR. virtio-i2c's status byte is OK-or-ERR with NO ERROR CODE.
+ *   virtio_i2c_complete_reqs() returns a COUNT of successful messages,
+ *   i2c_master_send() turns a zero count into a zero-length transfer, and
+ *   i2cdev_write() returns 0 without touching errno. Measured with this
+ *   repository's own binary against an address nd-i2c-keypadd does not answer:
+ *
+ *       [INPUT] short write on /dev/i2c-3 (got 0 of 2 bytes)
+ *       rc=2 stage=write errno=0
+ *
+ *   against i2c-gpio's `write of 2 bytes to /dev/i2c-3 (0x20) failed: No such
+ *   device or address` and errno=6 on the same probe. So the emulator hands
+ *   errno 0 to a classifier that says, by design and in its own comment,
+ *   "Includes 0. A failure with no errno behind it was not the kernel refusing
+ *   us anything" -- PERMANENT, no retry, the opposite branch of
+ *   try_reopen_matrix() from the one the phone takes.
+ *
+ * DO NOT FIX THIS BY SYNTHESISING AN ERRNO FROM A SHORT COUNT. On the phone
+ * i2c_master_send() returns 2 or a negative errno and never a short count, so
+ * a short-count-means-transient rule would be an emulator-only branch encoded
+ * in shipping code -- a divergence moved from the emulator into the phone's
+ * binary, which is the trade this whole branch exists to refuse. The cheapest
+ * real coverage is a SECOND adapter under QEMU: i2c-gpio on -M virt's pl061,
+ * measured at +3,000 bytes of zImage, permanently unanswered, producing a
+ * genuine ENXIO on demand. That is deliberately not part of the keypad stage.
+ */
+static void test_the_emulators_unanswered_bus_classifies_the_other_way(void)
+{
+    /* The phone's answer. Both spellings a real controller can produce. */
+    CHECK(nd_input_errno_is_transient(ENXIO));
+    CHECK(nd_input_errno_is_transient(EREMOTEIO));
+    CHECK_INT((int)nd_input_classify_open_failure(ND_ERR_IO, ENXIO), (int)ND_INPUT_FAIL_TRANSIENT);
+    CHECK_INT((int)nd_input_classify_open_failure(ND_ERR_IO, EREMOTEIO),
+              (int)ND_INPUT_FAIL_TRANSIENT);
+
+    /* The emulator's. Same fault on the wire, no errno behind it. */
+    CHECK(!nd_input_errno_is_transient(0));
+    CHECK_INT((int)nd_input_classify_open_failure(ND_ERR_IO, 0), (int)ND_INPUT_FAIL_PERMANENT);
+
+    /* And the one both machines agree on, so this test is not just asserting
+     * that zero is falsy: the udev race is transient everywhere. */
+    CHECK_INT((int)nd_input_classify_open_failure(ND_ERR_IO, EACCES), (int)ND_INPUT_FAIL_TRANSIENT);
+}
+
+/* The short-count path that produces the errno 0 above, driven through the
+ * SHIPPING driver rather than asserted about it: nd_pcf8575_write16() has to
+ * call a partial write an ND_ERR_IO, and last_errno is then whatever a
+ * SUCCESSFUL short write left behind -- which is not an errno at all.
+ *
+ * THE SHORT WRITE IS REAL AND THE KERNEL PRODUCES IT. RLIMIT_FSIZE is the one
+ * mechanism on Linux that makes write(2) transfer fewer bytes than asked
+ * without failing: generic_write_check_limits() clamps the count to
+ * limit - pos rather than refusing, so a two-byte write at offset 0 against a
+ * one-byte limit returns 1 with errno untouched. Measured here before it was
+ * written: `write -> 1 errno=0 (Success)`. A socketpair cannot be made to do
+ * this reliably -- unix stream sockets account by skb and freeing one byte of
+ * room frees a whole buffer -- and a pipe cannot do it at all, because a
+ * write of at most PIPE_BUF is atomic and returns EAGAIN or nothing.
+ *
+ * ONLY THE SOFT LIMIT IS LOWERED, AND THAT IS NOT A STYLE CHOICE. `struct
+ * rlimit one = {1u, 1u}` lowers the HARD limit too, and lowering a hard limit
+ * is a ONE-WAY DOOR for a process without CAP_SYS_RESOURCE in the initial
+ * user namespace -- which neither a developer nor root inside the test
+ * sandbox has. Measured here, as uid 0 and as uid 1000: setrlimit() back to
+ * the saved pair returns -1 EPERM, so the process kept a 1-byte file-size
+ * limit for the rest of the run and the next write to a REGULAR FILE took
+ * SIGXFSZ. That is invisible when stdout is a terminal or a pipe, because
+ * RLIMIT_FSIZE does not apply to either -- and fatal under `make test >
+ * log 2>&1`, where it killed this binary and silently skipped the two
+ * keycode-table tests that RUN after it. So: the soft limit only, and the
+ * restore is CHECKed rather than cast to void, because a restore that failed
+ * must fail this test rather than the next one.
+ *
+ * SIGXFSZ is ignored for the duration and the limit is restored immediately.
+ * The signal only fires on the total-failure path, which this is not, but a
+ * test that leaves a process-wide resource limit behind would take the whole
+ * suite down at the next log write. */
+static void test_a_short_write_is_an_error_with_no_errno(void)
+{
+    struct rlimit saved;
+    struct rlimit one;
+    void (*old_sig)(int);
+    nd_pcf8575 chip;
+    char path[ND_PATH_MAX];
+    int fd;
+    nd_err rc;
+    int recorded;
+    int restored;
+
+    CHECK_INT(getrlimit(RLIMIT_FSIZE, &saved), 0);
+    one = saved;
+    one.rlim_cur = 1u;
+    old_sig = signal(SIGXFSZ, SIG_IGN);
+    /* g_case_root is the per-case directory pt_new_case() made and cleans up;
+     * the file is removed here anyway, because a one-byte file left behind
+     * under an RLIMIT_FSIZE that is about to be restored is the kind of thing
+     * that confuses the next failure. */
+    CHECK(snprintf(path, sizeof path, "%s/shortwrite.bin", g_case_root) > 0);
+    fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    CHECK(fd >= 0);
+    /* Everything that can be CHECKed or logged happens OUTSIDE the window.
+     * A failing CHECK writes, nd_log_err() writes, and inside the window a
+     * write to a regular file is clamped to one byte -- so a diagnostic
+     * emitted in there is a diagnostic nobody can read. io_error_logged is
+     * pre-armed for the same reason: it is exactly what the driver sets after
+     * a first failure, and it leaves the two-byte write under test as the
+     * only write in the window. */
+    CHECK_INT(nd_pcf8575_attach(&chip, fd), ND_OK);
+    chip.io_error_logged = true;
+
+    /* errno is POISONED and not zeroed. Zeroing it here would prove only that
+     * this line ran: a short write leaves errno untouched, so whatever the
+     * last failed syscall left behind is what record_failure() would record.
+     * ENOENT specifically, because that is what the real bring-up path leaves
+     * -- wait_for_bus_node() polls stat("/dev/i2c-3") -- and it is on
+     * nd_input_errno_is_transient()'s list, so a driver that did not clear
+     * errno would answer TRANSIENT here and the divergence this file pins
+     * would be an artefact of unrelated syscalls rather than of the
+     * transport. nd_pcf8575_write16() sets errno = 0 before the write; this
+     * is the test that says so. */
+    CHECK_INT(setrlimit(RLIMIT_FSIZE, &one), 0);
+    errno = ENOENT;
+    rc = nd_pcf8575_write16(&chip, 0xFFFFu);
+    recorded = chip.last_errno;
+    restored = setrlimit(RLIMIT_FSIZE, &saved);
+    (void)signal(SIGXFSZ, old_sig);
+    (void)close(fd);
+    (void)unlink(path);
+
+    CHECK_INT(restored, 0);
+    CHECK_INT(rc, ND_ERR_IO);
+    CHECK_INT((int)chip.last_stage, (int)ND_PCF_STAGE_WRITE);
+    CHECK_INT(recorded, 0);
+    CHECK_INT((int)nd_input_classify_open_failure(ND_ERR_IO, recorded),
+              (int)ND_INPUT_FAIL_PERMANENT);
+}
+
 static void test_the_matrix_name_table_is_verbatim(void)
 {
     /* MATRIX_NAME_TO_CODE, core/main.py:47. Two names alias two codes on
@@ -862,6 +1016,8 @@ int main(void)
     RUN(test_a_saved_keymap_reads_back_identically);
     RUN(test_root_hands_the_keymap_to_the_directory_owner);
     RUN(test_a_non_root_writer_keeps_its_own_keymap);
+    RUN(test_the_emulators_unanswered_bus_classifies_the_other_way);
+    RUN(test_a_short_write_is_an_error_with_no_errno);
     RUN(test_the_matrix_name_table_is_verbatim);
     RUN(test_the_three_character_tables);
     return pt_report("test_keypad");

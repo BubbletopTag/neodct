@@ -67,7 +67,8 @@ INV|class.block [loop[N]x8 mtdblock0 mtdblock1 mtdblock2 mtdblock3 mtdblock4 mtd
 INV|class.gpio [export gpiochip0 gpiochip512 unexport]
 INV|class.graphics [fb0]
 INV|class.graphics.fb0.name Virtual FB
-INV|class.i2c-dev []
+INV|class.i2c-dev [i2c-3]
+INV|class.i2c-dev.i2c-3.name i2c_virtio at virtio bus 3
 INV|class.input [event0 input0]
 INV|class.input.event0.name ABSENT
 INV|class.input.input0.name QEMU Virtio Keyboard
@@ -98,11 +99,12 @@ INV|cpufreq.available 408000 600000 816000 1008000 1200000
 INV|cpufreq.cpu0 present
 INV|cpufreq.policies [policy0]
 INV|dev.console type=c mode=0600 uid=0(?) gid=0(?)
-INV|dev.count 637
+INV|dev.count 638
 INV|dev.fb0 type=c mode=0600 uid=0(?) gid=0(?)
 INV|dev.full type=c mode=0666 uid=0(?) gid=0(?)
 INV|dev.gpiochip0 type=c mode=0600 uid=0(?) gid=0(?)
 INV|dev.gpiochip1 type=c mode=0600 uid=0(?) gid=0(?)
+INV|dev.i2c-3 type=c mode=0600 uid=0(?) gid=0(?)
 INV|dev.input type=d mode=0755 uid=0(?) gid=0(?)
 INV|dev.input/event0 type=c mode=0600 uid=0(?) gid=0(?)
 INV|dev.kmsg type=c mode=0644 uid=0(?) gid=0(?)
@@ -174,7 +176,7 @@ INV|fb0.var.yres_virtual 175
 INV|input.byname."QEMU\x20Virtio\x20Keyboard".ev 120003
 INV|input.byname."QEMU\x20Virtio\x20Keyboard".handlers [event0 kbd]
 INV|input.node.event0.name QEMU Virtio Keyboard
-INV|~mem.total_kb 54812
+INV|~mem.total_kb 54808
 INV|mem.total_mib 52
 INV|modem.board_expects_radio UNAVAILABLE(nolib)
 INV|modem.candidate_ports []
@@ -239,5 +241,5 @@ INV|uname.release 6.12.47
 INV|uname.sysname Linux
 INV|zram0.disksize 0
 INV|END
-INV|# sha256.transport=c084d5d2eaca99615ca90016d04ad2b2c76fc05c636fcab6a8f291ec19ceaff4
-INV|# sha256.compared=278aa3ad4e57ba595058d8a34f9ce77e0e61471abfd384fa87cd00adfaaee2f9
+INV|# sha256.transport=99242788fa74b2b771dabcfd0a18fbadc0486bdabb0aeeb90fe2c3643fe06fb6
+INV|# sha256.compared=ce5b87e3a97b106a68280aed2c4ebb6e7bd8a1a4ee1f871f2d2125e38033b1ba

@@ -188,6 +188,29 @@ nd_err nd_pcf8575_write16(nd_pcf8575 *c, uint16_t value)
     out[0] = (uint8_t)(((uint32_t)value) & 0xFFu);
     out[1] = (uint8_t)((((uint32_t)value) >> 8) & 0xFFu);
 
+    /* ============ A SHORT TRANSFER IS THE ONE OUTCOME THAT LEAVES ERRNO
+     * ============ ALONE, SO CLEAR IT FIRST
+     *
+     * write(2) returning -1 always sets errno, so on the phone this line
+     * changes nothing: i2c_master_send() gives 2 or a negative errno and
+     * never a short count. Under QEMU it is the whole difference between a
+     * fact and an accident. virtio-i2c's status byte carries no error code,
+     * so an unanswered address arrives here as write() == 0 with errno
+     * untouched -- and record_failure() reads errno unconditionally, so
+     * last_errno would be whatever the last failed libc call in this process
+     * left behind. Measured: with ENOENT set beforehand -- which is exactly
+     * what nd_kpsetup_open_keypad_as_root()'s wait_for_bus_node() leaves,
+     * since it polls stat(2) on the node until it appears -- a genuine short
+     * write recorded last_errno=2 and nd_input_classify_open_failure()
+     * answered TRANSIENT instead of PERMANENT.
+     *
+     * A stale errno reported as this chip's is worse than no errno at all:
+     * it makes the retry decision a function of unrelated syscalls, so the
+     * same fault self-heals on some boots and does not on others. This is
+     * NOT the synthesised errno the divergence note in nd-i2c-keypadd.c and
+     * test_keypad.c refuses -- nothing is invented from the short count; the
+     * field is simply not allowed to hold somebody else's answer. */
+    errno = 0;
     n = write(c->fd, out, sizeof out);
     if (n != (ssize_t)sizeof out) {
         /* ============ THE SILENT NAK ============
@@ -218,6 +241,9 @@ nd_err nd_pcf8575_read16(nd_pcf8575 *c, uint16_t *out)
     if (c == NULL || c->fd < 0 || out == NULL)
         return ND_ERR_INVAL;
 
+    /* The same rule as write16() above, and for the same reason: a short read
+     * never touches errno, so the field would otherwise carry a stale one. */
+    errno = 0;
     n = read(c->fd, data, sizeof data);
     if (n != (ssize_t)sizeof data) {
         record_failure(c, ND_PCF_STAGE_READ);

@@ -46,13 +46,22 @@ musl, same hard-float NEON-VFPv4, same Thumb-2, same 32-bit `time_t`,
 machine agreed with the Pico Mini about everything except the things that
 break -- so those bugs passed here and failed on the bench. Measured on the
 kernel this tree builds: `uname -m` = `armv7l`, CPU part 0xc07, MemTotal
-54,812 kB of the 64 MB machine against the phone's ~54 MB -- 53,824 kB of it
-the kernel's, and the last ~1 MB the device tree's. `run_qemu.sh` needs `dtc`
+54,808 kB of the 64 MB machine against the phone's ~54 MB -- 53,824 kB of it
+the kernel's, and the last ~1 MB the device tree's. (It was 54,812 until the
+keypad stage put a bus-number reservation node in that tree; the kernel
+reserves `fdt_totalsize()`, so a bigger tree costs 4 kB. Measured on three
+boots of one kernel that the i2c device itself costs nothing.) `run_qemu.sh` needs `dtc`
 now: it appends `neodct/board/qemu/nd-virt-additions.dtsi` to the tree QEMU
 generates, which is where the emulator's backlight and cpufreq policy come
 from, and the kernel reserves `fdt_totalsize()` -- so passing a 8 KB tree
 instead of the 1 MiB blob QEMU pads its own to gives ~1 MB BACK and MemTotal
-rises. Without `dtc` the script says so and boots without either device.
+rises. Without `dtc` the script says so and boots without any of them --
+**three** things now and not two, because the keypad's bus NUMBER is a
+device-tree fact as well: `virtio_mmio.c` never sets an `of_node`, so only the
+reservation node puts the adapter at three. Measured, same kernel, `-dtb`
+omitted: `/sys/class/i2c-dev` is `[i2c-0]`. A bus at the wrong number is worse
+than no bus -- `nd_pcf8575_open(bus=3)` gets ENOENT and everything falls back
+silently -- so `run_qemu.sh` takes the keypad away with the tree and says so.
 
 The identity did NOT collapse with the ABI. The QEMU image is `qemu-armv7`
 and the phone is `luckfox-armv7`; `nd_manifest_check_compatible()` still
@@ -95,7 +104,8 @@ NEODCT_SIGN_KEY=$PWD/../neodct/tools/devkey/neodct-dev.key make update
 
 `run_qemu.sh` is driven entirely by environment variables — `NEODCT_STORAGE`,
 `NEODCT_SNAPSHOT`, `NEODCT_VERITY`, `NEODCT_SD`, `NEODCT_RECOVERY`,
-`NEODCT_MODEM`, `NEODCT_NET`, `NEODCT_DEBUG` and more. Read its header before
+`NEODCT_KEYPAD`, `NEODCT_KEYS`, `NEODCT_MODEM`, `NEODCT_NET`, `NEODCT_DEBUG`
+and more. Read its header before
 adding a flag; the one you want probably exists.
 
 Several of them **refuse** on the armv7 kernel and say what is missing:
@@ -130,8 +140,98 @@ attaches the virtio-console port that carries it, and
 240×240 frame, letterbox and all. The format is pinned in
 `neodct/src/displayd/nd_panel.h` and the decoder is deliberately a second
 implementation written from the datasheet, so it can disagree with a wrong
-encoder. The QEMU window is still where keystrokes come from; with no display
-at all the way in is `NEODCT_MONITOR` and the monitor's `sendkey`.
+encoder. The QEMU window is where a QWERTY keystroke comes from, and the
+phone's OWN keys come from the keypad fifo instead -- see the next paragraph.
+With no display at all the way into the evdev path is `NEODCT_MONITOR` and the
+monitor's `sendkey`; the fifo needs no display at all.
+
+**The keypad is a real i2c bus now, and it is a host process.** The phone's
+keypad is a PCF8575 on `/dev/i2c-3`; `-M virt` has no i2c controller of any
+kind, so until this stage `/sys/class/i2c-dev` was empty and `nd_pcf8575.c`,
+`nd_matrix.c`, `nd_keypadsetup.c`'s 1,202 lines, the T9 surround and
+`apps/KeypadMapperI2C` had run on exactly one machine in the world. The bus is
+a QEMU `vhost-user-i2c-device` whose transfers are serviced OUTSIDE QEMU by
+`neodct/tools/nd-i2c-keypadd`, a host program that models the expander at 0x20
+and the MAX17048 fuel gauge at 0x36 from their datasheets. Keys go in through
+a fifo, on the side the picture already comes out of:
+
+```sh
+echo 'tap num_5'   > ${TMPDIR:-/tmp}/neodct-keys   # press and release
+echo 'press num_2' > ${TMPDIR:-/tmp}/neodct-keys   # hold
+echo 'release all' > ${TMPDIR:-/tmp}/neodct-keys
+echo 'short 9 14'  > ${TMPDIR:-/tmp}/neodct-keys   # a pin pair no key joins
+```
+
+`run_qemu.sh` starts the daemon before QEMU and reaps it on the EXIT trap,
+because QEMU **refuses to start** when the vhost-user socket is not there
+(measured: `Failed to connect to '...': No such file or directory`, exit 1).
+That refusal is why the daemon goes first; it is **not** a guarantee that a
+run either has a keypad or does not boot. `run_qemu.sh` catches a daemon that
+will not start, drops the bus from the QEMU line and boots on evdev, loudly --
+which is what makes `NEODCT_KEYPAD=off` an escape hatch rather than a
+courtesy. `test_qemu_i2c.sh` and `parity_capture_probe.sh` REFUSE instead of
+degrading, because a gate and a baseline are not sessions.
+
+**QEMU's refusal only covers t=0.** Once it has connected, `i2c-virtio` waits
+in `wait_for_completion_interruptible()` with the bus lock held and no timeout
+anywhere in that path, so a daemon that dies mid-session does not leave a
+keypad that stopped working -- it leaves a guest frozen in
+`nd_input_read_key()`, with `nd_battery`'s poll stuck behind the same lock.
+Measured: `kill -9` the daemon at scan pass 5 and the guest never printed pass
+6. `run_qemu.sh` now watches the daemon's pid and stops QEMU with a message
+rather than letting that be silent.
+
+`NEODCT_KEYPAD=off` takes the bus away and names, on that boot, every path it
+is not exercising; any other spelling is refused rather than quietly booting
+with the bus.
+
+**Two sessions on one host need two fifos.** The socket and the daemon log are
+derived from `$NEODCT_KEYS`, so `NEODCT_KEYS=/tmp/keys-b run_qemu.sh` is a
+genuinely separate second emulator; without that they shared one socket and
+one log and the two daemons split the keystrokes between them (measured, 9/3
+of twelve). `nd-i2c-keypadd` now refuses a socket another daemon is already
+serving instead of unlinking it, which is also what surfaces an orphan left by
+a session whose terminal died.
+
+**The virtio keyboard stays**, and that is not an oversight. `nd_input_open()`
+opens the matrix FIRST and then opens an evdev device REGARDLESS, and polls
+both when both are present, because "a developer with a USB keyboard plugged
+into a real phone can still type" -- so a machine with both is the first one
+anywhere on which nd_input's backend SELECTION runs. Every boot logs which one
+it took (`Input backend selected:`), and `run_qemu.sh` says on every boot what
+to look for.
+
+Measured on a booted guest, with the repository's own `nd_pcf8575.c` and
+`nd_matrix.c` cross-compiled and run against the node:
+
+```
+I2C-ADAPTER i2c-3 name=i2c_virtio at virtio bus 1
+I2C-NODE /dev/i2c-3 mode=0600 uid=0 gid=0 major=89 minor=3
+I2C-FUNCS 0x0eff0009 I2C_FUNC_I2C=yes
+I2C-XFER write=0 read=0 value=0xFFFE stage= errno=0
+[BATT] MAX1704x fuel gauge @ 0x36 on /dev/i2c-3 (VERSION=0x0012).
+I2C-SCAN pass=1 PRESS row=1 col=1
+```
+
+The gate is `neodct/tools/test_qemu_i2c.sh --kernel <zImage> --rootfs <dir>`.
+
+The `bus 1` in that first line is **not** the i2c bus number and will not be
+the same everywhere: it is `i2c-virtio`'s `snprintf` of `vdev->index`, the
+count of virtio devices QEMU made before the adapter. That gate's boot has two
+(keyboard + i2c) and says 1; `test_qemu_surfaces.sh` has one and says 0; the
+parity capture has four and says 3. `allow.txt`'s `class.i2c-dev.i2c-3.name`
+record is a regex for exactly this reason -- and the committed parity baseline
+pins it anyway, so `make parity-probe` is sensitive to that boot's device
+list. The parity README says what to do about it.
+
+**One thing the emulator cannot reproduce, and it must not be papered over.**
+virtio-i2c's status byte is OK-or-ERR with no error code, so an address nobody
+answers reaches the phone's code as a SHORT WRITE with `errno` 0 where a real
+controller gives ENXIO -- and `nd_input_errno_is_transient(0)` is false by
+design, so the emulator calls an absent expander PERMANENT where the phone
+calls it TRANSIENT and self-heals. Do not teach `nd_pcf8575.c` to synthesise an
+errno from a short count: on the phone `i2c_master_send()` never returns one.
+`test_keypad.c` pins the divergence and `allow.txt` records it.
 
 Version comes from one place: `VERSION_ID` in `neodct/overlay/etc/os-release`.
 An update built without bumping it installs but shows no change on screen.
@@ -174,7 +274,7 @@ rather than falling back to a bare run.
 python3 -m pytest neodct/tests/ -q      # from the repo root
 ```
 
-2,087 passing and 14 skipped, ~111s — measured, on this checkout. (It said
+2,104 passing and 14 skipped, ~110s — measured, on this checkout. (It said
 "510 tests, ~20s" here for a long time, and that is the number agents
 calibrated on — `spec-build-test.md` risk R-15 is about exactly this. It then
 said 1,961 across two commits that added tests without touching it, which is
@@ -205,10 +305,48 @@ way to look at an animated wallpaper rather than guess.
 
 T9 — multi-tap, predictive, the `#` mode cycle and the mode indicator in the
 composer's top right — runs only on the i2c matrix keypad, because a QWERTY
-dev keyboard takes a different input path and genuinely has no modes. So on
-QEMU none of it is visible by default. `NEODCT_T9=1` overrides that; the boot
-script sources `/NeoDCT/User/env.sh` if it exists, which is the way to set it
-without rebuilding a read-only rootfs:
+dev keyboard takes a different input path and genuinely has no modes.
+
+**That used to mean "invisible on QEMU", and this recipe was how to see it.
+The emulator has a matrix now**, so on a default boot `nd_input` should select
+it and T9 should follow with no flag at all -- **after the first-boot keypad
+wizard, which now runs here.** `nd_kpsetup_gate_check()` returns
+`ND_KPSETUP_GATE_PROBE` the moment `/dev/i2c-3` exists (the `is_hw` test is
+only reached when the node is ABSENT), `nd_main.c` calls
+`nd_kpsetup_maybe_run()` on every boot, and no `keymap.json` ships in the
+overlay -- it lives on `/NeoDCT/User`, which the wizard writes. So a fresh
+userdata partition stops at sixteen enrolment prompts where this machine used
+to go QUIET, and the comment at `nd_main.c`'s call site ("on a phone with no
+i2c bus (QEMU) it gates itself off and is silent") is now stale. Feed the pad
+in `nd_kpsetup_targets[]` order to clear it:
+
+```sh
+for k in navikey clear up down num_1 num_2 num_3 num_4 \
+         num_5 num_6 num_7 num_8 num_9 num_0 star hash; do
+    echo "tap $k" > ${TMPDIR:-/tmp}/neodct-keys; sleep 1
+done
+```
+
+`NEODCT_SNAPSHOT=1` and `NEODCT_STORAGE=nand-full` both discard
+`/NeoDCT/User`, so under either the wizard runs on **every** boot.
+`run_qemu.sh` says all of this on any boot that attaches the bus. That the
+enrolment completes this way has NOT been booted -- the daemon's key names are
+`nd_kpsetup_targets[]` read row-major and `test_qemu_keypadd.py` pins that, but
+no image exists in this container -- so it is written here as what to expect.
+This is the first time `nd_keypadsetup.c`'s 1,202 lines will have executed
+anywhere, which is worth having rather than skipping. That is a claim about an image
+this container has never built -- `buildroot/output` does not exist -- so it is
+written here as what to expect and not as something measured: what IS measured
+is that `/dev/i2c-3` exists, that the repository's own scanner reads a
+keystroke off it, and that `nd_battery` goes LIVE on the same adapter. Check
+the boot log's `Input backend selected:` line before believing either way.
+
+`NEODCT_T9` therefore does not go away; its job reverses. `NEODCT_T9=0` becomes
+the only way to reach the QWERTY/DEV_KEYMAP text path on a machine where the
+matrix is the default -- and that path ships on the phone, for the USB-keyboard
+case. `NEODCT_T9=1` is still what a `NEODCT_KEYPAD=off` boot needs. The boot
+script sources `/NeoDCT/User/env.sh` if it exists, which is the way to set
+either without rebuilding a read-only rootfs:
 
 ```sh
 echo 'export NEODCT_T9=1' > /NeoDCT/User/env.sh
@@ -294,15 +432,20 @@ may not contain the word FAIL, and `nd-selftest` may not print a record.**
 
 **And one thing neither of them can do, which is ask the kernel to REFUSE a
 write.** `neodct/tools/test_qemu_surfaces.sh --kernel <zImage> --rootfs <a
-busybox directory>` boots the emulator twice and asserts the four small
-hardware surfaces: that `/sys/class/backlight` holds exactly one device named
+busybox directory>` boots the emulator twice and asserts the small hardware
+surfaces: that `/sys/class/backlight` holds exactly one device named
 `backlight` with `max_brightness` 10, that `/sys/class/power_supply` and
 `/sys/class/thermal` are EMPTY and `/sys/class/leds` absent, that gpio53,
 gpio56 and gpio57 export, and that a `scaling_min_freq` written before
 `scaling_max_freq` while RAISING is silently swallowed -- which is what
 `nd_cpufreq_max_first()` exists for and what `test_cpufreq.c` says in its own
 header it cannot check, because two ordinary files hold both values whichever
-order they were written in. It also asserts MemTotal on both sides of `-dtb`,
+order they were written in. Since the keypad stage it also asserts that there
+is exactly **one** i2c adapter, that it is bus **three**, and that
+`/dev/i2c-3` arrives from devtmpfs `root:root 0600` -- which is the state the
+udev rule then has to change, and the window
+`nd_kpsetup_open_keypad_as_root()` exists to step over. It also asserts
+MemTotal on both sides of `-dtb`,
 which is the only thing that checks that number **in a booted guest**. The
 other half is `test_parity_allowlist.py`, which asserts it out of the
 committed capture with no boot at all -- both are gates and neither is

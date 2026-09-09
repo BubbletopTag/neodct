@@ -1,6 +1,7 @@
 /*
- * nd-virt-additions.dtsi -- the two devices the phone has and `-M virt` does
- * not, appended to QEMU's own generated device tree by run_qemu.sh.
+ * nd-virt-additions.dtsi -- what the phone has and `-M virt` does not,
+ * appended to QEMU's own generated device tree by run_qemu.sh: a cpufreq
+ * table, a backlight, and the bus NUMBER the keypad's i2c adapter takes.
  *
  * ============ WHY THERE IS A DEVICE TREE HERE AT ALL ============
  *
@@ -178,4 +179,53 @@
 &{/cpus/cpu@0} {
 	clocks = <&nd_cpu_clk>;
 	operating-points-v2 = <&nd_opp_table>;
+};
+
+/ {
+	/*
+	 * ============ THE KEYPAD BUS'S NUMBER, WHICH IS LOAD-BEARING ============
+	 *
+	 * This node has no driver, no compatible and no address. It exists to
+	 * reserve i2c bus NUMBERS so that the emulator's keypad lands on
+	 * /dev/i2c-3 -- ND_I2C_BUS_DEFAULT, ND_KPSETUP_DEFAULT_BUS,
+	 * ND_BATT_DEFAULT_I2C_BUS, the first bus nd_selftest.c probes, and the
+	 * number nd_keymap.c writes into every keymap.json. Getting the
+	 * emulator to 3 is what means it needs no keymap fork, no
+	 * NEODCT_KEYPAD_SETUP_BUS and no settings override, which is the kind
+	 * of per-machine configuration this branch keeps deleting.
+	 *
+	 * THE OBVIOUS SPELLING DOES NOT WORK AND THE FAILURE IS THE ARGUMENT.
+	 * i2c-virtio copies the virtio device's of_node onto its adapter
+	 * (i2c-virtio.c:217) and virtio_mmio.c never sets one -- it sets only
+	 * vdev.dev.parent -- so i2c_add_adapter()'s of_alias_get_id() branch
+	 * sees NULL and an `i2c3` alias pointing at the mmio node is invisible
+	 * to it. Measured: with `aliases { i2c3 = "/virtio_mmio@a003e00"; }`
+	 * the adapter came up as i2c-4, because the alias was invisible to
+	 * of_alias_get_id() and still moved __i2c_first_dynamic_bus_num through
+	 * of_alias_get_highest_id("i2c") in i2c_init() (i2c-core-base.c:2080).
+	 *
+	 * That failure names the fix: an alias RESERVES, only an of_node NAMES.
+	 * Reserving 0..2 makes the FIRST DYNAMIC adapter number 3. The node is
+	 * `disabled` and carries no compatible, so of_alias_scan() resolves the
+	 * path and nothing ever binds to it -- measured, /dev/i2c-3 with no
+	 * driver attached to the reservation.
+	 *
+	 * IT DEPENDS ON A KERNEL INTERNAL AND THAT IS WRITTEN DOWN RATHER THAN
+	 * HIDDEN. __i2c_first_dynamic_bus_num and of_alias_get_highest_id() are
+	 * not API; a future kernel could number the adapter differently and the
+	 * keypad would move off /dev/i2c-3 silently. The tripwire is
+	 * `make parity-probe`: class.i2c-dev and the dev.i2c family are in the
+	 * committed capture, so the move is a byte diff in a pull request.
+	 *
+	 * It costs 4 kB of MemTotal (54,812 -> 54,808), because the kernel
+	 * reserves fdt_totalsize() and this makes the tree bigger. That number
+	 * is pinned in test_qemu_surfaces.sh and in the parity capture.
+	 */
+	nd_i2c_reserved: nd-i2c-number-reservation {
+		status = "disabled";
+	};
+
+	aliases {
+		i2c2 = &nd_i2c_reserved;
+	};
 };

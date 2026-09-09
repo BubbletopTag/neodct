@@ -12,6 +12,7 @@
 #   make clean           remove this variant's build directory
 #   make distclean       remove all of them
 #   make format          clang-format every source file in place
+#   make keypadd         the emulator's host-side i2c keypad daemon
 #   make V=1 ...         echo the commands
 #
 # ============ WHY THE SOURCE LISTS ARE GLOBBED ============
@@ -319,7 +320,7 @@ endif
 # Rules
 # ------------------------------------------------------------------ #
 
-.PHONY: all test test-one parity-probe clean distclean install format skipped help
+.PHONY: all test test-one parity-probe keypadd clean distclean install format skipped help
 .DEFAULT_GOAL := all
 
 all: $(TARGETS) skipped
@@ -747,6 +748,25 @@ parity-probe:
 	fi; \
 	../tools/parity_capture_probe.sh --kernel "$(ND_KERNEL)" --rootfs "$(ND_ROOTFS)" \
 	    --compare ../tests/parity/qemu-armv7-probe.inventory
+
+# ------------------------------------------------------------------ #
+# The emulator's keypad daemon -- a HOST tool, built by hand or on demand
+# ------------------------------------------------------------------ #
+#
+#     make keypadd
+#
+# neodct/tools/nd-i2c-keypadd is the vhost-user backend that models the
+# phone's PCF8575 for QEMU. It is not part of `all`, is never installed, and
+# never crosses the cross-compiler: it runs on the DEVELOPER's machine beside
+# QEMU, not on the phone and not in the guest. qemu_machine.sh builds it on
+# demand with plain -O2 so that booting the emulator needs no separate step,
+# and this target is what builds it under the project's own warning set --
+# without it nothing anywhere would notice the file drifting out of
+# CODING-STANDARDS.md section 6. neodct/tests/test_qemu_keypadd.py compiles it
+# the same way, so `python3 -m pytest` catches that too.
+keypadd:
+	$(Q)$(CC) $(WARNINGS) -O2 -o ../tools/nd-i2c-keypadd ../tools/nd-i2c-keypadd.c
+	@echo "  built ../tools/nd-i2c-keypadd"
 
 # ------------------------------------------------------------------ #
 # Install -- the target layout, whose absolute paths are load-bearing

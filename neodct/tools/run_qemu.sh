@@ -170,6 +170,10 @@
 #                                             simulated NAND, through
 #                                             /dev/ubiblock0_0. Needs
 #                                             NEODCT_MEM>=128 and says why
+#   NEODCT_KEYPAD=off ...                     boot with NO i2c keypad, so the
+#                                             emulator falls back to the evdev
+#                                             path (it says so on every boot)
+#   NEODCT_KEYS=<path> ...                    where the keypad fifo lives
 #   NEODCT_SD=none ...                        no card attached
 #   NEODCT_RECOVERY=1 ...                     boot into recovery mode
 #   NEODCT_RECTTY=/dev/console ...            drive recovery over serial
@@ -278,11 +282,28 @@ VERITY="${NEODCT_VERITY:-enforce}"
 SD_MODE="${NEODCT_SD:-image}"
 DISPLAY_MODE="${NEODCT_DISPLAY:-gtk}"
 STORAGE="${NEODCT_STORAGE:-nand}"
+KEYPAD="${NEODCT_KEYPAD:-i2c}"
+# Set by the device-tree branch below when there is no dtc. The bus NUMBER is
+# a device-tree fact, so a tree-less boot cannot have the keypad -- see there.
+KEYPAD_NODTB=""
 
 case "$STORAGE" in
     nand|nand-full|virtio) ;;
     *)
         echo "run_qemu: NEODCT_STORAGE must be nand, nand-full or virtio" >&2
+        exit 1
+        ;;
+esac
+
+# The same refusal, for the same reason. It used to accept off|none|0 and
+# treat EVERYTHING else as "attach the bus", so NEODCT_KEYPAD=no, =false and
+# =OFF all booted WITH the keypad -- and the whole value of the off path is the
+# banner naming the paths it is not exercising, so an operator who thought they
+# had taken the bus away got the opposite boot and none of the warning.
+case "$KEYPAD" in
+    i2c|on|1|off|none|0) ;;
+    *)
+        echo "run_qemu: NEODCT_KEYPAD must be i2c or off" >&2
         exit 1
         ;;
 esac
@@ -523,7 +544,27 @@ if ! command -v nd_dtb_build >/dev/null 2>&1 \
     echo "  That means NO backlight (/sys/class/backlight stays empty) and NO" >&2
     echo "  cpufreq (ND_CPUFREQ_DIR does not exist), so Sleepy's two screens" >&2
     echo "  will both report that there is nothing there." >&2
+    # AND THE THIRD ONE, WHICH IS NOT A DEGRADED DEVICE BUT A WRONG ONE.
+    #
+    # The keypad's BUS NUMBER is a device-tree fact: virtio_mmio.c never sets
+    # an of_node, so the only thing that puts the adapter at three is
+    # nd-virt-additions.dtsi's disabled reservation node reserving 0..2.
+    # Measured, same kernel, same nd_qemu_i2c_args, -dtb omitted:
+    # /sys/class/i2c-dev is [i2c-0] and the node is /dev/i2c-0.
+    #
+    # A bus at the wrong number is WORSE than no bus. nd_pcf8575_open(bus=3)
+    # gets ENOENT, nd_input falls back to evdev, nd_battery goes back to SIM,
+    # and T9, the first-boot wizard and KeypadMapperI2C are all silently off --
+    # while this script would have printed "i2c keypad on /dev/i2c-3" and the
+    # fifo would swallow keystrokes without a word. That is precisely the
+    # silent fast path the keypad block below exists to refuse, so the bus
+    # goes away with the tree rather than coming up somewhere else.
+    echo "  AND NO KEYPAD BUS: the adapter's NUMBER comes from the tree's" >&2
+    echo "  reservation node, so without it the bus is /dev/i2c-0 and nothing" >&2
+    echo "  looks for it there. Booting on evdev, with no matrix, no T9, no" >&2
+    echo "  first-boot wizard and a simulated battery. Install dtc." >&2
     NDDTB=""
+    KEYPAD_NODTB=1
 fi
 
 # ============ THE NAND, AND THE FACTORY THAT WRITES IT ============
@@ -579,6 +620,8 @@ exec 3<&0
 QEMU_PID=""
 QEMU_RAN=""
 VIRTIOFSD_PID=""
+KEYPADD_PID=""
+KEYPADD_WATCH_PID=""
 
 nd_nand_save() {
     # The de-interleave is in mkqemuflash.py, with the argument for it and for
@@ -617,6 +660,24 @@ nd_session_end() {
     if [ -n "$VIRTIOFSD_PID" ]; then
         kill "$VIRTIOFSD_PID" 2>/dev/null || true
         VIRTIOFSD_PID=""
+    fi
+    # The watchdog goes FIRST, before the daemon it is watching. It exists to
+    # notice the daemon dying under a running guest; killing the daemon on the
+    # way out is not that, and a watchdog still alive at that moment would
+    # print the alarm on every clean shutdown.
+    if [ -n "$KEYPADD_WATCH_PID" ]; then
+        kill "$KEYPADD_WATCH_PID" 2>/dev/null || true
+        KEYPADD_WATCH_PID=""
+    fi
+    # The keypad daemon, on the EXIT trap and not after the QEMU line -- the
+    # same discipline and the same measured reason as the userdata lift: under
+    # `set -e` a non-zero QEMU exit terminates this script before anything
+    # after that line, and a `kill` of the script skips it too. A daemon left
+    # behind holds the socket, and the NEXT boot's QEMU then connects to a
+    # backend serving a keypad nobody is typing on.
+    if [ -n "$KEYPADD_PID" ]; then
+        kill "$KEYPADD_PID" 2>/dev/null || true
+        KEYPADD_PID=""
     fi
     nd_nand_save
     rm -rf "$NAND_WORK"
@@ -1085,6 +1146,144 @@ if [ -n "$PANEL_STREAM" ]; then
     echo "run_qemu:   decode it with neodct/tools/st7789_replay.py --out a.png" >&2
 fi
 
+# --- the keypad -----------------------------------------------------------
+#
+# THE PHONE'S KEYPAD IS A PCF8575 ON /dev/i2c-3, and until this landed the
+# emulator had no i2c bus of any kind, so nd_pcf8575.c, nd_matrix.c, the T9
+# engine's whole surround, nd_keypadsetup.c's 1,202 lines and
+# apps/KeypadMapperI2C had run on exactly one machine in the world. The bus is
+# a `vhost-user-i2c-device` whose transfers are serviced OUTSIDE QEMU by
+# neodct/tools/nd-i2c-keypadd, which models the expander at 0x20 and the
+# MAX17048 fuel gauge at 0x36 from their datasheets. The guest sees a real
+# adapter, a real /dev/i2c-3 and real ioctls.
+#
+# THE VIRTIO KEYBOARD STAYS. It is not a QEMU shim standing in for the
+# keypad: nd_input_open() opens the matrix FIRST and then opens an evdev
+# device REGARDLESS, and polls both when both are present, because "a
+# developer with a USB keyboard plugged into a real phone can still type".
+# Deleting it to tidy up the emulator would remove a hardware feature to fix
+# an emulator problem -- and a machine with both is the first one anywhere on
+# which nd_input's backend SELECTION runs at all.
+#
+# WHICH IS WHY IT SAYS WHICH ONE WILL WIN, on every boot. A silent fast path
+# is how the storage divergence came back last time.
+#
+# NEODCT_KEYPAD=off takes the bus away, and the fallback it leaves behind is
+# named rather than implied. It is a real escape hatch and not a courtesy:
+# QEMU REFUSES TO START when the vhost-user socket is not there -- measured,
+# `Failed to connect to '...': No such file or directory' -- so a host with a
+# QEMU that has no vhost-user-i2c-device would otherwise have no emulator at
+# all rather than an emulator with no keypad.
+#
+# ============ ONE BASE, THREE PATHS, SO TWO SESSIONS CAN BE TWO ============
+#
+# The fifo keeps its documented default -- AGENTS.md tells people to
+# `echo 'tap num_5' > /tmp/neodct-keys` and that must stay true -- and the
+# socket and the log are DERIVED FROM IT rather than being two more fixed
+# per-host names. So `NEODCT_KEYS=/tmp/keys-b run_qemu.sh` is a genuinely
+# separate second session, where before it shared a socket and a log with the
+# first one and the two daemons split the keystrokes between them (measured:
+# twelve presses went 9/3). The daemon refuses a socket somebody is already
+# serving rather than taking it, so the collision is now loud either way --
+# including the orphan case, where a session whose terminal died hard leaves a
+# daemon still holding the socket and still polling the fifo.
+KEYS_FIFO="${NEODCT_KEYS:-${TMPDIR:-/tmp}/neodct-keys}"
+KEYPADD_SOCK="$KEYS_FIFO.sock"
+KEYPADD_LOG="$KEYS_FIFO.log"
+# ONE SHAREABLE BACKEND, NOT TWO. The NEODCT_SD=share path attaches its own
+# `-object memory-backend-file ... -numa node,memdev=mem` for vhost-user-fs,
+# and a second backend claiming to be the guest's RAM is a QEMU start-up
+# error, not a fallback. That combination is unreachable today -- NEODCT_SD=share
+# is refused two hundred lines up for want of CONFIG_VIRTIO_FS -- and it is
+# named here anyway, because the day somebody adds that symbol back the
+# failure would be an unexplained QEMU error in a mode nobody had changed.
+if [ "$SD_MODE" = "share" ] && [ -z "$KEYPAD_NODTB" ] && \
+   [ "$KEYPAD" != "off" ] && [ "$KEYPAD" != "none" ] && [ "$KEYPAD" != "0" ]; then
+    echo "run_qemu: NEODCT_SD=share and the i2c keypad both need the guest's RAM" >&2
+    echo "  to be a shareable backend, and QEMU takes only one. Boot with" >&2
+    echo "  NEODCT_KEYPAD=off, or teach nd_qemu_i2c_args() to reuse the backend" >&2
+    echo "  the share path already attaches." >&2
+    exit 1
+fi
+
+# An `if` and NOT `[ -n ... ] && KEYPAD=off`: under `set -e` a false test as
+# the last command of an AND-list terminates the script, which is the trap
+# this file's own cleanup comments were written about.
+if [ -n "$KEYPAD_NODTB" ]; then
+    KEYPAD=off
+fi
+
+case "$KEYPAD" in
+    off|none|0)
+        if [ -n "$KEYPAD_NODTB" ]; then
+            echo "run_qemu: and with no device tree there is no i2c bus at all," >&2
+            echo "  so NONE of this runs: the PCF8575 driver, the matrix" >&2
+        else
+            echo "run_qemu: NEODCT_KEYPAD=off -- no i2c bus, so /dev/i2c-3 does not" >&2
+            echo "  exist and NONE of this runs: the PCF8575 driver, the matrix" >&2
+        fi
+        echo "  scanner, the keymap loader, the first-boot keypad wizard, the" >&2
+        echo "  root-phase bring-up that hands a descriptor across the privilege" >&2
+        echo "  drop, T9 and its two uinput bridges, KeypadMapperI2C, and" >&2
+        echo "  nd_battery.c's live MAX17048 path. Keys come from the QEMU" >&2
+        echo "  window through /dev/input/event0 instead, which is the machine" >&2
+        echo "  the emulator was before this stage." >&2
+        ;;
+    *)
+        if KEYPAD_ARGS=$(nd_qemu_i2c_args "$KEYPADD_SOCK" "$MEMORY"); then
+            if KEYPADD_PID=$(nd_keypadd_start "$HERE" "$KEYPADD_SOCK" "$KEYS_FIFO" \
+                                              "$KEYPADD_LOG"); then
+                # shellcheck disable=SC2086  # deliberately word-split
+                set -- "$@" $KEYPAD_ARGS
+                echo "run_qemu: i2c keypad on /dev/i2c-3 (PCF8575 0x20, MAX17048 0x36)." >&2
+                echo "run_qemu:   type into it with:  echo 'tap num_5' > $KEYS_FIFO" >&2
+                echo "run_qemu:   press/release/tap <key>, release all, short <pinA> <pinB>" >&2
+                echo "run_qemu:   the daemon's log is $KEYPADD_LOG" >&2
+                # ============ AND THE WIZARD, WHICH IS NEW ON THIS MACHINE ===
+                #
+                # nd_kpsetup_gate_check() returns PROBE the moment /dev/i2c-3
+                # exists -- the is_hw test is only reached when the node is
+                # ABSENT -- and nd_main.c calls nd_kpsetup_maybe_run() on every
+                # boot. No keymap.json ships in the overlay; it lives on
+                # /NeoDCT/User, which the wizard writes. So a fresh userdata
+                # partition now stops at the sixteen-prompt enrolment screen
+                # where this machine used to go QUIET, and an operator watching
+                # for `Input backend selected:` has no reason to know why.
+                #
+                # It is said UNCONDITIONALLY, and not gated on "does the
+                # userdata have a keymap": /NeoDCT/User is a ubifs volume
+                # inside a nandsim image and there is no host-side way to look
+                # inside one -- post-image-neodct.sh says as much about
+                # NEODCT_KEEP_USERDATA. A test this script cannot actually
+                # perform is worse than a paragraph that is true every time.
+                echo "run_qemu: a /NeoDCT/User with no keymap.json now stops at the" >&2
+                echo "  SIXTEEN-PROMPT first-boot keypad wizard before the home screen." >&2
+                echo "  That is new on this machine: nd_kpsetup_gate_check() returns" >&2
+                echo "  PROBE as soon as /dev/i2c-3 exists, and it never did here" >&2
+                echo "  before. Clear it by feeding the pad in enrolment order:" >&2
+                echo "    for k in navikey clear up down num_1 num_2 num_3 num_4 \\" >&2
+                echo "             num_5 num_6 num_7 num_8 num_9 num_0 star hash; do" >&2
+                echo "      echo \"tap \$k\" > $KEYS_FIFO; sleep 1; done" >&2
+                echo "  NEODCT_SNAPSHOT=1 and NEODCT_STORAGE=nand-full both discard" >&2
+                echo "  /NeoDCT/User, so under either the wizard runs on EVERY boot." >&2
+                echo "run_qemu: the virtio keyboard is still attached, so nd_input picks" >&2
+                echo "  the MATRIX and keeps evdev as the second backend -- which is the" >&2
+                echo "  phone's own arrangement. Watch for 'Input backend selected:' in" >&2
+                echo "  the boot log; if it says evdev, the matrix did not open and the" >&2
+                echo "  line says why." >&2
+            else
+                KEYPADD_PID=""
+                echo "run_qemu: the keypad daemon would not start, so no i2c bus this" >&2
+                echo "  boot. $KEYPADD_LOG has the reason. Booting on evdev." >&2
+            fi
+        else
+            echo "run_qemu: no i2c keypad this boot (see the line above). The" >&2
+            echo "  emulator falls back to the QEMU keyboard, which is a different" >&2
+            echo "  input path from the phone's." >&2
+        fi
+        ;;
+esac
+
 # --- usb: audio, and optionally the real modem ---------------------------
 # Nothing below runs today: AUDIO is none and NEODCT_MODEM / NEODCT_BT refuse
 # at the top, because qemu-xhci is a PCI device and the guest has no PCI. It
@@ -1252,7 +1451,9 @@ fi
 # cleanup, and it now forwards a kill rather than orphaning QEMU under one.
 #
 # shellcheck disable=SC2086  # EXTRA is intentionally word-split
-if [ "$STORAGE" = "virtio" ] && [ "$SD_MODE" != "share" ]; then
+# ...and a keypad daemon is a third thing to clean up, so it joins the two
+# above in the list of reasons not to exec. An exec'd shell has no EXIT trap.
+if [ "$STORAGE" = "virtio" ] && [ "$SD_MODE" != "share" ] && [ -z "$KEYPADD_PID" ]; then
     trap - EXIT INT TERM
     exec qemu-system-arm "$@" -append "$APPEND" $EXTRA
 fi
@@ -1263,6 +1464,36 @@ fi
 QEMU_RAN=1
 qemu-system-arm "$@" -append "$APPEND" $EXTRA <&3 &
 QEMU_PID=$!
+
+# ============ A DEAD KEYPAD DAEMON IS A FROZEN GUEST, NOT A DEAD KEYPAD =====
+#
+# QEMU's refusal to start against a missing socket only covers t=0. AFTER it
+# has connected, i2c-virtio waits in wait_for_completion_interruptible() with
+# the i2c bus lock held and there is NO TIMEOUT anywhere in that path, so a
+# daemon that segfaults or is OOM-killed leaves every later transfer
+# outstanding for ever. Measured: kill -9 the daemon at scan pass 5 and the
+# guest never printed pass 6 and never reached its end marker; QEMU exited
+# only because a `timeout` shot it. On a real image that read is
+# nd_input_read_key() -> nd_matrix_scan_once(), i.e. the UI's own key loop,
+# and nd_battery's poll blocks behind the same bus lock -- so the whole
+# emulator stops with nothing on the console saying why.
+#
+# So: watch the daemon, and turn a silent freeze into a message and an exit.
+# It polls rather than trapping SIGCHLD because the daemon is not this shell's
+# only child and a trap would have to work out which one went.
+if [ -n "$KEYPADD_PID" ]; then
+    ( while kill -0 "$KEYPADD_PID" 2>/dev/null; do sleep 1; done
+      kill -0 "$QEMU_PID" 2>/dev/null || exit 0
+      echo "" >&2
+      echo "run_qemu: THE KEYPAD BACKEND DIED WITH THE GUEST RUNNING." >&2
+      echo "  i2c-virtio waits on a completion with the bus lock held and no" >&2
+      echo "  timeout, so the guest is frozen in its key loop rather than" >&2
+      echo "  running without a keypad. Stopping QEMU. Last of $KEYPADD_LOG:" >&2
+      tail -5 "$KEYPADD_LOG" >&2 2>/dev/null || true
+      kill "$QEMU_PID" 2>/dev/null || true ) &
+    KEYPADD_WATCH_PID=$!
+fi
+
 QEMU_STATUS=0
 wait "$QEMU_PID" || QEMU_STATUS=$?
 QEMU_PID=""

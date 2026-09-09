@@ -81,3 +81,13 @@ neodct/overlay/tests/*.mkv
 # commit nor blocks a release tag. The build leaves it out via
 # NEODCT_EXCLUDE_APPS=Tube. Remove this line when Tube is ready to ship.
 neodct/overlay/NeoDCT/System/apps/Tube/
+
+############################
+# Host tools built on demand
+############################
+# neodct/tools/nd-i2c-keypadd is the emulator's PCF8575 backend. It is a HOST
+# binary -- it never goes near the image and never crosses the cross-compiler
+# -- and qemu_machine.sh builds it from the .c beside it whenever it is
+# missing or older than the source, so committing one would only ever be a
+# stale binary somebody's boot silently preferred.
+neodct/tools/nd-i2c-keypadd

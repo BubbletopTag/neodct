@@ -89,7 +89,23 @@ ALLOW = os.path.join(PARITY_DIR, "allow.txt")
 # It was found by a reviewer, not by this file, and it is here because the
 # argument for it was already written down three records away, attached to the
 # wrong key family.
-PERMANENT_RECORDS_EXPECTED = 16
+#
+# SEVENTEEN AND EIGHTEEN ARE THE KEYPAD STAGE, and the first of the two is a
+# record CHANGING VERDICT rather than being added: class.i2c-dev was
+# `until-stage-4` and said in as many words that "Stage 4 cannot get a bus by
+# configuration alone and needs vhost-user-i2c or a mock adapter". That stage
+# landed -- the emulator's i2c bus is a vhost-user-i2c-device serviced by
+# neodct/tools/nd-i2c-keypadd -- and what is left is not a stage but a fact
+# about the two machines: the emulator declares ONE bus, the one the keypad
+# and the fuel gauge are on, and the RV1103 exposes several. So the hw column
+# asks that i2c-3 is among the phone's rather than that the two listings are
+# equal, which is the strongest thing that can honestly be asked.
+# The eighteenth, class.i2c-dev.i2c-3.name, is the adapter's own name and can
+# never agree: i2c_virtio here, an rk3x controller there. Its QEMU column is a
+# regex and the digit is why -- the name embeds the VIRTIO device index, not
+# the bus number, so it counts the virtio devices created before it and is a
+# function of run_qemu.sh's flags rather than of the adapter.
+PERMANENT_RECORDS_EXPECTED = 18
 
 # `permanent` was the ONLY integer this suite pinned, which left every other
 # way of growing the file uncounted. One appended record with a `[*]` key and
@@ -99,8 +115,15 @@ PERMANENT_RECORDS_EXPECTED = 16
 # `until-image`: those are the records the README says MUST be revisited the
 # first time a built image is captured, and a promise that can be added to
 # without a diff on an integer is a promise nobody is holding.
-TOTAL_RECORDS_EXPECTED = 27
-UNTIL_IMAGE_RECORDS_EXPECTED = 9
+#
+# The keypad stage moves both: two new permanent records above, and one new
+# `until-image` -- dev.i2c-3, which is the udev grant. That one is a promise
+# with a deadline in the strongest sense the file has: the two machines are
+# supposed to AGREE on it, so the day a built image is captured it should be
+# DELETED rather than re-argued, because an unlisted key here means MUST
+# MATCH and that is exactly what is wanted of a device node's mode and group.
+TOTAL_RECORDS_EXPECTED = 29
+UNTIL_IMAGE_RECORDS_EXPECTED = 10
 
 # ============ AND THE NUMBER THAT ACTUALLY MOVES, WHICH WAS UNPINNED =======
 #
@@ -119,7 +142,14 @@ UNTIL_IMAGE_RECORDS_EXPECTED = 9
 # mtd.byname keys that were silently REQUIRED TO AGREE -- and could not --
 # are now argued for. That is the honest sentence, and the README says it in
 # those words now.
-COVERED_KEYS_EXPECTED = 118
+#
+# The keypad stage moves it by TWO, and both are new keys in the capture
+# rather than newly-excused old ones: class.i2c-dev.i2c-3.name and dev.i2c-3
+# did not exist before there was an adapter. class.i2c-dev was already
+# covered, by the until-stage-4 record this one replaces. So 118 of 230
+# becomes 120 of 232 -- the same fraction, 51.7%, and a file that grew by
+# exactly the surface the new device added.
+COVERED_KEYS_EXPECTED = 120
 
 # A column matching every possible value. `~.*` and `~.+` are the two ways to
 # write one; see the block in allow.txt's header for why there are none left.
@@ -214,7 +244,14 @@ def test_the_measured_records_are_the_ones_the_findings_name(qemu):
     # MemTotal RISES. The emulator is now ~800 kB above the phone's ~54 MB
     # instead of ~180 kB below it, and this line is the only thing in the
     # suite that notices when that number moves.
-    assert qemu.informational["mem.total_kb"] == "54812"
+    # 54,808 since the keypad stage, and the 4 kB is the DEVICE TREE and not
+    # the i2c device: nd-virt-additions.dtsi grew a bus-number reservation
+    # node, the tree got bigger and the kernel reserves fdt_totalsize().
+    # Measured on three boots of one kernel -- old tree without the bus
+    # 54,812, new tree without the bus 54,808, new tree WITH the bus 54,808 --
+    # so `-object memory-backend-memfd,share=on` changes how guest RAM is
+    # allocated and not how much of it the guest gets.
+    assert qemu.informational["mem.total_kb"] == "54808"
     # Finding 11: nandsim reproduces the Pico Mini's part exactly, and it is
     # the write size that matters -- mtdram reports 1, so every LEB size and
     # VID header offset computed on it is arithmetic the phone never does.
@@ -501,6 +538,27 @@ def test_the_surfaces_stage_closed_its_records(allow):
     """
     stage5 = [rec["key"] for rec in allow if rec["verdict"] == "until-stage-5"]
     assert stage5 == [], f"{stage5} still promise a stage that has landed"
+
+
+def test_the_keypad_stage_closed_its_record(allow):
+    """until-stage-4 was one record and is now none, for the same reason.
+
+    `class.i2c-dev` said, in its own `why`, that "Stage 4 cannot get a bus by
+    configuration alone and needs vhost-user-i2c or a mock adapter". That is
+    the vhost-user-i2c half built: neodct/tools/nd-i2c-keypadd is a host
+    process serving a QEMU vhost-user-i2c-device, the guest gets a real
+    /dev/i2c-3 with I2C_FUNC_I2C, and the repository's own nd_matrix_scan_once()
+    reads a host keystroke off it (neodct/tools/test_qemu_i2c.sh boots that).
+
+    The record was NOT deleted, and that is the interesting half: what is left
+    is that the emulator declares ONE bus and the RV1103 exposes several, which
+    is a fact about the two machines rather than a stage anybody can close. So
+    it is `permanent` with a rewritten argument, like class.backlight before
+    it, and pinning the stage number here is what stops it -- or anything else
+    -- being reintroduced as a promise that has already been kept.
+    """
+    stage4 = [rec["key"] for rec in allow if rec["verdict"] == "until-stage-4"]
+    assert stage4 == [], f"{stage4} still promise a stage that has landed"
 
 
 def test_zero_records_are_verified_against_hardware(allow):

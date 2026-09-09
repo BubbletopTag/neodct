@@ -45,7 +45,7 @@
 #                         [--work <dir>]
 #
 # Environment, for the day the kernel config changes and the numbers move:
-#   ND_MEM_DTB=54812    expected MemTotal with the device tree
+#   ND_MEM_DTB=54808    expected MemTotal with the device tree
 #   ND_MEM_NODTB=53824  expected MemTotal without it
 set -eu
 
@@ -58,7 +58,13 @@ DTSI="$HERE/../board/qemu/nd-virt-additions.dtsi"
 # The two numbers four documents quote. They are here so that a kernel symbol
 # added without a re-boot fails a test instead of quietly making AGENTS.md,
 # BUILDING.md, docs/BLUETOOTH.md and the config header wrong at the same time.
-MEM_DTB="${ND_MEM_DTB:-54812}"
+# 54,808 and not 54,812: the keypad stage added a bus-number reservation node
+# to nd-virt-additions.dtsi, the tree got bigger, and the kernel reserves
+# fdt_totalsize(). The 4 kB is the device tree and NOT the i2c device --
+# measured, a boot with the vhost-user bus attached and one without it report
+# the same number, because `-object memory-backend-memfd,share=on` changes how
+# guest RAM is allocated and not how much of it there is.
+MEM_DTB="${ND_MEM_DTB:-54808}"
 MEM_NODTB="${ND_MEM_NODTB:-53824}"
 
 while [ $# -gt 0 ]; do
@@ -107,6 +113,19 @@ mount -t devtmpfs devtmpfs /dev
 say() { echo "SURF|$1|$2"; }
 echo "===SURFACES-BEGIN"
 say mem.total_kb "$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
+
+# The keypad's bus. `[]` here is the machine as it was before Stage 4, and it
+# is the shape of an i2c subsystem compiled in with no adapter behind it --
+# which is the distinction this whole file exists to make.
+if [ -d /sys/class/i2c-dev ]; then
+    say class.i2c-dev "[$(ls /sys/class/i2c-dev | tr '\n' ' ')]"
+else
+    say class.i2c-dev ABSENT
+fi
+if [ -e /sys/class/i2c-dev/i2c-3/name ]; then
+    say i2c3.name "$(cat /sys/class/i2c-dev/i2c-3/name)"
+    say i2c3.node "$(ls -l /dev/i2c-3 | awk '{print $1, $3, $4}')"
+fi
 
 for c in backlight power_supply thermal leds; do
     if [ -d "/sys/class/$c" ]; then
@@ -208,9 +227,44 @@ check() {   # check <log> <key> <expected> <why>
         FAILED=$((FAILED + 1))
     fi
 }
+# Same, but the expected value is a PREFIX. It exists for exactly one record:
+# the i2c adapter's name ends in a digit that is not the bus number, and
+# allow.txt's own class.i2c-dev.i2c-3.name entry argues at length that the
+# digit must not be pinned -- so pinning it here, under an explanation about
+# the phone's rk3x controller, would send the next reader to an allowlist that
+# says the opposite.
+check_prefix() {   # check_prefix <log> <key> <expected prefix> <why>
+    _got="$(val "$2" "$1")"
+    case "$_got" in
+        "$3"*) echo "ok    $2 = $_got" ;;
+        *)
+            echo "FAIL  $2: got '$_got', want something starting '$3'"
+            echo "        $4"
+            FAILED=$((FAILED + 1))
+            ;;
+    esac
+}
+
+# ============ THE KEYPAD BUS IS PART OF run_qemu.sh's MACHINE ============
+#
+# So it is part of this boot. A surfaces run without it would assert against a
+# machine nobody boots, which is the same argument the device tree carries
+# forty lines up -- and it is the argument that already cost this file once,
+# when its hand-copied kernel parameters had lost the nandsim ID bytes.
+KEYPADD_PID=""
+# `|| true`, because under `set -e` a kill of a pid that has already gone is
+# the LAST command of an AND-list and errexit applies to it -- the trap aborts
+# and the script exits non-zero after saying every check passed.
+trap 'rm -rf "$WORK"; if [ -n "$KEYPADD_PID" ]; then kill "$KEYPADD_PID" 2>/dev/null || true; fi' EXIT
+KEYPADD_PID=$(nd_keypadd_start "$HERE" "$WORK/i2c.sock" "$WORK/keys" "$WORK/keypadd.log") || {
+    echo "test_qemu_surfaces: the keypad daemon would not start, and QEMU refuses" >&2
+    echo "  to boot against a vhost-user socket that is not there." >&2
+    exit 2; }
+I2C_ARGS=$(nd_qemu_i2c_args "$WORK/i2c.sock" 64) || exit 2
 
 echo "== with the device tree =="
-boot "$WORK/dtb" -dtb "$WORK/nd.dtb"
+# shellcheck disable=SC2086  # I2C_ARGS is intentionally word-split
+boot "$WORK/dtb" -dtb "$WORK/nd.dtb" $I2C_ARGS
 
 check "$WORK/dtb" mem.total_kb "$MEM_DTB" \
     "the kernel reserves fdt_totalsize(); AGENTS.md, BUILDING.md, docs/BLUETOOTH.md and the kernel config header all quote this number"
@@ -249,6 +303,13 @@ check "$WORK/dtb" gpio53 "dir=out value=1" \
 check "$WORK/dtb" gpio56 "dir=out value=1" "the panel's RST, driven by neodctDisplay.c"
 check "$WORK/dtb" gpio57 "dir=out value=1" "the panel's DC, driven by neodctDisplay.c"
 
+check "$WORK/dtb" class.i2c-dev "[i2c-3 ]" \
+    "exactly one adapter and it is bus THREE. ND_I2C_BUS_DEFAULT, ND_KPSETUP_DEFAULT_BUS and ND_BATT_DEFAULT_I2C_BUS are all 3, and the number comes from the reservation node in nd-virt-additions.dtsi, not from luck"
+check_prefix "$WORK/dtb" i2c3.name "i2c_virtio at virtio bus " \
+    "the vhost-user adapter, whose transfers nd-i2c-keypadd services. The phone's is an rk3x string, which is why this is a permanent allow.txt record. THE TRAILING DIGIT IS DELIBERATELY NOT PINNED: it is i2c-virtio's snprintf of vdev->index, the count of virtio devices QEMU made before this one, so it is a function of THIS BOOT'S DEVICE LIST and not of the adapter -- measured, 0 here, 1 in test_qemu_i2c.sh and 3 in the parity capture"
+check "$WORK/dtb" i2c3.node "crw------- 0 0" \
+    "devtmpfs makes it root:root 0600 and the udev rule is what changes that -- the window nd_kpsetup_open_keypad_as_root() exists to step over"
+
 check "$WORK/dtb" mtd.count 6 \
     "nandsim.parts=2,2,4,128,64 must give SIX partitions -- five sizes and the remainder. Six sizes gives seven, and the seventh is 3 MiB of bad-block slack the phone's table has no name for"
 check "$WORK/dtb" mtd.class "[mtd0 mtd0ro mtd1 mtd1ro mtd2 mtd2ro mtd3 mtd3ro mtd4 mtd4ro mtd5 mtd5ro ]" \
@@ -271,6 +332,8 @@ check "$WORK/nodtb" class.backlight "[]" \
     "the subsystem is built in and the DEVICE comes from the device tree -- which is the distinction the parity allowlist turns on"
 check "$WORK/nodtb" cpufreq.present no \
     "cpufreq-dt binds nothing without operating-points-v2 on cpu@0"
+check "$WORK/nodtb" class.i2c-dev "[]" \
+    "and no keypad bus at all, because this boot attaches no vhost-user device -- which is what the emulator looked like before Stage 4: the subsystem compiled in, the class directory there, and nothing in it"
 
 echo
 if [ "$FAILED" -eq 0 ]; then

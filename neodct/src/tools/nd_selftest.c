@@ -720,10 +720,29 @@ static void section_devices(const nd_priv_id *usr, const nd_priv_id *ut)
                    "bus and not a missing grant. The MAX17048 fuel gauge and the "
                    "PCF8575 keypad expander are both on it -- look at i2c-dev and at "
                    "the device tree, not at 61-neodct-devices.rules");
+        /* ============ AND THIS SKIP IS NOW A FAULT ON QEMU TOO ============
+         *
+         * It used to read "no /dev/i2c-* here, and this image is QEMU, which
+         * has no i2c bus for the rules to grant", and that sentence stopped
+         * being true when the emulator got one: run_qemu.sh's default boot
+         * attaches a vhost-user-i2c adapter that comes up as /dev/i2c-3 with
+         * the PCF8575 at 0x20 and the MAX17048 at 0x36 on it. A tool that
+         * went on printing it would be lying about the machine it is standing
+         * on, which is worse than printing nothing.
+         *
+         * It is not promoted all the way to R_FAIL like the hardware branch,
+         * and the difference is NEODCT_KEYPAD=off: taking the bus away is a
+         * supported way to boot the emulator -- it is the escape hatch for a
+         * host whose QEMU has no vhost-user-i2c-device -- so an absent bus
+         * here is a machine somebody chose, where on the phone it is a
+         * soldered chip that has gone. The wording names the one thing to
+         * check rather than leaving "expected on QEMU" to be read as fine. */
         else if (nd_platform_is_qemu())
             report(R_SKIP, ND_PRIV_USER " can open the i2c bus",
-                   "no /dev/i2c-* here, and this image is QEMU, which has no i2c bus "
-                   "for the rules to grant");
+                   "no /dev/i2c-* on this emulator. Since the keypad stage QEMU has a "
+                   "real i2c bus by default, so this means the boot was NEODCT_KEYPAD=off "
+                   "or nd-i2c-keypadd did not start -- run_qemu.sh says which on every "
+                   "boot, and neither is the rules file's doing");
         /* A mis-assembled image lands here too, and the both-ways wording is
          * still the right one: it says the machine cannot be named, which is
          * exactly the state a disagreement leaves this in. The mismatch

@@ -164,7 +164,22 @@ if [ -e "$WORK" ]; then
     exit 2
 fi
 mkdir -p "$WORK"
-trap 'rm -rf "$WORK"' EXIT
+KEYPADD_PID=""
+# The daemon joins the work directory on the SAME trap rather than getting one
+# of its own, because there is one place a run of this script is wound up and
+# a second trap would replace the first.
+# `|| true`, because under `set -e` a kill of a pid that has already gone is
+# the LAST command of an AND-list and errexit applies to it: the trap aborts
+# and the script exits non-zero having captured a perfectly good baseline.
+# ND_KEEP_WORK=1 leaves the console, the daemon's log and the merged device
+# tree behind, the same escape hatch test_qemu_i2c.sh has. Without it this
+# script deleted the work directory on EVERY failure path -- including the one
+# where it had just told the operator to go and read a file in it.
+nd_probe_cleanup() {
+    if [ -n "$KEYPADD_PID" ]; then kill "$KEYPADD_PID" 2>/dev/null || true; fi
+    [ "${ND_KEEP_WORK:-0}" = "1" ] || rm -rf "$WORK"
+}
+trap nd_probe_cleanup EXIT
 
 nd_dtb_build "$DTSI" "$WORK" "$WORK/nd.dtb" || {
     echo "REFUSED: no device tree, so this would capture a machine run_qemu.sh" >&2
@@ -277,12 +292,43 @@ dd if=/dev/zero of="$WORK/nduser.img" bs=1M count=8 status=none
 # display mode carries it and a capture with no framebuffer is a capture
 # missing its eleven most valuable records, and neodct.devenv=1 because
 # run_qemu.sh passes it by default.
+# ============ AND THE KEYPAD BUS, WHICH IS NOT OPTIONAL EITHER ============
+#
+# run_qemu.sh's default is an i2c keypad, so a capture taken without one is a
+# capture of a machine nobody boots -- exactly the argument the device tree
+# already carries one paragraph up. It moves four records: class.i2c-dev goes
+# from [] to [i2c-3], class.i2c-dev.i2c-3.name and dev.i2c-3 appear, and
+# dev.count goes up by one.
+#
+# It is a REFUSAL and not a warning for the same reason the tree is. The
+# daemon is a host program with no dependencies beyond a C compiler, so an
+# environment that cannot start it is an environment that cannot produce this
+# baseline.
+KEYPADD_PID=$(nd_keypadd_start "$HERE" "$WORK/i2c.sock" "$WORK/keys" "$WORK/keypadd.log") || {
+    echo "REFUSED: the i2c keypad daemon would not start, and QEMU will not boot" >&2
+    echo "  without it -- it refuses a vhost-user socket that is not there. A" >&2
+    echo "  capture with no keypad would describe a machine run_qemu.sh does not" >&2
+    echo "  assemble." >&2
+    # `>&2` FIRST. Redirections apply left to right, so the old
+    # `2>/dev/null >&2` pointed fd 2 at /dev/null and then duplicated
+    # THAT into fd 1 -- the daemon's log went to /dev/null on both
+    # descriptors, and this refusal printed the path of a file the EXIT
+    # trap was about to delete. Measured on a socket path too long for a
+    # sockaddr_un: the one line explaining it was unrecoverable.
+    cat "$WORK/keypadd.log" >&2 2>/dev/null
+    exit 1; }
+I2C_ARGS=$(nd_qemu_i2c_args "$WORK/i2c.sock" 64) || {
+    echo "REFUSED: this qemu-system-arm cannot attach the keypad bus." >&2
+    exit 1; }
+
+# shellcheck disable=SC2086  # I2C_ARGS is intentionally word-split
 timeout 300 qemu-system-arm \
     -M virt -cpu cortex-a7 -smp 1 -m 64 -nographic \
     -global virtio-mmio.force-legacy=false \
     -kernel "$KERNEL" \
     -initrd "$WORK/initramfs.cpio.gz" \
     -dtb "$WORK/nd.dtb" \
+    $I2C_ARGS \
     -drive "file=$WORK/ndsys.img,if=none,format=raw,id=ndsys" \
     -device virtio-blk-device,drive=ndsys,serial=NDSYS \
     -drive "file=$WORK/nduser.img,if=none,format=raw,id=nduser" \

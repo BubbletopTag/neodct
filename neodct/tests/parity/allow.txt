@@ -365,16 +365,133 @@ why          The one framebuffer field the two kernels set INDEPENDENTLY, and
              nothing can legitimately land in a 2 KB window above the floor.
 
 key          class.i2c-dev
-qemu         []
-hw           ~\[.+\]
-verdict      until-stage-4
+qemu         [i2c-3]
+hw           ~\[.*i2c-3.*\]
+verdict      permanent
 hw_evidence  unmeasured-claim
-why          -M virt on arm has no i2c controller, measured, with
-             CONFIG_I2C_CHARDEV=y. So the class is there and empty. The phone's
-             keypad is a PCF8575 on /dev/i2c-3 and the whole T9 path, the
-             keypad wizard and KeypadMapperI2C hang off it; Stage 4 cannot get
-             a bus by configuration alone and needs vhost-user-i2c or a mock
-             adapter.
+why          THIS RECORD USED TO SAY until-stage-4 AND THE STAGE HAS LANDED.
+             Its old argument was "-M virt on arm has no i2c controller,
+             measured, with CONFIG_I2C_CHARDEV=y ... Stage 4 cannot get a bus
+             by configuration alone and needs vhost-user-i2c or a mock
+             adapter." That was true and it is the vhost-user-i2c half that
+             was built: the emulator's bus is a QEMU `vhost-user-i2c-device`
+             whose transfers are serviced by neodct/tools/nd-i2c-keypadd, a
+             host program modelling the phone's PCF8575 at 0x20 and its
+             MAX17048 at 0x36. Measured on a booted guest: /dev/i2c-3 char
+             89:3, funcs 0x0eff0009 with I2C_FUNC_I2C, the repository's own
+             nd_pcf8575_write16/read16 round-tripping, and a host keystroke
+             arriving in nd_matrix_scan_once() as one PRESS.
+             .
+             IT DOES NOT CLOSE OUTRIGHT, AND THAT IS THE HONEST VERDICT. The
+             emulator declares ONE bus, the one the keypad and the fuel gauge
+             are on. The RV1103 exposes several i2c controllers and the phone's
+             kernel enables more than one of them, so the two listings will
+             differ in CARDINALITY even though the record that matters --
+             i2c-3 being present -- agrees. That is a fact about the two
+             machines and not a stage anybody can close, so the hw column
+             demands that i2c-3 is among whatever the phone lists rather than
+             that the lists are equal.
+             .
+             The day a phone is captured this could be closed for real by
+             declaring the same set in nd-virt-additions.dtsi. Until then the
+             cardinality is the divergence and i2c-3 is the agreement.
+
+key          class.i2c-dev.i2c-3.name
+qemu         ~i2c_virtio at virtio bus [0-9]+
+hw           ~(?!ABSENT$).+
+verdict      permanent
+hw_evidence  unmeasured-claim
+why          The adapter's own name, and it can never agree: here it is
+             i2c-virtio's snprintf("i2c_virtio at virtio bus %d",
+             vdev->index) and on the phone it is the rk3x controller's.
+             .
+             THE QEMU COLUMN IS A REGEX AND THE DIGIT IS WHY. `vdev->index` is
+             the VIRTIO device index, not the i2c bus number, so it counts how
+             many virtio devices QEMU created before this one -- measured, the
+             parity probe's boot (two virtio-blk plus a virtio keyboard)
+             reports `bus 3` while test_qemu_surfaces.sh's boot, which has one
+             virtio device, reports `bus 0`. Pinning the digit would make this
+             record a function of run_qemu.sh's flags rather than of the
+             adapter, and the first person to add a device would have to edit
+             an allowlist to explain a change to something else.
+             .
+             ABSENT is deliberately not admitted on the hw side. A phone whose
+             /sys/class/i2c-dev/i2c-3 has no `name` has no adapter registered
+             there, which is a phone whose keypad and fuel gauge are both on a
+             bus that does not exist -- the opposite of an allowed difference.
+             .
+             AND ONE CONSEQUENCE THIS FILE CANNOT FIX, BECAUSE IT IS NOT THIS
+             FILE'S. The regex above is what parity_diff.py holds a capture
+             to; `make parity-probe` is a different gate, and it requires the
+             fresh capture to equal qemu-armv7-probe.inventory BYTE FOR BYTE.
+             That committed line reads `i2c_virtio at virtio bus 3`, so the
+             digit IS pinned in the baseline even though it is deliberately
+             not pinned here. Adding or removing any virtio device from
+             parity_capture_probe.sh's QEMU line therefore fails parity-probe
+             on a record nothing about the adapter changed, and the failure
+             reads as "the keypad adapter moved".
+             .
+             THE INTENDED RESPONSE IS TO RE-CAPTURE, not to widen the gate.
+             A byte-for-byte baseline is the only thing in the tree that
+             re-derives this file's input from a machine, and teaching
+             nd-inventory to canonicalise `virtio bus N` would put an
+             emulator-shaped rewrite inside a tool that ships on the phone --
+             the trade this whole branch exists to refuse. So: if a device is
+             added to that boot, re-run the capture and say in the commit that
+             the digit moved because the device list did.
+
+key          dev.i2c-3
+qemu         ~type=c mode=0600 uid=0\(\?\) gid=0\(\?\)
+hw           ~type=c mode=0660 uid=0\(root\) gid=[0-9]+\(i2c\)
+verdict      until-image
+hw_evidence  unmeasured-claim
+why          THE RECORD THAT TURNS THE UDEV RULE INTO A GATE, and the reason
+             it is `until-image` rather than `permanent` is that the two
+             machines are supposed to AGREE here and the probe cannot show it.
+             .
+             On the phone, and on a QEMU image carrying the same
+             overlay/etc/udev/rules.d/61-neodct-devices.rules, this node is
+             root:i2c 0660 on both machines -- one rule, one users-table.txt
+             entry, one mode. The moment qemu-armv7.inventory exists this
+             record should be DELETED rather than re-argued, because an
+             unlisted key in this harness means MUST MATCH and that is exactly
+             what is wanted.
+             .
+             What the busybox probe measures instead is the state BEFORE any
+             rule runs: devtmpfs creates the node the instant the adapter
+             registers, root:root 0600, and that initramfs has no eudev and no
+             /etc/passwd -- hence the `(?)` where a name would be. Both halves
+             are properties of the probe rootfs and neither is a property of
+             the emulator.
+             .
+             THE FAULT THIS EXISTS TO CATCH IS NOT "NO RULE". It is the third
+             state: a rule that matched and whose GROUP= named a group that
+             does not exist, which eudev resolves to gid 0, giving 0660
+             root:root -- indistinguishable from having no rule at all from
+             the UI's side, and produced by nothing more than a missing `i2c`
+             line in users-table.txt. All three states were put to the KERNEL
+             in a booted guest by test_qemu_i2c.sh, which forks and really
+             drops to uid 1000 in gid 1002 before each open:
+             .
+                 I2C-ACL devtmpfs-0600-root EACCES
+                 I2C-ACL udev-0660-i2c OPEN-OK
+                 I2C-ACL udev-0660-unknown-group EACCES
+             .
+             That is the answer the kernel gives, not the answer a rules file
+             claims, and it is what makes a permission bug on the phone a
+             build failure here.
+             .
+             AND IT IS DELIBERATELY NOT A `dev.i2c-[N]` FAMILY. inv_dev_family()
+             collapses pty/tty/loop/ram/vcs and could be taught i2c as well,
+             which would make the phone's several buses one record against the
+             emulator's one. It is not, because the emulator has exactly ONE
+             bus and its NUMBER is the thing this stage had to work for -- a
+             family record says `n=1` and does not say WHICH bus, so the one
+             fact the reservation node exists to produce would stop being in
+             the capture at all. Reconsider it the day a phone is captured and
+             its actual set of controllers is in hand; deciding it now, from
+             this side, would be choosing a shape for a machine nobody has
+             measured.
 
 key          input.node.event0.name
 qemu         QEMU Virtio Keyboard

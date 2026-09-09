@@ -1,5 +1,6 @@
-# qemu_machine.sh -- the two halves of the machine the NeoDCT emulator boots:
-# the device tree, and the kernel parameters that decide which devices exist.
+# qemu_machine.sh -- the machine the NeoDCT emulator boots: the device tree,
+# the kernel parameters that decide which devices exist, and the QEMU
+# arguments for the keypad's i2c bus.
 #
 # Sourced, not run. run_qemu.sh sources it to boot the phone;
 # test_qemu_surfaces.sh and parity_capture_probe.sh source it to boot a probe
@@ -153,4 +154,129 @@ nandsim.first_id_byte=0x20 nandsim.second_id_byte=0xa1 \
 nandsim.third_id_byte=0x00 nandsim.fourth_id_byte=0x15 \
 nandsim.parts=2,2,4,128,64 \
 gpio-mockup.gpio_mockup_ranges=0,64"
+}
+
+# nd_qemu_i2c_args <socket path> [guest MB]
+#
+# The QEMU arguments that give the guest a real i2c bus with a PCF8575 on it.
+# Echoed as one space-separated string, empty when the emulator's QEMU cannot
+# do it.
+#
+# ============ WHY THIS IS A SECOND FUNCTION AND NOT nd_qemu_append ============
+#
+# Everything nd_qemu_append() emits is a KERNEL PARAMETER. These are -object,
+# -machine, -chardev and -device arguments, which the kernel never sees. Two
+# different things in one string would be one string nobody could reuse: the
+# capture scripts want the devices without necessarily wanting the same
+# console, and a caller that wants neither still wants the nandsim bytes.
+#
+# It lives in THIS file for the reason the file exists: three recipes that
+# hand-copy a machine drift, and the drift is invisible. The measured
+# precedent is in this file's own header.
+#
+# ============ THE memfd IS NOT OPTIONAL ============
+#
+# vhost-user hands the backend a file descriptor for guest RAM and the backend
+# mmaps it. QEMU's default anonymous guest memory is not shareable, so the
+# backend maps nothing and every transfer silently does nothing --
+# `-object memory-backend-memfd,share=on` plus `-machine memory-backend=` is
+# what makes the RAM shareable. MEASURED that it costs nothing: MemTotal at
+# -m 64 is 54,808 kB with it and without it, byte for byte.
+#
+# ============ AND A MISSING DAEMON IS A BOOT FAILURE, NOT A DEGRADED BOOT ===
+#
+# QEMU REFUSES TO START when the vhost-user socket is not there -- measured,
+# `Failed to connect to '.../i2c.sock': No such file or directory` -- so the
+# caller must start nd-i2c-keypadd BEFORE qemu and reap it on an EXIT trap.
+# This function does not start anything; it only says what to put on the line.
+nd_qemu_i2c_args() {
+    _sock="$1"
+    _mem="${2:-64}"
+
+    # -M virt is a versioned machine and so is its device list. The tree is
+    # already regenerated from the installed binary on every run for exactly
+    # this reason; checking for the device rather than failing obscurely is
+    # the same discipline one layer up.
+    if ! qemu-system-arm -M virt -device help 2>/dev/null | grep -q '^name "vhost-user-i2c-device"'; then
+        echo "qemu_machine: this qemu-system-arm has no vhost-user-i2c-device." >&2
+        return 1
+    fi
+    echo "-object memory-backend-memfd,id=ndmem,size=${_mem}M,share=on \
+-machine memory-backend=ndmem \
+-chardev socket,id=ndi2c,path=$_sock \
+-device vhost-user-i2c-device,chardev=ndi2c"
+}
+
+# nd_keypadd_start <tools dir> <socket> <fifo> <log>
+#
+# Starts nd-i2c-keypadd, waits for it to be listening, and echoes its pid.
+# Returns non-zero having said why on stderr.
+#
+# The tools directory is an ARGUMENT and not `dirname $0`, because in a
+# sourced file $0 is the SOURCING script and the three callers do not all live
+# in the same directory. Every one of them already computes that path in order
+# to source this file, so passing it costs a word and cannot be wrong.
+#
+# THE WAIT IS A READY FILE AND NOT A SLEEP. QEMU's refusal to start against a
+# missing socket is immediate and total, so a `sleep 1` is a race that passes
+# on the machine it was written on and turns a slow host into "the emulator
+# does not boot".
+nd_keypadd_start() {
+    _kp_dir="$1"
+    _kp_sock="$2"
+    _kp_fifo="$3"
+    _kp_log="$4"
+    _kp_bin="$_kp_dir/nd-i2c-keypadd"
+    _kp_src="$_kp_dir/nd-i2c-keypadd.c"
+    _kp_ready="$_kp_sock.ready"
+
+    if [ ! -x "$_kp_bin" ] || [ "$_kp_src" -nt "$_kp_bin" ]; then
+        # Built on demand rather than committed, and rebuilt when the source
+        # is newer. It is a HOST tool -- it never goes near the image and
+        # never crosses the cross-compiler -- so requiring a make in another
+        # directory before the emulator boots would be a step people work
+        # around, and a stale binary is the bug that step would hide.
+        if ! cc -O2 -o "$_kp_bin" "$_kp_src"; then
+            echo "qemu_machine: cannot build nd-i2c-keypadd." >&2
+            return 1
+        fi
+    fi
+    # The READY file only. The SOCKET is deliberately left alone: it used to be
+    # removed here, which is how a second session on one host silently took a
+    # live session's socket away -- measured, the incumbent stayed alive with
+    # its path gone. The daemon decides, because only it can tell a stale
+    # socket file from one somebody is serving (it connects to it first).
+    rm -f "$_kp_ready"
+    # >/dev/null AND NOT >/dev/null 2>&1. stdout has to go, because this
+    # function is called in a command substitution to capture the pid and a
+    # background child holding that pipe open means `$(nd_keypadd_start ...)`
+    # never returns -- measured, it hung until the qemu timeout. STDERR must
+    # NOT go: the daemon's ordinary output goes to --log, so the only things
+    # it ever writes to stderr are the failures that happen BEFORE the log is
+    # open, and those are precisely the ones a caller cannot otherwise find.
+    "$_kp_bin" --socket "$_kp_sock" --keys "$_kp_fifo" --ready "$_kp_ready" \
+        --log "$_kp_log" >/dev/null &
+    _kp_pid=$!
+    _kp_wait=0
+    while [ ! -e "$_kp_ready" ]; do
+        # A daemon that has ALREADY EXITED is the common failure -- a socket
+        # somebody else is serving, a path too long for a sockaddr_un, an
+        # unwritable log -- and waiting ten seconds for a ready file that can
+        # never arrive turns a one-line reason into a timeout. It said its
+        # piece on stderr on the way out; noticing at once is what puts that
+        # line next to this one.
+        if ! kill -0 "$_kp_pid" 2>/dev/null; then
+            echo "qemu_machine: nd-i2c-keypadd exited before it was listening" >&2
+            echo "  (its reason is above, or in $_kp_log)." >&2
+            return 1
+        fi
+        _kp_wait=$((_kp_wait + 1))
+        if [ "$_kp_wait" -gt 200 ]; then
+            echo "qemu_machine: nd-i2c-keypadd never started listening; see $_kp_log" >&2
+            kill "$_kp_pid" 2>/dev/null || true
+            return 1
+        fi
+        sleep 0.05
+    done
+    echo "$_kp_pid"
 }

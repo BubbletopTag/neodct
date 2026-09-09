@@ -20,6 +20,7 @@ test_parity_allowlist.py       the gate that needs no boot, in the pytest suite
 ../../tools/qemu_machine.sh    the device tree AND the kernel parameters,
                                shared with run_qemu.sh
 ../../tools/test_qemu_surfaces.sh  the gate that needs a boot and no image
+../../tools/test_qemu_i2c.sh   the keypad bus, in a booted guest, no image
 ```
 
 ## What is measured and what is not
@@ -38,7 +39,8 @@ own kernel (`board/qemu/armv7-virt/linux.config`), the exact machine
 `run_qemu.sh` assembles — `-M virt -cpu cortex-a7 -smp 1 -m 64`,
 `-global virtio-mmio.force-legacy=false`, `mtdram.total_size=0` plus the Pico
 Mini's nandsim ID bytes and `nandsim.parts=2,2,4,128,64`, `video=vfb:on`,
-`gpio-mockup.gpio_mockup_ranges=0,64`
+`gpio-mockup.gpio_mockup_ranges=0,64`, **the keypad's `vhost-user-i2c-device`
+with `nd-i2c-keypadd` behind it**
 and **the device tree `run_qemu.sh` builds** — and a **busybox initramfs**
 where the NeoDCT rootfs would be, because `buildroot/output` does not exist
 and a full build is hours. Two boots produced byte-identical files.
@@ -61,12 +63,17 @@ MemTotal, the class trees, the MTD geometry, `/proc/devices`,
 ioctls. Everything *about* the image is not: `os-release`, `/NeoDCT/platform`,
 the users table, the mount set, and the six records that need libneodct all
 read `ABSENT` or `UNAVAILABLE(nolib)` and are properties of that initramfs.
-Those nine records carry the verdict `until-image` and must be revisited the
-first time `parity_capture_qemu.sh` runs on a built image; the count is pinned
+Those records carry the verdict `until-image` and must be revisited the
+first time `parity_capture_qemu.sh` runs on a built image; there are ten, and
+the tenth is not like the other nine -- `dev.i2c-3` is a record the two
+machines are supposed to AGREE on, so the day a built image is captured it
+should be DELETED rather than re-argued, because an unlisted key here means
+MUST MATCH and that is exactly what is wanted of a device node's mode and
+group; the count is pinned
 in the host test, and so is the total, so appending a record is a diff on an
 integer somebody sees.
 
-Three consequences worth knowing before the file confuses you:
+Some consequences worth knowing before the file confuses you:
 
 - `fb0.var.xres` is **240** and `bits_per_pixel` is **32**, because the
   capture is taken **after** `neodct_displayd`'s `force_mode()` has run. There
@@ -81,6 +88,28 @@ Three consequences worth knowing before the file confuses you:
   `--panel stream:`** — the stream needs a virtio-console port, the port gives
   the guest `/dev/vport0p1` and `/sys/class/virtio-ports`, and `dev.count`
   would move. A baseline describes the machine somebody boots.
+- `class.i2c-dev` is `[i2c-3]` and **the number is a device-tree fact**. The
+  emulator's adapter is a virtio device, and `virtio_mmio.c` never sets an
+  `of_node`, so `i2c-virtio.c`'s copy of one is NULL and `i2c_add_adapter()`
+  cannot see an `i2c3` alias aimed at the mmio node — measured, that spelling
+  produced `i2c-4`. What works is `nd-virt-additions.dtsi`'s disabled
+  `nd-i2c-number-reservation` node with `aliases { i2c2 = ... }`: an alias
+  RESERVES where only an `of_node` NAMES, so reserving 0..2 makes the first
+  dynamic adapter number three. It costs 4 kB of MemTotal — 54,812 to 54,808
+  — because the kernel reserves `fdt_totalsize()` and the tree got bigger. The
+  i2c DEVICE itself costs nothing: measured on three boots of one kernel, old
+  tree without the bus 54,812, new tree without it 54,808, new tree with it
+  54,808.
+- `class.i2c-dev.i2c-3.name` ends in a digit that is **not** a bus number and
+  **is** pinned in the baseline. It is `vdev->index`, the count of virtio
+  devices QEMU made before the adapter — measured, `bus 3` from this capture's
+  boot, `bus 1` from `test_qemu_i2c.sh`'s and `bus 0` from
+  `test_qemu_surfaces.sh`'s. `allow.txt` refuses to constrain it and both
+  booting gates now match only the prefix, but `make parity-probe` compares
+  the whole file byte for byte, so **adding or removing any virtio device from
+  `parity_capture_probe.sh`'s QEMU line moves this record and fails that
+  gate**. Re-capturing is the intended response; canonicalising the digit
+  inside `nd-inventory` is not, because that tool ships on the phone.
 - `class.gpio`'s `gpiochip0` is `CONFIG_GPIO_MOCKUP`, not a real controller.
   It is there because `-M virt`'s own pl061 is eight lines at base 512, so
   none of the pin numbers this tree hard-codes — `ND_BL_GPIO_PIN` 53, and 56
@@ -137,7 +166,9 @@ neodct/tools/parity_diff.py ... --propose >> neodct/tests/parity/allow.txt
 | gate | when it runs | what it catches |
 |---|---|---|
 | `test_parity_allowlist.py` | every change, no boot | an empty argument, an unedited `--propose` skeleton, a `permanent`/`until-image`/total count that moved, a column that matches every value, a `[*]` key free on both sides, an emulator column that no longer matches the committed capture, a baseline whose hashes do not verify or has none, a closed stage still promising to close, a `qemu-armv7.inventory` that has arrived unnoticed |
-| `test_qemu_surfaces.sh` | when a kernel is in hand, no image | the small hardware surfaces in a booted guest — the backlight's name and table, the cpufreq table, the two deliberately empty classes and the absent one, the phone's three GPIO pins, **the flash: six MTD partitions at the phone's numbers, mtd4 at 8 MiB, writesize 2048** — MemTotal on both sides of `-dtb`, and the one thing no host test can see: a write in the wrong order being swallowed |
+| `test_qemu_surfaces.sh` | when a kernel is in hand, no image | the small hardware surfaces in a booted guest — the backlight's name and table, the cpufreq table, the two deliberately empty classes and the absent one, the phone's three GPIO pins, **the flash: six MTD partitions at the phone's numbers, mtd4 at 8 MiB, writesize 2048**, **the keypad: exactly one i2c adapter, numbered three, `root:root 0600` out of devtmpfs** — MemTotal on both sides of `-dtb`, and the one thing no host test can see: a write in the wrong order being swallowed |
+| `test_qemu_i2c.sh` | when a kernel is in hand, no image | **the keypad bus end to end** — the adapter's number and name, `I2C_FUNCS` carrying `I2C_FUNC_I2C` (the one assertion that would have caught i2c-stub), the repository's own two-byte write and read round-tripping, exactly one of 0x20..0x27 answering, the MAX17048 on the same adapter reaching `ND_BATT_SRC_LIVE`, a host keystroke arriving in `nd_matrix_scan_once()` as one PRESS at a named row and column, `nd_input_open()` choosing the MATRIX on a machine that also has an evdev keyboard, and **the three-state ownership probe: a real fork, a real `setgid`/`setuid` to uid 1000 in gid 1002, and the kernel's answer for `0600 root:root`, `0660 root:i2c` and `0660 root:root`** |
+| `test_qemu_keypadd.py` (`pytest`) | every change, no boot | the host daemon's PCF8575 model, against a third reading of the datasheet in Python: an idle scan leaving only the driven ROW bit low (not a flat `0xFFFF`), a released port reading high with a key held, two keys on one row, **ghosting** — the phantom fourth corner of an L — every one of the sixteen keys round-tripping through a simulated `raw_scan()`, and a short between two pins no key joins, which is the world the first-boot wizard scans in |
 | `test_inventory` (`make test`) | every change, no boot | the canonicaliser: LC_ALL=C sorting, the `/dev` family collapse with the *first* member escaping it (which is what tests the majority rule — breaking a middle member cannot), every mask, `ABSENT` versus `[]`, key escaping, a duplicate key being refused, both line shapes of `/proc/filesystems`, and one tree built in two creation orders producing byte-identical output **and** the exact output a correct sort produces |
 | `parity_capture_probe.sh --compare` (`make parity-probe`) | when a kernel and a busybox rootfs are in hand, no image | **emulator drift** — a fresh capture from a real boot must equal the committed baseline byte for byte, *and* `neodct_displayd`'s start-up path, which the capture now runs before `nd-inventory`. ~4 s. This is the only gate anywhere that re-derives the allowlist's input from a *machine* rather than checking it against a file |
 | `test_qemu_nand.py` (`pytest`) | every change, no boot | the emulator's NAND without booting one: the de-interleave `/NeoDCT/User`'s persistence rests on (including that a page nandsim never programmed comes back as 0xFF and not 0x00), `nandsim.parts=` and `mkqemuflash.py`'s table being the same six partitions, `mknand.sh`'s LEB arithmetic and its `USERDATA_MAX_LEB`, that the flashing drives cannot wear `NDSYS` or `NDUSER`, that the cache drive is the last virtio-blk on the line, that the flasher is not packed into the phone's initramfs, and that the overlay cpio is reproducible and really unpacks |
@@ -204,10 +235,10 @@ both files say so in their own headers.
 ## Which way this file has actually moved
 
 **It grew, and saying otherwise was the most misleading sentence in it.** The
-storage and panel stages took it from 21 records to 27, and by the number that
-matters more — how many of the capture's keys are excused from parity — from
-67 of 169 to 118 of 230. The fraction of a capture this file exempts went from
-40% to 51%. Both integers are pinned in `test_parity_allowlist.py`
+storage and panel stages took it from 21 records to 27, and the keypad stage
+to 29; by the number that matters more — how many of the capture's keys are
+excused from parity — from 67 of 169 to 120 of 232. The fraction of a capture
+this file exempts went from 40% to 52%. Both integers are pinned in `test_parity_allowlist.py`
 (`TOTAL_RECORDS_EXPECTED`, `PERMANENT_RECORDS_EXPECTED`,
 `COVERED_KEYS_EXPECTED`) precisely so that neither can move without somebody
 typing the new one.
@@ -230,6 +261,19 @@ The honest version of the good news is a different sentence, and it is not
   making and worth naming.
 - **One record closed outright**: `class.mtd`, deleted because the emulator's
   MTD listing became the phone's.
+- **And one closed HALFWAY, which is the honest half of the keypad stage.**
+  `class.i2c-dev` said `until-stage-4` and said in as many words that "Stage 4
+  cannot get a bus by configuration alone and needs vhost-user-i2c or a mock
+  adapter". That stage landed and the emulator has a real bus — so the record
+  is `permanent` now rather than deleted, because what is left is a fact about
+  the two machines and not a stage: the emulator declares ONE bus, the one the
+  keypad and the fuel gauge are on, and the RV1103 exposes several. Its `hw`
+  column asks that i2c-3 is among the phone's rather than that the two
+  listings are equal, which is the strongest thing that can honestly be asked
+  before a phone has been captured. The keypad stage's whole cost in this file
+  is that record plus two: `class.i2c-dev.i2c-3.name`, a name that can never
+  agree, and `dev.i2c-3`, which is the udev grant and is the tenth
+  `until-image`.
 
 A record count going up is not by itself a failure; a record count going up
 while the README says it went down is.
@@ -254,6 +298,13 @@ while the README says it went down is.
   - `class.power_supply` and `class.thermal` were rewritten to `permanent`
     too, in the other direction: `CONFIG_TEST_POWER` came out, so they are
     empty **by decision** rather than for want of a device model.
+
+  **`until-stage-4` has now gone the same way and there are none of those
+  either.** One record carried it -- `class.i2c-dev` -- and the stage landed:
+  the emulator's keypad is a `vhost-user-i2c-device` serviced by
+  `neodct/tools/nd-i2c-keypadd`, `/dev/i2c-3` exists, and the repository's own
+  `nd_matrix_scan_once()` reads a host keystroke off it. The record survives as
+  `permanent` with the argument rewritten, for the reason given above.
 
   Zero `until-stage-5` records remain, which
   `test_the_surfaces_stage_closed_its_records` asserts; leaving one in would
