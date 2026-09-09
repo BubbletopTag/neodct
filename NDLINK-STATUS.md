@@ -308,3 +308,24 @@ debug link gated on engineering mode.
 That fourth one is the whole argument for this tool in one bug: ninety green
 checks, a clean build, a correct design, and a feature that did not exist on
 the only machine that matters.
+
+### `watch` — the phone on your desk, controllable
+
+`ndlink watch` opens a VNC window that **also types into the phone**. Arrows
+navigate, Enter is NaviKey, Backspace is C, digits/`*`/`#` are themselves,
+`m` is MENU. `--view-only` takes the typing away.
+
+No custom viewer was written. nd-vncd forwards RFB key events into the devkey
+channel, so any standard VNC client is already a control window — vncviewer,
+gvncviewer, noVNC in a browser, a VNC app on a tablet. A bespoke GUI would have
+meant a second RFB client and a second key map for the same result with fewer
+clients supported.
+
+Proved on hardware: three `XK_Down` over RFB walked the menu from item 1 to item
+4, and `XK_Return` opened Settings — on a phone whose keypad expander is
+physically disconnected.
+
+**With keys wired, VNC is control, not a view.** Same engineering-mode gate and
+bound address as telnet, which already grants root, so it adds reach rather than
+privilege — but a port that reads as "screen sharing" and can also type is worth
+being explicit about.
