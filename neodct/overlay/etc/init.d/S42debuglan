@@ -1,0 +1,190 @@
+#!/bin/sh
+# The ethernet debug link: a root shell (telnet) and root file access (ftp),
+# and NEITHER of them ever on the modem.
+#
+# Brings eth0 up with a fixed address and starts two daemons bound to that
+# one address. Nothing here needs a serial console, a login, or a step on the
+# phone: plug the cable in, boot, and from the development host
+#
+#     telnet 192.168.99.2        # root shell
+#     ftp/FileZilla 192.168.99.2 # the whole rootfs, as root
+#
+#     phone   eth0   192.168.99.2/24   <-- this script
+#     host    (its own NIC)  192.168.99.1/24
+#
+# docs/DEBUG_LAN.md has the whole setup.
+#
+# ============ THE ONE RESTRICTION THAT IS NOT NEGOTIABLE ============
+#
+# A daemon with no bind address listens on 0.0.0.0 AND ::, which is EVERY
+# interface the phone has -- including wwan0, the modem. So both daemons are
+# always given an explicit address, that address is always one this script has
+# just confirmed is on eth0, and if it cannot confirm it, NOTHING starts.
+# There is no path through here that ends in a daemon on the modem.
+#
+#   telnetd -b ADDR              binds the one address itself
+#   tcpsvd ADDR 21 ftpd          binds ADDR; ftpd has no socket of its own
+#
+# Both die rather than fall back if ADDR is not a local address when they bind
+# (telnetd's create_and_bind_stream_or_die; tcpsvd's bind gets EADDRNOTAVAIL),
+# so the on_iface check below and the bind are belt and braces.
+#
+# The carrier is CGNAT today, so an unbound daemon would probably not be
+# reachable from outside. "Probably not reachable" is not a security property
+# -- CGNAT is an addressing accident, not a firewall, and it changes when the
+# APN, the carrier or the SIM does. A bound socket does not care.
+#
+# ============ AND THE ONE THAT IS, FOR NOW ============
+#
+# This is deliberately NOT gated: it runs on any image that boots with an
+# eth0. A proof-of-concept decision made with the tradeoff understood -- what
+# is behind it is an unauthenticated cleartext root shell AND unauthenticated
+# root-level file read/write, and no image that leaves the bench may carry it.
+#
+# The intended gate is the existing engineering-mode marker (/etc/neodct-devenv,
+# see neodct/scripts/post-build-devenv-marker.sh, which is absent unless the
+# build asks for it and cannot be created by a running phone). Wrapping the
+# start) case in a test for that file is the whole change when that lands.
+#
+# Until then `neodct.telnet=off` on the kernel cmdline turns the link off, and
+# `neodct.telnet=<addr>[/<len>]` moves it.
+
+IFACE=eth0
+TELNET_PIDFILE=/run/telnetd.pid
+FTP_PIDFILE=/run/ftpd.pid
+
+# ftpd serves this directory. It is run as root, so it chroots here -- "/" is
+# the whole rootfs, which is the point. FileZilla lands at /.
+FTP_ROOT=/
+
+# The bench LAN. Deliberately not the 192.168.1.0/24 a home router hands out:
+# the development host has one NIC on each, and two interfaces claiming one
+# prefix sends router-bound traffic down the phone cable.
+DEFAULT_ADDR=192.168.99.2/24
+
+# Same cmdline parse shape as the rest of the neodct.* namespace
+# (neodct/initramfs/init). One token sets the address for the whole link.
+TOKEN=""
+for word in $(cat /proc/cmdline 2>/dev/null); do
+    case "$word" in
+        neodct.telnet=*) TOKEN="${word#neodct.telnet=}" ;;
+    esac
+done
+
+case "$TOKEN" in
+    off|no|0)  WANT="";               PINNED=0 ;;
+    "")        WANT="$DEFAULT_ADDR";  PINNED=0 ;;
+    *)         WANT="$TOKEN";         PINNED=1 ;;
+esac
+
+# <addr>/<len> for `ip addr add`, bare <addr> for the daemons.
+case "$WANT" in
+    */*) ADDR="${WANT%%/*}"; CIDR="$WANT" ;;
+    *)   ADDR="$WANT";       CIDR="$WANT/24" ;;
+esac
+
+say() { printf '[DEBUGLAN] %s\n' "$*"; }
+
+# True when $1 is an IPv4 address currently on $IFACE. This is the check that
+# keeps the daemons off the modem: it asks about ONE named interface, so an
+# address that belongs to wwan0 can never satisfy it.
+on_iface() {
+    ip -4 addr show dev "$IFACE" 2>/dev/null | grep -q "inet $1/"
+}
+
+case "$1" in
+    start)
+        if [ -z "$ADDR" ]; then
+            say "disabled by neodct.telnet=$TOKEN"
+            exit 0
+        fi
+        if [ ! -e "/sys/class/net/$IFACE" ]; then
+            # No ethernet on this build or this board. Nothing to say about it
+            # on a phone that is not being debugged.
+            exit 0
+        fi
+
+        # udhcpc and a static address on one interface is a fight the static
+        # address loses when a lease arrives -- and the lease would bring a
+        # default route with it, which a LAN between a phone and one computer
+        # must not add.
+        #
+        # Only when the cmdline PINNED an address, though. Without a token
+        # this is a best-effort debug link on whatever eth0 happens to be,
+        # and the emulator is the case that matters: run_qemu.sh with
+        # NEODCT_NET=1 gives the browser its internet through a DHCP lease on
+        # this same interface, and killing that would break browser testing
+        # to gain nothing. S41ethernet stands down on a pinned link, so this
+        # is here for a udhcpc started by hand.
+        if [ "$PINNED" = 1 ] && [ -n "$(pidof udhcpc 2>/dev/null)" ]; then
+            say "stopping udhcpc on $IFACE -- this link is pinned static"
+            ifdown "$IFACE" > /dev/null 2>&1
+            killall udhcpc > /dev/null 2>&1
+        fi
+
+        ip link set "$IFACE" up 2>/dev/null
+
+        if on_iface "$ADDR"; then
+            say "$ADDR already on $IFACE"
+        elif ip addr add "$CIDR" dev "$IFACE" 2>/dev/null; then
+            say "$CIDR added to $IFACE"
+        else
+            say "could not put $CIDR on $IFACE"
+        fi
+
+        # No default route is added and none should be. The phone's route to
+        # the world stays the modem's (S45modem); nothing on this link takes
+        # it.
+
+        # The last word before any daemon starts: the address must be on eth0
+        # NOW. If adding it failed above, or something removed it, this is what
+        # stops both daemons rather than letting them fall back to every
+        # interface -- the one outcome this whole script exists to prevent.
+        if ! on_iface "$ADDR"; then
+            say "$ADDR is not on $IFACE -- refusing to start anything unbound"
+            exit 0
+        fi
+
+        # --- telnetd: a root shell -------------------------------------------
+        # -F foreground (start-stop-daemon backgrounds it and writes the
+        # pidfile); -b binds the one confirmed address; -l /bin/sh because
+        # there is no password to give /bin/login.
+        if start-stop-daemon --start --quiet --background \
+                --make-pidfile --pidfile "$TELNET_PIDFILE" \
+                --exec /usr/sbin/telnetd -- -F -b "$ADDR" -l /bin/sh; then
+            say "telnet root shell on $ADDR:23 -- cleartext, no login, $IFACE only"
+        else
+            say "failed to start telnetd"
+        fi
+
+        # --- ftpd under tcpsvd: the whole rootfs ------------------------------
+        # tcpsvd binds ADDR:21 and runs one ftpd per connection. -A is ftpd's
+        # no-login mode; -w allows writes (STOR/DELE/MKD/rename); FTP_ROOT is
+        # "/", and since ftpd runs as root it chroots there. Client access is
+        # as root. -vE keeps tcpsvd quiet on env and terse in the log.
+        if start-stop-daemon --start --quiet --background \
+                --make-pidfile --pidfile "$FTP_PIDFILE" \
+                --exec /usr/bin/tcpsvd -- -vE "$ADDR" 21 \
+                ftpd -A -w "$FTP_ROOT"; then
+            say "ftp root access on $ADDR:21 -- cleartext, no login, rootfs as root"
+        else
+            say "failed to start ftpd/tcpsvd"
+        fi
+        ;;
+    stop)
+        for pf in "$TELNET_PIDFILE" "$FTP_PIDFILE"; do
+            [ -f "$pf" ] || continue
+            start-stop-daemon --stop --quiet --pidfile "$pf"
+            rm -f "$pf"
+        done
+        say "stopped"
+        ;;
+    restart|reload)
+        "$0" stop
+        "$0" start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac

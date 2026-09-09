@@ -372,6 +372,66 @@ modem at the same time needs a hub. The UB500's descriptor asks for 500 mA
 same USB, so the power budget wants measuring before any of this is trusted
 on a bench, let alone in a case.
 
+## SDK kernel: ethernet -- the MAC and PHY are both on the die
+
+`&gmac` was `status = "disabled"` in
+`sysdrv/source/kernel/arch/arm/boot/dts/rv1103g-luckfox-pico-mini.dts`, which
+is how Luckfox ship the Mini. It is `"okay"` now. Backup alongside as
+`*.bak-neodct-eth-20260909`.
+
+Nothing else changed, and that is the point worth recording. **The kernel
+already had every symbol needed** -- `CONFIG_STMMAC_ETH`,
+`CONFIG_STMMAC_PLATFORM`, `CONFIG_DWMAC_ROCKCHIP`, `CONFIG_PHYLIB` and
+`CONFIG_MDIO_BUS` are all `=y` in the stock
+`luckfox_rv1106_linux_defconfig`, because the boards that *do* have an RJ45
+(Pico Plus, Webbee, every RV1106) share that defconfig and differ only in
+the DTS. So enabling ethernet here is one status property, not a kernel
+reconfiguration.
+
+There is no external PHY to describe. `rv1106.dtsi`'s gmac node sets
+`phy-mode = "rmii"` and points `phy-handle` at an `ethernet-phy@2` marked
+`phy-is-integrated`, id `0044.1400` -- the RV1103's own 10/100 PHY, trimmed
+from eFuse (`macphy_bgs`, `macphy_txlevel`). That is why the Pico Plus DTS
+enables ethernet with nothing but `status = "okay"` and no pinctrl, mdio or
+regulator nodes of its own. The Mini gets the same treatment.
+
+**The pins are routed, and this is the part no datasheet said.** The open
+question was whether the four RMII differential pairs leave the package on
+this PCB at all -- the Mini has no RJ45 and no magnetics, so a `status`
+change could plausibly have produced an `eth0` that took an address and
+never got carrier. It does not. First boot after this change came up with
+**link lights on both ends** and the host's neighbour table populated:
+
+```
+$ ip neigh show dev enp5s0
+fe80::d470:23ff:feb2:2fed lladdr d6:70:23:b2:2f:ed STALE
+```
+
+That is the phone's `eth0` doing IPv6 neighbour discovery over the wire. So
+the Mini has working 10/100 ethernet and ships with it switched off in the
+DTS, which is a board-support decision and not a hardware limit.
+
+Confirm it on the phone with `/sys/class/net/eth0/carrier` (`1` = link) and
+`/sys/class/net/eth0/operstate`. `ethtool eth0` will *not* help, because
+`CONFIG_STMMAC_ETHTOOL` is off in this defconfig (a `ROCKCHIP_MINI_KERNEL`
+size trim) and so is `CONFIG_STMMAC_FULL`.
+
+**The MAC is random, and that will bite a debugging setup.** `d6:70:23:...`
+has the locally-administered bit set: there is no MAC in eFuse or in the DT,
+so stmmac generates one. Expect it to differ on every boot, which rules out
+DHCP reservations and any host config keyed on the address. Pin it with
+`local-mac-address` in the gmac node, or from userspace with
+`ip link set eth0 address ...` before the interface is brought up.
+
+Interface naming needs no `net.ifnames=0`: eudev 3.2.14 has `names_pci`,
+`names_usb`, `names_bcma`, `names_ccw` and `names_mac`, but no
+`names_platform`, so a platform MAC sets no `ID_NET_NAME_ONBOARD`/`_SLOT`/
+`_PATH` for `80-net-name-slot.rules` to rename it with. It stays `eth0`,
+which is the name `/etc/network/interfaces` and `S41ethernet` assume.
+
+What the link is *for* -- the bench addressing, and the gated telnet root
+shell bound to it -- is `docs/DEBUG_LAN.md`.
+
 ## NAND images
 
 `neodct/tools/mknand.sh <images-dir> <target-dir> [host-dir]` turns a finished

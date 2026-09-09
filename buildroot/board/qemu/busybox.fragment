@@ -26,3 +26,52 @@ CONFIG_UBIRSVOL=y
 CONFIG_UBIATTACH=y
 CONFIG_UBIDETACH=y
 CONFIG_UBIMKVOL=y
+
+# telnetd, for the ethernet debug link -- 13 kb, started by
+# /etc/init.d/S42telnet, which brings eth0 up on 192.168.99.2 and binds the
+# daemon to that one address. See docs/DEBUG_LAN.md.
+#
+# UNGATED AND KNOWN TO BE: it runs on any image that boots with an eth0, which
+# is a proof-of-concept decision taken with the tradeoff understood. What is
+# behind it is an unauthenticated cleartext root shell, so no image that
+# leaves the bench may carry it. The intended gate is the engineering-mode
+# marker (/etc/neodct-devenv, post-build-devenv-marker.sh) -- absent unless
+# the build asks for it and uncreatable by a running phone, which is the
+# property SECURITY-AUDIT.md 4 Q5 vector 2 is about. `neodct.telnet=off`
+# turns it off in the meantime.
+#
+# STANDALONE is what makes `-b <addr>` possible, and that flag is the part
+# that is NOT provisional: without it telnetd only runs under inetd, which
+# this image does not have, and there would be no way to say which interface
+# it answers on. Unbound it would also listen on wwan0. The carrier is CGNAT
+# so that is probably not reachable from outside -- but CGNAT is an addressing
+# accident rather than a firewall, and it changes with the APN, the carrier or
+# the SIM. A bound socket does not care.
+CONFIG_TELNETD=y
+CONFIG_FEATURE_TELNETD_STANDALONE=y
+CONFIG_FEATURE_TELNETD_PORT_DEFAULT=23
+
+# ftpd, on the same debug link as telnetd, for pulling files off the phone and
+# pushing test binaries onto it. Started by /etc/init.d/S42debuglan.
+#
+# -A: no login. ftpd's login loop is skipped entirely and USER/PASS both
+# answer 230 in the main loop (networking/ftpd.c), so any username with any
+# password gets in -- the name typed into FileZilla is decorative. Client
+# access then happens as the uid ftpd was started under, which is root, which
+# is the point: the whole rootfs, readable.
+#
+# The same "bench only" caveat as telnetd applies and is written out in
+# docs/DEBUG_LAN.md. Cleartext, no authentication, root.
+#
+# tcpsvd is what binds it to ONE address. ftpd is an inetd service and has no
+# listening socket of its own -- ftpd.c's own usage text gives
+# `tcpsvd -vE 0.0.0.0 21 ftpd DIR` as the standalone form. busybox inetd is
+# already enabled and could do this too, but it would need an /etc/inetd.conf
+# holding a second copy of the address, and the rootfs is read-only, so the
+# copy could not follow a `neodct.telnet=` override. tcpsvd takes the address
+# as an argument, so there is one source of truth and it is the init script.
+CONFIG_FTPD=y
+CONFIG_FEATURE_FTPD_WRITE=y
+CONFIG_FEATURE_FTPD_ACCEPT_BROKEN_LIST=y
+CONFIG_FEATURE_FTPD_AUTHENTICATION=y
+CONFIG_TCPSVD=y

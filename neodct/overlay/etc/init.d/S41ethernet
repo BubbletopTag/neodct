@@ -16,6 +16,23 @@ IFACE=eth0
 case "$1" in
     start)
         [ -e "/sys/class/net/$IFACE" ] || exit 0
+
+        # S42telnet owns this interface when the cmdline pins a static debug
+        # address, so do not start DHCP on it. Two reasons, and the second is
+        # the one that bites: `ifup` below is backgrounded, so udhcpc would
+        # come up AFTER S42telnet had already set the address -- a race whose
+        # loser is whichever ran second. And on a link that does have a DHCP
+        # server, the lease arrives with a default route, which is the one
+        # thing a debug LAN between a phone and one computer must not add.
+        for word in $(cat /proc/cmdline 2>/dev/null); do
+            case "$word" in
+                neodct.telnet=*)
+                    printf '[NET] %s is static (neodct.telnet) -- S42telnet has it\n' "$IFACE"
+                    exit 0
+                    ;;
+            esac
+        done
+
         printf '[NET] %s present; requesting an address\n' "$IFACE"
         ifup "$IFACE" > /dev/null 2>&1 &
         ;;

@@ -4818,3 +4818,198 @@ plant one where the layout says it cannot. That is nd-selftest's half -- run
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01JejfR7KPuWGxUYoyPU73df
+
+================================================================================
+
+ethernet on the Pico Mini: one status property, and the PHY was already inside
+
+The phone had no eth0 because rv1103g-luckfox-pico-mini.dts shipped
+`&gmac { status = "disabled"; }`, which is how Luckfox ship the Mini. It is
+"okay" now. That file is in the SDK tree and not version controlled here, so
+docs/HARDWARE_NOTES.md gains the section that records it, beside the backlight
+and dm-verity ones, and the backup is written alongside as
+*.bak-neodct-eth-20260909.
+
+Nothing else changed, and that is the finding worth keeping.
+
+THE KERNEL ALREADY HAD EVERYTHING. CONFIG_STMMAC_ETH, CONFIG_STMMAC_PLATFORM,
+CONFIG_DWMAC_ROCKCHIP, CONFIG_PHYLIB and CONFIG_MDIO_BUS are all =y in the
+stock luckfox_rv1106_linux_defconfig, and the build confirmed it -- "No change
+to .config" on the way through. They are there because the boards that do have
+an RJ45 (Pico Plus, Webbee, every RV1106) share that one defconfig and differ
+only in their DTS. So this was never a kernel reconfiguration; it was a
+property.
+
+THERE IS NO EXTERNAL PHY TO DESCRIBE. rv1106.dtsi's gmac node sets
+phy-mode = "rmii" and points phy-handle at an ethernet-phy@2 marked
+`phy-is-integrated`, id 0044.1400 -- the RV1103's own 10/100 PHY, trimmed from
+eFuse via the macphy_bgs and macphy_txlevel nvmem cells. That is why
+rv1103g-luckfox-pico-plus.dts enables ethernet with a status change and no
+pinctrl, mdio or regulator nodes of its own, and why the Mini needs the same
+and no more. Verified in the built DTB: ethernet@ffa80000 is "okay", the
+integrated PHY under its mdio bus is "okay", and aliases carries
+ethernet0 = "/ethernet@ffa80000".
+
+WHAT THIS DOES NOT SETTLE is whether the four RMII differential pins leave the
+package on this PCB. The Mini has no RJ45 and no magnetics. If they go
+nowhere, eth0 still appears, still takes an address and still routes -- it
+just never gets carrier, and /sys/class/net/eth0/carrier is the file that
+tells the two cases apart. `ethtool eth0` will not, because
+CONFIG_STMMAC_ETHTOOL is off in this defconfig (a ROCKCHIP_MINI_KERNEL size
+trim) and so is CONFIG_STMMAC_FULL.
+
+The userspace side needed nothing, which was checked rather than assumed:
+
+  * busybox already builds ifup/ifdown/ifconfig/ip/route/udhcpc, and ifupdown
+    is compiled with FEATURE_IFUPDOWN_IP so it drives `ip`, not ifconfig.
+  * /etc/network/interfaces already carries `iface eth0 inet dhcp`, left
+    deliberately not "auto", and S41ethernet already ifup's it only when
+    /sys/class/net/eth0 exists. Both were written for NEODCT_NET=1 under QEMU
+    and both now do the right thing on hardware with no edit.
+  * /etc/resolv.conf is a symlink into /run, so udhcpc can write nameservers
+    on a read-only squashfs root.
+  * no net.ifnames=0 is needed in the bootargs: eudev 3.2.14 has names_pci,
+    names_usb, names_bcma, names_ccw and names_mac but no names_platform, so a
+    platform MAC sets none of the ID_NET_NAME_* that 80-net-name-slot.rules
+    renames on. It stays eth0.
+
+No defconfig changed, so the neodct/configs <-> buildroot/configs pair that
+test_defconfig_copies.py guards is untouched.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01C2y5FofcBs4EWi7vk9LX2b
+
+--- follow-up, same session: it works, and the pins are routed ---
+
+First boot after the reflash came up with link lights on both ends, and the
+host's neighbour table on the directly-attached NIC shows the phone doing
+IPv6 neighbour discovery:
+
+    $ ip neigh show dev enp5s0
+    fe80::d470:23ff:feb2:2fed lladdr d6:70:23:b2:2f:ed STALE
+
+So the "what this does not settle" paragraph above is settled: the four RMII
+differential pairs DO leave the package on this PCB. The Luckfox Pico Mini has
+working 10/100 ethernet and ships with it switched off in the DTS. That is a
+board-support decision, not a hardware limit, and docs/HARDWARE_NOTES.md now
+says so instead of hedging.
+
+Two things that follow, both recorded there:
+
+THE MAC IS RANDOM. d6:70:23:b2:2f:ed has the locally-administered bit set --
+there is no MAC in eFuse or in the DT, so stmmac generates one, and it will
+differ on every boot. That rules out DHCP reservations and any host-side
+config keyed on the address. Pinning it wants local-mac-address in the gmac
+node, or `ip link set eth0 address` before the interface comes up.
+
+THE DEBUG LAN MUST NOT REUSE THE HOME SUBNET. The bench host has two NICs --
+enp6s0 on 192.168.1.0/24 with the default route, enp5s0 on the phone. Putting
+192.168.1.x on the phone link would give the kernel two routes for one prefix
+and send router-bound traffic out of the phone. 192.168.99.0/24, no gateway on
+either end, keeps the phone on the modem for data and the host on enp6s0 for
+internet.
+
+Still true and still the blocker for using any of this as a shell: sshd is
+generated with ListenAddress 127.0.0.1 (nd_remoteshell.c:691, pinned by
+test_remoteshell.c:449), so ethernet gets a link and not a login.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01C2y5FofcBs4EWi7vk9LX2b
+
+================================================================================
+
+a root shell on the debug LAN, and nowhere else
+
+telnetd, for the ethernet link that now works. busybox already carried the
+telnet CLIENT; the daemon is three symbols in board/qemu/busybox.fragment
+(TELNETD, FEATURE_TELNETD_STANDALONE, PORT_DEFAULT=23) and 13 kb. The fragment
+is shared by both defconfigs, so QEMU and the phone get the same thing and
+neither defconfig moved -- test_defconfig_copies.py has nothing to notice.
+
+What is worth reading is the two restrictions, because the naive version of
+this feature is a serious hole in a phone that is otherwise careful.
+
+IT IS GATED ON THE KERNEL CMDLINE. /etc/init.d/S42telnet starts nothing
+without a `neodct.telnet=<addr>[/<len>]` token: no daemon, no socket, no
+message. The token is in NEODCT_BOOTARGS_EXTRA in the SDK board config, so
+turning this on or off means reflashing env.img.
+
+The gate had to be something a running phone cannot rewrite, because what is
+behind it is an unauthenticated root shell. post-build-devenv-marker.sh
+already argues this at length for /etc/neodct-devenv and names the only two
+candidates -- the kernel cmdline and the read-only rootfs. A settings key or a
+file on the user partition would be SECURITY-AUDIT.md 4 Q5 vector 2 with a
+shell on the end of it.
+
+IT IS BOUND TO ONE ADDRESS. telnetd with no -b binds 0.0.0.0 AND ::, which on
+this device includes the modem -- and docs/MODEM_BRINGUP.md records that the
+carrier is IPv6-only, so wwan0 routinely holds a globally routable address.
+The unbound version of this daemon is a root shell on the public internet, live
+as soon as data comes up and whether or not the ethernet cable is plugged in.
+`-b 192.168.99.2` costs one flag. If the address is not on the interface
+S42telnet declines to start rather than falling back to every interface, since
+a fallback there would defeat the only thing protecting the phone.
+
+S41ethernet gains four lines: when the cmdline pins a static address it leaves
+eth0 alone. Without that the two scripts race -- S41 backgrounds `ifup`, so
+udhcpc would come up AFTER S42telnet had set the address -- and on a link that
+does have a DHCP server the lease would arrive with a default route, which is
+the one thing a LAN between a phone and one computer must not add.
+
+Neither end of that LAN has a gateway, on purpose. The phone's route to the
+world stays the modem's and the host's stays its other NIC. 192.168.99.0/24
+rather than the home router's 192.168.1.0/24: two interfaces claiming one
+prefix sends router-bound traffic down the phone cable.
+
+docs/DEBUG_LAN.md is the whole thing in one place -- addressing, the gate, how
+to use it, and how to turn it off. HARDWARE_NOTES.md's ethernet section points
+at it.
+
+Not changed, and deliberately: sshd is still ListenAddress 127.0.0.1
+(nd_remoteshell.c, pinned by test_remoteshell.c). telnetd is gated, bound and
+reflash-only precisely because it is the weaker thing; widening ssh is a
+separate decision and not one to make as a side effect of this.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01C2y5FofcBs4EWi7vk9LX2b
+
+--- follow-up, same session: ungate it, keep it off the modem ---
+
+Owner's call, made with the tradeoff stated: this is a proof of concept, the
+project already has an engineering-mode marker that is the right long-term
+gate for it, and that work is scheduled rather than now. So S42telnet no
+longer requires a cmdline token to run -- it starts on any image that boots
+with an eth0, puts 192.168.99.2/24 on it, and binds there. The phone therefore
+configures itself with no serial console and no typing, which was the point.
+
+`neodct.telnet=<addr>` still moves it and `neodct.telnet=off` still disables
+it; the token stops being a gate and becomes configuration.
+
+WHAT DID NOT RELAX IS -b, and the reasoning is now written down in three
+places because it is the part that must survive later edits. Unbound, telnetd
+binds 0.0.0.0 AND ::, which includes wwan0. The carrier is CGNAT, so an
+unbound daemon is probably not reachable from outside -- and "probably not
+reachable" is not a security property, because CGNAT is an addressing accident
+rather than a firewall and it changes with the APN, the carrier or the SIM.
+
+So the daemon is always given an explicit address; that address is always one
+the script has just re-confirmed with `ip -4 addr show dev eth0`, which by
+construction cannot be satisfied by an address belonging to wwan0; and when
+that check fails S42telnet starts nothing rather than falling back. There is
+no path through the script that ends in an unbound telnetd.
+
+One thing the ungating broke and this fixes: the udhcpc kill is now conditional
+on the cmdline having PINNED an address. Unconditionally killing udhcpc would
+have taken out the DHCP lease that run_qemu.sh's NEODCT_NET=1 gives the
+browser on this same interface -- breaking browser testing to gain nothing,
+since the emulator is not the thing that needs a static debug address.
+
+docs/DEBUG_LAN.md rewritten to say plainly, in the first paragraph, that this
+is ungated and is an unauthenticated cleartext root shell, and to name the
+engineering-mode marker as the gate that is coming and the one-line change it
+will be. The busybox fragment comment says the same. Neither hedges: an image
+that leaves the bench must not carry this as it stands, and until the gate
+lands that is a thing to remember rather than a thing the build enforces.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01C2y5FofcBs4EWi7vk9LX2b
