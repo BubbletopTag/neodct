@@ -21,8 +21,10 @@ is installed -- there is nothing to restart. Changing a theme changes the
 screen you are on straight away; the rest of the phone follows as you leave
 Settings.
 
-Two themes ship in the box: the Frutiger Aero look the phone already had,
-and Hello Kitty.
+Two themes come with this release as .nap files you install: the Frutiger
+Aero look the phone already had, written out as a theme file, and Hello
+Kitty -- pink, with its own icons, its own typeface and a polka dot
+wallpaper.
 
 Nothing about the existing look changed. A phone with no theme installed
 draws exactly the pixels it drew before, which is checked frame by frame.
