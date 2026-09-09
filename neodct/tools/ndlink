@@ -397,6 +397,133 @@ verb_key() {
     return 0
 }
 
+# bugreport is the verb you wish existed the first time something fails while
+# nobody is watching. One tarball, everything a diagnosis starts from, and it
+# keeps going when a piece is missing -- a report that refuses to be written
+# because dmesg was empty is worth nothing at 3am.
+verb_selftest() {
+    case "$TARGET" in
+    hw) _st=$(hw_shell "$(remote_tool nd-selftest) 2>&1") || true ;;
+    qemu) fail 2 "selftest on qemu is not wired up yet" ;;
+    esac
+    # nd-selftest's exit status is its verdict, but the transport already
+    # consumed it; the sections are what a caller reads.
+    if [ "$JSON" = 1 ]; then
+        printf '{"ok":true,"verb":"selftest","target":"%s","report":"%s"}\n' \
+            "$TARGET" "$(json_escape "$_st")"
+    else
+        printf '%s\n' "$_st"
+    fi
+    return 0
+}
+
+# N frames into a numbered directory. No video encoder: the panel is 240x175
+# and a numbered directory plus the tooling that already exists is enough.
+verb_record() {
+    _rc_dir=${1:-}
+    [ -n "$_rc_dir" ] || fail 5 "record needs an output directory"
+    _rc_n=${2:-10}
+    case "$_rc_n" in
+    '' | *[!0-9]*) fail 5 "record wants a whole number of frames" ;;
+    esac
+    mkdir -p "$_rc_dir"
+    _rc_i=0
+    while [ "$_rc_i" -lt "$_rc_n" ]; do
+        _rc_name=$(printf '%s/frame-%04d.png' "$_rc_dir" "$_rc_i")
+        verb_shot "$_rc_name" >/dev/null 2>&1 || fail 6 "frame $_rc_i failed"
+        _rc_i=$((_rc_i + 1))
+    done
+    emit_ok record "\"dir\":\"$(json_escape "$_rc_dir")\",\"frames\":$_rc_n"
+    [ "$JSON" = 1 ] || printf 'wrote %s frames into %s\n' "$_rc_n" "$_rc_dir"
+    return 0
+}
+
+# Compare two labelled references. Host-side only: it reads .ndlink/refs and
+# touches no target, which is why it is allowed to run with nothing connected.
+verb_diff() {
+    [ $# -ge 2 ] || fail 5 "diff needs two reference names"
+    _da="$REFS/$1.digest"
+    _db="$REFS/$2.digest"
+    [ -f "$_da" ] || fail 5 "no reference \"$1\""
+    [ -f "$_db" ] || fail 5 "no reference \"$2\""
+    _va=$(cat "$_da")
+    _vb=$(cat "$_db")
+    if [ "$_va" = "$_vb" ]; then
+        emit_ok diff "\"a\":\"$1\",\"b\":\"$2\",\"same\":true"
+        [ "$JSON" = 1 ] || printf '%s and %s are identical\n' "$1" "$2"
+        return 0
+    fi
+    if [ "$JSON" = 1 ]; then
+        printf '{"ok":false,"verb":"diff","target":"%s","a":"%s","b":"%s","same":false,"code":1}\n' \
+            "${TARGET:-none}" "$1" "$2"
+    else
+        printf '%s and %s DIFFER\n  %s %s\n  %s %s\n' "$1" "$2" "$1" "$_va" "$2" "$_vb" >&2
+    fi
+    exit 1
+}
+
+# reboot recovery writes the marker the initramfs looks for, which is the route
+# that also works on hardware -- the phone's cmdline lives in the U-Boot
+# environment and cannot be edited from a running system.
+verb_reboot() {
+    _rb_mode=${1:-}
+    case "$TARGET" in
+    hw) ;;
+    qemu) fail 2 "reboot on qemu: restart run_qemu.sh" ;;
+    esac
+    if [ "$_rb_mode" = recovery ]; then
+        hw_shell "mkdir -p /NeoDCT/User/.ndsys; : > /NeoDCT/User/.ndsys/boot_recovery; sync" \
+            >/dev/null || fail 6 "could not arm recovery"
+    fi
+    # The phone goes away mid-command, so a non-zero status here is expected
+    # and is not a failure. There is nothing left to talk to either way.
+    hw_shell "sync; (sleep 1; reboot) >/dev/null 2>&1 &" >/dev/null 2>&1 || true
+    emit_ok reboot "\"mode\":\"${_rb_mode:-normal}\""
+    [ "$JSON" = 1 ] || printf 'reboot requested (%s)\n' "${_rb_mode:-normal}"
+    return 0
+}
+
+# NOTE: every variable here carries a _br_ prefix. Shell variables are global,
+# and this verb CALLS another verb (verb_shot), which assigns _out for its own
+# purposes -- so a plain _out here is silently overwritten by the callee and the
+# tarball ends up written to the screenshot's path. That is not hypothetical; it
+# happened on the first run of this function.
+verb_bugreport() {
+    _br_out=${1:-}
+    [ -n "$_br_out" ] || _br_out="ndlink-bugreport-$(date +%Y%m%d-%H%M%S).tar.gz"
+    case "$TARGET" in
+    hw) ;;
+    qemu) fail 2 "bugreport on qemu is not wired up yet" ;;
+    esac
+
+    _br_tmp=$(mktemp -d)
+    _br_d="$_br_tmp/bugreport"
+    mkdir -p "$_br_d"
+
+    # Each of these is best-effort on purpose; see above.
+    hw_shell "$(remote_tool nd-state) 2>&1" > "$_br_d/state.json" 2>/dev/null || true
+    hw_shell "cat /NeoDCT/System/version.prop 2>/dev/null" > "$_br_d/version.prop" 2>/dev/null || true
+    hw_shell "dmesg 2>/dev/null | tail -n 400" > "$_br_d/dmesg.txt" 2>/dev/null || true
+    hw_shell "tail -n 400 /var/log/messages 2>/dev/null" > "$_br_d/messages.txt" 2>/dev/null || true
+    hw_shell "cat /proc/cmdline; echo; cat /proc/meminfo; echo; ps; echo; mount" \
+        > "$_br_d/proc.txt" 2>/dev/null || true
+    hw_shell "ip -br addr 2>/dev/null; ip route 2>/dev/null" > "$_br_d/net.txt" 2>/dev/null || true
+    hw_shell "ls -la /NeoDCT/User /NeoDCT/User/.ndsys /NeoDCT/User/logs 2>&1" \
+        > "$_br_d/userdir.txt" 2>/dev/null || true
+    hw_shell "$(remote_tool nd-selftest) 2>&1" > "$_br_d/selftest.txt" 2>/dev/null || true
+    verb_shot "$_br_d/screen.png" >/dev/null 2>&1 || true
+
+    ( cd "$_br_tmp" && tar czf - bugreport ) > "$_br_out" 2>/dev/null || {
+        rm -rf "$_br_tmp"
+        fail 6 "could not write $_br_out"
+    }
+    rm -rf "$_br_tmp"
+    _br_sz=$(wc -c < "$_br_out" | tr -d ' ')
+    emit_ok bugreport "\"path\":\"$(json_escape "$_br_out")\",\"bytes\":$_br_sz"
+    [ "$JSON" = 1 ] || printf 'wrote %s (%s bytes)\n' "$_br_out" "$_br_sz"
+    return 0
+}
+
 verb_state() {
     case "$TARGET" in
     hw) _j=$(hw_shell "$(remote_tool nd-state) 2>/dev/null") || fail 6 "nd-state failed" ;;
@@ -636,6 +763,11 @@ Verbs built so far:
   key KEY...           press keys (MENU, 5, DOWN, NAVIKEY...)
   logs                 the phone's recent log
   state                version, RAM, card, backlight, battery (JSON)
+  bugreport [OUT]      one tarball: state, logs, dmesg, screenshot, selftest
+  selftest             run nd-selftest and report
+  record DIR [N]       N frames into a numbered directory
+  diff A B             compare two references (exit 1 if they differ)
+  reboot [recovery]    restart, optionally into recovery
   push LOCAL REMOTE    copy a file to the target
   pull REMOTE LOCAL    copy a file from the target
   connect ADDR         remember a hardware address
@@ -701,7 +833,7 @@ esac
 # devices is the one verb that must work with nothing reachable -- it is how
 # you find that out.
 case "$VERB" in
-devices | connect | disconnect)
+devices | connect | disconnect | diff)
     # Host-side bookkeeping: these must work with no target reachable, since
     # finding that out (or fixing it) is what they are for.
     ;;
@@ -721,6 +853,11 @@ digest) verb_digest "$@" ;;
 key) verb_key "$@" ;;
 logs) verb_logs "$@" ;;
 state) verb_state "$@" ;;
+bugreport) verb_bugreport "$@" ;;
+selftest) verb_selftest "$@" ;;
+record) verb_record "$@" ;;
+diff) verb_diff "$@" ;;
+reboot) verb_reboot "$@" ;;
 push) verb_push "$@" ;;
 pull) verb_pull "$@" ;;
 connect) verb_connect "$@" ;;

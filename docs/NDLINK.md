@@ -59,6 +59,14 @@ forever — an overnight run that wedges is a wasted night.
 | `logs` | recent log lines | exit 2 | **tested** |
 | `snapshot NAME` | capture a reference digest | exit 2 | **tested** |
 | `expect NAME` | assert the panel matches a reference | exit 2 | **tested** |
+| `state` | version, RAM, card, backlight, battery as JSON | exit 2 | **tested** |
+| `push` / `pull` | move files (ftp) | exit 2 | **tested** |
+| `connect` / `disconnect` | remember a hardware address | n/a | **tested** |
+| `bugreport [OUT]` | one tarball of everything | exit 2 | **tested** |
+| `selftest` | run `nd-selftest` and report | exit 2 | **tested** |
+| `record DIR [N]` | N frames into a numbered directory | exit 2 | **tested** |
+| `diff A B` | compare two references | host-side | **tested** |
+| `reboot [recovery]` | restart the phone | exit 2 | written, **not run** |
 
 "tested" means run against a real Luckfox Pico Mini over the ethernet debug
 link, not reasoned about.
@@ -186,13 +194,31 @@ The repo already ships python3 host tooling (`mkupdate.py`, `uistub.py`,
 `mknap.py`, `goldenframe.py`), so this adds no dependency that was not
 already required to build an image.
 
+## Two shell traps this file already hit
+
+**Variables are global, and verbs call verbs.** `bugreport` calls `shot`, which
+assigns `_out` for its own purposes — so `bugreport`'s own `_out` was silently
+overwritten by the callee and the tarball was written to the screenshot's path.
+Every variable in `verb_bugreport` now carries a `_br_` prefix. Any new verb
+that calls another verb must do the same; POSIX sh has no `local`.
+
+**A helper that emits a statement cannot take arguments.** `remote_tool()` first
+emitted a complete `if … fi`, so `$(remote_tool nd-grab) out.png` expanded to
+`… fi out.png`. It emits a path *expression* now. The failure surfaced three
+layers away, as the transport losing its framing.
+
 ## Not built yet
 
-- **`text`, `state`, `push`/`pull` verbs, `apps`, `launch`/`stop`, `record`,
-  `db`, `settings`, `install`/`uninstall`, `dev`, `selftest`, `bugreport`,
-  `reboot`, `update`, `backup`/`restore`, `script`, `connect`/`disconnect`.**
-  Stage B and beyond. The transports they need (`hw_shell`, `hw_push`,
-  `hw_pull`) exist and are tested, so these are mostly verb bodies.
+- **`text`, `apps`, `launch`/`stop`, `db`, `settings`, `install`/`uninstall`,
+  `dev`, `update`, `backup`/`restore`, `script`.** Stage B and beyond. The
+  transports they need (`hw_shell`, `hw_push`, `hw_pull`, `remote_tool`) exist
+  and are tested, so these are mostly verb bodies rather than new machinery.
+  `text` and `launch` additionally need the devkey socket, since both drive the
+  UI by pressing keys.
+- **`reboot` is written but has not been run.** Deliberate: the phone is the
+  only way to test any of this and there is no maskrom access tonight, so a
+  reboot that did not come back would have ended the session. Test it first
+  thing with the link in front of you.
 - **`watch`** — a live view. `nd-vncd` already does this and has its own spec;
   the verb should wrap it rather than reimplement it.
 - **`ndlinkd`** — a device daemon replacing telnet round trips. Telnet is an
