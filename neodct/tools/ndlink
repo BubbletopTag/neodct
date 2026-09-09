@@ -942,7 +942,11 @@ verb_doctor() {
             _ver=$(hw_shell "cat /NeoDCT/System/version.prop 2>/dev/null | sed -n 's/^system.os.versionnumber=//p'" || printf '')
             _ver=$(printf '%s' "$_ver" | tr -d ' \n\r')
             hw_shell "test -f /etc/neodct-devenv" >/dev/null 2>&1 && _devenv=true
-            hw_shell "test -S /run/neodct/devkey" >/dev/null 2>&1 && _devkey=true
+            # MUST track ND_PATH_DEVKEY_SOCK in nd_paths.h. It drifted once
+            # already: the socket moved to its own directory so the UI could
+            # bind it after dropping privilege, and doctor kept reporting
+            # "false" against a phone where it was working perfectly.
+            hw_shell "test -S /run/neodct/input/devkey" >/dev/null 2>&1 && _devkey=true
             hw_shell "test -x /NeoDCT/System/bin/nd-grab -o -x $ND_REMOTE_BIN/nd-grab" >/dev/null 2>&1 && _ndgrab=true
             hw_shell "test -x /NeoDCT/System/bin/nd-key -o -x $ND_REMOTE_BIN/nd-key" >/dev/null 2>&1 && _ndkey=true
             if [ "$_ndgrab" = true ]; then
