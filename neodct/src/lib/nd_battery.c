@@ -121,18 +121,64 @@ struct nd_battery {
 
 /* Write the register pointer, STOP, then a separate read transaction. NOT a
  * repeated-START combined transfer -- do not "improve" this into an I2C_RDWR
- * ioctl, the bus timing on the real board differs. */
+ * ioctl, the bus timing on the real board differs.
+ *
+ * ============ THE FIRST TRANSACTION AFTER IDLE IS LOST ============
+ *
+ * And it is lost often enough that a single attempt is not a read. Measured on
+ * the bench phone, gauge at i2c-3 0x36, same command either way:
+ *
+ *     one read after two seconds idle, ten times   ONE succeeded, NINE failed
+ *     ten reads back to back                       ten succeeded
+ *
+ * so the failure is not the wiring, not the address and not the transaction
+ * shape -- all three are fine the moment the part is awake. The MAX1704x drops
+ * into a low-power state between accesses and the edge that wakes it is the
+ * one carrying the address, so that transfer gets NAKed and comes back ENXIO.
+ *
+ * This cost a real diagnosis. nd_battery_open() runs once, reads VERSION
+ * immediately, and that read is by definition the cold one -- so the phone
+ * settled on ND_BATT_SRC_UNREADABLE and reported no voltage at all, while
+ * i2cget from a shell appeared to work perfectly because its second and third
+ * invocations were warm. The gauge was never broken and neither was the
+ * solder.
+ *
+ * Three attempts with a millisecond between them, because the wake costs one
+ * transfer and never two. This is deliberately here rather than at the probe:
+ * every caller of read16 wants a woken part, and a retry loop around the probe
+ * would leave VCELL and SOC reading through the same cold-NAK window that
+ * VERSION just walked into. A gauge that is genuinely absent still fails all
+ * three and still settles as absent -- open() classifies that by errno, not
+ * here -- so this cannot turn a missing chip into a plausible one.
+ */
+#define BATT_READ_TRIES 3
+
 static int read16(int fd, uint8_t reg, uint16_t *out)
 {
-    uint8_t r = reg;
-    uint8_t d[2];
+    int attempt;
 
-    if (write(fd, &r, 1u) != 1)
-        return -1;
-    if (read(fd, d, 2u) != 2)
-        return -1;
-    *out = (uint16_t)(((uint16_t)d[0] << 8) | (uint16_t)d[1]);
-    return 0;
+    for (attempt = 0; attempt < BATT_READ_TRIES; attempt++) {
+        uint8_t r = reg;
+        uint8_t d[2];
+
+        if (attempt > 0) {
+            /* Long enough for the part to be awake, short enough that three of
+             * them are invisible next to the two-second poll interval. */
+            struct timespec nap;
+
+            nap.tv_sec = 0;
+            nap.tv_nsec = 1000000L; /* 1 ms */
+            while (nanosleep(&nap, &nap) != 0 && errno == EINTR)
+                ;
+        }
+        if (write(fd, &r, 1u) != 1)
+            continue;
+        if (read(fd, d, 2u) != 2)
+            continue;
+        *out = (uint16_t)(((uint16_t)d[0] << 8) | (uint16_t)d[1]);
+        return 0;
+    }
+    return -1;
 }
 
 static int write16(int fd, uint8_t reg, uint16_t val)
