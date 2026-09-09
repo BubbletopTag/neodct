@@ -582,7 +582,10 @@ verb_update() {
         # here means the phone comes back running the tools it was built with.
         hw_shell "rm -rf /NeoDCT/User/bin /NeoDCT/User/lib" >/dev/null 2>&1 || true
 
-        hw_shell "sync; (sleep 1; reboot) >/dev/null 2>&1 &" >/dev/null 2>&1 || true
+        # setsid for the reason spelled out in verb_reboot: a bare & is killed
+        # when the transport's shell exits, and the reboot never happens.
+        hw_shell "sync; setsid sh -c 'sleep 2; reboot' >/dev/null 2>&1 </dev/null &" \
+            >/dev/null 2>&1 || true
         emit_ok update "\"staged\":\"$(json_escape "$_up_remote")\",\"bytes\":${_up_sz:-0},\"applied\":\"rebooting\""
         if [ "$JSON" != 1 ]; then
             printf 'staged %s and rebooting.\n' "$_up_remote"
@@ -694,9 +697,18 @@ verb_reboot() {
         hw_shell "mkdir -p /NeoDCT/User/.ndsys; : > /NeoDCT/User/.ndsys/boot_recovery; sync" \
             >/dev/null || fail 6 "could not arm recovery"
     fi
-    # The phone goes away mid-command, so a non-zero status here is expected
-    # and is not a failure. There is nothing left to talk to either way.
-    hw_shell "sync; (sleep 1; reboot) >/dev/null 2>&1 &" >/dev/null 2>&1 || true
+    # setsid, NOT a bare `&`. The transport runs one command and then exits the
+    # shell, and exiting SIGHUPs the job it just backgrounded -- so
+    # `(sleep 1; reboot) &` is killed before reboot ever runs, and the verb
+    # reports success against a phone that is still up. That is exactly what
+    # happened the first time this was used for real, on an update that then
+    # sat staged and uninstalled. Detaching from the session is what makes the
+    # delayed reboot outlive the connection that asked for it.
+    #
+    # The delay is so the reply reaches us before the phone goes; the caller
+    # sees the verb succeed rather than a lost connection.
+    hw_shell "sync; setsid sh -c 'sleep 2; reboot' >/dev/null 2>&1 </dev/null &" \
+        >/dev/null 2>&1 || true
     emit_ok reboot "\"mode\":\"${_rb_mode:-normal}\""
     [ "$JSON" = 1 ] || printf 'reboot requested (%s)\n' "${_rb_mode:-normal}"
     return 0
