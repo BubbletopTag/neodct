@@ -123,7 +123,7 @@ static const char *nz(const char *s)
  * look softer; 6 and 5 are what read as "speech" and "row" at this size. */
 #define BUBBLE_RADIUS   6
 #define ROW_RADIUS      5
-#define CHAT_INK_SHADOW ND_RGB(0x08, 0x1E, 0x33)
+#define CHAT_INK_SHADOW ND_TH_TEXT_SHADOW
 
 static void chat_header(nd_ui *ui, const char *title)
 {

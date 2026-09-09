@@ -407,7 +407,7 @@ void nd_pagedlist_draw(nd_pagedlist *p)
         /* Muted, because it is the answer and the name above it is the
          * question. On a monochrome screen the only way to say that was size;
          * there is a second axis now. */
-        nd_theme_text(d, x, y, value, ui->font_n, ND_TH_SKY_TOP, ND_RGB(0x08, 0x1E, 0x33));
+        nd_theme_text(d, x, y, value, ui->font_n, ND_TH_INK_MUTED, ND_TH_TEXT_SHADOW);
     }
 
     /* Scrollbar. Same centre column and same extent as the white width-2 line

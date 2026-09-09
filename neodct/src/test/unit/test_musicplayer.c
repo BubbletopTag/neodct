@@ -442,12 +442,18 @@ static void test_truncate(void)
         }
     }
 
-    /* And the DEFAULT artist now fits, where it did not before: "Unknown
-     * Artist" came to more than 116 px at 14 px on the pixel face and was
-     * shown as "Unknown A...", which is a poor thing for a music player to
-     * say about every untagged file it has. On the UI face it fits whole. */
-    CHECK_STR(api.truncate(out, sizeof out, "Unknown Artist", fx.font_s, 116), "Unknown Artist",
-              "the default artist fits on this face");
+    /* And the DEFAULT artist does not fit: "Unknown Artist" comes to more than
+     * 116 px at 14 px on the pixel face and is shown as "Unknown A...", which
+     * is a poor thing for a music player to say about every untagged file it
+     * has.
+     *
+     * It fitted whole while the phone shipped the glass theme's narrower UI
+     * face, and it is clipped again now that the pixel face is the shipped
+     * one -- so this is a property of the TYPEFACE and not of the string. A
+     * theme that brings its own face gets the whole words back; it is not
+     * worth widening the budget for, because 116 px is what the row has. */
+    CHECK_STR(api.truncate(out, sizeof out, "Unknown Artist", fx.font_s, 116), "Unknown A...",
+              "the default artist is clipped on the pixel face");
 
     /* `while w > max_w and len(t) > 0` -- the length guard is what ends this
      * one, and the result is WIDER than max_w. Ported, because the alternative

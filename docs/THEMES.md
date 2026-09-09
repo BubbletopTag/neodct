@@ -1,10 +1,17 @@
 # Themes -- changing what the phone looks like
 
-From 0.6.0a the interface is **data**. The colours, the typeface, the icons
-and the status sprites are read at startup rather than compiled in, so a look
-is something an owner installs from the memory card in the same way they
-install an app -- and something a person can write in an afternoon with a
-text editor and a folder of PNGs.
+From 0.6.0a the interface is **data**. The colours, the typeface, the icons,
+the status sprites *and the decoration itself* are read at startup rather than
+compiled in, so a look is something an owner installs from the memory card in
+the same way they install an app -- and something a person can write in an
+afternoon with a text editor and a folder of PNGs.
+
+The phone ships one look, **Classic**: white type on black in the pixel
+typeface, flat and square-cornered. It is the built-in, it needs no files, and
+it is what an owner gets with nothing installed. The glossy **Frutiger Aero**
+look is a theme (`neodct/contrib/themes/FruitigerAero`) -- which is the proof
+that the system is worth having, because those two share no colour, no
+typeface, no icon and no drawing style, and the same widgets draw both.
 
 The owner's side of it is one screen: **Settings → Theme**. `*` and `#` turn
 the pages, each page is drawn *in the theme it is offering*, and NaviKey
@@ -58,7 +65,9 @@ signature colour even in a theme with no blue in it.
 
 | key | what it paints |
 | --- | --- |
-| `blue_hi` `blue_top` `blue_mid` `blue_bot` | the signature plate: title bars, the selected row, the softkey |
+| `blue_hi` `blue_top` `blue_mid` `blue_bot` | the signature colour: the selected row, a progress fill, an accent |
+| `bar_top` `bar_bot` `bar_ink` | the title bar and the softkey strip, and the type on them |
+| `sel_ink` | type standing on the selection -- white over glass, black over an inverted row |
 | `blue_deep` | the 1 px dark cut around every plate and divider |
 | `glass_top` `glass_bot` | the frosted panel content sits on |
 | `chrome_hi` `chrome_top` `chrome_bot` | bezels, the bevel hairline, the scrollbar track |
@@ -73,6 +82,50 @@ signature colour even in a theme with no blue in it.
 `text_shadow` and `scrim_ink` are worth setting even in a small theme. Both
 are navy in the stock look because navy darkens a blue interface without
 desaturating it, and navy under pink type reads as a bruise.
+
+### Structure
+
+A palette makes the interface pink. It cannot make it *flat* -- recolouring a
+glossy plate to black leaves a glossy black plate -- so a theme also carries
+switches for the decoration:
+
+```json
+"style": {
+  "gloss": true, "bevel": true, "gradients": true, "round": true,
+  "type_shadow": true, "plate_shadow": true, "bevel_divider": true,
+  "icon_glow": true, "reflection": true, "scrim": true,
+  "pixel_font": false, "wallpaper_dim": 88, "app_wallpaper_dim": 68
+}
+```
+
+**Every switch defaults to off**, and that direction is deliberate: a theme
+file that says nothing gets the plain, cheap, legible look rather than
+inheriting somebody else's gloss.
+
+| key | what it turns on |
+| --- | --- |
+| `gloss` | the white sheen filling a plate's top half |
+| `bevel` | the white hairline just inside a top edge |
+| `gradients` | off collapses every ramp to its top colour |
+| `round` | off squares every corner, whatever radius a widget asked for |
+| `type_shadow` | the shadow under light type, the sheen under dark |
+| `plate_shadow` | the soft band a plate casts onto what is below it |
+| `bevel_divider` | a dark rule plus a white one, instead of a single line |
+| `icon_glow` | the radial glow behind the app selector's icon |
+| `reflection` | the icon standing on a glossy floor |
+| `scrim` | the readability wash laid over a wallpaper |
+| `pixel_font` | draw with the pixel face rather than the UI face |
+| `wallpaper_dim` | 0-100, how far the wallpaper is dimmed on the home screen |
+| `app_wallpaper_dim` | the same inside an app, where there is more to read |
+
+The two dims move **with** `scrim`. A theme that scrims can leave the picture
+bright, because it darkens only the rows that carry type; a theme that does
+not has to dim the whole picture or its white text is unreadable over a bright
+one. `system.ui.wpeverywhere_dim` still overrides `app_wallpaper_dim`, so an
+owner who has tuned it keeps their value across a theme change.
+
+A theme that ships `fonts/ui.ttf` uses it whatever `pixel_font` says -- "the
+pixel face unless I brought my own" needs no third setting.
 
 ### Alphas
 
@@ -131,10 +184,11 @@ framework rather than a mock-up that can drift from it.
 
 ## Worked example
 
-`neodct/contrib/themes/FruitigerAero/` is the stock look written out as a
-theme file. Every value in it is the built-in one, which makes it both the
-reference for the format and a regression test: installed, it renders frames
-byte-identical to the compiled-in default. Copy it and change colours.
+`neodct/contrib/themes/FruitigerAero/` is the whole glass look as a theme
+file: palette, structure, icons, status sprites, typeface and wallpaper. It is
+both the reference for the format and a regression test -- installed, it
+renders the frames the phone rendered when that look was compiled in, and the
+suite checks it. Copy it and change colours.
 
 ## For the curious: how it works
 

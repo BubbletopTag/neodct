@@ -40,6 +40,7 @@
 #include "nd_battery.h"
 #include "nd_ui_sim.h"
 
+#include "nd_theme.h"
 #include "smallapp_test.h"
 
 #include "../../apps/FuelGauge/fuelgauge.h"
@@ -87,6 +88,12 @@ static nd_battery_snap sample_snap(void)
     s.bus = 3;
     s.addr = 0x36;
     return s;
+}
+
+
+static bool colour_eq(nd_color a, nd_color b)
+{
+    return a.r == b.r && a.g == b.g && a.b == b.b;
 }
 
 static void test_rows_hardware(void)
@@ -306,14 +313,29 @@ static void test_refuses_without_the_hook(void)
      * readout's row 0 was black and a dialog's was the warning triangle's
      * transparent margin, which was also black -- the old check happened to
      * pass for the right reason and would have passed for the wrong one too.
-     * A dialog's middle is its GLASS PANEL, which is far lighter than
-     * anything a readout puts there, and that is a difference neither screen
-     * can fake. */
+     * A dialog's middle is its PANEL, and a panel has two vertical borders --
+     * one on each side of the screen's centre, drawn in chrome_hi. A readout
+     * writes across the full width and has no such pair.
+     *
+     * This used to test that the middle pixel was bright (sum > 500), which
+     * was really asking "is the panel's body a pale glass". It is not, under
+     * the look the phone ships: that panel is black with a white outline, and
+     * the check failed on a screen it should pass. The BORDERS are the panel,
+     * in every theme; its fill is a decoration. */
     {
-        nd_color mid = nd_image_get_px(fx.canvas, 120, 90);
+        bool left_edge = false;
+        bool right_edge = false;
+        int32_t x;
 
-        CHECK((int32_t)mid.r + (int32_t)mid.g + (int32_t)mid.b > 500,
-              "the dialog's panel is on screen, not a readout");
+        for (x = 0; x < 120; x++) {
+            if (colour_eq(nd_image_get_px(fx.canvas, x, 90), ND_TH_CHROME_HI))
+                left_edge = true;
+        }
+        for (x = 120; x < 240; x++) {
+            if (colour_eq(nd_image_get_px(fx.canvas, x, 90), ND_TH_CHROME_HI))
+                right_edge = true;
+        }
+        CHECK(left_edge && right_edge, "the dialog's panel is on screen, not a readout");
     }
     nd_vclock_disable();
 

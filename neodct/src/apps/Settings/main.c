@@ -1284,23 +1284,34 @@ void nd_setapp_draw_about(nd_ui *ui)
         if (y <= content_bottom - 18) {
             char label[96];
 
+            /* ============ THE QUIET LINES USE THE MUTED INK ============
+             *
+             * All three were drawn in ND_TH_SKY_TOP -- the BACKGROUND colour
+             * -- which worked only because the glass theme's background is a
+             * pale sky while its content sits on a darker scrim. Under a
+             * theme whose background is black, and the shipped one is, that
+             * is type painted in the colour behind it: invisible.
+             *
+             * ink_muted is the palette's own name for "quieter than the
+             * headline", which is the role actually wanted here, and it is
+             * legible in both. */
             (void)nd_snprintf(label, sizeof label, "Version: %s", version_number);
-            nd_theme_text(d, 10, y, label, ui->font_s, ND_TH_SKY_TOP, ND_RGB(0x08, 0x1E, 0x33));
+            nd_theme_text(d, 10, y, label, ui->font_s, ND_TH_INK_MUTED, ND_TH_TEXT_SHADOW);
         }
         /* The += 16 is OUTSIDE the `if y <=` in the Python too: a version
          * number that did not fit still costs its row. */
         y += 16;
     }
     if (y <= content_bottom - 18)
-        nd_theme_text(d, 10, y, "Build time:", ui->font_s, ND_TH_SKY_TOP, ND_RGB(0x08, 0x1E, 0x33));
+        nd_theme_text(d, 10, y, "Build time:", ui->font_s, ND_TH_INK_MUTED, ND_TH_TEXT_SHADOW);
     y += 16;
 
     nd_setapp_wrap_text(&lines, ui, build_time, screen_w - 20, ui->font_s);
     for (i = 0u; i < lines.n && i < 2u; i++) {
         if (y > content_bottom - 18)
             break;
-        nd_theme_text(d, 10, y, nd_lines_at(&lines, i), ui->font_s, ND_TH_SKY_TOP,
-                      ND_RGB(0x08, 0x1E, 0x33));
+        nd_theme_text(d, 10, y, nd_lines_at(&lines, i), ui->font_s, ND_TH_INK_MUTED,
+                      ND_TH_TEXT_SHADOW);
         y += 16;
     }
 

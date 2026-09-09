@@ -55,6 +55,7 @@
 #include "nd_text.h"
 #include "nd_widgets.h"
 
+#include "nd_theme.h"
 #include "smallapp_test.h"
 
 #include "../../apps/Settings/settings_app.h"
@@ -133,6 +134,12 @@ static char g_saved_root[ND_PATH_MAX];
 /* Bluetooth off: one row, and it is the only thing worth offering. Scanning
  * with the adapter down would ask the kernel to do something it cannot, and
  * Disconnect would be a row that does nothing. */
+
+static bool colour_eq(nd_color a, nd_color b)
+{
+    return a.r == b.r && a.g == b.g && a.b == b.b;
+}
+
 static void test_bt_lines_off(void)
 {
     char lines[ND_SETAPP_BT_MAX_ITEMS][ND_SETAPP_BT_LINE_MAX];
@@ -665,8 +672,12 @@ static void test_about(void)
         for (x = 0; x < 240; x++) {
             nd_color c = nd_image_get_px(fx.canvas, x, y);
 
-            /* Pale, blue-leaning, and not the near-white the headline is. */
-            if (c.b > 150u && c.b > c.r + 40u && c.r < 200u) {
+            /* The muted ink, which is the palette's own "quieter than the
+             * headline" colour. Compared against ND_TH_INK_MUTED rather than
+             * described as "pale and blue-leaning": that description was the
+             * glass theme's grey-blue and stopped being true of the shipped
+             * look, which mutes with a plain grey. */
+            if (colour_eq(c, ND_TH_INK_MUTED)) {
                 any_grey = true;
                 break;
             }

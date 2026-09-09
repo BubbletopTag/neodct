@@ -410,7 +410,7 @@ static void render_text_element(nd_ui *ui, const nd_element *el)
         return;
     }
 
-    nd_theme_text(ui->draw, x, y, text, f, el->color, ND_RGB(0x08, 0x1E, 0x33));
+    nd_theme_text(ui->draw, x, y, text, f, el->color, ND_TH_TEXT_SHADOW);
 }
 
 static void render_icon_set_element(nd_ui *ui, const nd_element *el)

@@ -253,7 +253,7 @@ static void draw_waveform(nd_ui *ui, const char *label, const nd_mic_column *col
     nd_ui_paint_chrome(ui, band);
 
     nd_theme_text_light(ui->draw, 5, 0, nd_mictest_title, ui->font_xl);
-    nd_theme_text(ui->draw, 5, 22, label, ui->font_s, ND_TH_SKY_TOP, ND_RGB(0x08, 0x1E, 0x33));
+    nd_theme_text(ui->draw, 5, 22, label, ui->font_s, ND_TH_INK_MUTED, ND_TH_TEXT_SHADOW);
 
     /* The silence line, drawn first so the waveform sits on top of it. Without
      * it a dead microphone draws nothing at all, and nothing at all looks like
@@ -297,8 +297,8 @@ static void draw_readout(nd_ui *ui, int32_t gain, int32_t peak, bool live)
     else
         (void)nd_strlcpy(right, "no samples -- device in use?", sizeof right);
     nd_text_size(ui->font_s, right, &w, &h);
-    nd_theme_text(ui->draw, ND_UI_W - 8 - w, ND_MICTEST_READOUT_Y, right, ui->font_s, ND_TH_SKY_TOP,
-                  ND_RGB(0x08, 0x1E, 0x33));
+    nd_theme_text(ui->draw, ND_UI_W - 8 - w, ND_MICTEST_READOUT_Y, right, ui->font_s, ND_TH_INK_MUTED,
+                  ND_TH_TEXT_SHADOW);
 }
 
 /* ============ THE MIXER, AND WHY IT IS LISTED ONCE ============

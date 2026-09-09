@@ -84,6 +84,15 @@ static uint8_t lerp8(uint8_t a, uint8_t b, int32_t i, int32_t span)
     return (uint8_t)((int32_t)a + ((d * i * 2 + (d >= 0 ? span : -span)) / (span * 2)));
 }
 
+/* The bottom of a ramp. With gradients off it is the TOP colour, which
+ * collapses every gradient in the interface to a flat fill without any of the
+ * ramp code having to know -- and keeps "top" as the single colour a flat
+ * theme has to name. */
+static nd_color ramp_bot(nd_color top, nd_color bot)
+{
+    return ND_TH_GRADIENTS ? bot : top;
+}
+
 static nd_color lerp_colour(nd_color a, nd_color b, int32_t i, int32_t span)
 {
     return ND_RGB(lerp8(a.r, b.r, i, span), lerp8(a.g, b.g, i, span), lerp8(a.b, b.b, i, span));
@@ -122,6 +131,7 @@ void nd_theme_fill(nd_image *img, nd_rect r, nd_color c, uint8_t alpha)
 void nd_theme_gradient_v_ramped(nd_image *img, nd_rect paint, int32_t ramp_y0, int32_t ramp_y1,
                                 nd_color top, nd_color bot, uint8_t alpha)
 {
+    bot = ramp_bot(top, bot);
     nd_rect q;
     int32_t span = ramp_y1 - ramp_y0;
     int32_t y;
@@ -242,6 +252,12 @@ static uint8_t round_cov(nd_rect r, int32_t x, int32_t y, int32_t radius)
  * and eating a bite out of the shape. */
 static int32_t clamp_radius(nd_rect r, int32_t radius)
 {
+    /* A flat theme squares every corner, and it is done HERE rather than at
+     * the seventeen call sites that pass a radius: those numbers are a
+     * layout's business and stay as written, so turning the corners back on
+     * restores the shape they always described. */
+    if (!ND_TH_ROUND)
+        return 0;
     int32_t half_w = (r.x1 - r.x0 + 1) / 2;
     int32_t half_h = (r.y1 - r.y0 + 1) / 2;
     int32_t cap = half_w < half_h ? half_w : half_h;
@@ -297,6 +313,7 @@ void nd_theme_round_fill(nd_image *img, nd_rect r, int32_t radius, nd_color c, u
 void nd_theme_round_gradient(nd_image *img, nd_rect r, int32_t radius, nd_color top, nd_color bot,
                              uint8_t alpha)
 {
+    bot = ramp_bot(top, bot);
     round_body(img, r, radius, top, bot, alpha);
 }
 
@@ -337,6 +354,18 @@ void nd_theme_round_outline(nd_image *img, nd_rect r, int32_t radius, nd_color c
  * The glossy plate
  * ------------------------------------------------------------------ */
 
+/* The decoration every plate shares, applied after its own fields are set so
+ * that one theme switch reaches all four constructors. */
+static void plate_style(nd_theme_plate *p)
+{
+    if (!ND_TH_GLOSS)
+        p->sheen_a = 0u;
+    if (!ND_TH_BEVEL)
+        p->bevel = false;
+    if (!ND_TH_PLATE_SHADOW)
+        p->drop_shadow = false;
+}
+
 nd_theme_plate nd_theme_plate_blue(int32_t radius)
 {
     nd_theme_plate p;
@@ -351,6 +380,32 @@ nd_theme_plate nd_theme_plate_blue(int32_t radius)
     p.radius = radius;
     p.bevel = true;
     p.drop_shadow = true;
+    plate_style(&p);
+    return p;
+}
+
+/* The title bar and the softkey strip.
+ *
+ * Identical to the blue plate in a glass theme -- bar_top and bar_bot ARE the
+ * blues there -- and completely different in a flat one, where they are the
+ * background and the strip disappears behind its own type. The border goes
+ * with them, because a dark cut around a black bar on a black screen is a
+ * line the classic look does not have. */
+nd_theme_plate nd_theme_plate_bar(int32_t radius)
+{
+    nd_theme_plate p;
+
+    memset(&p, 0, sizeof p);
+    p.top = ND_TH_BAR_TOP;
+    p.bot = ND_TH_BAR_BOT;
+    p.border = ND_TH_BLUE_DEEP;
+    p.border_a = ND_TH_GRADIENTS ? 210u : 0u;
+    p.sheen_a = 90u;
+    p.body_a = 255u;
+    p.radius = radius;
+    p.bevel = true;
+    p.drop_shadow = true;
+    plate_style(&p);
     return p;
 }
 
@@ -371,6 +426,7 @@ nd_theme_plate nd_theme_plate_glass(int32_t radius)
     p.radius = radius;
     p.bevel = true;
     p.drop_shadow = true;
+    plate_style(&p);
     return p;
 }
 
@@ -388,6 +444,7 @@ nd_theme_plate nd_theme_plate_chrome(int32_t radius)
     p.radius = radius;
     p.bevel = true;
     p.drop_shadow = false;
+    plate_style(&p);
     return p;
 }
 
@@ -463,6 +520,19 @@ void nd_theme_divider(nd_image *img, int32_t x0, int32_t x1, int32_t y, uint8_t 
     if (img == NULL)
         return;
 
+    /* ONE RULE, OR THE CUT-AND-CATCH PAIR.
+     *
+     * The pair is idea 3: a dark line for the cut and a white one just inside
+     * it for the light on the bevel. On a flat black screen the dark half is
+     * invisible and the white half is the whole divider -- which is exactly
+     * what the classic look draws, a single white pixel row -- so a flat
+     * theme skips the cut and paints the catch at full strength rather than
+     * at the 130/255 that makes it read as a highlight. */
+    if (!ND_TH_BEVEL_DIVIDER) {
+        if (clip(img, ND_RECT(x0, y, x1, y), &q))
+            span_blend(img, q.x0, q.x1, q.y0, ND_TH_CHROME_HI, alpha);
+        return;
+    }
     if (clip(img, ND_RECT(x0, y, x1, y), &q))
         span_blend(img, q.x0, q.x1, q.y0, ND_TH_BLUE_DEEP, alpha);
     if (clip(img, ND_RECT(x0, y + 1, x1, y + 1), &q))
@@ -508,13 +578,28 @@ void nd_theme_text(nd_draw *d, int32_t x, int32_t y, const char *utf8, const nd_
      * behaviour wanted. Sideways offsets were tried and read as a print
      * registration error; down is the only direction that reads as light from
      * above. */
-    (void)nd_draw_text(d, x, y + 1, utf8, f, shadow);
+    /* SKIPPED, not drawn in the ink colour, when the theme is flat: the
+     * classic face is a pixel font at small sizes and a second pass one row
+     * down thickens every stem enough to close the counters in "e" and "a".
+     * It also halves the text cost of a frame, which the phone notices. */
+    if (ND_TH_TYPE_SHADOW)
+        (void)nd_draw_text(d, x, y + 1, utf8, f, shadow);
     (void)nd_draw_text(d, x, y, utf8, f, ink);
 }
 
 void nd_theme_text_light(nd_draw *d, int32_t x, int32_t y, const char *utf8, const nd_font *f)
 {
     nd_theme_text(d, x, y, utf8, f, ND_TH_INK_LIGHT, ND_TH_TEXT_SHADOW);
+}
+
+void nd_theme_text_sel(nd_draw *d, int32_t x, int32_t y, const char *utf8, const nd_font *f)
+{
+    nd_theme_text(d, x, y, utf8, f, ND_TH_SEL_INK, ND_TH_TEXT_SHADOW);
+}
+
+void nd_theme_text_bar(nd_draw *d, int32_t x, int32_t y, const char *utf8, const nd_font *f)
+{
+    nd_theme_text(d, x, y, utf8, f, ND_TH_BAR_INK, ND_TH_TEXT_SHADOW);
 }
 
 void nd_theme_text_dark(nd_draw *d, int32_t x, int32_t y, const char *utf8, const nd_font *f)
@@ -599,7 +684,7 @@ void nd_theme_panel(nd_image *img, nd_rect r, int32_t radius)
 int32_t nd_theme_titlebar(nd_image *img, nd_draw *d, int32_t w, int32_t bar_h, const char *title,
                           const nd_font *title_font, const char *badge, const nd_font *badge_font)
 {
-    nd_theme_plate p = nd_theme_plate_blue(0);
+    nd_theme_plate p = nd_theme_plate_bar(0);
     nd_rect bar = ND_RECT(0, 0, w - 1, bar_h - 1);
 
     if (img == NULL || bar_h <= 0)
@@ -616,7 +701,8 @@ int32_t nd_theme_titlebar(nd_image *img, nd_draw *d, int32_t w, int32_t bar_h, c
     /* The shadow it casts DOWN onto the content, which is what makes the bar
      * sit in front rather than beside. Three rows: at two the content still
      * looks pasted on, at four the band itself becomes the thing you see. */
-    nd_theme_shadow_band(img, 0, w - 1, bar_h, 3, 130u);
+    if (ND_TH_PLATE_SHADOW)
+        nd_theme_shadow_band(img, 0, w - 1, bar_h, 3, 130u);
 
     if (d != NULL && title != NULL && title[0] != '\0' && title_font != NULL) {
         int32_t th = 0;
@@ -626,7 +712,7 @@ int32_t nd_theme_titlebar(nd_image *img, nd_draw *d, int32_t w, int32_t bar_h, c
          * different ink boxes and centring on the line height would sit them
          * on different rows. */
         nd_text_size(title_font, title, NULL, &th);
-        nd_theme_text_light(d, 8, (bar_h - th) / 2, title, title_font);
+        nd_theme_text_bar(d, 8, (bar_h - th) / 2, title, title_font);
     }
 
     if (d != NULL && badge != NULL && badge[0] != '\0' && badge_font != NULL) {
@@ -634,7 +720,7 @@ int32_t nd_theme_titlebar(nd_image *img, nd_draw *d, int32_t w, int32_t bar_h, c
         int32_t bh = 0;
 
         nd_text_size(badge_font, badge, &bw, &bh);
-        nd_theme_text_light(d, w - 6 - bw, (bar_h - bh) / 2, badge, badge_font);
+        nd_theme_text_bar(d, w - 6 - bw, (bar_h - bh) / 2, badge, badge_font);
     }
 
     /* +3 for the shadow band, so a caller laying out from the returned row
@@ -645,6 +731,11 @@ int32_t nd_theme_titlebar(nd_image *img, nd_draw *d, int32_t w, int32_t bar_h, c
 void nd_theme_reflection(nd_image *dst, const nd_image *src, int32_t x, int32_t y, int32_t height,
                          uint8_t alpha_top)
 {
+    /* The glossy floor an icon stands on. There is no floor in the classic
+     * look; the icon simply ends where it ends. */
+    if (!ND_TH_REFLECTION)
+        return;
+
     int32_t row;
 
     if (dst == NULL || src == NULL || src->pixels == NULL || height <= 0)
@@ -694,6 +785,11 @@ void nd_theme_reflection(nd_image *dst, const nd_image *src, int32_t x, int32_t 
 void nd_theme_glow(nd_image *img, int32_t cx, int32_t cy, int32_t radius, nd_color c,
                    uint8_t alpha_centre)
 {
+    /* A lit halo behind an icon is the most Frutiger-Aero thing on the screen
+     * and the most wrong on a flat one. */
+    if (!ND_TH_ICON_GLOW)
+        return;
+
     nd_rect q;
     int32_t r2;
     int32_t y;
@@ -733,6 +829,12 @@ void nd_theme_glow(nd_image *img, int32_t cx, int32_t cy, int32_t radius, nd_col
 void nd_theme_scrim(nd_image *img, nd_rect paint, int32_t ramp_y0, int32_t ramp_y1,
                     uint8_t alpha_top, uint8_t alpha_bot)
 {
+    /* The readability wash under type on a wallpaper. A flat theme does not
+     * need it -- its type sits on a solid background, not a photograph -- and
+     * a grey band across a black screen is a smear with nothing behind it. */
+    if (!ND_TH_SCRIM)
+        return;
+
     /* Not black: a neutral wash over a blue-green sky greys it, and the whole
      * palette is trying to stay in one family. A very dark blue darkens
      * without desaturating. */

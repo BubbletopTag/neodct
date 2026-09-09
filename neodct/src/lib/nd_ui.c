@@ -472,7 +472,11 @@ const nd_image *nd_ui_get_image_scaled(nd_ui *ui, const char *path, double scale
  * 0.95 the bright bloom on its left swallows a list row. It is applied
  * identically to a still and to every frame of an animation, which is what
  * these two functions exist to guarantee. */
-#define ND_UI_WALLPAPER_BRIGHTNESS 0.88
+/* The dim is the ACTIVE THEME's, not a constant -- see nd_theme_style's
+ * wallpaper_dim for why one number cannot serve both a scrimmed and an
+ * unscrimmed look. The macro name stays so the two call sites below read as
+ * they always did. */
+#define ND_UI_WALLPAPER_BRIGHTNESS ((double)ND_TH_WALLPAPER_DIM / 100.0)
 
 /* Everything that turns a decoded picture into a wallpaper: to RGB888, to the
  * panel's size with LANCZOS, then to ND_UI_WALLPAPER_BRIGHTNESS. Takes
@@ -1314,11 +1318,20 @@ static void chrome_settings_load(nd_ui *ui)
                           : nd_settings_get(ND_SET_UI_WP_EVERYWHERE, ND_SET_UI_WP_EVERYWHERE_DFLT),
         true);
 
-    raw = getenv(ND_ENV_UI_WP_DIM);
-    if (raw == NULL)
-        raw = nd_settings_get(ND_SET_UI_WP_APP_DIM, ND_SET_UI_WP_APP_DIM_DFLT);
-    if (raw == NULL)
-        raw = ND_SET_UI_WP_APP_DIM_DFLT;
+    /* The THEME supplies the default and the setting overrides it, so an
+     * owner who has never touched this gets what their theme intends and one
+     * who has tuned it keeps their number across a theme change. */
+    {
+        char dflt[16];
+
+        (void)nd_snprintf(dflt, sizeof dflt, "%u.%02u", ND_TH_APP_WALLPAPER_DIM / 100u,
+                          ND_TH_APP_WALLPAPER_DIM % 100u);
+        raw = getenv(ND_ENV_UI_WP_DIM);
+        if (raw == NULL)
+            raw = nd_settings_get(ND_SET_UI_WP_APP_DIM, dflt);
+        if (raw == NULL)
+            raw = ND_SET_UI_WP_APP_DIM_DFLT;
+    }
     v = strtod(raw, &end);
     /* strtod says "nothing consumed" by leaving end where it started. A value
      * outside [0,1] is a typo rather than a preference -- 0 is a black screen
@@ -1942,6 +1955,33 @@ static void ui_font_paths(char *ui_face, size_t ui_sz, char *bold, size_t bold_s
      * nd_theme_resource() answers a VIRTUAL path, which is what the existence
      * test wants; the resolve to a real path happens after, as before. */
     char want[ND_PATH_MAX];
+
+    /* THE PIXEL FACE IS A THEME'S CHOICE TOO.
+     *
+     * The classic look is not the glass look recoloured -- it is Nokia
+     * Cellphone FC, and drawing it in a rounded sans is the single thing that
+     * would stop it reading as the phone it imitates. So a theme with
+     * style.pixel_font gets font.ttf, which is the face the boot bar and
+     * nd_panic already use.
+     *
+     * A theme that ships its own fonts/ui.ttf still wins: nd_theme_resource()
+     * is asked first and answers with the theme's file when there is one, so
+     * "pixel font unless I brought my own" falls out without a third case. */
+    if (ND_TH_PIXEL_FONT && !nd_theme_active()->has_font) {
+        if (nd_path_resolve(ui_face, ui_sz, ND_PATH_FONT) != ND_OK)
+            ui_face[0] = '\0';
+        if (!nd_theme_active()->has_font_bold) {
+            /* The pixel face has one weight. nd_ui_font_bold() answers the
+             * regular for a NULL, so emphasis simply stops existing -- which
+             * is what the classic look does. */
+            bold[0] = '\0';
+            return;
+        }
+        (void)nd_theme_resource(ND_PATH_UI_FONT_BOLD, want, sizeof want);
+        if (!nd_path_is_file(want) || nd_path_resolve(bold, bold_sz, want) != ND_OK)
+            bold[0] = '\0';
+        return;
+    }
 
     (void)nd_theme_resource(ND_PATH_UI_FONT, want, sizeof want);
     if (!nd_path_is_file(want) || nd_path_resolve(ui_face, ui_sz, want) != ND_OK) {

@@ -59,8 +59,8 @@ extern "C" {
  * Anyone who preferred the empty ground still has it: the wallpaper picker's
  * first entry is "None", and choosing it writes "NONE" here. Every other
  * shipped wallpaper is one row further down the same list. */
-#define ND_SET_UI_WALLPAPER_DFLT     "/NeoDCT/System/wallpapers/Fruitiger Aero.jpg"
-#define ND_SET_UI_THEME_DFLT         "aero"
+#define ND_SET_UI_WALLPAPER_DFLT     "NONE"
+#define ND_SET_UI_THEME_DFLT         "classic"
 #define ND_SET_UI_ENG_MODE_DFLT      "ON"
 #define ND_SET_UI_WP_EVERYWHERE_DFLT "ON"
 /* Was 0.75, on top of a home wallpaper already dimmed to 0.3 -- so chrome sat
@@ -71,7 +71,7 @@ extern "C" {
  * gave it, and still a visible step down from the home screen. That step is
  * the whole reason there are two numbers: the home screen is where the
  * picture is the point, and a screen with a list of words on it is not. */
-#define ND_SET_UI_WP_APP_DIM_DFLT    "0.68"
+#define ND_SET_UI_WP_APP_DIM_DFLT    "0.75"
 #define ND_SET_OS_VERSIONNUMBER_DFLT "0.3.1a"
 #define ND_SET_OS_VERSIONNAME_DFLT   "NeoDCT System v0.3.1a"
 #define ND_SET_OS_PLATFORM_DFLT      "unknown"

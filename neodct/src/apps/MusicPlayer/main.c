@@ -112,9 +112,13 @@
  *
  * MUSIC_BAR_GREY is gone: the progress trough is drawn now rather than
  * filled. */
-#define MUSIC_ARTIST_GREY ND_TH_SKY_TOP
+/* Was ND_TH_SKY_TOP -- the BACKGROUND colour, used as a quiet ink because the
+ * glass theme's background happens to be a pale sky. It is the colour behind
+ * the type under any theme whose background is dark, and the shipped one is
+ * black. ink_muted is the role that was actually wanted. */
+#define MUSIC_ARTIST_GREY ND_TH_INK_MUTED
 #define MUSIC_ALBUM_GREY  ND_TH_INK_MUTED
-#define MUSIC_INK_SHADOW  ND_RGB(0x08, 0x1E, 0x33)
+#define MUSIC_INK_SHADOW  ND_TH_TEXT_SHADOW
 
 /* One row of the track list, as VerticalList wants it: an array of pointers
  * into a block of basenames. 256 * 256 = 65,536 bytes for the paths plus
@@ -183,10 +187,10 @@ static void show_no_music(nd_ui *ui, nd_softkey *bar)
      * over it. Pillow clips column 240 away; so does nd_draw. */
     nd_ui_paint_chrome_content(ui);
     nd_theme_text_light(ui->draw, 10, y, "No Music Found", nd_ui_font_bold(ui, ui->font_n));
-    nd_theme_text(ui->draw, 10, y + 30, "Add mp3s to:", ui->font_s, ND_TH_SKY_TOP,
+    nd_theme_text(ui->draw, 10, y + 30, "Add mp3s to:", ui->font_s, ND_TH_INK_MUTED,
                   MUSIC_INK_SHADOW);
     /* Stale, and on screen. See note 3 in the file header. */
-    nd_theme_text(ui->draw, 10, y + 50, "/User/music", ui->font_s, ND_TH_SKY_TOP, MUSIC_INK_SHADOW);
+    nd_theme_text(ui->draw, 10, y + 50, "/User/music", ui->font_s, ND_TH_INK_MUTED, MUSIC_INK_SHADOW);
     nd_softkey_update(bar, "Exit", true);
 
     for (;;) {

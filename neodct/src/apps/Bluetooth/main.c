@@ -77,7 +77,7 @@
 
 /* The two column origins. The adapter and self-test pages are FuelGauge's
  * 8/70 split; the scan list is 8/168 -- see bluetooth.h. */
-#define BT_INK_SHADOW ND_RGB(0x08, 0x1E, 0x33)
+#define BT_INK_SHADOW ND_TH_TEXT_SHADOW
 
 #define BT_COL_LABEL 8
 #define BT_COL_VALUE 70
@@ -384,11 +384,11 @@ static void draw_page(nd_ui *ui, const char *title, const nd_btapp_row *rows, si
         nd_theme_text(ui->draw, BT_COL_LABEL, y, rows[i].left, ui->font_s,
                       right_col == BT_COL_VALUE ? ND_TH_SKY_TOP : ND_TH_INK_LIGHT, BT_INK_SHADOW);
         nd_theme_text(ui->draw, right_col, y, rows[i].right, ui->font_s,
-                      right_col == BT_COL_VALUE ? ND_TH_INK_LIGHT : ND_TH_SKY_TOP, BT_INK_SHADOW);
+                      right_col == BT_COL_VALUE ? ND_TH_INK_LIGHT : ND_TH_INK_MUTED, BT_INK_SHADOW);
         y += pitch;
     }
     if (footer != NULL && footer[0] != '\0')
-        nd_theme_text(ui->draw, BT_COL_LABEL, bottom - 14, footer, ui->font_s, ND_TH_SKY_TOP,
+        nd_theme_text(ui->draw, BT_COL_LABEL, bottom - 14, footer, ui->font_s, ND_TH_INK_MUTED,
                       BT_INK_SHADOW);
 }
 

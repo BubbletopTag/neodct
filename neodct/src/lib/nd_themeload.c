@@ -22,6 +22,7 @@
 #include "nd_theme.h"
 
 #include <dirent.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -34,27 +35,72 @@
  * The built-in look
  * ------------------------------------------------------------------ */
 
+/* ============ THE BUILT-IN IS THE PLAIN ONE ============
+ *
+ * White type on black, one white rule under the title, a white lozenge with
+ * black type for the selected row. That is the phone's own face -- the
+ * Nokia-style look this OS is an imitation of -- and it is what an owner gets
+ * with nothing installed.
+ *
+ * It is the DEFAULT rather than a theme for a reason that is not nostalgia:
+ * every field a theme file omits falls back to these values, so a half-
+ * written theme lands on the honest, cheap, legible look instead of
+ * inheriting somebody else's gloss and coming out as a black glass plate.
+ * The decoration is opt-in, and Frutiger Aero is the theme that opts in.
+ *
+ * Pure black and pure white on purpose. This panel is 240x175 and the classic
+ * face gets its legibility from maximum contrast; the navy-instead-of-black
+ * reasoning in the glass theme is about type on a blue-white gradient, and
+ * there is no gradient here. */
 static const nd_theme_palette builtin_palette = {
-    /* blue */
-    ND_RGB(0x5C, 0xC3, 0xF5), ND_RGB(0x2A, 0x9B, 0xE8), ND_RGB(0x0F, 0x6C, 0xC8),
-    ND_RGB(0x0A, 0x4A, 0x9B), ND_RGB(0x06, 0x2E, 0x63),
-    /* glass */
-    ND_RGB(0xF2, 0xF9, 0xFF), ND_RGB(0xC6, 0xDF, 0xF2),
-    /* chrome */
-    ND_RGB(0xFF, 0xFF, 0xFF), ND_RGB(0xDA, 0xE7, 0xF2), ND_RGB(0x8E, 0xA8, 0xBE),
-    /* sky */
-    ND_RGB(0x9E, 0xDC, 0xF7), ND_RGB(0x14, 0x4E, 0x8F),
-    /* green */
-    ND_RGB(0x9E, 0xE8, 0x4A), ND_RGB(0x3D, 0x9A, 0x14),
-    /* amber, red */
-    ND_RGB(0xFF, 0xD9, 0x5C), ND_RGB(0xD8, 0x88, 0x0A), ND_RGB(0xFF, 0x8A, 0x7A),
-    ND_RGB(0xB4, 0x1C, 0x14),
-    /* ink */
-    ND_RGB(0x0C, 0x2A, 0x47), ND_RGB(0xFF, 0xFF, 0xFF), ND_RGB(0x5B, 0x7C, 0x99),
-    /* the two type colours, and the scrim's */
-    ND_RGB(0x08, 0x1E, 0x33), ND_RGB(0xFF, 0xFF, 0xFF), ND_RGB(0x04, 0x14, 0x28),
+    /* the signature colour: the selection lozenge, a progress fill. White,
+     * because the classic selection is an inverted row. */
+    ND_RGB(0xFF, 0xFF, 0xFF), ND_RGB(0xFF, 0xFF, 0xFF), ND_RGB(0xFF, 0xFF, 0xFF),
+    ND_RGB(0xFF, 0xFF, 0xFF), ND_RGB(0xFF, 0xFF, 0xFF),
+    /* glass: the panel content sits on -- black, i.e. nothing at all */
+    ND_RGB(0x00, 0x00, 0x00), ND_RGB(0x00, 0x00, 0x00),
+    /* chrome: the rules and the scrollbar. White line art. */
+    ND_RGB(0xFF, 0xFF, 0xFF), ND_RGB(0xFF, 0xFF, 0xFF), ND_RGB(0x80, 0x80, 0x80),
+    /* the background */
+    ND_RGB(0x00, 0x00, 0x00), ND_RGB(0x00, 0x00, 0x00),
+    /* green, amber, red: the battery and the warnings, which stay legible
+     * colours even here -- a red fault has to read as one */
+    ND_RGB(0x2E, 0xCC, 0x40), ND_RGB(0x2E, 0xCC, 0x40),
+    ND_RGB(0xFF, 0xB0, 0x00), ND_RGB(0xFF, 0xB0, 0x00), ND_RGB(0xFF, 0x41, 0x36),
+    ND_RGB(0xFF, 0x41, 0x36),
+    /* the bars: the title strip and the softkey strip, both the background */
+    ND_RGB(0x00, 0x00, 0x00), ND_RGB(0x00, 0x00, 0x00), ND_RGB(0xFF, 0xFF, 0xFF),
+    /* type standing on the selection: black, because the lozenge is white */
+    ND_RGB(0x00, 0x00, 0x00),
+    /* Ink. ink_dark is "type on a glass panel", and this theme's glass IS the
+     * black background -- there is no light plate anywhere in it -- so the
+     * type on one has to be WHITE. Leaving it black is how the calculator's
+     * readout came out invisible: a black panel with a white border and black
+     * digits inside it. */
+    ND_RGB(0xFF, 0xFF, 0xFF), ND_RGB(0xFF, 0xFF, 0xFF), ND_RGB(0xA0, 0xA0, 0xA0),
+    /* the type shadow and sheen, and the scrim's ink. Unused while
+     * style.type_shadow and style.scrim are off, and named anyway so that a
+     * theme turning them on without restating them gets something sane. */
+    ND_RGB(0x00, 0x00, 0x00), ND_RGB(0xFF, 0xFF, 0xFF), ND_RGB(0x00, 0x00, 0x00),
     /* the five coverages */
     96u, 0u, 70u, 150u, 110u,
+};
+
+/* And the structure that goes with it: nothing on but the pixel face. */
+static const nd_theme_style builtin_style = {
+    false, /* gloss         */
+    false, /* bevel         */
+    false, /* gradients     */
+    false, /* round         */
+    false, /* type_shadow   */
+    false, /* plate_shadow  */
+    false, /* bevel_divider */
+    false, /* icon_glow     */
+    false, /* reflection    */
+    false, /* scrim         */
+    true,  /* pixel_font    */
+    30u,   /* wallpaper_dim     -- no scrim, so the picture itself gives way */
+    75u,   /* app_wallpaper_dim -- and further still inside an app */
 };
 
 /* The active theme, and the pointer everything draws through.
@@ -67,10 +113,16 @@ static nd_theme_info active;
 static bool active_ready;
 
 const nd_theme_palette *nd_theme_pal = &builtin_palette;
+const nd_theme_style *nd_theme_style_of = &builtin_style;
 
 const nd_theme_palette *nd_theme_palette_builtin(void)
 {
     return &builtin_palette;
+}
+
+const nd_theme_style *nd_theme_style_builtin(void)
+{
+    return &builtin_style;
 }
 
 /* The built-in as a whole record. Not a constant, because `palette` has to be
@@ -83,9 +135,12 @@ static void builtin_info(nd_theme_info *out)
     (void)nd_strlcpy(out->id, ND_THEME_ID_BUILTIN, sizeof out->id);
     (void)nd_strlcpy(out->name, ND_THEME_NAME_BUILTIN, sizeof out->name);
     (void)nd_strlcpy(out->version, "built in", sizeof out->version);
-    (void)nd_strlcpy(out->desc, "The glass and gradients the OS ships with.", sizeof out->desc);
+    (void)nd_strlcpy(out->desc, "White type on black in the phone's own pixel typeface. Flat, "
+                                "square-cornered and high contrast.",
+                     sizeof out->desc);
     out->builtin = true;
     out->palette = builtin_palette;
+    out->style = builtin_style;
 }
 
 /* ------------------------------------------------------------------ *
@@ -222,12 +277,71 @@ static void read_palette(const nd_json_val *pal, nd_theme_palette *p)
     read_colour(pal, "amber_bot", &p->amber_bot);
     read_colour(pal, "red_top", &p->red_top);
     read_colour(pal, "red_bot", &p->red_bot);
+    read_colour(pal, "bar_top", &p->bar_top);
+    read_colour(pal, "bar_bot", &p->bar_bot);
+    read_colour(pal, "bar_ink", &p->bar_ink);
+    read_colour(pal, "sel_ink", &p->sel_ink);
     read_colour(pal, "ink_dark", &p->ink_dark);
     read_colour(pal, "ink_light", &p->ink_light);
     read_colour(pal, "ink_muted", &p->ink_muted);
     read_colour(pal, "text_shadow", &p->text_shadow);
     read_colour(pal, "text_sheen", &p->text_sheen);
     read_colour(pal, "scrim_ink", &p->scrim_ink);
+}
+
+static void read_flag(const nd_json_val *obj, const char *key, bool *out)
+{
+    const nd_json_val *v = nd_json_get(obj, key);
+    bool b = false;
+
+    if (v == NULL)
+        return;
+    if (!nd_json_bool(v, &b)) {
+        nd_log_err(ND_LOG_UI, "theme: style.%s is not true or false; keeping the default", key);
+        return;
+    }
+    *out = b;
+}
+
+/* The structural switches. Named exactly as the struct's fields, and all of
+ * them default OFF -- see nd_theme_style in the header for why the decoration
+ * is opt-in rather than opt-out. */
+static void read_style(const nd_json_val *st, nd_theme_style *y)
+{
+    read_flag(st, "gloss", &y->gloss);
+    read_flag(st, "bevel", &y->bevel);
+    read_flag(st, "gradients", &y->gradients);
+    read_flag(st, "round", &y->round);
+    read_flag(st, "type_shadow", &y->type_shadow);
+    read_flag(st, "plate_shadow", &y->plate_shadow);
+    read_flag(st, "bevel_divider", &y->bevel_divider);
+    read_flag(st, "icon_glow", &y->icon_glow);
+    read_flag(st, "reflection", &y->reflection);
+    read_flag(st, "scrim", &y->scrim);
+    read_flag(st, "pixel_font", &y->pixel_font);
+    {
+        static const struct {
+            const char *key;
+            size_t off;
+        } DIMS[] = {
+            {"wallpaper_dim", offsetof(nd_theme_style, wallpaper_dim)},
+            {"app_wallpaper_dim", offsetof(nd_theme_style, app_wallpaper_dim)},
+        };
+        size_t i;
+
+        for (i = 0u; i < ND_ARRAY_LEN(DIMS); i++) {
+            const nd_json_val *v = nd_json_get(st, DIMS[i].key);
+            int64_t n = 0;
+
+            if (v == NULL || !nd_json_int(v, &n))
+                continue;
+            if (n < 0)
+                n = 0;
+            if (n > 100)
+                n = 100;
+            *((uint8_t *)((char *)y + DIMS[i].off)) = (uint8_t)n;
+        }
+    }
 }
 
 nd_err nd_theme_read(const char *dir, nd_theme_info *out)
@@ -288,6 +402,9 @@ nd_err nd_theme_read(const char *dir, nd_theme_info *out)
     pal = nd_json_get(root, "palette");
     if (nd_json_type_of(pal) == ND_JSON_OBJECT)
         read_palette(pal, &t.palette);
+    pal = nd_json_get(root, "style");
+    if (nd_json_type_of(pal) == ND_JSON_OBJECT)
+        read_style(pal, &t.style);
     pal = nd_json_get(root, "alpha");
     if (nd_json_type_of(pal) == ND_JSON_OBJECT) {
         read_alpha(pal, "scrim_top", &t.palette.scrim_top_a);
@@ -354,7 +471,7 @@ static size_t scan_dir(const char *root, nd_theme_info *out, size_t max, size_t 
             continue;
 
         /* First id wins, and the built-in is added first, so a card cannot
-         * shadow "aero" and leave the owner with no way back to the stock
+         * shadow "classic" and leave the owner with no way back to the stock
          * look. The same rule makes the system themes beat the card's. */
         for (i = 0; i < n; i++) {
             if (strcmp(out[i].id, t.id) == 0) {
@@ -364,7 +481,7 @@ static size_t scan_dir(const char *root, nd_theme_info *out, size_t max, size_t 
         }
         if (dup) {
             /* out[i].dir is empty for the built-in, which is the case that
-             * actually happens -- a card carrying an "aero" -- so it is named
+             * actually happens -- a card carrying a "classic" -- so it is named
              * rather than printed as a blank path. */
             nd_log(ND_LOG_UI, "theme: %s is already %s; ignoring %s", t.id,
                    out[i].builtin ? "the built-in look" : out[i].dir, dir);
@@ -442,6 +559,7 @@ void nd_theme_apply(const nd_theme_info *t)
     if (t == NULL) {
         builtin_info(&active);
         nd_theme_pal = &builtin_palette;
+        nd_theme_style_of = &builtin_style;
         active_ready = true;
         return;
     }
@@ -450,6 +568,7 @@ void nd_theme_apply(const nd_theme_info *t)
      * whatever the picker had on its stack when it previewed. */
     active = *t;
     nd_theme_pal = t->builtin ? &builtin_palette : &active.palette;
+    nd_theme_style_of = t->builtin ? &builtin_style : &active.style;
     active_ready = true;
 }
 

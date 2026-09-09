@@ -972,8 +972,8 @@ static void draw_capture_prompt(nd_ui *ui, nd_softkey *bar, const nd_kmi2c_confi
 
     (void)nd_kmi2c_progress(progress, sizeof progress, index, total);
     nd_ui_text_size(ui, progress, ui->font_s, &tw, &th);
-    nd_theme_text(d, screen_w - tw - 8, 38, progress, ui->font_s, ND_TH_SKY_TOP,
-                  ND_RGB(0x08, 0x1E, 0x33));
+    nd_theme_text(d, screen_w - tw - 8, 38, progress, ui->font_s, ND_TH_INK_MUTED,
+                  ND_TH_TEXT_SHADOW);
 
     /* line_h = get_text_size("Ag", font_s)[1] + 4. Ink height, so the '+ 4' is
      * the whole of the leading and the 'g' descender is what sets the rest. */

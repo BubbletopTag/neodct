@@ -131,13 +131,13 @@ static void draw_wake_screen(nd_ui *ui, nd_bl_mode mode, double seconds)
         (void)nd_snprintf(headline, sizeof headline, "Screen off for %.0f s.", seconds);
     nd_theme_text_light(ui->draw, 8, 42, headline, ui->font_md);
     nd_theme_text(ui->draw, 8, 74, mode == ND_BL_PWM ? "Tier: PWM backlight" : "Tier: gpio53 (BL)",
-                  ui->font_s, ND_TH_SKY_TOP, ND_RGB(0x08, 0x1E, 0x33));
+                  ui->font_s, ND_TH_INK_MUTED, ND_TH_TEXT_SHADOW);
     /* Stated because the timed measurement depends on nobody pressing
      * anything, and somebody who does not know the escape exists will press
      * everything. On the untimed row a key is not an escape, it is the only
      * way out, so the line is not optional there. */
     nd_theme_text(ui->draw, 8, 96, seconds < 0.0 ? "Any key wakes it." : "Any key wakes it early.",
-                  ui->font_s, ND_TH_SKY_TOP, ND_RGB(0x08, 0x1E, 0x33));
+                  ui->font_s, ND_TH_INK_MUTED, ND_TH_TEXT_SHADOW);
 }
 
 static void show_dialog(nd_ui *ui, const char *message)

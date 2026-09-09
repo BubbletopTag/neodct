@@ -2,22 +2,32 @@
  *
  * ============ WHY THIS EXISTS ============
  *
- * The phone ships two faces (nd_paths.h): font.ttf, the pixel face that
- * fontref.json pins by SHA-256 and that the initramfs boot bar's glyph tables
- * are baked from; and aero.ttf, what the UI actually draws with.
+ * A fixture that renders a SCREEN has to open the face the UI actually draws
+ * with, or its frames will not match the reference set and the mismatch will
+ * look like a layout bug rather than a font one. That is not hypothetical:
+ * when the glass theme was the shipped look, fifteen fixtures each carried
+ * their own resolver with "font.ttf" spelled into it, every one kept
+ * rendering in the pixel face, and eng-cubebench came back "8.14% of pixels
+ * differ" with a picture of a perfectly correct cube.
  *
- * A fixture that renders a SCREEN has to open the second, or its frames will
- * not match the reference set and the mismatch will look like a layout bug
- * rather than a font one -- which is exactly what happened when the theme
- * landed: fifteen fixtures each carried their own copy of a resolver with
- * "font.ttf" spelled into it, every one of them kept rendering in the pixel
- * face, and eng-cubebench came back "8.14% of pixels differ" with a picture of
- * a perfectly correct cube.
+ * ============ AND WHY IT NOW POINTS AT font.ttf ANYWAY ============
+ *
+ * The phone ships ONE face again. The UI face is the pixel face: the built-in
+ * look is the classic one and nd_theme_style's pixel_font says so, and
+ * aero.ttf left the image with the rest of the glass look when that became a
+ * theme (neodct/contrib/themes/FruitigerAero ships its own fonts/ui.ttf).
+ *
+ * So the constants below are font.ttf -- not because the distinction stopped
+ * mattering, but because the two answers have converged for the shipped
+ * default. A fixture that renders a screen under a THEME has to ask
+ * nd_theme_resource() instead, exactly as nd_ui does; nothing in the suite
+ * does that yet, and this is where it would go.
  *
  * A fixture that tests the RENDERER -- test_font, test_draw, test_bootbar,
- * test_keypadsetup -- must keep opening font.ttf, because the thing it is
- * checking is pinned against that file. Those four do not include this header
- * and must not.
+ * test_keypadsetup -- opens font.ttf because the thing it is checking is
+ * pinned against that file by fontref.json. Those four do not include this
+ * header and must not, even now that it names the same file: the reason
+ * differs, and a future theme would move this one and not theirs.
  *
  * ============ THE BOLD PAIR ============
  *
@@ -27,6 +37,10 @@
  * crash, no warning, and every title one stroke too light. So loading them is
  * not optional for a fixture that compares against a reference frame, and
  * ui_bold_face_path() is here to make it one line.
+ *
+ * The pixel face HAS no bold cut, so ui_bold_face_path() answers false for it
+ * and the fixtures degrade to the regular weight -- which is what the phone
+ * itself does under the classic look, so the frames still agree.
  */
 
 #ifndef ND_UIFONT_TEST_H_INCLUDED
@@ -39,9 +53,9 @@
 
 /* Relative to the repo's neodct/ directory, which is what every fixture's own
  * resolver searches from. */
-#define ND_TEST_UI_FONT_REL      "overlay/NeoDCT/System/ui/resources/fonts/aero.ttf"
-#define ND_TEST_UI_FONT_ABS      "/NeoDCT/System/ui/resources/fonts/aero.ttf"
-#define ND_TEST_UI_FONT_BOLD_REL "overlay/NeoDCT/System/ui/resources/fonts/aero-bold.ttf"
+#define ND_TEST_UI_FONT_REL      "overlay/NeoDCT/System/ui/resources/fonts/font.ttf"
+#define ND_TEST_UI_FONT_ABS      "/NeoDCT/System/ui/resources/fonts/font.ttf"
+#define ND_TEST_UI_FONT_BOLD_REL "overlay/NeoDCT/System/ui/resources/fonts/font-bold.ttf"
 
 /* The bold companion of an already-resolved regular face: the same directory,
  * with "-bold" before the extension. Derived rather than searched for so that

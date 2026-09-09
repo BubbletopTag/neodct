@@ -610,11 +610,15 @@ static void test_icon_geometry(nd_ui *ui)
             CHECK(opaque, "the icon has ink in it");
         }
     }
-    /* Every shipped icon is square now. Koki's was 120x115 and the odd one
-      * out; the Frutiger Aero set replaced it with a 120x120 like the rest.
-      * Asserted as a count rather than dropped, because "the icons are all one
-      * size" is worth knowing and a stray one would otherwise be silent. */
-    CHECK_INT(non_square, 0, "every shipped icon is square");
+    /* Koki's icon is 120x115 and the odd one out. It was briefly square, when
+     * the Frutiger Aero set was what the phone shipped; that set is a theme
+     * now (neodct/contrib/themes/FruitigerAero) and the shipped icons are the
+     * phone's own again, Koki's included.
+     *
+     * Asserted as a count rather than dropped, because "the icons are all one
+     * size except this one" is worth knowing and a second stray would
+     * otherwise be silent. */
+    CHECK_INT(non_square, 1, "exactly one shipped icon is not square (Koki, 120x115)");
 }
 
 /* ------------------------------------------------------------------ *
@@ -637,17 +641,21 @@ static void test_icon_geometry(nd_ui *ui)
 
 /* ============ THE NOTCH IS A THUMB NOW ============
  *
- * It was a seven-row white rectangle riding a white line, and it is a glossy
- * plate riding a recessed groove -- nd_theme_scrollbar, the same object every
- * other scrollbar in the OS uses. So it can no longer be found by looking for
- * pure white, and its height is no longer fixed: the thumb is sized to the
- * list, which is what makes a long menu read as long.
+ * It was a seven-row white rectangle riding a white line, and it is
+ * nd_theme_scrollbar's thumb -- the same object every other scrollbar in the
+ * OS uses, sized to the list so that a long menu reads as long rather than
+ * being a fixed seven rows.
  *
- * What can still be found exactly is its TOP EDGE. Every plate draws a white
- * hairline one row inside its top (nd_theme.h idea 3), and on this screen it
- * is the only near-white thing in the track's columns. That pins the thumb to
- * the pixel, which is what these tests are about: where the thumb lands for a
- * given index. */
+ * WHAT ROW IS ITS TOP depends on the theme, and that is the trap this comment
+ * exists for. A glossy theme draws a dark border on the thumb's top row and a
+ * white bevel one row inside it, so the first near-white row is top + 1. A
+ * flat theme draws neither, so the first near-white row IS the top. Measuring
+ * the bevel and subtracting one was right while the phone shipped the glass
+ * look and is off by a pixel now that it ships the plain one.
+ *
+ * So the scan reports the first row carrying the thumb's ink and the caller
+ * adds the bevel back only when the active theme draws one. The thumb stays
+ * pinned to the pixel either way, which is what these tests are about. */
 static bool thumb_bevel_row(const nd_image *frame, int32_t bar_x, int32_t y)
 {
     int32_t x;
@@ -692,7 +700,7 @@ static int32_t measure_thumb_top(const nd_image *frame, int32_t bar_x)
 
     for (y = NOTCH_SCAN_TOP; y <= NOTCH_SCAN_BOTTOM && y < frame->h; y++) {
         if (thumb_bevel_row(frame, bar_x, y))
-            return y - 1;
+            return ND_TH_BEVEL ? y - 1 : y;
     }
     return -1;
 }

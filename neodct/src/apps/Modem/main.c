@@ -413,13 +413,13 @@ void nd_modemapp_draw_page(nd_ui *ui, const nd_modem_status *st, bool linked, in
     nd_ui_text_size(ui, page_name, ui->font_s, &tw, &th);
     /* y = 8, not 0: the page tag is small type sitting on the title's
      * baseline rather than its ascender. */
-    nd_theme_text(ui->draw, screen_w - 5 - tw, 8, page_name, ui->font_s, ND_TH_SKY_TOP,
-                  ND_RGB(0x08, 0x1E, 0x33));
+    nd_theme_text(ui->draw, screen_w - 5 - tw, 8, page_name, ui->font_s, ND_TH_INK_MUTED,
+                  ND_TH_TEXT_SHADOW);
 
     line_h = nd_modemapp_line_h(bottom, y, n_rows);
     for (i = 0u; i < n_rows; i++) {
-        nd_theme_text(ui->draw, 8, y, rows[i].label, ui->font_s, ND_TH_SKY_TOP,
-                      ND_RGB(0x08, 0x1E, 0x33));
+        nd_theme_text(ui->draw, 8, y, rows[i].label, ui->font_s, ND_TH_INK_MUTED,
+                      ND_TH_TEXT_SHADOW);
         nd_theme_text_light(ui->draw, 70, y, rows[i].value, ui->font_s);
         y += line_h;
     }
@@ -432,11 +432,11 @@ void nd_modemapp_draw_page(nd_ui *ui, const nd_modem_status *st, bool linked, in
                   !linked        ? ND_MODEMAPP_NO_LINK
                   : st->hardware ? st->port
                                  : ND_MODEMAPP_SIMULATION,
-                  ui->font_s, ND_TH_SKY_TOP, ND_RGB(0x08, 0x1E, 0x33));
+                  ui->font_s, ND_TH_INK_MUTED, ND_TH_TEXT_SHADOW);
     (void)nd_snprintf(pos, sizeof pos, "%d/%d", page + 1, ND_MODEMAPP_N_PAGES);
     nd_ui_text_size(ui, pos, ui->font_s, &tw, &th);
-    nd_theme_text(ui->draw, screen_w - 5 - tw, bottom - 14, pos, ui->font_s, ND_TH_SKY_TOP,
-                  ND_RGB(0x08, 0x1E, 0x33));
+    nd_theme_text(ui->draw, screen_w - 5 - tw, bottom - 14, pos, ui->font_s, ND_TH_INK_MUTED,
+                  ND_TH_TEXT_SHADOW);
 }
 
 /* ------------------------------------------------------------------ *

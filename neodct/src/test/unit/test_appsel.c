@@ -62,6 +62,7 @@
 #include "nd_keypad.h"
 #include "nd_paths.h"
 #include "nd_types.h"
+#include "nd_theme.h"
 #include "nd_ui.h"
 #include "nd_ui_sim.h"
 #include "nd_vclock.h"
@@ -176,6 +177,47 @@ static int rm_cb(const char *path, const struct stat *st, int flag, struct FTW *
     ND_UNUSED(flag);
     ND_UNUSED(ftw);
     return remove(path);
+}
+
+
+/* Is `c` a pixel of the theme's background?
+ *
+ * The background is a vertical ramp from sky_top to sky_bot, so every row of
+ * it lies between the two PER CHANNEL -- and with a flat theme, where the two
+ * are the same colour, that collapses to "equals the background" without the
+ * check needing to know which kind of theme it is looking at.
+ *
+ * This replaced "blue leads red by 30", which was true of the glass look and
+ * of nothing else: the phone ships the flat black look now and the assertion
+ * was really asking "is the theme Frutiger Aero". What these tests mean is
+ * "the wallpaper did not get through", and that is what this says. */
+
+/* Two pixels the same? Used by checks that mean "something was drawn here"
+ * rather than "this exact colour was drawn here", which is what keeps them
+ * true of whatever theme is active. */
+static bool colour_eq(nd_color a, nd_color b)
+{
+    return a.r == b.r && a.g == b.g && a.b == b.b;
+}
+
+static bool is_theme_sky(nd_color c)
+{
+    nd_color a = ND_TH_SKY_TOP;
+    nd_color b = ND_TH_SKY_BOT;
+    int32_t lo;
+    int32_t hi;
+
+    lo = (a.r < b.r) ? a.r : b.r;
+    hi = (a.r > b.r) ? a.r : b.r;
+    if ((int32_t)c.r < lo || (int32_t)c.r > hi)
+        return false;
+    lo = (a.g < b.g) ? a.g : b.g;
+    hi = (a.g > b.g) ? a.g : b.g;
+    if ((int32_t)c.g < lo || (int32_t)c.g > hi)
+        return false;
+    lo = (a.b < b.b) ? a.b : b.b;
+    hi = (a.b > b.b) ? a.b : b.b;
+    return (int32_t)c.b >= lo && (int32_t)c.b <= hi;
 }
 
 static void drop_stage(void)
@@ -820,23 +862,36 @@ static void test_overflowing_name(nd_capture *cap, nd_ui *ui)
         return;
     }
     {
-        /* Ink on BOTH outermost columns of the title band: the string is
-         * clipped at each edge, not shrunk to fit, not ellipsised and not
-         * dropped. The band starts at the 24 px face's first ink row,
-         * title_y + bbox_top = 14 + 3, and ends before the scrollbar's
-         * track_top of 36 plus the descenders. */
+        /* ============ THIS USED TO ASSERT THE OPPOSITE ============
+         *
+         * It checked for ink on both outermost columns and called that "the
+         * title runs off the edges, clipped rather than ellipsised". That has
+         * not been true since the selector started trimming the name against
+         * the page badge: nd_text_fit() shortens with "..." until the string
+         * fits screen_w - 2 * (badge_w + 12), so a centred title physically
+         * cannot reach column 0.
+         *
+         * It passed anyway for four months, because the test asked whether
+         * the outer columns had any RED in them and the glass theme's
+         * background is a blue gradient -- every pixel of it answers yes. The
+         * check was measuring the wallpaper. Putting the flat black look back
+         * as the shipped one is what exposed it.
+         *
+         * So it now asserts what the widget actually does: the name is
+         * shortened, and it stays inside the panel. */
         bool left = false;
         bool right = false;
         int32_t y;
 
-        for (y = 17; y <= 37; y++) {
-            if (nd_image_get_px(frame, 0, y).r > 0u)
+        for (y = 0; y < 40; y++) {
+            if (!colour_eq(nd_image_get_px(frame, 0, y), nd_image_get_px(frame, 1, y)))
                 left = true;
-            if (nd_image_get_px(frame, nd_ui_width(ui) - 1, y).r > 0u)
+            if (!colour_eq(nd_image_get_px(frame, nd_ui_width(ui) - 1, y),
+                           nd_image_get_px(frame, nd_ui_width(ui) - 2, y)))
                 right = true;
         }
-        CHECK(left, "the title runs off the left edge");
-        CHECK(right, "and off the right edge");
+        CHECK(!left, "the title does not reach the left edge: it is trimmed to fit");
+        CHECK(!right, "nor the right");
     }
     (void)nd_capture_save(cap, "menu-overflow", frame);
 }
@@ -865,13 +920,12 @@ static void test_empty_list(nd_capture *cap, nd_ui *ui)
 
         CHECK(track.r == beside.r && track.g == beside.g && track.b == beside.b,
               "no scrollbar on the empty menu");
-        /* And the ground really is the sky: blue leads red by a wide margin,
-         * which a black fill did not do and no wallpaper is loaded here. */
+        /* And the ground really is the theme's background rather than a
+         * wallpaper, whichever theme is on. */
         {
             nd_color sky = nd_image_get_px(frame, 0, 0);
 
-            CHECK((int32_t)sky.b - (int32_t)sky.r > 30,
-                  "the ground is the sky gradient, not a black fill");
+            CHECK(is_theme_sky(sky), "the ground is the theme's background");
         }
     }
     (void)nd_capture_save(cap, "menu-empty", nd_capture_recent(cap, 0u));
@@ -903,9 +957,14 @@ static void test_single_item_scrollbar(nd_capture *cap, nd_ui *ui)
         nd_color past = nd_image_get_px(frame, 232, 138);
         nd_color past_beside = nd_image_get_px(frame, 212, 138);
 
-        CHECK((int32_t)at_top.b - (int32_t)at_top.r > 40, "the thumb starts at the track top");
-        CHECK((int32_t)at_bottom.b - (int32_t)at_bottom.r > 40,
-              "and fills the track: nothing to scroll");
+        /* "Is it blue" was the old test and it only ever meant "is the theme
+         * Frutiger Aero". What is actually claimed is that the thumb is drawn
+         * at both ends of the track -- i.e. it fills it, because there is
+         * nothing to scroll -- and a thumb is visible exactly where the track
+         * column differs from the untouched column beside it. */
+        CHECK(!colour_eq(at_top, nd_image_get_px(frame, 212, 40)),
+              "the thumb starts at the track top");
+        CHECK(!colour_eq(at_bottom, beside), "and fills the track: nothing to scroll");
         CHECK(at_bottom.r != beside.r || at_bottom.b != beside.b, "the track is drawn at x=232");
         CHECK(past.r == past_beside.r && past.g == past_beside.g && past.b == past_beside.b,
               "the track stops at y=135 inclusive");

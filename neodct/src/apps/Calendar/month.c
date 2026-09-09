@@ -198,7 +198,7 @@ static void draw_centred(nd_draw *d, const nd_font *f, const char *text, int32_t
     /* Through the theme, so a digit in the grid carries the same shadow as
      * every other label in the OS -- without it the numbers sit flat on the
      * wallpaper and the grid reads as a screenshot pasted over a photograph. */
-    nd_theme_text(d, x0 + nd_max32(0, (box_w - tw) / 2), y, text, f, c, ND_RGB(0x08, 0x1E, 0x33));
+    nd_theme_text(d, x0 + nd_max32(0, (box_w - tw) / 2), y, text, f, c, ND_TH_TEXT_SHADOW);
 }
 
 void nd_cal_month_draw(nd_ui *ui, int32_t year, int32_t month, int32_t day, uint32_t mask)

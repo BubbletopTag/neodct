@@ -200,7 +200,9 @@ void nd_vlist_draw(nd_vlist *l)
             nd_theme_plate p = nd_theme_plate_blue(6);
 
             nd_theme_plate_draw(ui->canvas, ND_RECT(4, y, selected_right, y + item_height), &p);
-            nd_theme_text_light(d, 12, text_y, item_text, nd_ui_font_bold(ui, item_font));
+            /* ON the lozenge, so it follows sel_ink: white over glass, black
+             * over the classic look's inverted white row. */
+            nd_theme_text_sel(d, 12, text_y, item_text, nd_ui_font_bold(ui, item_font));
         } else {
             nd_theme_text_light(d, 12, text_y, item_text, item_font);
         }

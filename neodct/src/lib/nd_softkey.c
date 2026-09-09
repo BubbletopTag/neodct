@@ -149,7 +149,7 @@ void nd_softkey_update(nd_softkey *bar, const char *text, bool present)
      * background they asked for. */
     if (text != NULL && text[0] != '\0' && ui->font_n != NULL) {
         const nd_font *f = nd_ui_font_bold(ui, ui->font_n);
-        nd_theme_plate p = nd_theme_plate_blue(6);
+        nd_theme_plate p = nd_theme_plate_bar(6);
         nd_rect plate = ND_RECT(2, bar->y_start + 2, screen_w - 3, screen_h - 3);
         int32_t w = 0;
         int32_t h = 0;
@@ -184,7 +184,7 @@ void nd_softkey_update(nd_softkey *bar, const char *text, bool present)
          * look machined. */
         nd_ui_text_size(ui, text, f, &w, &h);
         nd_text_bbox(f, text, &ink);
-        nd_theme_text_light(ui->draw, floordiv2(screen_w - w) - ink.x0,
+        nd_theme_text_bar(ui->draw, floordiv2(screen_w - w) - ink.x0,
                             plate.y0 + floordiv2(nd_rect_h(plate) - h) - ink.y0, text, f);
     }
 

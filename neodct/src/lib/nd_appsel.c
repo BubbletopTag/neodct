@@ -250,13 +250,13 @@ void nd_appsel_draw(nd_appsel *s)
      *    visible seam in the OS. */
     {
         const nd_font *f = nd_ui_font_bold(ui, ui->font_n);
-        nd_theme_plate p = nd_theme_plate_blue(6);
+        nd_theme_plate p = nd_theme_plate_bar(6);
         nd_rect plate = ND_RECT(2, content_bottom + 2, screen_w - 3, screen_h - 3);
 
         nd_theme_plate_draw(ui->canvas, plate, &p);
         nd_ui_text_size(ui, "Select", f, &w, &h);
-        nd_theme_text_light(d, floordiv2(screen_w - w), plate.y0 + floordiv2(nd_rect_h(plate) - h),
-                            "Select", f);
+        nd_theme_text_bar(d, floordiv2(screen_w - w), plate.y0 + floordiv2(nd_rect_h(plate) - h),
+                          "Select", f);
     }
 
     /* 5. The scrollbar. Same centre column and same extent as before; see

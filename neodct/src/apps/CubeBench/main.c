@@ -334,7 +334,7 @@ int app_run(nd_ui *ui)
 
         nd_ui_text_size(ui, "BACK/OK to exit", ui->font_s, &tw, &th);
         nd_theme_text(ui->draw, floordiv(screen_w - tw, 2), content_bottom - th - 4,
-                      "BACK/OK to exit", ui->font_s, ND_TH_SKY_TOP, ND_RGB(0x08, 0x1E, 0x33));
+                      "BACK/OK to exit", ui->font_s, ND_TH_INK_MUTED, ND_TH_TEXT_SHADOW);
 
         /* present=False: the softkey bar is painted into the same frame the
          * cube is in, and the one commit below puts both on the panel. */

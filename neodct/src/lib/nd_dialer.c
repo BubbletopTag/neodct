@@ -365,8 +365,8 @@ static void draw_call_frame(nd_ui *ui, const char *number, const char *label, in
              * scrollbar track, and grey over a colour wallpaper is mud. A
              * pale sky blue is the same "quieter than the number above"
              * without leaving the palette. */
-            nd_theme_text(d, label_x, num_y + 24, timer_text, timer_font, ND_TH_SKY_TOP,
-                          ND_RGB(0x08, 0x1E, 0x33));
+            nd_theme_text(d, label_x, num_y + 24, timer_text, timer_font, ND_TH_INK_MUTED,
+                          ND_TH_TEXT_SHADOW);
     }
 
     render_status_chrome(ui, /*with_clock=*/true);

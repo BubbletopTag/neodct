@@ -646,8 +646,8 @@ nd_msg_detail_result nd_msg_show_detail(nd_ui *ui, const char *title, const char
             /* "From:" and "Time:" are the envelope, not the letter. They were
              * ND_GRAY to say so, and grey over a colour wallpaper is mud; a
              * pale sky blue is the same demotion inside the palette. */
-            nd_theme_text(ui->draw, 10, y, meta[i], ui->font_s, ND_TH_SKY_TOP,
-                          ND_RGB(0x08, 0x1E, 0x33));
+            nd_theme_text(ui->draw, 10, y, meta[i], ui->font_s, ND_TH_INK_MUTED,
+                          ND_TH_TEXT_SHADOW);
             y += 18;
         }
 

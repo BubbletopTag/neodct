@@ -182,6 +182,38 @@ static int rm_cb(const char *path, const struct stat *st, int flag, struct FTW *
 
 /* CODING-STANDARDS.md section 1.7 applies to the filesystem too: a leak
  * detector's output is only worth reading if the run leaves nothing behind. */
+
+/* Is `c` a pixel of the theme's background?
+ *
+ * The background is a vertical ramp from sky_top to sky_bot, so every row of
+ * it lies between the two PER CHANNEL -- and with a flat theme, where the two
+ * are the same colour, that collapses to "equals the background" without the
+ * check needing to know which kind of theme it is looking at.
+ *
+ * This replaced "blue leads red by 30", which was true of the glass look and
+ * of nothing else: the phone ships the flat black look now and the assertion
+ * was really asking "is the theme Frutiger Aero". What these tests mean is
+ * "the wallpaper did not get through", and that is what this says. */
+static bool is_theme_sky(nd_color c)
+{
+    nd_color a = ND_TH_SKY_TOP;
+    nd_color b = ND_TH_SKY_BOT;
+    int32_t lo;
+    int32_t hi;
+
+    lo = (a.r < b.r) ? a.r : b.r;
+    hi = (a.r > b.r) ? a.r : b.r;
+    if ((int32_t)c.r < lo || (int32_t)c.r > hi)
+        return false;
+    lo = (a.g < b.g) ? a.g : b.g;
+    hi = (a.g > b.g) ? a.g : b.g;
+    if ((int32_t)c.g < lo || (int32_t)c.g > hi)
+        return false;
+    lo = (a.b < b.b) ? a.b : b.b;
+    hi = (a.b > b.b) ? a.b : b.b;
+    return (int32_t)c.b >= lo && (int32_t)c.b <= hi;
+}
+
 static void drop_stage(void)
 {
     (void)nd_path_set_root(NULL);
@@ -822,7 +854,7 @@ static void test_chrome_background(nd_fb *fb)
     {
         nd_color c = nd_image_get_px(ui.canvas, 120, 20);
 
-        CHECK((int32_t)c.b - (int32_t)c.r > 30, "and the background is the sky, not the picture");
+        CHECK(is_theme_sky(c), "and the background is the theme's, not the picture");
     }
     /* The HOME screen still has its wallpaper: this setting is about chrome. */
     CHECK(nd_ui_wallpaper(&ui) != NULL, "the home wallpaper is unaffected by wpeverywhere");

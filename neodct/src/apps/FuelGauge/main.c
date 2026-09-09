@@ -216,8 +216,8 @@ static void draw_readout(nd_ui *ui, const nd_fg_row *rows, size_t n_rows, bool h
 
     line_h = nd_fg_line_h(bottom, y, n_rows);
     for (i = 0u; i < n_rows; i++) {
-        nd_theme_text(ui->draw, 8, y, rows[i].label, ui->font_s, ND_TH_SKY_TOP,
-                      ND_RGB(0x08, 0x1E, 0x33));
+        nd_theme_text(ui->draw, 8, y, rows[i].label, ui->font_s, ND_TH_INK_MUTED,
+                      ND_TH_TEXT_SHADOW);
         nd_theme_text_light(ui->draw, 70, y, rows[i].value, ui->font_s);
         y += line_h;
     }
@@ -231,12 +231,12 @@ static void draw_readout(nd_ui *ui, const nd_fg_row *rows, size_t n_rows, bool h
         (void)snprintf(bus_text, sizeof bus_text, "i2c-%d @ 0x%02X", snap->bus,
                        (unsigned)snap->addr);
         nd_ui_text_size(ui, bus_text, ui->font_s, &bw, &bh);
-        nd_theme_text(ui->draw, screen_w - 5 - bw, bottom - 14, bus_text, ui->font_s, ND_TH_SKY_TOP,
-                      ND_RGB(0x08, 0x1E, 0x33));
+        nd_theme_text(ui->draw, screen_w - 5 - bw, bottom - 14, bus_text, ui->font_s, ND_TH_INK_MUTED,
+                      ND_TH_TEXT_SHADOW);
     }
     if (flash != NULL && flash[0] != '\0')
-        nd_theme_text(ui->draw, 8, bottom - 14, flash, ui->font_s, ND_TH_SKY_TOP,
-                      ND_RGB(0x08, 0x1E, 0x33));
+        nd_theme_text(ui->draw, 8, bottom - 14, flash, ui->font_s, ND_TH_INK_MUTED,
+                      ND_TH_TEXT_SHADOW);
 }
 
 /* ------------------------------------------------------------------ *

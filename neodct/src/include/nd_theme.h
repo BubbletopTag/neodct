@@ -106,7 +106,22 @@ extern "C" {
  * nd_theme.c's parser walks a table keyed by these names and a reader
  * comparing the two should not have to hunt. */
 typedef struct {
-    /* The signature blue. Title bars, the selection lozenge, the softkey. */
+    /* ============ THREE ROLES THAT WERE ONE COLOUR ============
+     *
+     * blue_* used to paint the title bar, the softkey strip AND the selected
+     * row, because in a glass theme all three are the same object at
+     * different sizes. They are not the same object in a FLAT theme: the
+     * classic look has white type on a black bar and inverts to black type
+     * on a white lozenge when a row is selected, so a palette that spells
+     * them with one colour cannot say it.
+     *
+     * So the bars have their own pair and the selection has its own ink.
+     * Frutiger Aero sets bar_* to the blues and sel_ink to white, which is
+     * what it always drew; the classic look sets bar_* to the background and
+     * sel_ink to black, and the same widgets draw both. */
+
+    /* The signature colour. The selection lozenge, a progress fill, an
+     * accent. */
     nd_color blue_hi;   /* lit top edge          */
     nd_color blue_top;
     nd_color blue_mid;  /* where the gloss stops */
@@ -139,6 +154,15 @@ typedef struct {
     nd_color amber_bot;
     nd_color red_top;
     nd_color red_bot;
+
+    /* The title bar and the softkey strip. */
+    nd_color bar_top;
+    nd_color bar_bot;
+    nd_color bar_ink;
+
+    /* Type standing on the signature colour -- the selected row's label.
+     * White in a glass theme, black in an inverting one. */
+    nd_color sel_ink;
 
     /* Ink. Dark type on a light plate is navy rather than black, because pure
      * black against a blue-white gradient reads as a hole punched in it. */
@@ -181,6 +205,84 @@ typedef struct {
     uint8_t sheen_a;
 } nd_theme_palette;
 
+/* ============ STRUCTURE, WHICH IS NOT COLOUR ============
+ *
+ * A palette can make the interface pink. It cannot make it FLAT, and flat is
+ * what the phone's own look is: the classic face is white type on black with
+ * a one-pixel rule under the title, no gradient anywhere, square corners and
+ * no shadow under anything. Recolouring a glossy plate to black leaves a
+ * glossy black plate.
+ *
+ * So a theme carries structure as well, and these are the switches. Every one
+ * of them turns something OFF, and the built-in has them all off: the stock
+ * phone is the plain one, and Frutiger Aero is the theme that turns the
+ * decoration on. That direction matters -- it means a theme file that says
+ * nothing gets the honest, cheap look rather than accidentally inheriting
+ * somebody else's gloss.
+ *
+ * They are read in the render path exactly like the colours, through the same
+ * pointer, so nothing has to be passed down. */
+typedef struct {
+    bool gloss;         /* the white sheen filling a plate's top half   */
+    bool bevel;         /* the white hairline just inside a top edge    */
+    bool gradients;     /* off collapses every ramp to its top colour   */
+    bool round;         /* off squares every corner                     */
+    bool type_shadow;   /* the shadow under light type, sheen under dark */
+    bool plate_shadow;  /* the soft band a plate casts onto what is below */
+    bool bevel_divider; /* a dark line plus a white one, not just a rule */
+    bool icon_glow;     /* the radial glow behind a selector icon       */
+    bool reflection;    /* the icon standing on a glossy floor          */
+    bool scrim;         /* the readability wash over a wallpaper        */
+
+    /* The pixel face rather than the UI face. Not a decoration: the classic
+     * look IS Nokia Cellphone FC, and drawing it in a rounded sans is the one
+     * thing that would stop it reading as the phone it is imitating. A theme
+     * that ships its own fonts/ui.ttf overrides this either way. */
+    bool pixel_font;
+
+    /* How far the wallpaper is dimmed, 0-100, before anything is drawn on it.
+     *
+     * THE OTHER HALF OF THE SCRIM DECISION, and it has to move with it. A
+     * glass theme darkens only the rows that hold type (nd_theme_scrim) and
+     * can therefore leave the picture at 88 and let it actually look like a
+     * photograph. A flat theme has no scrim -- white type sits straight on
+     * the picture with nothing behind it -- so the only way to keep "Memory
+     * card" legible is to dim the whole thing, which is what the phone did
+     * before any of this and why 30 is the built-in.
+     *
+     * Shipping one number for both looks means one of them is wrong: at 88
+     * with no scrim the menu is unreadable over a bright wallpaper, and at 30
+     * with a scrim the photograph is a dark smudge for no reason. */
+    uint8_t wallpaper_dim;
+
+    /* The same question asked INSIDE an app, where there is far more type to
+     * read than on the home screen, so the picture gives way further. 75 is
+     * the phone's own number and 68 is the glass theme's.
+     *
+     * A DEFAULT and not a decree: system.ui.wpeverywhere_dim still overrides
+     * it, so an owner who has tuned the background keeps their value when
+     * they change theme. What a theme sets is what an owner who has never
+     * touched it gets. */
+    uint8_t app_wallpaper_dim;
+} nd_theme_style;
+
+/* The active structure, alongside the active palette and swapped with it. */
+extern const nd_theme_style *nd_theme_style_of;
+
+#define ND_TH_GLOSS         (nd_theme_style_of->gloss)
+#define ND_TH_BEVEL         (nd_theme_style_of->bevel)
+#define ND_TH_GRADIENTS     (nd_theme_style_of->gradients)
+#define ND_TH_ROUND         (nd_theme_style_of->round)
+#define ND_TH_TYPE_SHADOW   (nd_theme_style_of->type_shadow)
+#define ND_TH_PLATE_SHADOW  (nd_theme_style_of->plate_shadow)
+#define ND_TH_BEVEL_DIVIDER (nd_theme_style_of->bevel_divider)
+#define ND_TH_ICON_GLOW     (nd_theme_style_of->icon_glow)
+#define ND_TH_REFLECTION    (nd_theme_style_of->reflection)
+#define ND_TH_SCRIM         (nd_theme_style_of->scrim)
+#define ND_TH_PIXEL_FONT    (nd_theme_style_of->pixel_font)
+#define ND_TH_WALLPAPER_DIM (nd_theme_style_of->wallpaper_dim)
+#define ND_TH_APP_WALLPAPER_DIM (nd_theme_style_of->app_wallpaper_dim)
+
 /* The active palette. Never NULL -- it points at the built-in Frutiger Aero
  * values until nd_theme_load() replaces it, and back at them when a theme is
  * removed. Read it through the ND_TH_* names below rather than directly; the
@@ -196,6 +298,7 @@ extern const nd_theme_palette *nd_theme_pal;
  * is installed -- the theme picker's "Frutiger Aero" entry, and the reset
  * path when a theme file turns out to be unreadable. */
 const nd_theme_palette *nd_theme_palette_builtin(void);
+const nd_theme_style *nd_theme_style_builtin(void);
 
 /* The signature blue. Title bars, the selection lozenge, the softkey. */
 #define ND_TH_BLUE_HI   (nd_theme_pal->blue_hi)   /* lit top edge      */
@@ -226,6 +329,12 @@ const nd_theme_palette *nd_theme_palette_builtin(void);
 #define ND_TH_AMBER_BOT (nd_theme_pal->amber_bot)
 #define ND_TH_RED_TOP   (nd_theme_pal->red_top)
 #define ND_TH_RED_BOT   (nd_theme_pal->red_bot)
+
+/* Ink. */
+#define ND_TH_BAR_TOP (nd_theme_pal->bar_top)
+#define ND_TH_BAR_BOT (nd_theme_pal->bar_bot)
+#define ND_TH_BAR_INK (nd_theme_pal->bar_ink)
+#define ND_TH_SEL_INK (nd_theme_pal->sel_ink)
 
 /* Ink. */
 #define ND_TH_INK_DARK  (nd_theme_pal->ink_dark)
@@ -341,6 +450,12 @@ typedef struct {
  * field, pass it: this is the house style rather than filling in nine fields
  * at each of forty call sites. */
 nd_theme_plate nd_theme_plate_blue(int32_t radius);
+
+/* The title bar and the softkey strip. Its own constructor because those two
+ * are the strips that FRAME the screen rather than things standing on it, and
+ * a flat theme paints them in the background colour so that only the type and
+ * the rule under it show. */
+nd_theme_plate nd_theme_plate_bar(int32_t radius);
 nd_theme_plate nd_theme_plate_glass(int32_t radius);
 nd_theme_plate nd_theme_plate_chrome(int32_t radius);
 
@@ -381,6 +496,15 @@ void nd_theme_text_light(nd_draw *d, int32_t x, int32_t y, const char *utf8, con
  * effect. Reads as engraved rather than printed, which is the whole of iOS 6's
  * type treatment on a light surface. */
 void nd_theme_text_dark(nd_draw *d, int32_t x, int32_t y, const char *utf8, const nd_font *f);
+
+/* Type standing ON the signature colour -- the selected row's label. White in
+ * a glass theme and therefore identical to nd_theme_text_light() there; black
+ * in a theme whose selection is a white lozenge, which is the whole reason it
+ * is a separate call rather than a second argument nobody would pass. */
+void nd_theme_text_sel(nd_draw *d, int32_t x, int32_t y, const char *utf8, const nd_font *f);
+
+/* Type on a title bar or a softkey. Follows bar_ink for the same reason. */
+void nd_theme_text_bar(nd_draw *d, int32_t x, int32_t y, const char *utf8, const nd_font *f);
 
 /* ------------------------------------------------------------------ *
  * Composed parts
@@ -520,9 +644,16 @@ void nd_theme_scrim(nd_image *img, nd_rect paint, int32_t ramp_y0, int32_t ramp_
 
 /* The built-in look's id. Not a directory -- there is no theme.json for it,
  * because its values are the compiled-in defaults and a file that merely
- * restated them would be a second place to get them wrong. */
-#define ND_THEME_ID_BUILTIN   "aero"
-#define ND_THEME_NAME_BUILTIN "Frutiger Aero"
+ * restated them would be a second place to get them wrong.
+ *
+ * "classic", because the built-in IS the phone's own face: white type on
+ * black in the pixel typeface. It was briefly "aero" while the glass look was
+ * compiled in, which then collided with the theme file that took the glass
+ * look over -- the id a theme claims and the id the built-in answers to are
+ * one namespace, and the built-in wins, so the collision presented as the
+ * Frutiger Aero theme silently never loading. */
+#define ND_THEME_ID_BUILTIN   "classic"
+#define ND_THEME_NAME_BUILTIN "Classic"
 
 /* What theme.json is called inside a theme directory. */
 #define ND_THEME_MANIFEST "theme.json"
@@ -543,10 +674,11 @@ typedef struct {
 
     bool builtin;
 
-    /* The palette, fully resolved: every field the file did not mention has
-     * already been filled in from the built-in, so a caller never has to ask
-     * whether a colour was specified. */
+    /* The palette and the structure, both fully resolved: every field the
+     * file did not mention has already been filled in from the built-in, so a
+     * caller never has to ask whether something was specified. */
     nd_theme_palette palette;
+    nd_theme_style style;
 
     /* Which optional parts this theme actually ships. Recorded at read time
      * so the picker can say "icons and a wallpaper" without stat()ing seven

@@ -550,18 +550,18 @@ static void test_wrap(sa_fixture *fx)
     CHECK_INT(lines.n, 1, "a short line does not wrap");
     CHECK_STR(nd_lines_at(&lines, 0), "Press: NaviKey", "unchanged");
 
-    /* A line that really does wrap on this panel.
+    /* The one body line that really does wrap on this panel.
      *
-     * It was "Capture one keypad button now." -- one of the app's own body
-     * lines -- and on the pixel face that came to 224 px and broke in two. The
-     * UI face fits it whole, so the string here is longer: what is being
-     * tested is that the wrapper is GREEDY, not that any particular sentence
-     * of this app happens to overflow. */
-    i2c.wrap(&lines, "Capture one keypad button now, then press it again.", fx->ui.font_s, 224);
+     * The string has moved twice with the shipped typeface, which is worth
+     * recording: it is one of the app's own body lines, it broke in two on
+     * the pixel face, it fitted whole when the glass theme brought a narrower
+     * UI face, and it breaks in two again now that the pixel face is what the
+     * phone ships. What is being tested throughout is that the wrapper is
+     * GREEDY -- not that any particular sentence of this app overflows. */
+    i2c.wrap(&lines, "Capture one keypad button now.", fx->ui.font_s, 224);
     CHECK_INT(lines.n, 2, "the long line wraps in two");
-    CHECK_STR(nd_lines_at(&lines, 0), "Capture one keypad button now,",
-              "greedy, so as much as fits");
-    CHECK_STR(nd_lines_at(&lines, 1), "then press it again.", "and the rest");
+    CHECK_STR(nd_lines_at(&lines, 0), "Capture one keypad", "greedy, so as much as fits");
+    CHECK_STR(nd_lines_at(&lines, 1), "button now.", "and the rest");
 
     /* An over-long WORD is not broken. It goes on a line of its own and
      * overflows the margin -- which is the difference between this wrapper

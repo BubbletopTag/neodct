@@ -3,7 +3,7 @@
   "frames": [
     {
       "name": "app-calculator",
-      "sha256": "98b9e7eb180594fc09d624e78868627025fae60cb273844f86010c8b6a9d456f",
+      "sha256": "12822892ca1ec55e000fcae45d0af69d3ed3ae7062b1e4a93ac4f4796853801c",
       "size": [
         240,
         175
@@ -11,7 +11,7 @@
     },
     {
       "name": "app-calculator-options",
-      "sha256": "483c10a4513fb7053d364b91953984d45d3218f9cd605eb84825d111c2b47e3e",
+      "sha256": "393f3ddd38e760f49b5142e5df810c8f253aed20d5d13cb3d6edf4732f4872c8",
       "size": [
         240,
         175
@@ -19,7 +19,7 @@
     },
     {
       "name": "app-calllog",
-      "sha256": "e91029bb62894ceee196a7f8b1c1744426b484d0dca6d2517707336650846f93",
+      "sha256": "5556d93630c4c228673ab3f7b6834db10a8e2116493637c6ababbe784d06c13c",
       "size": [
         240,
         175
@@ -27,7 +27,7 @@
     },
     {
       "name": "app-clock",
-      "sha256": "22864991333fa4304b05b1e018e79745c44a41964036dc7c6381b8a5e6f9580e",
+      "sha256": "53e5edfb76fdf796a60e91ba2e37fc4c5052baf89e3c11b2b5b344b2601c1e7b",
       "size": [
         240,
         175
@@ -35,7 +35,7 @@
     },
     {
       "name": "app-games",
-      "sha256": "14d7b2776f56f42b2ff8b1d57fc4f635975755ffeaee29454ed664862250b072",
+      "sha256": "89e0ca37ce45157eb4db3dab414df0eec3ad2a9039a270ab9e6952c58622b1f7",
       "size": [
         240,
         175
@@ -51,7 +51,7 @@
     },
     {
       "name": "app-messages",
-      "sha256": "23cab5111b538b34509cb4a4a81dba2d26ca3a3a55129b1fd531b577545b791d",
+      "sha256": "50f613406027913d5c152996c228a765fee531038951414ff699b78152e0ad76",
       "size": [
         240,
         175
@@ -59,7 +59,7 @@
     },
     {
       "name": "app-messages-inbox",
-      "sha256": "caaad7a70be85dd87ea449f81c0640dc0ec3bfbaf9d33bd44f982d85b16049d4",
+      "sha256": "4a25704dcffdd02e81a668333bbf6021a4db568dbe44699ea97beab6f961ed62",
       "size": [
         240,
         175
@@ -67,7 +67,7 @@
     },
     {
       "name": "app-musicplayer",
-      "sha256": "dfd4c343add8d4c182ce6403d80441670a27e846588104678cb9432685ee28f2",
+      "sha256": "fa988b248fb578168afeeeaa7f46f9433aa1a7bbed559cdb603e4096a7018c87",
       "size": [
         240,
         175
@@ -75,7 +75,7 @@
     },
     {
       "name": "app-phonebook",
-      "sha256": "b0659278455ac7fccdbc609c5559c9c2dc00eb261b5c8164a3f3feb2220f9790",
+      "sha256": "9757685c5ce86e1e9cfef9e1e407e989d06d236fe2d681190b020133f927e1b1",
       "size": [
         240,
         175
@@ -83,7 +83,7 @@
     },
     {
       "name": "app-settings",
-      "sha256": "016c400b74570bf0747fd39b2bb2e7cb829a9fb49f041d67cf59fb0972406cb2",
+      "sha256": "65059d5a06e1d52e2af28d18195ae79e8fb9ec457e9df9f182dd4fc2ab7cfdd9",
       "size": [
         240,
         175
@@ -91,7 +91,7 @@
     },
     {
       "name": "app-settings-wallpaper",
-      "sha256": "586fdca8e204a6e54553a3f01bfb5ac859af4efd452fdb13be27fc5a42cec8da",
+      "sha256": "e4111181d228efd60400006588771a20c7461e55b610c109392a660f0c5aa856",
       "size": [
         240,
         175
@@ -99,7 +99,7 @@
     },
     {
       "name": "app-tones",
-      "sha256": "866f60b6037215be1fa385599a750ae74745c89fbe25be3f593c90c6040bac3d",
+      "sha256": "f0ce9e28736c02729c35b0a5e5a7e24605ad97136164a41f918425590d1b2112",
       "size": [
         240,
         175
@@ -107,7 +107,7 @@
     },
     {
       "name": "call-active",
-      "sha256": "a21c277a05c4050e60275b3d9c082187369654a2c441b76bfae9db114070a7b5",
+      "sha256": "5c2ed25985823d6a73c26dc3085cb26e154703b59931acc4b812154cf0f2a6aa",
       "size": [
         240,
         175
@@ -115,7 +115,7 @@
     },
     {
       "name": "call-incoming",
-      "sha256": "15155b686eec0ff4e0e0f980d8c974b33ed6c0d9802a6db07e8e8f2c512b478a",
+      "sha256": "35ed2eb29d1d18db4b5ad6bab46d3a77316aecf27d9aaeedc2f1ef06adc66e93",
       "size": [
         240,
         175
@@ -123,7 +123,7 @@
     },
     {
       "name": "contacts-picker",
-      "sha256": "c87783d47b8723f7f1534e48fdf46e9fa323762e6222f34331442496d0225396",
+      "sha256": "5565a8e172074bb364fce0d586849fe01953d49dc4e7f3eee7e8d3d5436f09b8",
       "size": [
         240,
         175
@@ -131,7 +131,7 @@
     },
     {
       "name": "crash-screen",
-      "sha256": "c0d814c98ccd0bf9d8bfc01124a3fe1984ea5f205df38e2a10311e54890fd0d3",
+      "sha256": "2fa8a850f199e17123918563846938223bfbc1581eeac642a19a0ed6f2c8b1f2",
       "size": [
         240,
         175
@@ -139,7 +139,7 @@
     },
     {
       "name": "eng-cubebench",
-      "sha256": "01f56286161ca93a943f071f0173f0fcc6ec1cefb6172f9e431159aafea3de3f",
+      "sha256": "7dadb05eb890ed63a992d0b64673834d57bbd83cf440368850193dc8344d3ea0",
       "size": [
         240,
         175
@@ -147,7 +147,7 @@
     },
     {
       "name": "eng-fuelgauge",
-      "sha256": "d737f4b4615978a7eb3af2b309a034cad344eebd6cf7783474e682c6ae1404d6",
+      "sha256": "62c37ed8b1392752d998b52a42645aae967c78dde919de4d67a0ad754e3dcc46",
       "size": [
         240,
         175
@@ -155,7 +155,7 @@
     },
     {
       "name": "eng-lcdtest",
-      "sha256": "b62e34d37b56705e1d8a8e458e67cc03596043dadc2c8f22e770f28429d4f5d9",
+      "sha256": "bf80c056346e7456b476bb2aa7bfcc3fac3e9742c7d08c97702c63afc571d1fc",
       "size": [
         240,
         175
@@ -163,7 +163,7 @@
     },
     {
       "name": "eng-modem",
-      "sha256": "a5f76a28dfd28fe19c0d5fdc0b75ecc7e0f297172b83fa99715f115068c84249",
+      "sha256": "428391021ac39aa5d5e004e712b9d28af87942d8a66cd14e342ad20869714823",
       "size": [
         240,
         175
@@ -171,7 +171,7 @@
     },
     {
       "name": "game-memory",
-      "sha256": "bb9d2fbf874b40e16698ed2f50c8be88e53637533fd2dec554b39f887bb4b556",
+      "sha256": "2a6820c7012f50f4ab91e1443dbe70c17d9fcc2b0c3bdfcfa29d93265e4d9445",
       "size": [
         240,
         175
@@ -179,7 +179,7 @@
     },
     {
       "name": "game-snake",
-      "sha256": "c6316fa5bcdc6a2b050d1a49d5a42e772ae1424ba5f6cd4a13f22e7fbddadd98",
+      "sha256": "84aea868f17687f349922c30e8981fa8625975827979e5de2ee5f4d40708e55c",
       "size": [
         240,
         175
@@ -187,7 +187,7 @@
     },
     {
       "name": "home",
-      "sha256": "3b4027df1a59cd8d7de26ab02f6fcbaa2fd4453145ed1319cdcff0c1fcb96054",
+      "sha256": "982d72a2fcf3fe222161a96420e0a0a577ec838239e3b14eaa3da76d6dc4d39e",
       "size": [
         240,
         175
@@ -195,7 +195,7 @@
     },
     {
       "name": "home-dialing",
-      "sha256": "36470db791848d13c0daa1fb3c60c89bbf45d2f1f546f6ca6b199bb77e95d35f",
+      "sha256": "625960c63ca70752420b10574ecce756030eff6292fc039d96a7439ce7e7061f",
       "size": [
         240,
         175
@@ -203,7 +203,7 @@
     },
     {
       "name": "home-nowallpaper",
-      "sha256": "089c6991e2153df2be46da8695c3da7f10f36be6ce12fdcfecf0637efb9b8444",
+      "sha256": "52f33fd81642b1fb3e627bef97178d088c0af6e4645886b689d18a52a94b80ae",
       "size": [
         240,
         175
@@ -211,7 +211,7 @@
     },
     {
       "name": "home-panel",
-      "sha256": "1dc8d7e7614d5d5f9e186e1f1039f2e07e53fe8c6c38baaa7bd368dc3b0f318c",
+      "sha256": "e530ffc383e4a3abdb18d8343e0c0ee3a74953f8cbf79667e4f41becb78ad4e6",
       "size": [
         240,
         240
@@ -219,7 +219,7 @@
     },
     {
       "name": "home-simulation",
-      "sha256": "7d6a3aa80127aadce430195963f04c17043b8729e9e75d7d3481b7da05cd3002",
+      "sha256": "47fd9229986a53246aa074a0ae3959164d43ece903f4a08c041c64bb76188efb",
       "size": [
         240,
         175
@@ -227,7 +227,7 @@
     },
     {
       "name": "home-sms-banner",
-      "sha256": "2daab13cfc0df78fbdcadd1cd6400994077295f23c2bc7832bc1c115d229f7ca",
+      "sha256": "d86ad00b44b98f9796f21b56d7337a250bb307f887357d10f3ebbbc2dcdeedd5",
       "size": [
         240,
         175
@@ -235,7 +235,7 @@
     },
     {
       "name": "menu-browser",
-      "sha256": "b29284cb0b76b89bdc5ada103e9307ba5a4f148b0fe4c6fe6c86efa560064ce5",
+      "sha256": "e445c25282064afa0be72d1b4a6ace7c965889c609773f29e48040d2e86f4a3e",
       "size": [
         240,
         175
@@ -243,7 +243,7 @@
     },
     {
       "name": "menu-calculator",
-      "sha256": "b5162cfc8d5f64b28337efecf041d1bb8b991780cd0b10edef5af4377d9059da",
+      "sha256": "82e44a353b787442f8942aed9dbe01dfc45db23e997ac5c3565fc0545b492e81",
       "size": [
         240,
         175
@@ -251,7 +251,7 @@
     },
     {
       "name": "menu-games",
-      "sha256": "ca4ceb096c14810b8e7d1ae91e174bd320049590900d5f4c9cdf557a42bf2e30",
+      "sha256": "f8b3a40651db1752e066828cdd9c877e5b178c29e6614f6ad6b086efbd93e718",
       "size": [
         240,
         175
@@ -259,7 +259,7 @@
     },
     {
       "name": "menu-koki-mobile",
-      "sha256": "b6b229c127ba4930e3bbb6f039691af13ce6a1d3f14b67436576b02fe19ce3f7",
+      "sha256": "a5ab9ac608910cacf77c853b3d6688487e1ae41e770a65ffde737c229aac6d08",
       "size": [
         240,
         175
@@ -267,7 +267,7 @@
     },
     {
       "name": "menu-messages",
-      "sha256": "8120c961fe416b17e1ec2d8faa1529cbdfdd3fc71ad79cdd93c08fb35f212edf",
+      "sha256": "69fa9138c92e9232266e58e9ae48ad5f3159fe083ead27dbb8e036fea3ed317d",
       "size": [
         240,
         175
@@ -275,7 +275,7 @@
     },
     {
       "name": "menu-music",
-      "sha256": "8e4c99fe0817e06ef5b0a6ded4172bface706b579ea0c21fe606bb602183e398",
+      "sha256": "b26f4a82d3ddab7c3faf00ac651b881e296adf729fc71a8fc204b8e1aa9173a6",
       "size": [
         240,
         175
@@ -283,7 +283,7 @@
     },
     {
       "name": "menu-panel",
-      "sha256": "b7e9cc5adf9abe8ab2b1f7a548ff8e3a37c314736f590d32d40eda62bb62beea",
+      "sha256": "651842238bc0761478438c3ac7281050019e2cbd17463e6b510241f578d967e5",
       "size": [
         240,
         240
@@ -291,7 +291,7 @@
     },
     {
       "name": "menu-phone-book",
-      "sha256": "dba87202ed373a4d137d2e489c197c5bf3dfa61b42a66407e83207fe57be37a3",
+      "sha256": "a545110ae649888d486905d1dcf4caa00b30e62e8da1bc4fd665ada6e0daf54f",
       "size": [
         240,
         175
@@ -299,7 +299,7 @@
     },
     {
       "name": "menu-settings",
-      "sha256": "86e4ba3d6463ac0eeb698e23619ca60145814282fa75f270bd4e9cf105116189",
+      "sha256": "33118d3cc00130aeaaca5622877fe9142c63a4475c39c87cb8cfe57f6353dd02",
       "size": [
         240,
         175
@@ -307,7 +307,7 @@
     },
     {
       "name": "widget-infoscreen",
-      "sha256": "1efa77911dba09c1db717fde14b1e5c206f7fda4721ce3d8c6077aff256509ca",
+      "sha256": "7e297aed2977fc48577e8d03ce9bb2762f9da177583adabfdf6cdf9fb6e3b21d",
       "size": [
         240,
         175
@@ -315,7 +315,7 @@
     },
     {
       "name": "widget-levelselector",
-      "sha256": "985a2507a6e49af30c980725e0043eb210331cac997340293f355742108638c6",
+      "sha256": "eb50e4b4c2b1736b5e49469f66ea7b78017fbeeef814a40abb0fb0ba9dbf9e39",
       "size": [
         240,
         175
@@ -323,7 +323,7 @@
     },
     {
       "name": "widget-messagedialog",
-      "sha256": "08ebd789e9c85146ac871dcf52ed52947944a0671ecd9ee9f0101023206f1339",
+      "sha256": "eda4a6b7aa40f9b68bbf17fc1e12c02fe9a3c507d3247de9512c264ab7faa747",
       "size": [
         240,
         175
@@ -331,7 +331,7 @@
     },
     {
       "name": "widget-pagedlist",
-      "sha256": "67b3c0b6e9446b73d530706395bfe15690dac9de9a2bb1d7cea74d108daf8679",
+      "sha256": "a4e92dd474488e2c53b393de383d60aa4e70d14705795f8dc420c3829f0501b1",
       "size": [
         240,
         175
@@ -339,7 +339,7 @@
     },
     {
       "name": "widget-softkeybar",
-      "sha256": "8819a8fa50dd96a47d897794493e3b6923f18f99de8236b0fb315e78197e63bd",
+      "sha256": "71fb5935c24cbe2ebe6654eb57b24a9e873d15080d70c75009229531ead0f96d",
       "size": [
         240,
         175
@@ -347,7 +347,7 @@
     },
     {
       "name": "widget-textinput",
-      "sha256": "5e11cc2042f486d51a9f56cbbf0dc077af2c02d54ba34801dc0170a6fd2921b5",
+      "sha256": "16b5895226dee0e76afcbed2e0593b46d68b4eccf04c987e216a6b03985c4958",
       "size": [
         240,
         175
@@ -355,7 +355,7 @@
     },
     {
       "name": "widget-textinputlong",
-      "sha256": "1881c5a2ff09667c66e4f59cafc9d104fa86ba23832a102ef98701c9f576724c",
+      "sha256": "58884e4aa21a272eb06da5b2cf1f7ddfc8c6fea6c7d80a3485e2fa4536fc84b8",
       "size": [
         240,
         175
@@ -363,7 +363,7 @@
     },
     {
       "name": "widget-textscroller",
-      "sha256": "90ed590f904d692ffcb6213ad41a04ff63b77db54dcfb600a20adc2f479fd9b3",
+      "sha256": "6d5de4d646dbcf29c41903d2ec23578a498cf62db5ea6dd754a42c2aefcf6fbb",
       "size": [
         240,
         175
@@ -371,7 +371,7 @@
     },
     {
       "name": "widget-verticallist",
-      "sha256": "9038e50a2ad6cf3a442b72d067594eeaa92eccdae4bbb80f937300841ed7eb54",
+      "sha256": "445d4f33bf5fe7c5350b2f45aa954b8b053f572f7e44190219e4841b2ef9db83",
       "size": [
         240,
         175
@@ -379,7 +379,7 @@
     },
     {
       "name": "widget-verticallist-scrolled",
-      "sha256": "a1ab7a91ab371b7f663542a2e17010a9332d91ea6e7beb5fd5f483ba41498cf3",
+      "sha256": "0ba6fe3cc4028b5f739bec96a994eace52726b00224c7c33c692815775971a79",
       "size": [
         240,
         175
