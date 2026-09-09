@@ -136,7 +136,19 @@ qemu_reachable() { [ -S "$(qemu_monitor)" ]; }
 # not a guess: picking one silently is how a test run reports a pass against
 # the thing you were not testing.
 resolve_target() {
-    [ -n "$TARGET" ] && return 0
+    # An EXPLICIT -t is still checked for reachability. Without this the verb
+    # body runs first, and on a backend where it is a stub the caller gets
+    # "not implemented on this backend" (2) for a target that simply is not
+    # running -- which sends them to read the code instead of starting QEMU.
+    # Unreachable beats unimplemented: it is the more specific answer and the
+    # one that is actionable.
+    if [ -n "$TARGET" ]; then
+        case "$TARGET" in
+        hw) hw_reachable || fail 3 "no phone answering at $(hw_addr):$HW_TELNET_PORT" ;;
+        qemu) qemu_reachable || fail 3 "no QEMU monitor at $(qemu_monitor)" ;;
+        esac
+        return 0
+    fi
     _hw=0
     _q=0
     hw_reachable && _hw=1
