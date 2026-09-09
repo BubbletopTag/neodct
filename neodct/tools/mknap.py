@@ -299,6 +299,7 @@ def list_package(path):
     with tarfile.open(path, "r:", format=tarfile.USTAR_FORMAT) as tar:
         members = tar.getmembers()
         manifest = None
+        theme = None
         arches = []
         top_so = False
         for m in members:
@@ -320,11 +321,31 @@ def list_package(path):
                     problems.append("%s: lib/ may only hold lib/<tag>/app.so" % name)
             if name == "manifest.json":
                 manifest = json.loads(tar.extractfile(m).read().decode("utf-8"))
+            if name == "theme.json":
+                theme = json.loads(tar.extractfile(m).read().decode("utf-8"))
             if name == "app.so":
                 top_so = True
             print("  %s  %9d  %s" % (kind, m.size, name))
     if manifest is None:
         problems.append("no manifest.json")
+    elif manifest.get("type", "app") not in ("app", "theme"):
+        problems.append("\"type\": %r is not a kind this phone knows; absent means \"app\""
+                        % manifest.get("type"))
+    elif manifest.get("type", "app") == "theme":
+        # A theme's rules are the app's rules turned round: no code, and a
+        # theme.json that says what it is called. The phone applies exactly
+        # these (nd_nap.c inspect_manifest), so a package that passes here
+        # passes there.
+        if top_so or arches:
+            problems.append("a theme package carries program code")
+        if theme is None:
+            problems.append("no theme.json")
+        elif not theme.get("id"):
+            problems.append("theme.json has no \"id\"")
+        if manifest.get("arch"):
+            problems.append("\"arch\" in a theme's manifest; a theme runs on every phone")
+        print("%s: %s -- theme \"%s\", for every phone" % (
+            path, manifest.get("name"), (theme or {}).get("id", "?")))
     else:
         arch = manifest.get("arch")
         if top_so and not arch:

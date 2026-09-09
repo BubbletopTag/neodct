@@ -1284,10 +1284,14 @@ nd_err nd_nap_install(const char *path, const char *apps_dir, const char *arch, 
     rc = walk(path, install_entry, &ic, why, why_sz);
     if (rc != ND_OK)
         goto fail;
-    if (!ic.wrote_so) {
-        /* Cannot happen after the has_arch check above, but a package
-         * without a program is the one thing that must never be installed,
-         * so it is checked on the writing side too. */
+    if (c.info.kind == ND_NAP_KIND_APP && !ic.wrote_so) {
+        /* Cannot happen after the has_arch check above, but an APP without a
+         * program is the one thing that must never be installed, so it is
+         * checked on the writing side too.
+         *
+         * A theme is the other way round: it must never have written one, and
+         * inspect_manifest() has already refused a theme package that carries
+         * an app.so at all -- so there is nothing left to check here. */
         say(why, why_sz, "Package has no app.so.");
         rc = ND_ERR_INVAL;
         goto fail;
@@ -1383,8 +1387,15 @@ nd_err nd_nap_install(const char *path, const char *apps_dir, const char *arch, 
     if (moved_old)
         rm_rf(old_dir);
 
-    nd_log(ND_LOG_OS, "nap: installed %s (id %d, %s) from %s%s", c.info.name, (int)c.info.id, arch,
-           path, have_old ? ", replacing the earlier version" : "");
+    /* A theme has neither a menu id nor an arch, so naming them would print
+     * two numbers that mean nothing about what was just installed. */
+    if (c.info.kind == ND_NAP_KIND_THEME)
+        nd_log(ND_LOG_OS, "nap: installed the theme %s (%s) from %s%s", c.info.name,
+               c.info.theme_id, path, have_old ? ", replacing the earlier version" : "");
+    else
+        nd_log(ND_LOG_OS, "nap: installed %s (id %d, %s) from %s%s", c.info.name,
+               (int)c.info.id, arch, path,
+               have_old ? ", replacing the earlier version" : "");
     /* After the rename, so the note is only left once the app really is there.
      * This is the one place in the tree that changes which directories carry a
      * manifest.json -- Fetch writes into apps/PSX/ and into untrusted/, and a
