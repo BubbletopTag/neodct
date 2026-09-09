@@ -66,7 +66,8 @@ forever — an overnight run that wedges is a wasted night.
 | `selftest` | run `nd-selftest` and report | exit 2 | **tested** |
 | `record DIR [N]` | N frames into a numbered directory | exit 2 | **tested** |
 | `diff A B` | compare two references | host-side | **tested** |
-| `reboot [recovery]` | restart the phone | exit 2 | written, **not run** |
+| `reboot [recovery]` | restart the phone | exit 2 | **tested** |
+| `watch [--view-only]` | a window that shows the panel and types into it | exit 2 | **tested** |
 | `apps` | installed apps on the card | exit 2 | **tested** |
 | `install PKG.nap` | sideload an app package | exit 2 | **tested** |
 | `uninstall DIR` | remove an installed app | exit 2 | **tested** |
@@ -198,6 +199,38 @@ The repo already ships python3 host tooling (`mkupdate.py`, `uistub.py`,
 `mknap.py`, `goldenframe.py`), so this adds no dependency that was not
 already required to build an image.
 
+## watch: the panel on your desk, and you can type into it
+
+`ndlink watch` opens a VNC window on the panel — and **your keystrokes go to the
+phone**. Arrows navigate, Enter is NaviKey, Backspace is C, `0`–`9`, `*` and `#`
+are themselves, and `m` is MENU. `--view-only` takes the typing away.
+
+**There is deliberately no custom viewer.** nd-vncd forwards RFB key events into
+the devkey channel, so *any* standard VNC client is already a control window:
+`vncviewer`, `gvncviewer`, noVNC in a browser, a VNC app on a tablet. A bespoke
+GUI would have meant maintaining a second RFB client and a second key map to
+arrive at the same place supporting fewer clients. `watch` finds a viewer and
+points it at the phone.
+
+This is the seam the first version of nd-vncd left unwired, and the reason it
+was left is unchanged: **not uinput**. Apps never read `/dev/input`, and
+`nd_input`'s `is_our_injector()` exists so a core cannot read back what it
+wrote. Keys go to the devkey channel, which *is* the core's key source — a key
+from a VNC client is merged into the same queue the i2c matrix feeds, so held
+state, repeat and T9 all behave exactly as they do for a real press.
+
+There is no `ptrAddEvent`. The phone has no pointer, and inventing one would let
+a flow work over VNC that cannot work on the hardware.
+
+**Say the consequence plainly: with keys wired, VNC is no longer a view, it is
+control.** It sits behind the same engineering-mode gate and the same bound
+address as telnet, which already grants everything, so this adds reach rather
+than privilege — but a "screen sharing" port that can also type is worth
+knowing about.
+
+Proved on hardware: three `XK_Down` over RFB walked the menu from item 1 to
+item 4, and `XK_Return` opened Settings.
+
 ## Sideloading
 
 `ndlink install PKG.nap` pushes the package to `/tmp` on the phone and unpacks
@@ -267,8 +300,7 @@ layers away, as the transport losing its framing.
   only way to test any of this and there is no maskrom access tonight, so a
   reboot that did not come back would have ended the session. Test it first
   thing with the link in front of you.
-- **`watch`** — a live view. `nd-vncd` already does this and has its own spec;
-  the verb should wrap it rather than reimplement it.
+- (nothing outstanding from this list)
 - **`ndlinkd`** — a device daemon replacing telnet round trips. Telnet is an
   interactive protocol with no clean status, and it will get old around the
   fiftieth scripted `shot`. The CLI should not be able to tell the difference.

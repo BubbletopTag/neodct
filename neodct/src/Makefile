@@ -397,9 +397,12 @@ $(BINDIR)/neodct_displayd: $(DISPLAYD_OBJS)
 # assembled flag set (WARNINGS + NEODCT_CFLAGS), exactly as DISPLAYD_CFLAGS
 # learned to be, so the cross build buildroot drives is covered and not just a
 # host make. Links libvncserver; its own NEEDED entries pull jpeg/png/lzo/z.
+# -Iinclude because nd-vncd now uses the ND_KEY_* and path CONSTANTS when it
+# forwards keys to the devkey channel. Headers only -- it still links
+# libvncserver and not libneodct, and calls no function from either header.
 VNCD_CFLAGS := $(filter-out -Wconversion -Wsign-conversion, \
 	$(WARNINGS) $(OPTFLAGS) $(SANFLAGS) $(NEODCT_CFLAGS) $(CFLAGS)) \
-	-D_GNU_SOURCE -MMD -MP
+	-Iinclude -D_GNU_SOURCE -MMD -MP
 
 $(OBJDIR)/vncd/%.o: vncd/%.c
 	$(Q)mkdir -p $(dir $@)

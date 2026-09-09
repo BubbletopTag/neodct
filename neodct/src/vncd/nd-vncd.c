@@ -35,8 +35,16 @@
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <linux/fb.h>
 #include <arpa/inet.h>
+
+/* Header-only use: the ND_KEY_* and path constants. nd-vncd deliberately does
+ * not link libneodct (see the header), so nothing here calls a function from
+ * either of these. */
+#include "nd_keycodes.h"
+#include "nd_paths.h"
 
 #include <rfb/rfb.h>
 
@@ -71,6 +79,8 @@ static const char *opt_bind     = "127.0.0.1"; /* SAFE default; see main()     *
 static int         opt_port     = 5900;
 static const char *opt_desktop  = "NeoDCT";
 static int         opt_require_devenv = 0;     /* the gate seam; see main()     */
+static int         opt_view_only = 0;          /* refuse to forward keys        */
+static const char *opt_devkey = ND_PATH_DEVKEY_SOCK;
 
 /* --- run state ----------------------------------------------------------- */
 static volatile sig_atomic_t g_stop = 0;
@@ -239,11 +249,143 @@ static int render_dirty(rfbScreenInfoPtr screen)
     return 1;
 }
 
+/* ------------------------------------------------------------------ *
+ * Keys, forwarded to the core's own key source
+ * ------------------------------------------------------------------ *
+ *
+ * This is the seam the first version left unwired, now that the thing it was
+ * waiting for exists. The reasoning it was left for has not changed and is
+ * worth restating, because the obvious implementation is still wrong:
+ *
+ *   NOT uinput. Apps never read /dev/input -- the core reads the keypad and
+ *   hands each app a pipe -- and nd_input's is_our_injector() refuses the
+ *   core's own uinput device precisely so a core cannot read back what it
+ *   wrote. A uinput device created here would reach nothing.
+ *
+ *   The devkey channel instead, which IS the core's key source: a datagram
+ *   arriving there is merged into the same queue the i2c matrix and the evdev
+ *   descriptor feed, so a key sent from a VNC client is indistinguishable
+ *   from a key pressed on the phone. Held state, repeat and T9 all behave.
+ *
+ * The consequence worth stating plainly: with this wired, VNC is no longer a
+ * view. It is control. That is the point -- a phone whose keypad expander has
+ * lost its solder joint is otherwise undrivable -- but it means the VNC port
+ * grants what telnet already grants, which is everything. Both sit behind the
+ * same engineering-mode gate and the same bound address, so this adds reach
+ * rather than privilege. --view-only declines it.
+ *
+ * RFB hands us press and release separately, which is exactly what the channel
+ * wants: sending only presses would leave keys held, and held state is real
+ * state that widgets read.
+ */
+
+static int devkey_fd = -1;
+
+/* Connect lazily and re-connect on failure. nd-vncd is started by
+ * S42debuglan and the socket is created by the UI, so which comes first is not
+ * ours to decide -- a phone where the UI is still starting must not leave this
+ * permanently keyless. */
+static bool devkey_ready(void)
+{
+    struct sockaddr_un addr;
+
+    if (devkey_fd >= 0)
+        return true;
+    if (opt_view_only)
+        return false;
+    if (strlen(opt_devkey) >= sizeof addr.sun_path)
+        return false;
+
+    devkey_fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (devkey_fd < 0)
+        return false;
+    memset(&addr, 0, sizeof addr);
+    addr.sun_family = AF_UNIX;
+    (void)snprintf(addr.sun_path, sizeof addr.sun_path, "%s", opt_devkey);
+    if (connect(devkey_fd, (const struct sockaddr *)&addr, sizeof addr) != 0) {
+        (void)close(devkey_fd);
+        devkey_fd = -1;
+        return false;
+    }
+    return true;
+}
+
+/* X11 keysym -> NeoDCT keycode, or -1 for a key this phone does not have.
+ *
+ * Deliberately small. Every entry is a key somebody will actually press at a
+ * VNC client, and the phone has sixteen -- mapping a full keyboard onto it
+ * would invent keys the hardware cannot produce and make a flow that works
+ * over VNC fail on the keypad. LEFT and RIGHT are here because the codes
+ * exist and a dev keyboard can send them, not because the phone has them. */
+static int32_t keysym_to_code(rfbKeySym k)
+{
+    switch (k) {
+    case 0xFF52: return ND_KEY_UP;      /* XK_Up        */
+    case 0xFF54: return ND_KEY_DOWN;    /* XK_Down      */
+    case 0xFF51: return ND_KEY_LEFT;    /* XK_Left      */
+    case 0xFF53: return ND_KEY_RIGHT;   /* XK_Right     */
+    case 0xFF0D:                        /* XK_Return    */
+    case 0xFF8D: return ND_KEY_NAVIKEY; /* XK_KP_Enter  */
+    case 0xFF08:                        /* XK_BackSpace */
+    case 0xFF1B: return ND_KEY_CLEAR;   /* XK_Escape    */
+    case 0x0020: return ND_KEY_SPACE;
+    case 0x002A: return ND_KEY_STAR;    /* '*' */
+    case 0x0023: return ND_KEY_HASH;    /* '#' */
+    case 0x002D: return ND_KEY_MINUS;   /* '-' */
+    case 0x002E: return ND_KEY_DOT;     /* '.' */
+    case 0x002C: return ND_KEY_COMMA;   /* ',' */
+    case 0x0031: return ND_KEY_1;
+    case 0x0032: return ND_KEY_2;
+    case 0x0033: return ND_KEY_3;
+    case 0x0034: return ND_KEY_4;
+    case 0x0035: return ND_KEY_5;
+    case 0x0036: return ND_KEY_6;
+    case 0x0037: return ND_KEY_7;
+    case 0x0038: return ND_KEY_8;
+    case 0x0039: return ND_KEY_9;
+    case 0x0030: return ND_KEY_0;
+    /* 'm' and 'M' for the menu key, which the phone's keypad does not have
+     * either -- the home screen's "Menu" label is NaviKey. Useful from a
+     * keyboard, and marked the same way nd-key --list marks it. */
+    case 0x006D:
+    case 0x004D: return ND_KEY_MENU;
+    default: return -1;
+    }
+}
+
+static void on_key(rfbBool down, rfbKeySym key, rfbClientPtr cl)
+{
+    char msg[32];
+    int32_t code;
+    int n;
+
+    (void)cl;
+    if (opt_view_only)
+        return;
+    code = keysym_to_code(key);
+    if (code < 0)
+        return;
+    if (!devkey_ready())
+        return;
+
+    n = snprintf(msg, sizeof msg, "%d %d", (int)code, down ? 1 : 0);
+    if (n < 0 || (size_t)n >= sizeof msg)
+        return;
+    if (send(devkey_fd, msg, (size_t)n, 0) != (ssize_t)n) {
+        /* The UI restarted, or the socket went away. Drop the descriptor so
+         * the next key reconnects rather than silently going nowhere. */
+        (void)close(devkey_fd);
+        devkey_fd = -1;
+    }
+}
+
 int main(int argc, char **argv)
 {
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--swap-rb"))  opt_swap_rb = 1;
         else if (!strcmp(argv[i], "--require-devenv")) opt_require_devenv = 1;
+        else if (!strcmp(argv[i], "--view-only")) opt_view_only = 1;
+        else if (!strcmp(argv[i], "--devkey") && i + 1 < argc) opt_devkey = argv[++i];
         else if (!strcmp(argv[i], "--fps")  && i + 1 < argc) opt_fps  = (uint32_t)strtoul(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--bind") && i + 1 < argc) opt_bind = argv[++i];
         else if (!strcmp(argv[i], "--port") && i + 1 < argc) opt_port = (int)strtol(argv[++i], NULL, 10);
@@ -256,6 +398,8 @@ int main(int argc, char **argv)
                 "  --fps N       frames/sec when a client is attached (default 10)\n"
                 "  --swap-rb     invert the detected red/blue order\n"
                 "  --name STR    VNC desktop name (default NeoDCT)\n"
+                "  --view-only   watch without being able to press anything\n"
+                "  --devkey PATH the key channel to forward presses to\n"
                 "  --require-devenv  refuse to start without /etc/neodct-devenv\n");
             return 2;
         }
@@ -350,7 +494,13 @@ int main(int argc, char **argv)
      * unix socket, gated on /etc/neodct-devenv) that nd_input polls alongside
      * the matrix. When that exists, wiring screen->kbdAddEvent to it is a dozen
      * lines and drives the home screen, the app selector and every app through
-     * the one path. Until then: no kbdAddEvent, no ptrAddEvent. View-only. */
+     * the one path.
+     *
+     * THAT CHANNEL NOW EXISTS, so the hook is wired: see on_key() above. There
+     * is still no ptrAddEvent -- the phone has no pointer and inventing one
+     * would let a flow work over VNC that cannot work on the hardware. */
+    if (!opt_view_only)
+        screen->kbdAddEvent = on_key;
 
     rfbInitServer(screen);
     if (!rfbIsActive(screen)) {
@@ -364,8 +514,12 @@ int main(int argc, char **argv)
     signal(SIGTERM, on_signal);
     signal(SIGPIPE, SIG_IGN);
 
-    printf("nd-vncd: serving %dx%d on %s:%d at %u fps (view-only)\n",
-           FB_W, FB_H, opt_bind, opt_port, opt_fps);
+    printf("nd-vncd: serving %dx%d on %s:%d at %u fps (%s)\n",
+           FB_W, FB_H, opt_bind, opt_port, opt_fps,
+           opt_view_only ? "view-only" : "keys forwarded to the phone");
+    if (!opt_view_only)
+        printf("nd-vncd: keys go to %s -- arrows, Enter=NaviKey, Backspace=C, "
+               "0-9, * and #\n", opt_devkey);
     printf("nd-vncd: note -- fb0 keeps its last image while the panel backlight "
            "is asleep, so a 'frozen' screen here may just be a sleeping phone\n");
     fflush(stdout);

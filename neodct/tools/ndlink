@@ -622,6 +622,52 @@ verb_update() {
     return 0
 }
 
+# watch -- a window showing the panel that also types into it.
+#
+# There is deliberately NO custom viewer here. nd-vncd forwards RFB key events
+# into the devkey channel, which means ANY standard VNC client is already a
+# control window: vncviewer, gvncviewer, noVNC in a browser, a VNC app on a
+# tablet. Writing a bespoke GUI would have meant maintaining a second RFB
+# client and a second key map to arrive at the same place with fewer clients
+# supported.
+#
+# So this finds a viewer and points it at the phone. --view-only asks nd-vncd's
+# side of that, not the client's, because a client-side "view only" is a
+# promise the client makes and this one is enforced where the keys would land.
+verb_watch() {
+    _w_viewonly=0
+    [ "${1:-}" = "--view-only" ] && { _w_viewonly=1; shift; }
+    case "$TARGET" in
+    hw) ;;
+    qemu) fail 2 "watch on qemu: run_qemu.sh already has a window" ;;
+    esac
+
+    _w_port=5900
+    port_open "$(hw_addr)" "$_w_port" || fail 3 \
+        "nothing listening on $(hw_addr):$_w_port -- is engineering mode on?"
+
+    if [ "$_w_viewonly" = 1 ]; then
+        hw_shell "killall nd-vncd 2>/dev/null; sleep 1; $(remote_tool nd-vncd) --bind $(hw_addr) --fps 10 --view-only >/dev/null 2>&1 &" >/dev/null 2>&1 || true
+        sleep 2
+    fi
+
+    _w_addr="$(hw_addr):$_w_port"
+    for _w_v in vncviewer gvncviewer vinagre remmina; do
+        if command -v "$_w_v" >/dev/null 2>&1; then
+            emit_ok watch "\"viewer\":\"$_w_v\",\"address\":\"$_w_addr\",\"input\":$([ "$_w_viewonly" = 1 ] && printf false || printf true)"
+            if [ "$JSON" != 1 ]; then
+                printf 'opening %s on %s\n' "$_w_v" "$_w_addr"
+                [ "$_w_viewonly" = 1 ] || printf 'Keys go to the phone: arrows, Enter=NaviKey, Backspace=C, 0-9, * and #\n'
+            fi
+            # Replace this process: the viewer is the point, and leaving ndlink
+            # in the middle would hold the target lock for as long as the
+            # window is open.
+            exec "$_w_v" "$_w_addr"
+        fi
+    done
+    fail 6 "no VNC client found (tried vncviewer, gvncviewer, vinagre, remmina)"
+}
+
 verb_selftest() {
     case "$TARGET" in
     hw) _st=$(hw_shell "$(remote_tool nd-selftest) 2>&1") || true ;;
@@ -1002,6 +1048,7 @@ Verbs built so far:
   state                version, RAM, card, backlight, battery (JSON)
   bugreport [OUT]      one tarball: state, logs, dmesg, screenshot, selftest
   selftest             run nd-selftest and report
+  watch [--view-only]  a window showing the panel that also types into it
   apps                 installed apps on the card
   install PKG.nap      sideload an app package
   uninstall DIR        remove an installed app
@@ -1096,6 +1143,7 @@ logs) verb_logs "$@" ;;
 state) verb_state "$@" ;;
 bugreport) verb_bugreport "$@" ;;
 selftest) verb_selftest "$@" ;;
+watch) verb_watch "$@" ;;
 install) verb_install "$@" ;;
 uninstall) verb_uninstall "$@" ;;
 apps) verb_apps "$@" ;;
