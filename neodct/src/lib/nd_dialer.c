@@ -102,30 +102,6 @@ static int32_t floordiv2(int32_t v)
 }
 
 /* ------------------------------------------------------------------ *
- * call_screen._draw_handset_icon
- * ------------------------------------------------------------------ */
-
-/* "Simple fallback icon (you can replace with a PNG later)" -- the Python's
- * own words. Three rectangles: an outline silhouette and the ear and mouth
- * blocks. Called with (8, 10), so the outline lands at (8,12)-(26,20). */
-static void draw_handset_icon(nd_ui *ui, int32_t x, int32_t y)
-{
-    /* Still three rectangles at the same coordinates -- an outline silhouette
-     * and the ear and mouth blocks -- so the icon occupies exactly the pixels
-     * it did. It is green rather than white because this one only ever appears
-     * on a call that is up, and green is what that means everywhere else on
-     * this phone. */
-    nd_theme_plate p = nd_theme_plate_blue(2);
-
-    p.top = ND_TH_GREEN_TOP;
-    p.bot = ND_TH_GREEN_BOT;
-    p.drop_shadow = false;
-    nd_theme_plate_draw(ui->canvas, ND_RECT(x, y + 2, x + 18, y + 10), &p);
-    nd_theme_fill(ui->canvas, ND_RECT(x + 1, y + 3, x + 5, y + 5), ND_TH_CHROME_HI, 220u);
-    nd_theme_fill(ui->canvas, ND_RECT(x + 13, y + 7, x + 17, y + 9), ND_TH_CHROME_HI, 220u);
-}
-
-/* ------------------------------------------------------------------ *
  * call_screen._fit_text -- the binary-search fitter
  * ------------------------------------------------------------------ */
 
@@ -335,9 +311,16 @@ static void draw_call_frame(nd_ui *ui, const char *number, const char *label, in
      * clear rows 0..content_bottom only. call_screen.py:118. */
     nd_ui_paint_chrome_full(ui);
 
-    draw_handset_icon(ui, 8, 10);
-
-    /* The top-right clock is COMMENTED OUT at call_screen.py:125-127 and the
+    /* NOTHING IN THE TOP-LEFT CORNER.
+     *
+     * There was a "handset glyph" here -- three rectangles the Python called
+     * a "simple fallback icon (you can replace with a PNG later)". It was
+     * never replaced and it never belonged: at 19x9 on a 240 px panel it does
+     * not read as a handset, and on the in-call screen the caller's number
+     * and the running timer already say what the screen is. Removed at the
+     * owner's request.
+     *
+     * The top-right clock is COMMENTED OUT at call_screen.py:125-127 and the
      * home layout's own clock element is rendered at the bottom of the
      * function instead. Both are ported: nothing here, one there. */
 

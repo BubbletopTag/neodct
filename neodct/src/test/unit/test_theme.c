@@ -60,11 +60,19 @@ static void test_the_built_in_is_active_before_anything_is_loaded(void)
     const nd_theme_palette *p = nd_theme_pal;
 
     CHECK(p == nd_theme_palette_builtin());
-    CHECK_INT(p->blue_top.r, 0x2A);
-    CHECK_INT(p->blue_top.g, 0x9B);
-    CHECK_INT(p->blue_top.b, 0xE8);
-    CHECK_INT(p->scrim_top_a, 96);
-    CHECK_INT(p->sheen_a, 110);
+    /* The built-in is the CLASSIC look: white type on black, one ink, no
+     * gloss. Asserted by its two most characteristic values rather than by
+     * every field -- the signature colour is white because the selection is
+     * an inverted row, and the background is black. */
+    CHECK_INT(p->blue_top.r, 0xFF);
+    CHECK_INT(p->blue_top.g, 0xFF);
+    CHECK_INT(p->blue_top.b, 0xFF);
+    CHECK_INT(p->sky_top.r, 0x00);
+    CHECK_INT(p->sky_bot.b, 0x00);
+    CHECK_INT(p->ink_light.r, 0xFF);
+    CHECK(!nd_theme_style_of->gloss);
+    CHECK(!nd_theme_style_of->round);
+    CHECK(nd_theme_style_of->pixel_font);
     CHECK_STR(nd_theme_active()->id, ND_THEME_ID_BUILTIN);
 }
 
@@ -82,10 +90,17 @@ static void test_an_absent_colour_keeps_the_built_in_value(void)
     CHECK_STR(t.id, "partial");
     CHECK_INT(t.palette.blue_top.r, 0xFF);
     CHECK_INT(t.palette.blue_top.g, 0x00);
-    /* untouched */
-    CHECK_INT(t.palette.blue_bot.r, 0x0A);
-    CHECK_INT(t.palette.sky_top.r, 0x9E);
-    CHECK_INT(t.palette.scrim_top_a, 96);
+    /* Untouched -- and compared against the BUILT-IN rather than against the
+     * literal it currently holds. The claim is "a field the file did not
+     * mention keeps the built-in value", so saying it that way means changing
+     * the built-in does not falsify a test about inheritance. */
+    {
+        const nd_theme_palette *b = nd_theme_palette_builtin();
+
+        CHECK_INT(t.palette.blue_bot.r, b->blue_bot.r);
+        CHECK_INT(t.palette.sky_top.r, b->sky_top.r);
+        CHECK_INT(t.palette.scrim_top_a, b->scrim_top_a);
+    }
 }
 
 /* An id is the one thing a theme cannot do without: it is what the setting
@@ -128,8 +143,9 @@ static void test_a_bad_colour_keeps_the_default_and_the_theme_still_loads(void)
                                            "\"blue_bot\":\"#00FF00\"}}");
 
     CHECK_INT(nd_theme_read(dir, &t), ND_OK);
-    CHECK_INT(t.palette.blue_top.r, 0x2A); /* the built-in survived */
-    CHECK_INT(t.palette.blue_bot.g, 0xFF); /* the good one landed   */
+    /* the built-in survived the bad value, and the good one landed */
+    CHECK_INT(t.palette.blue_top.r, nd_theme_palette_builtin()->blue_top.r);
+    CHECK_INT(t.palette.blue_bot.g, 0xFF);
 }
 
 /* Out of range is clamped, not refused: "300" means "as hard as it goes". */

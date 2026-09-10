@@ -55,18 +55,6 @@ def _read_keypress(fd, timeout=0.10):
     return None
 
 
-def _draw_handset_icon(draw, x, y):
-    """
-    Simple fallback icon (you can replace with a PNG later).
-    Draws a tiny handset-like shape.
-    """
-    # Outer silhouette
-    draw.rectangle((x, y + 2, x + 18, y + 10), outline="white")
-    # "ear" and "mouth" blocks
-    draw.rectangle((x + 1, y + 3, x + 5, y + 5), fill="white")
-    draw.rectangle((x + 13, y + 7, x + 17, y + 9), fill="white")
-
-
 def _fit_text(ui, text, max_width, prefer_font):
     """
     If text doesn't fit, fall back to a smaller font or truncate with '…'.
@@ -117,9 +105,12 @@ def draw_call_screen(ui, number, name=None):
     # Clear full screen
     ui.draw.rectangle((0, 0, screen_w, screen_h), fill="black")
 
-    # --- Top left: handset icon (placeholder) ---
-    # (You can replace this with a PNG later)
-    _draw_handset_icon(ui.draw, 8, 10)
+    # No icon in the top-left corner. There was a placeholder handset drawn
+    # here -- a rectangle with two smaller ones inside it, its own docstring
+    # calling it "a simple fallback icon (you can replace with a PNG later)".
+    # It was never part of the design, no screen on the phone has an icon in
+    # that corner, and the C port copied it faithfully because this file is
+    # the reference. Both are gone.
 
     # --- Top right: CLOCK ---
    # clock_text = time.strftime("%H:%M")

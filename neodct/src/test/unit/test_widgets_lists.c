@@ -41,6 +41,7 @@
 #include <unistd.h>
 
 #include "nd_capture.h"
+#include "themeprobe_test.h"
 #include "uifont_test.h"
 #include "nd_draw.h"
 #include "nd_font.h"
@@ -404,13 +405,17 @@ static void test_golden_levelselector(fixture *fx)
      * whatever the scroller left is still in this frame. Reproduce the
      * INHERITED strip, not an "OK".
      *
-     * It says "Back" and not "More". nd_scroller shows its back label on the
-     * LAST page and its more label otherwise, and the snake help text used to
-     * need two pages on the pixel face; on the UI face the same words fit on
-     * one, so the scroller before this frame ends on its last page. The
-     * scroller's paging itself is covered in test_widgets_text. */
+     * It says "More" and not "Back". nd_scroller shows its back label on the
+     * LAST page and its more label otherwise, and the snake help text needs
+     * two pages on the PIXEL face -- which is the face the built-in theme
+     * uses -- so the scroller before this frame is still on page one. A
+     * theme that ships a proportional face fits the same words on one page
+     * and the strip reads "Back" there instead; that is a difference in the
+     * theme, not in the widget, and the golden is captured with the
+     * built-in. The scroller's paging itself is covered in
+     * test_widgets_text. */
     nd_softkey_init(&bar, &fx->ui, false);
-    nd_softkey_update(&bar, "Back", false);
+    nd_softkey_update(&bar, "More", false);
 
     nd_levelsel_init(&sel, &fx->ui, 3, 9, "Level", 6);
     CHECK_INT(sel.count, 9);
@@ -632,81 +637,111 @@ static int32_t strip_drawn(const nd_image *img, const nd_image *bg)
     return n;
 }
 
-/* A glossy plate -- a selection lozenge, a title bar, a scrollbar thumb -- as
- * a predicate rather than a value.
+/* A plate -- a selection lozenge, a title bar, a scrollbar thumb -- as a
+ * predicate rather than a value.
  *
- * ============ WHAT ACTUALLY SEPARATES A PLATE FROM ITS GROUND ============
+ * ============ WHAT SEPARATES A PLATE FROM ITS GROUND, IN ANY THEME ========
  *
- * Not brightness, and not "is it blue". The ground is ND_TH_SKY_*, which is
- * itself a blue gradient, and it is BRIGHTER than most of a plate rather than
- * darker -- a lozenge over the sky measures (95,172,229) against a background
- * of (91,141,173) at the same row. Both of those obvious tests were tried and
- * both answer yes to the empty screen.
+ * Not brightness, and not "is it blue". These probes used to test for blue
+ * saturation, because the look that was compiled in was a glass one and its
+ * plates really were the bluest thing on the screen. That is a fact about
+ * ONE theme. The built-in look is the flat classic face now -- a white
+ * lozenge on black -- and every one of those probes answered no to it.
  *
- * What is true of every plate and of nothing else on the screen is that it is
- * far more SATURATED toward blue than the ground: its blue channel leads its
- * red by a much wider margin. Measured on the shipped palette over the sky:
+ * What is true of a plate under any theme is that it is painted in the
+ * theme's SIGNATURE colour: the blue_hi..blue_deep family, which the classic
+ * face spells as white and a pink one spells as pink. So a plate pixel is
+ * one that was drawn AND that landed nearer the signature family than the
+ * ground it covered. That is theme-independent by construction and it holds
+ * for the two cases these tests care about separating:
  *
- *     lozenge / thumb body   b - r  =  112 .. 174   (ground: ~80)
- *     the plate's border     b - r  =   98 .. 102
- *     its two-row shadow     b - r  =   91
- *     a scrollbar groove     b - r  =   89
+ *     built-in   lozenge/thumb  (255,255,255) vs ground (0,0,0)
+ *                               -- 0 from the signature, 255 from the ground
+ *                scrollbar track (90,90,90)   vs ground (0,0,0)
+ *                               -- 165 from the signature, 90 from the ground
  *
- * So the body clears the ground by thirty or more and the three DARK parts of
- * a plate -- border, shadow, groove -- do not. Thirty is the gap, and it is
- * measured rather than chosen.
+ * so the thumb is a plate and the groove it rides in is not, which is the
+ * distinction every assertion below is actually making.
  *
- * A plate's FIRST TWO AND LAST ROWS are its border and its white bevel, and
- * neither is body: sample at least two rows inside whatever is being asked
- * about, which is why every call below does. */
+ * A plate's border and bevel rows are NOT its fill and do not answer yes:
+ * sample at least two rows inside whatever is being asked about, which is
+ * why every call below does. */
+
 /* Anything at all was drawn here. */
 static bool is_drawn(const nd_image *img, const nd_image *bg, int32_t x, int32_t y)
 {
     return !px_is_bg(img, bg, x, y);
 }
 
-#define PLATE_SATURATION 30
-
-/* How much bluer than its ground this pixel is. Negative for the near-white
- * parts of a plate, which is what the bevel test below relies on. */
-static int32_t blue_lead(const nd_image *img, const nd_image *bg, int32_t x, int32_t y)
+/* How far this colour is from the nearest member of the theme's signature
+ * family -- the five shades a plate is filled with. */
+static int32_t sig_dist(nd_color c)
 {
-    nd_color c = nd_image_get_px(img, x, y);
-    nd_color b = nd_image_get_px(bg, x, y);
+    const nd_color sig[5] = {ND_TH_BLUE_HI, ND_TH_BLUE_TOP, ND_TH_BLUE_MID, ND_TH_BLUE_BOT,
+                             ND_TH_BLUE_DEEP};
+    int32_t best = 255;
+    size_t i;
 
-    return ((int32_t)c.b - (int32_t)c.r) - ((int32_t)b.b - (int32_t)b.r);
+    for (i = 0; i < ND_ARRAY_LEN(sig); i++) {
+        int32_t d = nd_tp_dist(c, sig[i]);
+
+        if (d < best)
+            best = d;
+    }
+    return best;
 }
+
+/* How far a plate's fill is allowed to drift from the family it is mixed
+ * from. A fill is a gradient BETWEEN two of the five, so it never leaves
+ * their neighbourhood; the things that must not be mistaken for one are
+ * further out than this by a wide margin. Measured on the built-in, where
+ * the family is white and the scrollbar is the hardest case on the screen:
+ *
+ *     thumb fill      (255,255,255)     0 from the family
+ *     track hairline  (153,153,153)   102     -- chrome_hi at 60% coverage
+ *     track groove    ( 90, 90, 90)   165
+ *
+ * Forty is nowhere near either of the two that have to be excluded, and a
+ * fill that drifted forty from every shade it is mixed from would not be
+ * the theme's colour any more. */
+#define PLATE_TOLERANCE 40
 
 static bool is_plate(const nd_image *img, const nd_image *bg, int32_t x, int32_t y)
 {
+    nd_color c;
+    int32_t d;
+
     if (px_is_bg(img, bg, x, y))
         return false;
-    return blue_lead(img, bg, x, y) >= PLATE_SATURATION;
+    c = nd_image_get_px(img, x, y);
+    d = sig_dist(c);
+    /* Near the family AND nearer it than the ground it covers. The second
+     * half matters for a theme whose sky is itself close to one of the five:
+     * a translucent groove over it lands near both, and only the ground is
+     * what it actually is. */
+    return d <= PLATE_TOLERANCE && d < nd_tp_dist(c, nd_image_get_px(bg, x, y));
 }
 
-/* ============ THE BEVEL IS WHERE THE PLATE STARTS ============
+/* The first row of a plate's FILL in column x, searching down from y0.
+ * -1 when the column carries no plate at all in that span.
  *
- * nd_theme.h idea 3: every plate draws a white hairline ONE ROW INSIDE its
- * top edge. It is the only near-white part of a plate, so against a blue
- * ground its blue-minus-red delta goes sharply NEGATIVE -- measured at -30 to
- * -67 on the shipped palette, against +14 to +33 for the border above it and
- * +2 to +98 for the body below.
- *
- * That makes it the most precise thing on the screen to pin a plate's
- * position with: exactly one row below the top edge, one row tall, present on
- * every plate at every size. A gradient body's saturation varies with where
- * on the screen it lands -- the same thumb reads +98 at the top of the track
- * and +64 at the bottom -- so probing the body is how a test ends up with a
- * threshold that works for one scroll position and not the next.
- *
- * The threshold is generous because the bevel's own colour is constant
- * (197,227,248) while the GROUND's saturation is not: the same hairline reads
- * -30 against the sky at row 41 and -18 against it at row 1. Anything
- * negative at all is a bevel, since every other part of a plate -- border
- * +14, shadow +1, groove +3, body +29 and up -- sits on the positive side. */
-static bool is_plate_bevel(const nd_image *img, const nd_image *bg, int32_t x, int32_t y)
+ * This is what pins a plate's position to the pixel. It replaces a probe
+ * that looked for the white hairline a glossy theme draws one row inside its
+ * top edge: that hairline is decoration and a flat theme has none, but every
+ * theme's plate has a first filled row and it is the same row of the same
+ * rectangle. ND_TP_FILL_INSET is how many rows the decoration costs -- two
+ * for a bevelled theme, whose plate spends its top edge on a dark border and
+ * the row under it on the hairline, and none for a flat one. */
+static int32_t plate_fill_top(const nd_image *img, const nd_image *bg, int32_t x, int32_t y0,
+                              int32_t y1)
 {
-    return blue_lead(img, bg, x, y) <= -10;
+    int32_t y;
+
+    for (y = y0; y <= y1; y++) {
+        if (is_plate(img, bg, x, y))
+            return y;
+    }
+    return -1;
 }
 
 static void test_softkey(void)
@@ -866,12 +901,19 @@ static void test_vlist_layout(void)
     CHECK(!row_is_selection_bar(fx.canvas, bg, 72));
     CHECK(!row_is_selection_bar(fx.canvas, bg, 39));
 
-    /* The body is the theme's blue and the two rows under it are the shadow:
-     * drawn, and DARKER than the ground rather than lighter. Getting these
-     * the wrong way round would be a lozenge that glows downward. */
+    /* The body is the theme's signature colour. The two rows under it are
+     * its drop shadow -- drawn, and NOT body, so a lozenge that glowed
+     * downward instead of casting would fail here -- but only in a theme
+     * that casts one at all. The flat face does not, and the same two rows
+     * have to come back clean there: a shadow leaking out of a theme that
+     * switched it off is exactly the kind of thing this suite is for. */
     CHECK(is_plate(fx.canvas, bg, 120, 55));
-    CHECK(is_drawn(fx.canvas, bg, 120, 70));
-    CHECK(!is_plate(fx.canvas, bg, 120, 70));
+    if (ND_TH_PLATE_SHADOW) {
+        CHECK(is_drawn(fx.canvas, bg, 120, 70));
+        CHECK(!is_plate(fx.canvas, bg, 120, 70));
+    } else {
+        CHECK(!is_drawn(fx.canvas, bg, 120, 70));
+    }
 
     list.selected_index = 1u;
     nd_vlist_draw(&list);
@@ -885,21 +927,32 @@ static void test_vlist_layout(void)
     CHECK(row_is_selection_bar(fx.canvas, bg, 135));
     CHECK(!row_is_selection_bar(fx.canvas, bg, 138));
 
-    /* The title bar occupies rows 0..29 across the FULL width and the content
-     * starts below it. It was a one-pixel white rule at row 30 with black
-     * either side of it; the plate is the rule now, so what is asserted is
-     * that the bar is there, that it reaches both edges, and that row 33 --
-     * clear of the plate and of the three-row shadow it casts -- is not part
-     * of it. */
-    CHECK(is_drawn(fx.canvas, bg, 0, 29));
-    CHECK(is_drawn(fx.canvas, bg, 239, 29));
-    CHECK(is_drawn(fx.canvas, bg, 0, 0));
-    CHECK(is_drawn(fx.canvas, bg, 239, 0));
-    /* Its top edge, to the pixel. Sampled at x=120 and not at x=0: a plate's
-      * BORDER is drawn last and covers the whole of its outermost columns, so
-      * at x=0 row 1 is border rather than bevel. */
-    CHECK(is_plate_bevel(fx.canvas, bg, 120, 1));
-    CHECK(!is_drawn(fx.canvas, bg, 0, 36));     /* clear of the bar and its shadow */
+    /* The title bar occupies rows 0..29 and the content starts below it.
+     *
+     * WHETHER ANYTHING IS PAINTED THERE IS THE THEME'S BUSINESS. A glass
+     * theme lays a full-width plate over those rows; the flat face leaves
+     * them the background and lets the title's white type stand on it, which
+     * is why its corners read as untouched. Asserting "the bar reaches both
+     * edges" unguarded is how a correct flat theme fails a test about a
+     * decoration it does not have -- so each look asserts its own, and both
+     * assert the two things that hold either way: the title's ink is in
+     * there, and row 36, clear of the bar and of any shadow it casts, is
+     * not part of it. */
+    CHECK(!row_is_bg(fx.canvas, bg, 12));   /* the title's ink */
+    CHECK(!is_drawn(fx.canvas, bg, 0, 36)); /* clear of the bar and its shadow */
+    if (nd_tp_bars_painted()) {
+        /* Full width, and starting at row 0 rather than an inch down it. */
+        CHECK(is_drawn(fx.canvas, bg, 0, 29));
+        CHECK(is_drawn(fx.canvas, bg, 239, 29));
+        CHECK(is_drawn(fx.canvas, bg, 0, 0));
+        CHECK(is_drawn(fx.canvas, bg, 239, 0));
+    } else {
+        /* Nothing but the type: the corners of the strip are background. */
+        CHECK(!is_drawn(fx.canvas, bg, 0, 29));
+        CHECK(!is_drawn(fx.canvas, bg, 239, 29));
+        CHECK(!is_drawn(fx.canvas, bg, 0, 0));
+        CHECK(!is_drawn(fx.canvas, bg, 239, 0));
+    }
 
     /* The scrollbar. The track is centred on column 235 as it always was --
      * five columns wide now rather than one, so 233..237 -- and the thumb is
@@ -912,7 +965,7 @@ static void test_vlist_layout(void)
      * fails if the arithmetic changes and not merely if the pixels move. */
     list.selected_index = 0u;
     nd_vlist_draw(&list);
-    CHECK(is_plate_bevel(fx.canvas, bg, 235, 41)); /* thumb top edge = 40 */
+    CHECK_INT(plate_fill_top(fx.canvas, bg, 235, 36, 140), 40 + ND_TP_FILL_INSET);
     CHECK(is_plate(fx.canvas, bg, 235, 50));
     CHECK(!is_plate(fx.canvas, bg, 235, 60));
     /* The track is drawn its whole length -- a recessed groove, which is what
@@ -927,7 +980,7 @@ static void test_vlist_layout(void)
     /* At the last item the thumb is at the bottom: top edge 40 + 5*17 = 125. */
     list.selected_index = 5u;
     nd_vlist_draw(&list);
-    CHECK(is_plate_bevel(fx.canvas, bg, 235, 126));
+    CHECK_INT(plate_fill_top(fx.canvas, bg, 235, 36, 140), 125 + ND_TP_FILL_INSET);
     CHECK(is_plate(fx.canvas, bg, 235, 137));
     CHECK(!is_plate(fx.canvas, bg, 235, 50));
 
@@ -1032,8 +1085,8 @@ static void test_vlist_notch_truncates(void)
     nd_vlist_init(&list, &fx.ui, "T", SEVEN, ND_ARRAY_LEN(SEVEN), 9);
     list.selected_index = 1u;
     nd_vlist_draw(&list);
-    CHECK(!is_plate(fx.canvas, bg, 235, 50));      /* track, not thumb */
-    CHECK(is_plate_bevel(fx.canvas, bg, 235, 55)); /* thumb top edge = 54 */
+    CHECK(!is_plate(fx.canvas, bg, 235, 50)); /* track, not thumb */
+    CHECK_INT(plate_fill_top(fx.canvas, bg, 235, 36, 140), 54 + ND_TP_FILL_INSET);
     CHECK(is_plate(fx.canvas, bg, 235, 62));
     CHECK(!is_plate(fx.canvas, bg, 235, 75));
 
@@ -1043,8 +1096,8 @@ static void test_vlist_notch_truncates(void)
      * something longer", which was never true. */
     nd_vlist_init(&list, &fx.ui, "T", SEVEN, 1u, 9);
     nd_vlist_draw(&list);
-    CHECK(is_plate_bevel(fx.canvas, bg, 235, 41)); /* top edge still 40 */
-    CHECK(is_drawn(fx.canvas, bg, 235, 138));      /* and it reaches the bottom */
+    CHECK_INT(plate_fill_top(fx.canvas, bg, 235, 36, 140), 40 + ND_TP_FILL_INSET);
+    CHECK(is_drawn(fx.canvas, bg, 235, 138)); /* and it reaches the bottom */
 
     nd_image_free(bg);
     fx_free(&fx);
@@ -1362,13 +1415,13 @@ static void test_pagedlist_layout(void)
      * is 38..69 and index 1 is 38+33 = 71..102. THE STEP TRUNCATES -- 33.0
      * exactly here, so the next assertion is the one that would catch
      * rounding. */
-    CHECK(is_plate_bevel(fx.canvas, bg, 235, 39)); /* thumb top edge = 38 */
+    CHECK_INT(plate_fill_top(fx.canvas, bg, 235, 34, 135), 38 + ND_TP_FILL_INSET);
     CHECK(is_plate(fx.canvas, bg, 235, 60));
     CHECK(!is_plate(fx.canvas, bg, 235, 80));
 
     p.selected_index = 1u;
     nd_pagedlist_draw(&p);
-    CHECK(is_plate_bevel(fx.canvas, bg, 235, 72)); /* 38 + 33 = 71 */
+    CHECK_INT(plate_fill_top(fx.canvas, bg, 235, 34, 135), 71 + ND_TP_FILL_INSET);
     CHECK(is_plate(fx.canvas, bg, 235, 95));
     CHECK(!is_plate(fx.canvas, bg, 235, 45));
 

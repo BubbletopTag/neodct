@@ -48,6 +48,7 @@
 #include <unistd.h>
 
 #include "nd_capture.h"
+#include "themeprobe_test.h"
 #include "uifont_test.h"
 #include "nd_draw.h"
 #include "nd_font.h"
@@ -329,14 +330,29 @@ static void fx_free(fixture *fx)
  *     navy text                  125 .. 180  at full coverage
  *     the warning icon's triangle, which is black art          ~0
  *
- * The threshold is 550 rather than something in the middle of that gap,
+ * The threshold was 550 rather than something in the middle of that gap,
  * because a glyph's leftmost column is usually PARTLY covered: at 300 the
  * first two columns of an "L" went undetected and every first_lit_col()
  * answered a pixel or two right of the letter. Anything below the panel's own
  * floor is ink. Every scan below is bounded to the panel's INTERIOR
  * (x 8..231), because the border is the one thing on the panel that is dark
- * and is not ink. */
-#define INK_LUMA_MAX 550
+ * and is not ink.
+ *
+ * ============ AND WHY IT IS NO LONGER A NUMBER ============
+ *
+ * "Ink is dark" is a fact about ONE theme. The built-in look is the classic
+ * face: WHITE type on a black panel, where every background pixel is darker
+ * than any glyph and the constant above declared the whole screen to be ink.
+ * first_lit_row() answered 40 -- the first row it looked at -- for every
+ * dialog on the screen.
+ *
+ * So the threshold is derived from the palette instead, and it keeps the
+ * same meaning it had: ink is a pixel the type covers by more than about a
+ * quarter. That is where 550 sat between this theme's panel (704) and its
+ * type (125), and it is the coverage that made the leftmost column of an
+ * "L" count. INK_COVERAGE spells it, and px_lit() works out which SIDE of
+ * the panel the type is on by asking the palette rather than assuming. */
+#define INK_COVERAGE 70 /* of 255 -- see above */
 #define INK_X0       8
 #define INK_X1       231
 /* The panel's last interior row. It runs to 141 and its bottom border and the
@@ -478,11 +494,24 @@ static int32_t count_drawn(const nd_image *img, nd_rect box)
     return n;
 }
 
+static int32_t luma_sum(nd_color c)
+{
+    return (int32_t)c.r + (int32_t)c.g + (int32_t)c.b;
+}
+
 static bool px_lit(const nd_image *img, int32_t x, int32_t y)
 {
-    nd_color c = nd_image_get_px(img, x, y);
+    /* The two ends of the scale this theme draws a dialog with: the panel
+     * its body stands on, and the ink of the body itself. Both come from the
+     * palette, so the sign of the difference between them -- dark type on a
+     * light panel, or light type on a dark one -- is the theme's answer and
+     * not this file's assumption. */
+    int32_t panel = (luma_sum(ND_TH_GLASS_TOP) + luma_sum(ND_TH_GLASS_BOT)) / 2;
+    int32_t ink = luma_sum(ND_TH_INK_DARK);
+    int32_t cut = panel + ((ink - panel) * INK_COVERAGE) / 255;
+    int32_t here = luma_sum(nd_image_get_px(img, x, y));
 
-    return ((int32_t)c.r + (int32_t)c.g + (int32_t)c.b) < INK_LUMA_MAX;
+    return ink < panel ? here < cut : here > cut;
 }
 
 /* First lit row at or after `from`, or -1. */
@@ -741,26 +770,32 @@ static void test_golden_textscroller(fixture *fx)
     CHECK_INT(s.top, 8);
     CHECK(s.font == fx->ui.font_n);
 
-    /* ============ THE SNAKE HELP FITS ON ONE PAGE NOW ============
+    /* ============ HOW MANY PAGES IS THE FACE'S CALL ============
      *
-     * It was two pages: five 25 px lines fitted in the 133 px budget and a
-     * sixth did not, so the strip said "More". The UI face is narrower per
-     * character and its line height is smaller, so the same words come to one
-     * page and the strip says "Back".
+     * On the pixel face -- which is the face the BUILT-IN theme uses -- the
+     * snake help is two pages: five 25 px lines fit in the 133 px budget and
+     * a sixth does not, so the strip says "More" and this frame is a
+     * scroller mid-document. A theme shipping a narrower face with a smaller
+     * line height brings the same words to one page and the strip says
+     * "Back" instead.
      *
-     * That is a better screen and it costs the reference set its only picture
-     * of a scroller mid-document. The PAGINATION is still covered, by
-     * test_scroller_blank_line_is_a_gap and
-     * test_scroller_page_never_starts_on_a_gap, which build their own text. */
+     * The page COUNT is therefore derived from what paginate() answers
+     * rather than spelled out, and what is asserted about it is the pair of
+     * things that must agree: the line height is the ink height of "Ag" plus
+     * four, and draw() reports "last page" exactly when there is only one.
+     * A widget that paginated one way and drew another would fail that
+     * whatever the face. */
     {
         int32_t ag = 0;
+        size_t pages;
 
         nd_text_size(fx->ui.font_n, "Ag", NULL, &ag);
-        CHECK_INT(nd_scroller_paginate(&s, &line_h), 1);
+        pages = nd_scroller_paginate(&s, &line_h);
+        CHECK(pages >= 1u);
         CHECK_INT((int)line_h, ag + 4);
+        CHECK_INT(nd_scroller_draw(&s) ? 1 : 0, pages == 1u ? 1 : 0);
     }
 
-    CHECK(nd_scroller_draw(&s)); /* one page, so it is the last */
     check_frame(fx, "widget-textscroller");
 }
 
@@ -855,12 +890,22 @@ static void test_msgdialog_alert_look(void)
     nd_msgdialog_init(&dlg, &fx.ui, "LOW BATTERY!");
     nd_msgdialog_render(&dlg);
 
-    /* The icon occupies rows 8..31, and its first INK is three rows in -- the
-     * triangle's apex is two pixels wide at (11,3) of the 24 px art, so the
-     * absolute pixel is (19, 11). The old assertion probed (19, 8), which is
-     * inside the icon's box but above any of its ink; it passed only because
-     * "lit" meant "not black" and the wallpaper was there. */
-    CHECK(px_lit(fx.canvas, 19, 11));
+    /* The icon occupies rows 8..31 and nothing below them.
+     *
+     * WHICH PIXEL OF IT IS INKED IS THE THEME'S BUSINESS. This used to probe
+     * (19, 11) -- the apex of the triangle, three rows into the box, chosen
+     * because the previous assertion at (19, 8) was above any of the art's
+     * ink and passed on wallpaper alone. But that apex is ink only in a
+     * theme whose warning art is a solid dark triangle. The classic face
+     * draws the same icon as a white outline round a dark middle, so its
+     * apex row IS the top of the box and the pixel three rows in is the
+     * hollow inside.
+     *
+     * What holds either way is that the box is substantially inked and that
+     * the six rows under it, before the body starts, are not: an icon drawn
+     * at the wrong scale or the wrong origin fails both. */
+    CHECK(count_lit(fx.canvas, ND_RECT(8, 8, 31, 31)) > 40);
+    CHECK_INT(count_lit(fx.canvas, ND_RECT(8, 32, 31, 37)), 0);
     nd_text_bbox(fx.ui.font_n, "LOW BATTERY!", &bbox);
     nd_text_size(fx.ui.font_n, "LOW BATTERY!", &lw, NULL);
 
@@ -936,25 +981,29 @@ static void test_msgdialog_invisible_ellipsis(void)
         CHECK(false);
         return;
     }
-    /* ============ THE ELLIPSIS IS VISIBLE NOW ============
+    /* ============ WHETHER IT IS VISIBLE IS THE FACE'S CALL ============
      *
-     * font.ttf had no glyph for U+2026: append_ellipsis() added one, it drew
-     * NOTHING, and a clipped message ended in eight pixels of empty space.
-     * That is what this test was named after and what nd_msgdialog.c's header
-     * still called "the invisible ellipsis".
+     * font.ttf has no glyph for U+2026: append_ellipsis() adds one, it draws
+     * NOTHING, and a clipped message ends in eight pixels of empty space.
+     * That is what this test is named after, what nd_msgdialog.c's header
+     * calls "the invisible ellipsis", and -- since the built-in look is the
+     * classic one and its face is font.ttf -- what the phone does today.
      *
-     * The UI face has the glyph, so a clipped message now visibly ends in
-     * "…" -- which is what every call site wanted in the first place. The
-     * property asserted is therefore the opposite of what it was: the
-     * ellipsis costs advance AND puts ink on the screen. */
+     * A theme shipping a face that HAS the glyph gets the "…" every call
+     * site wanted, for free and without the widget knowing. So the ink is
+     * asserted for whichever face is loaded, and what both owe
+     * append_ellipsis() is asserted unguarded: the ADVANCE. Those eight
+     * pixels come off the line's budget, which is the property "..." would
+     * break by costing three characters of it instead. */
     nd_text_size(fx.ui.font_s, "yet.", &plain, NULL);
     nd_text_size(fx.ui.font_s, "yet. \xE2\x80\xA6", &with_dots, NULL);
     CHECK(with_dots > plain);
     CHECK(nd_font_advance(fx.ui.font_n, 0x2026u) > 0);
     {
         const nd_glyph *g = nd_font_glyph(fx.ui.font_n, 0x2026u);
+        bool inked = g != NULL && g->ink_w > 0 && g->ink_h > 0;
 
-        CHECK(g != NULL && g->ink_w > 0 && g->ink_h > 0);
+        CHECK_INT(inked ? 1 : 0, ND_TH_PIXEL_FONT ? 0 : 1);
     }
 
     {
@@ -1026,19 +1075,22 @@ static void test_msgdialog_measure_sees_the_clip(void)
         nd_msgdialog_measure(&dlg, &needed, &fits);
 
         CHECK_INT((int)fits, body_fits(&fx.ui, fx.ui.font_s));
-        /* ============ AND IT FITS NOW ============
+        /* ============ AND ON THE BUILT-IN FACE IT STILL CLIPS ============
          *
-         * On the pixel face this message needed seven lines into five and
-         * shipped clipped, ending mid-sentence at "there is". The UI face is
-         * narrower per character and its line height is smaller, so the same
-         * words come to six lines into six: the bug this test was written for
-         * is gone, on this string, by arithmetic rather than by editing.
+         * Seven lines into five. This is the message that shipped that way,
+         * ending mid-sentence at "there is", and the built-in look draws it
+         * in the same pixel face it always did -- so that is still what the
+         * phone shows, and measure() seeing it is still the only reason
+         * anybody would know.
          *
-         * The assertion is kept and inverted rather than deleted, because
-         * "the message the phone actually shows fits" is the thing anyone
-         * would want to know, and because a future face could take it back
-         * over the line without anybody thinking to look. */
-        CHECK(needed <= fits);
+         * A theme with a narrower face and a smaller line height brings the
+         * same words to six lines into six and the clip goes away by
+         * arithmetic. That is why the assertion is guarded rather than
+         * spelled as 7 and 5: the numbers belong to the face, the clip
+         * belongs to the string, and measure() is what connects them. */
+        CHECK(needed > 0u);
+        if (ND_TH_PIXEL_FONT)
+            CHECK(needed > fits);
     }
 
     /* That measure() SEES a clip is what the next case is for -- it is the

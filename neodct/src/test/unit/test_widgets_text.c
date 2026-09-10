@@ -39,6 +39,7 @@
 #include <unistd.h>
 
 #include "nd_capture.h"
+#include "themeprobe_test.h"
 #include "uifont_test.h"
 #include "nd_draw.h"
 #include "nd_font.h"
@@ -341,6 +342,18 @@ static bool px_white(const fixture *fx, int32_t x, int32_t y)
     return c.r > 127u && c.g > 127u && c.b > 127u;
 }
 
+/* Anything at all here, in any theme. These fixtures clear to black before
+ * they draw, so "not the clear colour" is the whole test -- and it stays
+ * the whole test for a theme that fills its ground with something else,
+ * because the clear happens first either way. */
+static bool px_drawn(const fixture *fx, int32_t x, int32_t y)
+{
+    nd_color c = nd_image_get_px(fx->canvas, x, y);
+    nd_color ground = nd_image_get_px(fx->canvas, 1, 143);
+
+    return nd_tp_dist(c, ground) > ND_TP_SAME;
+}
+
 /* ------------------------------------------------------------------ *
  * 1. The golden frames
  * ------------------------------------------------------------------ */
@@ -422,27 +435,51 @@ static void test_textinput_geometry(void)
      * hollow-outline test it replaces and is the same statement about where
      * the field is. */
     {
-        /* The plate is a dark blue gradient and the ground below it is the
-         * pale sky, so the bar is asserted by the STEP between them rather
-         * than by either one's colour. */
         /* x=200, clear of the title text: "Phonebook" at 24 px bold reaches
          * past the middle of the bar, and a white glyph would not be a fair
-         * sample of the plate.
+         * sample of the strip.
          *
-         * The plate is not simply darker than the ground -- its sheen is
-         * lighter in green and blue than the sky is. What separates the two
-         * everywhere is SATURATION: the plate is far more blue than the pale
-         * sky it sits on. */
+         * WHETHER THE STRIP IS PAINTED IS THE THEME'S CALL. A glass theme
+         * lays a plate over rows 0..29 and the assertion is the STEP between
+         * it and the ground below -- not "is it darker", because its sheen
+         * is lighter in green and blue than the sky is, but "is it far more
+         * SATURATED", which separates the two everywhere. The classic face
+         * paints no strip at all: its bar colour IS the sky, and row 8 at
+         * x=200 has to come back as untouched as row 36. Both are checked,
+         * because a strip leaking out of a theme that switched it off is as
+         * much a bug as one that failed to draw. */
         nd_color bar = nd_image_get_px(fx->canvas, 200, 8);
         nd_color below = nd_image_get_px(fx->canvas, 200, 36);
 
-        CHECK((int32_t)bar.b - (int32_t)below.b > 30);
-        CHECK(((int32_t)bar.b - (int32_t)bar.r) - ((int32_t)below.b - (int32_t)below.r) > 30);
+        if (nd_tp_bars_painted()) {
+            CHECK((int32_t)bar.b - (int32_t)below.b > 30);
+            CHECK(((int32_t)bar.b - (int32_t)bar.r) - ((int32_t)below.b - (int32_t)below.r) > 30);
+        } else {
+            CHECK_INT(nd_tp_dist(bar, below), 0);
+        }
     }
 
-    CHECK(px_white(fx, 120, 82));  /* inside the well */
-    CHECK(px_white(fx, 120, 118)); /* still inside it, near the bottom */
-    CHECK(!px_white(fx, 5, 100));  /* left of it */
+    /* The well, at the same (10, 80)-(230, 120) the outline occupied.
+     *
+     * Its INTERIOR is the themed part: a glass theme fills it light, the
+     * classic face leaves it the background and draws only its edges, which
+     * is the hollow rule this widget always had. What both agree on is
+     * where the field IS -- its top and bottom edges are drawn, and nothing
+     * outside it is -- so that is asserted first and unguarded. */
+    CHECK(px_drawn(fx, 120, 80));   /* the field's top edge */
+    CHECK(px_drawn(fx, 120, 120));  /* and its bottom edge */
+    CHECK(!px_drawn(fx, 120, 75));  /* above it */
+    CHECK(!px_drawn(fx, 120, 126)); /* below it */
+    CHECK(!px_drawn(fx, 5, 100));   /* left of it */
+    CHECK(!px_drawn(fx, 235, 100)); /* right of it */
+
+    if (nd_tp_panels_painted()) {
+        CHECK(px_white(fx, 120, 82));  /* inside the well */
+        CHECK(px_white(fx, 120, 118)); /* still inside it, near the bottom */
+    } else {
+        CHECK(!px_white(fx, 120, 100)); /* hollow: the ground shows through */
+    }
+    CHECK(!px_white(fx, 5, 100));   /* left of it */
     CHECK(!px_white(fx, 235, 100)); /* right of it */
     CHECK(!px_white(fx, 120, 75));  /* above it */
     CHECK(!px_white(fx, 120, 126)); /* below it */
