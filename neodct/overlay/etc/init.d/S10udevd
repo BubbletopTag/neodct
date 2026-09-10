@@ -54,7 +54,9 @@ MODEM_LOCK=/tmp/neodct-modem.lock
 #   sound     /dev/snd/*, group audio: every tone, every ringtone, every call
 #   misc      /dev/uinput, which is how the browser is fed its arrow keys
 #   rtc       /dev/rtc0, which nd_clock.c writes after an SNTP sync
-#   backlight the PWM brightness attribute (the GPIO tier is S90display's)
+#   backlight the PWM brightness and bl_power attributes -- both, because
+#             lighting a panel that booted powered down needs the second one
+#             (the GPIO tier is S90display's)
 #   cpu       the cpufreq attributes
 #   block     the SD card. S12sdcard runs after this one and scans for a card
 #             that is already in the slot; a card that arrives later comes in
@@ -91,6 +93,7 @@ DEVICE_GRANTS="
 /dev/snd/pcmC[0-9]*D[0-9]*:audio
 /dev/input/event[0-9]*:input
 /sys/class/backlight/*/brightness:video
+/sys/class/backlight/*/bl_power:video
 "
 
 have_group() {   # have_group NAME

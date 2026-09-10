@@ -113,7 +113,7 @@ int nd_input_fd(const nd_input *in);
 bool nd_input_has_backend(const nd_input *in);
 
 /* True when the developer key channel is bound and being polled -- i.e. this
- * image carries /etc/neodct-devenv and the socket came up.
+ * phone is in engineering mode and the socket came up.
  *
  * It is reported separately from the backends on purpose. The channel can
  * drive a phone whose keypad is dead, so it must not be allowed to make

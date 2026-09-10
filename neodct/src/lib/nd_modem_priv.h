@@ -332,6 +332,18 @@ struct nd_modem {
     double next_net;
     double next_cops;
     double next_probe;
+    /* The re-scan ladder (nd_modem.h). `unregistered_since` is 0.0 whenever
+     * the modem is registered, which is also what resets the ladder -- so the
+     * next outage starts at the urgent cadence rather than wherever the last
+     * one wound down to. Modem thread only. */
+    double unregistered_since;
+    double next_rescan_cops;
+    double next_rescan_cfun;
+    /* The last registration state written to the log, so a transition is
+     * logged once instead of on every 20 s poll that re-reads the same
+     * number. -2 rather than -1 because -1 is a real value here (Python's
+     * None) and would suppress the first "not registered" line. */
+    int32_t logged_reg_stat;
     /* When the boot grace runs out (nd_modem.h). Set at creation and then
      * PUSHED OUT by a probe that had nothing to probe -- see
      * ND_MODEM_LATE_GRACE_MAX_S. Written by the modem thread under st_mu

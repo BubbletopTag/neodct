@@ -431,6 +431,10 @@ struct nd_notify {
      * settings.prop holds, not the ND_ROOT-resolved one. */
     char ring_path[ND_PATH_MAX];
     bool have_ring_path;
+    /* Whether the ring currently playing was started for an ALARM rather than
+     * for a call. Dismissing the banner stops that one and only that one --
+     * see nd_notify_dismiss(). */
+    bool ringing_for_alarm;
 
     nd_ringer *ring; /* streaming ringer, NULL when not ringing */
     pid_t mpv_pid;   /* mpv fallback, -1 when not ringing       */
@@ -986,6 +990,19 @@ void nd_notify_post_event(nd_notify *n, int64_t row_id, const char *title, int64
         (void)nd_notify_play_tone(n, ND_NOTIFY_EVENT_TONE);
 }
 
+void nd_notify_post_alarm(nd_notify *n, int64_t when)
+{
+    if (n == NULL)
+        return;
+    take_over(n, ND_NOTIFY_KIND_ALARM);
+    n->count = 1; /* not ++: there is one alarm, so there is one of these */
+    n->latest = -1;
+    n->event_when = when;
+    nd_log(ND_LOG_NOTIFY, "Alarm due");
+    /* No tone here. An alarm RINGS, and only the core knows whether ringing
+     * is appropriate this second -- see nd_notify_start_ring_file(). */
+}
+
 bool nd_notify_active(const nd_notify *n)
 {
     return n != NULL && n->kind != NULL;
@@ -1041,6 +1058,15 @@ size_t nd_notify_banner_lines(const nd_notify *n, char l1[ND_NOTIFY_LINE_MAX],
         return 2u;
     }
 
+    if (strcmp(n->kind, ND_NOTIFY_KIND_ALARM) == 0) {
+        /* Names itself and says the time it was set for. There is never more
+         * than one, so there is no counted form -- which is why this reads
+         * "Alarm" and not "1 alarm". */
+        (void)nd_strlcpy(l1, "Alarm", ND_NOTIFY_LINE_MAX);
+        nd_timeset_format_clock(l2, ND_NOTIFY_LINE_MAX, (time_t)n->event_when);
+        return 2u;
+    }
+
     return 0u;
 }
 
@@ -1053,6 +1079,18 @@ void nd_notify_dismiss(nd_notify *n)
      * count is a SQL query and not this counter. A dismissed reminder has no
      * such second life: the appointment is still in the calendar, but nothing
      * on the home screen goes on saying so. */
+    /* ============ DISMISSING AN ALARM STOPS IT ============
+     *
+     * Here and not at the two call sites in nd_ui.c, because there are two of
+     * them -- the softkey and C -- and a ringing phone that only one of them
+     * silenced would be a bug found at four in the morning.
+     *
+     * Gated on ringing_for_alarm and not merely on the kind: a call ringing
+     * while an alarm banner happens to be up must survive the banner being
+     * dismissed. Only a ring THIS module started for an alarm is stopped. */
+    if (n->kind != NULL && strcmp(n->kind, ND_NOTIFY_KIND_ALARM) == 0 && n->ringing_for_alarm)
+        nd_notify_stop_ring(n);
+
     n->kind = NULL;
     n->count = 0;
     n->latest = -1;
@@ -1309,27 +1347,14 @@ const char *nd_notify_ringtone_path(nd_notify *n)
  * Ringing
  * ------------------------------------------------------------------ */
 
-bool nd_notify_start_ring(nd_notify *n)
+/* The body both entry points share: ring `path`, streaming first and mpv
+ * second. Split out when the alarm needed to ring a named file -- everything
+ * below the resolution step was already identical, and duplicating the mpv
+ * fallback would have meant two places to fix the next time it changed. */
+static bool ring_the_path(nd_notify *n, const char *path)
 {
-    char path[ND_PATH_MAX];
-    const char *chosen;
     const char *why = "";
     const char *argv[7];
-
-    if (n == NULL)
-        return false;
-
-    nd_notify_stop_ring(n); /* idempotent, and the Python starts here too */
-
-    chosen = nd_notify_ringtone_path(n);
-    if (chosen == NULL) {
-        nd_log(ND_LOG_NOTIFY, "No ringtone available; ringing silently.");
-        return false;
-    }
-    /* ringtone_path() hands back a pointer into n->ring_path, which the
-     * ringer does not touch -- but the ringer is the only reader and a copy
-     * costs nothing, so nothing here depends on that staying true. */
-    (void)nd_strlcpy(path, chosen, sizeof path);
 
     if (ringer_start(n, path, &why)) {
         nd_log(ND_LOG_NOTIFY, "Ringing: %s", path);
@@ -1365,10 +1390,57 @@ bool nd_notify_start_ring(nd_notify *n)
     return false;
 }
 
+bool nd_notify_start_ring(nd_notify *n)
+{
+    char path[ND_PATH_MAX];
+    const char *chosen;
+
+    if (n == NULL)
+        return false;
+
+    nd_notify_stop_ring(n); /* idempotent, and the Python starts here too */
+
+    chosen = nd_notify_ringtone_path(n);
+    if (chosen == NULL) {
+        nd_log(ND_LOG_NOTIFY, "No ringtone available; ringing silently.");
+        return false;
+    }
+    /* ringtone_path() hands back a pointer into n->ring_path, which the
+     * ringer does not touch -- but the ringer is the only reader and a copy
+     * costs nothing, so nothing here depends on that staying true. */
+    (void)nd_strlcpy(path, chosen, sizeof path);
+
+    n->ringing_for_alarm = false;
+    return ring_the_path(n, path);
+}
+
+bool nd_notify_start_ring_file(nd_notify *n, const char *virt_path)
+{
+    if (n == NULL || virt_path == NULL || virt_path[0] == '\0')
+        return false;
+
+    nd_notify_stop_ring(n);
+
+    /* NO fallback chain. nd_notify_start_ring() sweeps the tones directory
+     * for anything playable because a phone that cannot ring is a phone that
+     * misses calls. An alarm sound ships with the image: if it is not there
+     * the build is wrong, and ringing some other tone instead would hide
+     * that. Silence plus the banner is the honest answer. */
+    n->ringing_for_alarm = true;
+    if (ring_the_path(n, virt_path))
+        return true;
+    n->ringing_for_alarm = false;
+    return false;
+}
+
 void nd_notify_stop_ring(nd_notify *n)
 {
     if (n == NULL)
         return;
+
+    /* Cleared here rather than at the call sites, so that every way a ring
+     * can end leaves the flag agreeing with reality. */
+    n->ringing_for_alarm = false;
 
     /* Both handles are checked, and both print, so a state where BOTH were
      * somehow live prints the line twice. That is the Python's behaviour and

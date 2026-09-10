@@ -9,15 +9,17 @@
  * ============ WHY THE GATE IS THE FIRST CASE ============
  *
  * What is behind this socket is the ability to press keys on somebody's
- * phone. The gate is /etc/neodct-devenv, which lives on the read-only
- * squashfs and is placed only by a build that asked for it -- so a running
- * phone cannot open the channel for itself. That property is worth more than
- * the feature, so it is asserted first and from both directions: absent
- * marker means no socket at all, not merely a socket that refuses.
+ * phone. The gate is ENGINEERING MODE, the switch in Settings, and nothing
+ * else -- it used to be /etc/neodct-devenv, a marker only a rebuild could
+ * place, which meant a phone sitting in engineering mode still refused to be
+ * driven and told its owner to go and rebuild the image. That property is
+ * worth more than the feature, so it is asserted first and from both
+ * directions: engineering mode off means no socket at all, not merely a
+ * socket that refuses.
  *
  * These tests are all against a scratch ND_ROOT (pt_new_case()), so the
- * "marker" and the socket are files under /tmp and nothing touches the real
- * /etc or /run.
+ * settings file and the socket are files under /tmp and nothing touches the
+ * real /NeoDCT or /run.
  */
 
 #include <errno.h>
@@ -41,12 +43,23 @@
  * Helpers
  * ------------------------------------------------------------------ */
 
-/* Put the devenv marker in the scratch root, so nd_input_open() opens the
- * channel. Without this every test here gets a phone with no channel. */
+/* Write the engineering-mode switch into the scratch root's settings file.
+ *
+ * Spelled out rather than relying on the default, in BOTH directions. The
+ * default happens to be ON (ND_SET_UI_ENG_MODE_DFLT), so a case that wanted
+ * the channel closed and simply wrote no settings file would get an open one
+ * and pass for the wrong reason. */
+static void given_engineering_mode(bool on)
+{
+    pt_mkdir("/NeoDCT/User");
+    pt_write_text(ND_PATH_SETTINGS_PROP,
+                  on ? "system.ui.engineering_mode=ON\n" : "system.ui.engineering_mode=OFF\n");
+}
+
+/* What every case that wants a working channel opens with. */
 static void give_marker(void)
 {
-    pt_mkdir("/etc");
-    pt_write_text(ND_PATH_DEVENV_MARKER, "1\n");
+    given_engineering_mode(true);
 }
 
 /* The resolved socket path inside the scratch root. */
@@ -86,13 +99,13 @@ static bool send_text(const char *msg)
  * The gate
  * ------------------------------------------------------------------ */
 
-static void test_without_the_marker_there_is_no_socket(void)
+static void test_with_engineering_mode_off_there_is_no_socket(void)
 {
     nd_input *in = NULL;
     char path[ND_PATH_MAX];
     struct stat st;
 
-    /* No give_marker() here -- that is the whole case. */
+    given_engineering_mode(false); /* explicitly OFF -- that is the whole case */
     CHECK(nd_input_open(&in) == ND_OK);
     CHECK(in != NULL);
 
@@ -109,7 +122,7 @@ static void test_without_the_marker_there_is_no_socket(void)
     nd_input_close(in);
 }
 
-static void test_with_the_marker_the_socket_exists_and_is_private(void)
+static void test_with_engineering_mode_on_the_socket_exists_and_is_private(void)
 {
     nd_input *in = NULL;
     char path[ND_PATH_MAX];
@@ -322,8 +335,8 @@ static void test_reads_still_time_out_normally(void)
 
 int main(void)
 {
-    RUN(test_without_the_marker_there_is_no_socket);
-    RUN(test_with_the_marker_the_socket_exists_and_is_private);
+    RUN(test_with_engineering_mode_off_there_is_no_socket);
+    RUN(test_with_engineering_mode_on_the_socket_exists_and_is_private);
     RUN(test_a_datagram_comes_out_of_read_key);
     RUN(test_press_and_release_leaves_nothing_held);
     RUN(test_a_press_alone_leaves_the_key_held);

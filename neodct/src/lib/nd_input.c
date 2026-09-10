@@ -50,6 +50,7 @@
 #include "nd_keypad.h"
 #include "nd_log.h"
 #include "nd_paths.h"
+#include "nd_settings.h"
 
 #include "nd_input_priv.h"
 
@@ -464,20 +465,30 @@ static bool fd_poll_into_queue(nd_input *in, double wait_s)
  * its caller and must not grow a listener behind its back. */
 static void devkey_open(nd_input *in)
 {
-    char marker[ND_PATH_MAX];
     char sock_path[ND_PATH_MAX];
     struct sockaddr_un addr;
     int fd;
 
-    /* The gate. The marker lives on the read-only squashfs and is placed only
-     * by a build that asked for it, which is what makes it a gate a running
-     * phone cannot open for itself -- post-build-devenv-marker.sh's header
-     * makes the argument at length. No marker, no socket, and one line so
-     * that its absence is visible rather than mysterious. */
-    if (nd_path_resolve(marker, sizeof marker, ND_PATH_DEVENV_MARKER) != ND_OK)
-        return;
-    if (access(marker, F_OK) != 0) {
-        nd_log(ND_LOG_INPUT, "devkey: no %s; the key channel stays closed", ND_PATH_DEVENV_MARKER);
+    /* ============ THE GATE IS ENGINEERING MODE, AND ONLY THAT ============
+     *
+     * It used to be /etc/neodct-devenv, a marker placed only by a build run
+     * with NEODCT_DEVENV_IMAGE=1. The argument for it was that a marker on a
+     * read-only squashfs is a gate a running phone cannot open for itself --
+     * which is true, and beside the point: it also means the OWNER cannot
+     * open it. A phone sitting in engineering mode still refused `ndlink key`
+     * and told whoever asked to go and rebuild the image, which is not a
+     * thing anybody holding the phone can do.
+     *
+     * So the Settings switch decides, here and everywhere else. Read through
+     * nd_settings_engineering_mode() so this cannot drift from the answer the
+     * Settings screen gives -- see the block on it in nd_settings.h -- and
+     * matching S42debuglan, which gates the whole debug LAN on the same key.
+     *
+     * Checked at open, so turning engineering mode on takes effect when the
+     * UI next starts. That is already true of everything else the switch
+     * controls: the engineering apps are collected once at startup too. */
+    if (!nd_settings_engineering_mode()) {
+        nd_log(ND_LOG_INPUT, "devkey: engineering mode is off; the key channel stays closed");
         return;
     }
 

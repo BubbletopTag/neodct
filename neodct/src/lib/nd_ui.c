@@ -57,6 +57,8 @@
 #include "nd_crash.h"
 #include "nd_db.h"
 #include "nd_draw.h"
+#include "nd_alarm.h"
+#include "nd_easteregg.h"
 #include "nd_fb.h"
 #include "nd_font.h"
 #include "nd_gif.h"
@@ -138,6 +140,17 @@
 #pragma weak nd_msgdialog_show
 
 #pragma weak nd_proc_launch_app
+
+/* Weak like the rest, and for the same reason: a test binary that links
+ * nd_ui.c without lib/nd_easteregg.c must still link. */
+#pragma weak nd_easteregg_is_code
+#pragma weak nd_easteregg_run
+
+/* The alarm: its store, and the two NotifyService calls only it makes. */
+#pragma weak nd_alarm_take_due
+#pragma weak nd_alarm_load
+#pragma weak nd_notify_post_alarm
+#pragma weak nd_notify_start_ring_file
 
 /* The two Dialer screens are declared in nd_widgets.h and belong to the UI
  * framework work package. */
@@ -2310,6 +2323,56 @@ static void calendar_tick(nd_ui *ui)
         nd_cal_mark_notified(ev.id, occurrence);
 }
 
+/* The alarm, on the same footing as the reminder above and for the same
+ * reason: the Clock app is not running when the time comes round, so the core
+ * is what notices.
+ *
+ * nd_alarm_take_due() is the whole decision -- it reads the store, compares
+ * against the wall clock and marks the day before saying yes, so it says yes
+ * at most once however often this is called. Everything here is what happens
+ * afterwards. */
+static void alarm_tick(nd_ui *ui)
+{
+    static double next_poll;
+    double now;
+    nd_alarm went_off;
+
+    /* ui->notify NULL is an APP process (nd_app.h), where this is a no-op. */
+    if (ui->notify == NULL || nd_alarm_take_due == NULL || nd_notify_post_alarm == NULL)
+        return;
+
+    now = nd_time_monotonic();
+    if (next_poll != 0.0 && now < next_poll)
+        return;
+    next_poll = now + ND_ALARM_POLL_S;
+
+    if (!nd_alarm_take_due(&went_off))
+        return;
+
+    /* The banner carries the time it was set for rather than the time it is
+     * now: those differ by up to ND_ALARM_LATE_S, and the number somebody
+     * typed is the one they will recognise. */
+    {
+        struct tm when;
+        time_t stamp;
+
+        nd_time_localtime(nd_time_now(), &when);
+        when.tm_hour = (int)went_off.hour;
+        when.tm_min = (int)went_off.minute;
+        when.tm_sec = 0;
+        stamp = mktime(&when);
+        nd_notify_post_alarm(ui->notify, (int64_t)stamp);
+    }
+
+    /* AND NOT WHILE A CALL IS UP. An alarm that started blaring into a live
+     * call would be using the same sound card the call is on, and the banner
+     * alone still says what happened. This is the decision nd_notify.c
+     * deliberately does not make for itself -- see nd_notify_post_alarm(). */
+    if (nd_notify_start_ring_file != NULL &&
+        (nd_modem_state == NULL || nd_modem_state(ui->modem) == ND_CALL_IDLE))
+        (void)nd_notify_start_ring_file(ui->notify, ND_ALARM_TONE);
+}
+
 /* ============ THE T9 FLAG IS NOT A FACT ABOUT THE BOOT ============
  *
  * ui->has_matrix_keypad was decided once, in nd_ui_init(), from an nd_input
@@ -2462,6 +2525,7 @@ int32_t nd_ui_read_keypress(nd_ui *ui, double timeout_s)
     battery_tick(ui);
     modem_tick(ui);
     calendar_tick(ui);
+    alarm_tick(ui);
     keypad_tick(ui);
     if (ring_tick(ui))
         return ND_KEY_INCOMING_CALL;
@@ -2588,6 +2652,54 @@ static int32_t floordiv2(int32_t v)
     return v >= 0 ? v / 2 : -(((-v) + 1) / 2);
 }
 
+/* ============ THE ALARM CLOCK, 15x14, ONE PIXEL AT A TIME ============
+ *
+ * A twin-bell alarm clock: two bells up top, a round body, and two little
+ * feet. '#' is a lit pixel and ' ' is background, so the shape is legible in
+ * the source as the thing it draws -- which matters more than usual here,
+ * because there is no file to open in an editor to see what it looks like.
+ *
+ * Drawn with nd_draw_point rather than blitted, because at this size the
+ * alternative is an image asset that has to be authored, scaled and shipped
+ * to say the same 210 pixels. */
+#define ALARM_GLYPH_W 17
+#define ALARM_GLYPH_H 16
+
+/* Sized against the CLOCK, which is the other thing in this strip that is
+ * text rather than a meter: its ink is 13 px tall, so sixteen rows of bells
+ * and feet sit in the same band without towering over it. */
+static const char *const ALARM_GLYPH[ALARM_GLYPH_H] = {
+    "  ####     ####  ", " #####     ##### ", " #####     ##### ", " #####     ##### ",
+    "  #############  ", "    #########    ", "   ##       ##   ", "   #         #   ",
+    "  ##    #    ##  ", "  ##    #    ##  ", "  ##    #### ##  ", "  ##         ##  ",
+    "   #         #   ", "   ##       ##   ", "    ##     ##    ", "  ## ####### ##  ",
+};
+
+/* Where it goes: immediately RIGHT of the signal meter, in the top strip.
+ *
+ * ui_home.json puts the signal meter at x = 7 with a 26-wide sprite, so it
+ * owns x 7..33 and this starts at 36. y = 5 puts the glyph's 16 rows across
+ * the same band as the clock text on the other side of the screen (ink y
+ * 9..21), which is what makes the two read as one row of status rather than
+ * as two unrelated marks. */
+#define ALARM_GLYPH_X 36
+#define ALARM_GLYPH_Y 5
+
+static void draw_alarm_glyph(nd_ui *ui, int32_t ox, int32_t oy)
+{
+    int32_t row;
+
+    for (row = 0; row < ALARM_GLYPH_H; row++) {
+        const char *line = ALARM_GLYPH[row];
+        int32_t col;
+
+        for (col = 0; col < ALARM_GLYPH_W && line[col] != '\0'; col++) {
+            if (line[col] == '#')
+                (void)nd_draw_point(ui->draw, ox + col, oy + row, ND_WHITE);
+        }
+    }
+}
+
 void nd_ui_render_home(nd_ui *ui)
 {
     int32_t w;
@@ -2679,6 +2791,28 @@ void nd_ui_render_home(nd_ui *ui)
         /* The Python passes no font here and gets Pillow's built-in bitmap
          * face; see U-2 in OPEN-QUESTIONS.md. */
         (void)nd_draw_text(ui->draw, 10, 10, "No Layout Found", ui->font_s, ND_RGB(255, 0, 0));
+    }
+
+    /* --- 2b. the alarm clock, top left ---
+     *
+     * PIXEL ART DRAWN IN CODE, not a PNG like the envelope beside it. The
+     * envelope is scaled by h/240 and blitted with alpha, which is right for
+     * artwork somebody drew; this is fifteen pixels across and it wants to be
+     * exactly the pixels it is. Scaling it would put grey on the edges of a
+     * two-colour panel.
+     *
+     * It sits to the right of the signal meter -- see ALARM_GLYPH_X -- which
+     * is where a phone of this shape has always put its indicators.
+     *
+     * Drawn whenever an alarm is SET -- not while it is going off. It is a
+     * statement about the phone's configuration, like the battery meter, and
+     * the banner is what says the alarm is happening now. */
+    if (nd_alarm_load != NULL) {
+        nd_alarm a;
+
+        nd_alarm_load(&a);
+        if (a.set)
+            draw_alarm_glyph(ui, ALARM_GLYPH_X, ALARM_GLYPH_Y);
     }
 
     /* --- 3. notification layer: a flashing envelope while unread mail
@@ -2911,10 +3045,12 @@ void nd_ui_update(nd_ui *ui)
         nd_ui_render_home(ui);
         /* present=false: the softkey bar's own flush is suppressed so exactly
          * ONE framebuffer write happens per home frame. */
-        /* "Read" is what you do to a message and "View" is what you do to an
-         * appointment. One word each, because the strip has room for one. */
+        /* "Read" is what you do to a message, "View" to an appointment and
+         * "Stop" to a noise. One word each, because the strip has room for
+         * one. */
         nd_softkey_update(ui->softkey,
                           !nd_ui_status_notify_active(ui)       ? "Menu"
+                          : banner_is(ui, ND_NOTIFY_KIND_ALARM) ? "Stop"
                           : banner_is(ui, ND_NOTIFY_KIND_EVENT) ? "View"
                                                                 : "Read",
                           false);
@@ -3067,6 +3203,11 @@ static void open_notification(nd_ui *ui)
         open_sms_notification(ui, count, target);
     else if (strcmp(kind, ND_NOTIFY_KIND_EVENT) == 0)
         open_event_notification(ui, count, target);
+    /* An alarm opens nothing. Its softkey is "Stop", and stopping it is what
+     * the dismiss above already did -- nd_notify_dismiss() silences a ring it
+     * started for an alarm, so both this key and C end it. Opening the Clock
+     * app on top would be answering a question nobody asked at the moment
+     * they are trying to make a noise stop. */
 }
 
 static void place_call(nd_ui *ui, const char *number, const char *name);
@@ -3099,7 +3240,14 @@ void nd_ui_handle_input(nd_ui *ui, int32_t code)
         if (ui->state == ND_UI_STATE_HOME) {
             ui->state = ND_UI_STATE_MENU;
         } else if (ui->state == ND_UI_STATE_HOME_DIALING) {
-            place_call(ui, ui->dial_buffer, NULL);
+            /* Checked before place_call, because the whole point is that it
+             * never reaches the modem. Weak, so a build without the module
+             * simply dials whatever was typed. */
+            if (nd_easteregg_is_code != NULL && nd_easteregg_run != NULL &&
+                nd_easteregg_is_code(ui->dial_buffer))
+                nd_easteregg_run(ui);
+            else
+                place_call(ui, ui->dial_buffer, NULL);
             ui->dial_buffer[0] = '\0';
             ui->state = ND_UI_STATE_HOME;
         }

@@ -84,9 +84,23 @@ extern const char *const nd_clock_app_bad_date;
  * cannot tell them apart and says one sentence for both. */
 extern const char *const nd_clock_app_set_failed;
 
-/* The alarm row exists and does not work yet; it says so rather than opening
- * an empty screen. */
-extern const char *const nd_clock_app_no_alarms;
+/* ------------------------------------------------------------------ *
+ * Alarm
+ * ------------------------------------------------------------------ */
+
+/* One alarm, a time of day, stored in settings -- nd_alarm.h owns all of
+ * that, including the parsing, because the CORE is what has to read it when
+ * the time comes round and this app is not running. */
+#define ND_CLOCK_ALARM_OPTIONS 2
+extern const char *const nd_clock_app_alarm_options[ND_CLOCK_ALARM_OPTIONS];
+
+extern const char *const nd_clock_app_alarm_set;
+extern const char *const nd_clock_app_alarm_off;
+/* Four digits that are not a time of day -- "2465", or an incomplete field. */
+extern const char *const nd_clock_app_alarm_bad;
+/* settings.prop would not take it. Rare enough to share one sentence between
+ * setting and clearing. */
+extern const char *const nd_clock_app_alarm_failed;
 
 #ifdef __cplusplus
 }

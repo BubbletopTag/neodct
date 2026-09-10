@@ -5126,3 +5126,206 @@ reference for the debug link.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01C2y5FofcBs4EWi7vk9LX2b
+
+
+================================================================================
+
+idle: the phone rests on the home screen, and the backlight it was never
+allowed to switch on
+
+Sixty seconds with nobody touching the keypad and the panel drops to its
+dimmest lit step while the CPU pins to 600 MHz; the next key puts both back and
+still does whatever that key normally does. It is deliberately not called
+sleep. Nothing suspends, no clock stops, the modem stays registered and the
+screen keeps its picture -- it is the cheap nine tenths of sleep that costs no
+bring-up, which is what was asked for.
+
+THE TICK LIVES IN nd_main.c'S LOOP, WHICH IS THE WHOLE DESIGN. That loop runs
+only while the home screen is the thing on the panel: opening a menu or an app
+hands control to that screen's own key loop and this one stops being called. So
+a menu left open never dims and an app is never dimmed underneath itself, which
+is what a download, music playing or a game needs -- and getting that from
+where the code sits is better than getting it from a list of exceptions
+somebody has to maintain. The cost is that a phone parked in Settings stays
+bright, and that is a known gap rather than an oversight.
+
+Two calls surround handle_input rather than one. nd_idle_wake() goes BEFORE it
+so the screen the key opens is drawn at the brightness and the clock speed it
+will be read at instead of fading up underneath itself, and
+nd_idle_note_activity() goes AFTER it because handle_input owns the phone for
+as long as a menu or an app is open and every key pressed in that time went to
+that screen's loop and was never seen here. Without the second call, closing an
+app would land on a countdown spent minutes ago and the phone would dim in the
+owner's hands.
+
+The decision is a separate pure function -- nd_idle_should_dim(), four numbers
+in and a bool out -- so the boundary is checkable without a panel, a CPU that
+scales, or a clock that has to really advance. test_idle.c has 37 checks and
+the sysfs half runs against a tree built under the case root, which matters
+more than usual here: these paths are /sys/class/backlight and the cpufreq
+directory, and a test that reached the real ones would dim the developer's
+screen and pin their workstation to 600 MHz.
+
+A dim must always be undoable, so the state to restore is captured BEFORE
+anything is written, `dimmed` is set even when the writes fail, and the wake
+restores best-effort rather than giving up at the first refusal. A phone that
+fails to dim has a slightly worse battery; a phone that dims and cannot undo it
+is a brick with a picture on it. The wake also runs on the way out of the main
+loop -- a reboot into recovery must not hand the updater a dim panel and a CPU
+pinned to 600 MHz. A phone already pinned below 600 by hand is left alone
+rather than being sped UP by going idle, and its pin survives the wake.
+
+============ AND THE PERMISSION THIS UNCOVERED ============
+
+61-neodct-devices.rules handed ndusr the backlight's `brightness` and nothing
+else. nd_backlight_set_percent() writes brightness and then bl_power, and going
+ON it reports failure when the second write is refused -- because a panel that
+booted powered down is lit by bl_power and by nothing else. So every
+unprivileged caller got a dim that half worked and a hard error to show for it:
+the brightness write landed, the panel visibly changed, and the function said
+no.
+
+That went unnoticed for as long as every caller was root. Engineering apps run
+as root, and nd-core does its boot-time brightness restore before the privilege
+drop. The idle dimmer is the first caller that is not, which is what turned a
+latent grant into a missing one. Both attributes are now granted, in the udev
+rule and in S10udevd's fallback list.
+
+Found while diagnosing a backlight that would not dim or blank at all on the
+real phone. That turned out to be a broken solder joint on BLK -- the kernel
+was modulating the pad perfectly and the LED was not attached to it, which
+/sys/kernel/debug/pwm showed as `duty: 250 ns` of a 25000 ns period while the
+panel sat at full brightness. No software fault, and none of the backlight
+logic changed; the permission above is the one real defect the investigation
+turned up.
+
+nd_log.c: nd_strlcpy instead of snprintf into sun_path. The length guard was
+already there and correct, but GCC cannot see a preceding strlen() as proving
+anything about a later snprintf and fails -Wformat-truncation at the higher
+optimisation level the sanitiser build uses -- so `make ASAN=1` had been broken
+since 88c8558b while the ordinary build stayed green. Pre-existing, unrelated,
+and fixed here because it blocked the ASan run AGENTS.md asks for.
+
+Both suites pass, ASan included.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AGkCgPaiaVZmUUQsRDQ7kL
+
+
+================================================================================
+
+modem: stop waiting for the network to be noticed
+
+"It takes ages to get service when I come back upstairs" turned out to be
+three separate things, and only one of them was the radio.
+
+MEASURED ON THE PHONE FIRST, which is what makes the rest of this specific.
+AT+COPS=? in the basement returns T-Mobile, AT&T, Verizon and FirstNet, every
+one of them at <AcT> 7 -- so there IS LTE down there, findable in a scan that
+dwells. The modem still sits at +CPSI: NO SERVICE with +CSQ: 99,99, and it
+stayed there through a forced CFUN=4/1 cycle (72 s) and through LTE-only plus
+a COPS re-selection (84 s). That cell is below the threshold to camp on and no
+amount of software changes it. The basement is physics. What is NOT physics is
+how long the phone takes to notice once it is somewhere the cell is good.
+
+FIRST: registration was never pushed. _handle_urc has parsed unsolicited
+"+CEREG:" since the port and nothing ever sent AT+CEREG=n, so the modem had no
+reason to emit one; the phone read +CEREG: 0,4 -- n=0 -- and learned about
+registration only from its own AT+CEREG? every ND_POLL_NET_S. Twenty seconds
+of staleness on exactly the transition somebody is standing there watching
+for. Now AT+CEREG=1.
+
+Deliberately =1 and not =2. The richer form appends the tracking area and cell
+id, which would be worth having, but nd_modem__parse_reg tells the query form
+from the URC form by whether a second comma-field exists and takes it as
+<stat> when it does -- and under =2 that field is a QUOTED tac, so
+nd_modem__parse_int fails on it and the parser returns having updated nothing.
+Enabling the better URC would have silently dropped every registration event.
+=1's URC is a bare "+CEREG: <stat>", which that rule reads correctly.
+
+SECOND: nothing ever asked the modem to look again. The poll loop read CSQ,
+CEREG? and COPS? and never once triggered a search, so how fast service came
+back was entirely the firmware's own back-off -- and that back-off grows the
+longer the phone has been out of service, which makes it slowest at the exact
+moment somebody has carried it somewhere it would work.
+
+So, a ladder, with two rungs because they are not equally disruptive.
+AT+COPS=2 then AT+COPS=0 every 30 s -- deregister then re-select, because a
+bare COPS=0 on a modem already in automatic mode is frequently a no-op and the
+deregister is what makes the re-select a fresh search. Then AT+CFUN=4 then
+AT+CFUN=1 every two minutes, which is the one that actually clears a wound-down
+firmware search state. NOT AT+CFUN=1,1: that resets the module and
+re-enumerates every /dev/ttyUSB under it, taking the AT port away from
+S45modem and the UI for half a minute to fix what CFUN=4 fixes without
+dropping the port. Both rungs relax to five minutes after ten, so a phone left
+somewhere with no coverage is not searching hard all night, and both are off
+during a call -- CFUN=4 would drop it, and a call that is up is proof the radio
+has the network whatever <stat> says.
+
+THIRD: it was searching radio technologies this network does not run. Every
+PLMN the scan returned was E-UTRAN; T-Mobile's UMTS was switched off in 2022
+and the SIM is one of its MVNOs. Left at +CNMP: 2 the modem spends part of
+every cycle sweeping GSM and WCDMA, which lengthens the loop that decides how
+soon service returns. AT+CNMP=38, re-stated on every rung rather than set once
+in the init sequence -- because it does not survive: setting it and then
+changing COPS put it back to 2, which was found by reading it back rather than
+by trusting it. ND_RESCAN_RAT is one definition so the init sequence and the
+ladder cannot disagree; "51" there keeps a GSM fallback.
+
+AT+AUTOCSQ=1,1 as well, so signal is pushed rather than polled. That needed
+parse_csq's per-line half split out of its loop -- an unsolicited +CSQ arrives
+as one line, and building a one-element nd_lines for it would put that whole
+pool struct on the modem thread's stack to carry twelve characters. The
+ND_POLL_SIGNAL_S poll is kept as a fallback until the URC is proven on air;
+the two are idempotent.
+
+And every registration CHANGE is now logged once, with how long the outage
+lasted, because "it takes ages" was not a number and the phone could not
+produce one. `ndlink logs --os` now answers it from a phone that was carried
+upstairs with no cable attached and brought back.
+
+test_modem: 752 checks, six of them new and covering the rungs' order (the
+hammer pushes the cheap rung out with it, since a radio that has just been
+cycled is already searching as freshly as it can), the arming tick that
+deliberately sends nothing, the relax after the urgency window, and the two
+cases that must send nothing at all.
+
+Both suites pass, ASan included.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AGkCgPaiaVZmUUQsRDQ7kL
+
+
+================================================================================
+
+input: engineering mode is the gate, not the way the image was built
+
+`ndlink key` on a phone sitting in engineering mode answered "this phone was
+not built with the devenv marker... Rebuild with NEODCT_DEVENV_IMAGE=1", which
+is not a thing the person holding the phone can do.
+
+The old argument for /etc/neodct-devenv was that a marker on a read-only
+squashfs is a gate a running phone cannot open for itself. That is true, and
+it is beside the point: it also means the OWNER cannot open it. The switch in
+Settings is the gate for everything else developer-facing -- LinuxShell, raw
+AT, the whole debug LAN in S42debuglan -- and it is the gate here now.
+
+nd_settings_engineering_mode() is added so there is ONE reading of it: same
+key, same default, same treatment of a value that is neither, as
+nd_ui_engineering_mode(). A gate that disagreed with what the Settings screen
+displays would be worse than no gate at all, and two copies of that expression
+would eventually disagree.
+
+Note the default is ON, so test_devkey now writes the switch explicitly in
+BOTH directions -- a case that wanted the channel closed and simply omitted
+the settings file would get an open one and pass for the wrong reason.
+
+nd-key's error text and nd_input.h's comment said the same untrue thing and
+are fixed with it. PentestPersist still reads the marker, and should: it
+audits whether the boot-time devenv gate is open, which is a diagnostic about
+the image rather than a gate on a feature.
+
+Both suites pass, ASan included.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AGkCgPaiaVZmUUQsRDQ7kL

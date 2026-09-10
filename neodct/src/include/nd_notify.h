@@ -61,6 +61,16 @@ extern const char *const ND_RING_SWEEP_EXT[ND_RING_SWEEP_EXT_COUNT];
  * meaning. */
 #define ND_NOTIFY_EVENT_TONE ND_SMS_TONE
 
+/* The third kind. An alarm is the same banner as the other two -- two lines,
+ * a verb on the softkey, C to dismiss -- because that is the one idiom this
+ * phone has for "something happened".
+ *
+ * What it does NOT share is the sound. A text chirps once; an alarm is meant
+ * to wake somebody, so it RINGS: its own file, looped, until it is stopped.
+ * That is nd_notify_start_ring_file() below, and it is the only reason this
+ * kind needed anything in nd_notify.c beyond wording. */
+#define ND_NOTIFY_KIND_ALARM "alarm"
+
 #define ND_NOTIFY_LINE_MAX 32
 
 typedef struct nd_notify nd_notify;
@@ -88,8 +98,17 @@ void nd_notify_post_sms(nd_notify *n, int64_t row_id, bool tone);
  * in two lines, which is what the 3310 refused to do too. */
 void nd_notify_post_event(nd_notify *n, int64_t row_id, const char *title, int64_t when, bool tone);
 
+/* The alarm went off. `when` is the time it was set for, whose clock reading
+ * is the second line of the banner.
+ *
+ * Does NOT start the ringing -- the caller does that, because the core has to
+ * decide whether a ring is appropriate at all (it is not, mid-call) and this
+ * function has no way to know. Same take-over rule as the other two: posting
+ * this replaces whatever banner was up. */
+void nd_notify_post_alarm(nd_notify *n, int64_t when);
+
 bool nd_notify_active(const nd_notify *n);
-/* ND_NOTIFY_KIND_SMS, ND_NOTIFY_KIND_EVENT, or NULL. Compare with strcmp:
+/* ND_NOTIFY_KIND_SMS, ND_NOTIFY_KIND_EVENT, ND_NOTIFY_KIND_ALARM, or NULL. Compare with strcmp:
  * the pointer is one of the two literals above, but a caller that relies on
  * that is one refactor from being wrong. */
 const char *nd_notify_kind(const nd_notify *n);
@@ -102,6 +121,7 @@ int64_t nd_notify_latest_data(const nd_notify *n); /* -1 for none */
  *   sms,   many    "3 messages"     / "received"
  *   event, one     "Dentist"        / "10:30 am"
  *   event, many    "3 reminders"    / "due"
+ *   alarm          "Alarm"          / "07:30 am"
  *
  * The plural shape is the same in both, deliberately: when more than one
  * thing has happened the banner counts them and the app shows the list. */
@@ -116,6 +136,16 @@ bool nd_notify_play_tone(nd_notify *n, const char *path);
 /* The ringer. start_ring resolves the ringtone through the fallback chain
  * above; ringtone_path reports what it settled on, NULL when nothing played. */
 bool nd_notify_start_ring(nd_notify *n);
+
+/* Ring a NAMED file, looped, instead of the configured ringtone.
+ *
+ * nd_notify_start_ring() exists to ring whatever the owner chose for calls,
+ * and resolves it through a fallback chain to get there. An alarm is not a
+ * call: it has one sound, it ships with the image, and picking the ringtone
+ * for it would mean an alarm that changes when somebody changes their
+ * ringtone. Same machinery underneath -- the streaming ringer already takes a
+ * path, and mpv --loop-file=inf is still the fallback. */
+bool nd_notify_start_ring_file(nd_notify *n, const char *virt_path);
 void nd_notify_stop_ring(nd_notify *n);
 bool nd_notify_ringing(const nd_notify *n);
 const char *nd_notify_ringtone_path(nd_notify *n);

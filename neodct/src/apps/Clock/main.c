@@ -41,6 +41,7 @@
 
 #include "clock_app.h"
 
+#include "nd_alarm.h"
 #include "nd_app.h"
 #include "nd_clock.h"
 #include "nd_draw.h"
@@ -80,7 +81,14 @@ const char *const nd_clock_app_bad_date = "Not a date.\n\nEight digits, day firs
  * the person holding the phone. */
 const char *const nd_clock_app_set_failed =
     "The clock would not take it.\n\nCheck it and try again.";
-const char *const nd_clock_app_no_alarms = "No alarms yet.\n\nThis row is not built.";
+const char *const nd_clock_app_alarm_set = "Alarm set.";
+const char *const nd_clock_app_alarm_off = "Alarm off.";
+const char *const nd_clock_app_alarm_bad = "That is not a time.\n\nFour digits, 00:00 to 23:59.";
+const char *const nd_clock_app_alarm_failed = "Could not save the alarm.";
+
+/* Two rows: change it, or turn it off. Only shown when one is already set --
+ * with none there is nothing to turn off and the field opens directly. */
+const char *const nd_clock_app_alarm_options[ND_CLOCK_ALARM_OPTIONS] = {"Change", "Turn off"};
 
 /* ------------------------------------------------------------------ *
  * Small shared screens
@@ -218,19 +226,103 @@ static void show_clock_settings(nd_ui *ui)
 }
 
 /* ------------------------------------------------------------------ *
+ * Alarm
+ * ------------------------------------------------------------------ */
+
+/* Ask for a time and store it. Shared by "no alarm yet" and "Change", which
+ * are the same question asked from two places. */
+static void ask_for_alarm_time(nd_ui *ui)
+{
+    char text[ND_TIMESET_TEXT_MAX];
+    char reading[16];
+    char message[96];
+    nd_alarm now_set;
+    int32_t hour;
+    int32_t minute;
+
+    /* The same masked field the clock itself is set with, so "type the time"
+     * means the same thing in both places on this phone. */
+    if (!ask_masked(ui, "Alarm (24h):", ND_TIMESET_TIME_MASK, text, sizeof text))
+        return;
+    if (!nd_alarm_parse(text, &hour, &minute)) {
+        say(ui, nd_clock_app_alarm_bad);
+        return;
+    }
+    if (nd_alarm_save(hour, minute) != ND_OK) {
+        say(ui, nd_clock_app_alarm_failed);
+        return;
+    }
+
+    /* Read back through the same formatter the row uses, so the confirmation
+     * and the row behind it cannot disagree. */
+    now_set.set = true;
+    now_set.hour = hour;
+    now_set.minute = minute;
+    nd_alarm_format(&now_set, reading, sizeof reading);
+    (void)nd_snprintf(message, sizeof message, "%s\n\n%s", nd_clock_app_alarm_set, reading);
+    say(ui, message);
+    nd_log(ND_LOG_CLOCK_APP, "Alarm set for %s", reading);
+}
+
+static void show_alarm(nd_ui *ui)
+{
+    nd_alarm current;
+    nd_vlist menu;
+    nd_softkey bar;
+    int32_t choice;
+
+    nd_alarm_load(&current);
+
+    /* Nothing set: skip the menu entirely. A list whose only useful row is
+     * "Change" is a keypress between somebody and the thing they came for. */
+    if (!current.set) {
+        ask_for_alarm_time(ui);
+        return;
+    }
+
+    nd_vlist_init(&menu, ui, "Alarm", nd_clock_app_alarm_options, ND_CLOCK_ALARM_OPTIONS,
+                  ND_CLOCK_APP_ID);
+    nd_softkey_init(&bar, ui, false);
+    nd_softkey_update(&bar, "Select", false);
+
+    choice = nd_vlist_show(&menu);
+    if (choice == ND_WIDGET_BACK)
+        return;
+
+    if (choice == 0) {
+        ask_for_alarm_time(ui);
+        return;
+    }
+
+    if (nd_alarm_clear() != ND_OK) {
+        say(ui, nd_clock_app_alarm_failed);
+        return;
+    }
+    say(ui, nd_clock_app_alarm_off);
+    nd_log(ND_LOG_CLOCK_APP, "Alarm cleared");
+}
+
+/* ------------------------------------------------------------------ *
  * The root menu
  * ------------------------------------------------------------------ */
 
 /* What each row is currently set to. Rebuilt every time round the loop rather
  * than once: the clock moves while the menu is up, and both other rows are
  * changed by the screens this menu opens. */
-static void read_values(char *clock_out, size_t clock_sz, const char *values[ND_CLOCK_APP_ROWS])
+static void read_values(char *clock_out, size_t clock_sz, char *alarm_out, size_t alarm_sz,
+                        const char *values[ND_CLOCK_APP_ROWS])
 {
     nd_timeset_format_clock(clock_out, clock_sz, (time_t)nd_time_now());
 
-    /* Not "-" and not blank: the alarm row has a state even though nothing
-     * can change it yet, and "Off" is the true one. */
-    values[ND_CLOCK_ROW_ALARM] = "Off";
+    /* The time it is set for, or "Off" -- nd_alarm_format() spells both, so
+     * this row and the confirmation dialog cannot word it differently. */
+    {
+        nd_alarm a;
+
+        nd_alarm_load(&a);
+        nd_alarm_format(&a, alarm_out, alarm_sz);
+        values[ND_CLOCK_ROW_ALARM] = alarm_out;
+    }
     values[ND_CLOCK_ROW_SETTINGS] = clock_out;
     values[ND_CLOCK_ROW_NTP] = nd_clock_ntp_enabled() ? "On" : "Off";
 }
@@ -243,10 +335,11 @@ int app_run(nd_ui *ui)
     for (;;) {
         nd_pagedlist menu;
         char clock_text[32];
+        char alarm_text[16];
         const char *values[ND_CLOCK_APP_ROWS];
         int32_t choice;
 
-        read_values(clock_text, sizeof clock_text, values);
+        read_values(clock_text, sizeof clock_text, alarm_text, sizeof alarm_text, values);
 
         nd_pagedlist_init(&menu, ui, nd_clock_app_title, nd_clock_app_rows, ND_CLOCK_APP_ROWS,
                           ND_CLOCK_APP_ROOT, true);
@@ -258,7 +351,7 @@ int app_run(nd_ui *ui)
 
         switch (choice) {
         case ND_CLOCK_ROW_ALARM:
-            say(ui, nd_clock_app_no_alarms);
+            show_alarm(ui);
             break;
         case ND_CLOCK_ROW_SETTINGS:
             show_clock_settings(ui);

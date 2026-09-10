@@ -85,8 +85,20 @@ SUBSYSTEM=="i2c-dev", GROUP="i2c", MODE="0660"
 # the panel through /sys/class/gpio instead. See S90display for that half: the
 # gpio class has no uevent for an exported pin, so no rule here can grant it
 # and a boot script has to.
+#
+# BOTH attributes, and bl_power is not optional. nd_backlight_set_percent()
+# writes brightness and then bl_power, and going ON it reports failure when
+# the second write is refused -- because a panel that booted powered down is
+# lit by bl_power and by nothing else. So a rule that granted only brightness
+# left every unprivileged caller with a dim that half worked and a hard error
+# to show for it: the brightness write landed, the panel visibly changed, and
+# the function said no.
+#
+# That went unnoticed for as long as the only callers were root. nd-core
+# drops to ndusr and its idle dimmer (nd_idle.c) is the first one that is not,
+# which is what turned a latent grant into a missing one.
 SUBSYSTEM=="backlight", ACTION=="add", \
-    RUN+="/bin/sh -c 'b=/sys%p/brightness; [ -e $$b ] && chgrp video $$b && chmod 0664 $$b'"
+    RUN+="/bin/sh -c 'for f in brightness bl_power; do p=/sys%p/$$f; [ -e $$p ] && { chgrp video $$p; chmod 0664 $$p; }; done'"
 
 # --- backlight, the GPIO tier ---------------------------------------------
 #

@@ -586,6 +586,12 @@ bool nd_setting_is_enabled(const char *value, bool dflt)
     return dflt;
 }
 
+bool nd_settings_engineering_mode(void)
+{
+    return nd_setting_is_enabled(nd_settings_get(ND_SET_UI_ENGINEERING, ND_SET_UI_ENG_MODE_DFLT),
+                                 true);
+}
+
 bool nd_setting_modem_truthy(const char *value)
 {
     static const char *const yes[] = {"ON", "1", "TRUE", "YES"};

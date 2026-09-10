@@ -512,9 +512,19 @@ nd_err nd_log_syslog_open(const char *ident)
 
     memset(&addr, 0, sizeof addr);
     addr.sun_family = AF_UNIX;
-    if (strlen(resolved) >= sizeof addr.sun_path)
+    /* nd_strlcpy rather than snprintf, and the length checked from its return
+     * value rather than by a strlen() before it.
+     *
+     * sun_path is 108 bytes and `resolved` is up to ND_PATH_MAX, so the guard
+     * is needed either way -- but GCC cannot see a preceding strlen() as
+     * proving anything about a later snprintf, and at -O1 and above it fails
+     * -Wformat-truncation on the copy. That is what broke `make ASAN=1`,
+     * which is built at a higher optimisation level than the default one, so
+     * the ordinary build stayed green and only the sanitiser build did not.
+     * nd_strlcpy is not a format function and reports the length it wanted,
+     * which is the same check in one step. */
+    if (nd_strlcpy(addr.sun_path, resolved, sizeof addr.sun_path) >= sizeof addr.sun_path)
         return ND_ERR_TOOLONG;
-    (void)snprintf(addr.sun_path, sizeof addr.sun_path, "%s", resolved);
 
     fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd < 0)

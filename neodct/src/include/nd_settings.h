@@ -255,6 +255,24 @@ void nd_settings_set_paths(const char *settings_path, const char *version_path);
  * Used for system.ui.engineering_mode. */
 bool nd_setting_is_enabled(const char *value, bool dflt);
 
+/* ============ ENGINEERING MODE IS THE GATE. ONE READING OF IT. ============
+ *
+ * Every developer-facing thing on this phone is gated on the Settings switch
+ * and on NOTHING ELSE -- not on a marker file baked into an image, not on a
+ * kernel command line, not on a build flag. A gate the owner cannot see and
+ * cannot change is not a gate they control, and it is the reason a phone in
+ * engineering mode could still refuse `ndlink key`: the key channel was gated
+ * on /etc/neodct-devenv, which only a rebuild could place.
+ *
+ * This is that switch, read exactly the way nd_ui_engineering_mode() reads it
+ * -- same key, same default, same treatment of a value that is neither --
+ * because a gate that disagreed with what the Settings screen displays would
+ * be worse than no gate at all. Callers outside nd_ui use this; nd_ui itself
+ * calls it too and caches the answer.
+ *
+ * S42debuglan makes the same decision in shell, against the same key. */
+bool nd_settings_engineering_mode(void);
+
 /* ModemService: strip, uppercase, then membership of {"ON","1","TRUE","YES"}.
  * Anything else is FALSE -- there is no default to fall back to.
  * Careful: in the Python, an exception while READING the setting returns true,

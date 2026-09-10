@@ -1418,6 +1418,13 @@ static const fake_rule SIM7600[] = {
      "first message\r\n"
      "+CMGL: 2,\"REC UNREAD\",\"+15550002\",\"\",\"24/08/23,01:02:04+04\"\r\n"
      "second message\r\n\r\nOK\r\n"},
+    {"AT+CEREG=1", "\r\nOK\r\n"},
+    {"AT+CNMP=" ND_RESCAN_RAT, "\r\nOK\r\n"},
+    {"AT+AUTOCSQ=1,1", "\r\nOK\r\n"},
+    {"AT+COPS=2", "\r\nOK\r\n"},
+    {"AT+COPS=0", "\r\nOK\r\n"},
+    {"AT+CFUN=4", "\r\nOK\r\n"},
+    {"AT+CFUN=1", "\r\nOK\r\n"},
     {"AT+SILENT", NULL}, /* says nothing: the timeout path */
 };
 
@@ -1453,8 +1460,13 @@ static void test_probe_adopts_the_port_and_runs_the_init_sequence(void)
     }
 
     CHECK(nd_modem_has_hardware(m));
-    /* AT plus the seven configuration commands plus AT+CGSN. */
-    CHECK_INT(fake_commands(&fm), 9);
+    /* AT plus the ten configuration commands plus AT+CGSN.
+     *
+     * Seven until the reacquisition work added three more: AT+CEREG=1 so
+     * registration is pushed rather than found up to ND_POLL_NET_S late,
+     * AT+CNMP so the search stops sweeping radio technologies this network
+     * does not run, and AT+AUTOCSQ=1,1 so signal is pushed too. */
+    CHECK_INT(fake_commands(&fm), 12);
 
     nd_modem_status_snapshot(m, &st);
     CHECK(st.hardware);
@@ -3565,6 +3577,206 @@ static void test_a_zero_boot_grace_extends_nothing(void)
     nd_modem__destroy(m);
 }
 
+/* ------------------------------------------------------------------ *
+ * The out-of-service re-scan ladder
+ * ------------------------------------------------------------------ */
+
+/* Hold the modem out of service and keep the READ chain out of the way, so
+ * the only commands a tick can produce are the ladder's own. The fake answers
+ * AT+CEREG? with "+CEREG: 0,1" -- registered -- which is what every other
+ * case in this file wants and the exact opposite of what these want. */
+static void given_no_service(nd_modem *m)
+{
+    double far = nd_modem__now() + 1000.0;
+
+    m->reg_stat = 0;
+    m->next_csq = far;
+    m->next_net = far;
+    m->next_cops = far;
+}
+
+/* Wind both rungs into the past. Used to prove that something OTHER than the
+ * timers -- registration, a call -- is what stopped them firing. */
+static void given_both_rungs_are_due(nd_modem *m)
+{
+    m->unregistered_since = nd_modem__now() - 10000.0;
+    m->next_rescan_cops = 0.0;
+    m->next_rescan_cfun = 0.0;
+}
+
+static void test_a_registered_modem_never_rescans(void)
+{
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+    m->reg_stat = 1;
+    m->next_net = nd_modem__now() + 1000.0;
+    given_both_rungs_are_due(m);
+    fake_log_clear(&fm);
+
+    poll_now(m);
+    CHECK(!fake_sent(&fm, "AT+COPS=2"));
+    CHECK(!fake_sent(&fm, "AT+CFUN=4"));
+    /* And the ladder is disarmed, so the NEXT outage starts at the urgent
+     * cadence rather than resuming a wound-down one. */
+    CHECK(m->unregistered_since == 0.0);
+
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
+/* The first tick out of service arms the timers and sends NOTHING. A modem
+ * one second into an ordinary re-selection finds the network on its own, and
+ * a re-scan on top would abort the attempt it was about to finish. */
+static void test_the_first_tick_out_of_service_only_arms(void)
+{
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+    int before;
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+    given_no_service(m);
+    m->unregistered_since = 0.0;
+    fake_log_clear(&fm);
+    before = fake_commands(&fm);
+
+    poll_now(m);
+    CHECK_INT(fake_commands(&fm) - before, 0);
+    CHECK(m->unregistered_since > 0.0);
+    CHECK(m->next_rescan_cops > nd_modem__now());
+    CHECK(m->next_rescan_cfun > m->next_rescan_cops);
+
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
+/* The cheap rung: deregister then re-select. A bare AT+COPS=0 on a modem
+ * already in automatic mode is frequently a no-op, so the pair is the point. */
+static void test_the_cops_rung_deregisters_then_reselects(void)
+{
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+    given_no_service(m);
+    m->unregistered_since = nd_modem__now() - 60.0;
+    m->next_rescan_cops = 0.0;
+    m->next_rescan_cfun = nd_modem__now() + 1000.0; /* not this one */
+    fake_log_clear(&fm);
+
+    poll_now(m);
+    CHECK(fake_sent(&fm, "AT+COPS=2"));
+    CHECK(fake_sent(&fm, "AT+COPS=0"));
+    CHECK(!fake_sent(&fm, "AT+CFUN=4"));
+    /* The radio preference does not survive a COPS change, so every rung
+     * re-states it. */
+    CHECK(fake_sent(&fm, "AT+CNMP=" ND_RESCAN_RAT));
+    CHECK(m->next_rescan_cops > nd_modem__now());
+
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
+/* The hammer, and it must NOT be AT+CFUN=1,1 -- that resets the module and
+ * re-enumerates every /dev/ttyUSB under it. */
+static void test_the_cfun_rung_cycles_the_radio_without_resetting_it(void)
+{
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+    given_no_service(m);
+    given_both_rungs_are_due(m);
+    fake_log_clear(&fm);
+
+    poll_now(m);
+    CHECK(fake_sent(&fm, "AT+CFUN=4"));
+    CHECK(fake_sent(&fm, "AT+CFUN=1"));
+    CHECK(!fake_sent(&fm, "AT+CFUN=1,1"));
+    CHECK(fake_sent(&fm, "AT+CNMP=" ND_RESCAN_RAT));
+    /* The cheaper rung is pushed out with it: a radio that has just been
+     * switched off and on is already searching as freshly as it can. */
+    CHECK(!fake_sent(&fm, "AT+COPS=2"));
+    CHECK(m->next_rescan_cops > nd_modem__now());
+
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
+/* Past ND_RESCAN_URGENT_S this is a phone in a dead zone, not one somebody
+ * just carried upstairs, and it must stop spending a battery at the fast
+ * cadence. */
+static void test_the_ladder_relaxes_once_the_urgency_window_passes(void)
+{
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+    double armed;
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+    given_no_service(m);
+    m->unregistered_since = nd_modem__now() - (ND_RESCAN_URGENT_S + 60.0);
+    m->next_rescan_cops = 0.0;
+    m->next_rescan_cfun = nd_modem__now() + 100000.0;
+    fake_log_clear(&fm);
+
+    poll_now(m);
+    CHECK(fake_sent(&fm, "AT+COPS=2"));
+    armed = m->next_rescan_cops - nd_modem__now();
+    /* The relaxed beat, not the urgent one. */
+    CHECK(armed > ND_RESCAN_COPS_S + 1.0);
+
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
+/* Never mid-call: AT+CFUN=4 would drop it, and a call that is up is proof
+ * the radio has the network whatever <stat> currently says. */
+static void test_no_rescan_during_a_call(void)
+{
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+    given_no_service(m);
+    given_both_rungs_are_due(m);
+    m->state = ND_CALL_CONNECTED;
+    m->next_clcc = nd_modem__now() + 1000.0;
+    fake_log_clear(&fm);
+
+    poll_now(m);
+    CHECK(!fake_sent(&fm, "AT+CFUN=4"));
+    CHECK(!fake_sent(&fm, "AT+COPS=2"));
+
+    m->state = ND_CALL_IDLE;
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
 int main(void)
 {
     (void)nd_settings_init();
@@ -3657,6 +3869,13 @@ int main(void)
     RUN(test_a_held_lock_is_not_ninety_seconds_of_silence);
     RUN(test_the_boot_grace_waits_for_the_bus_to_settle);
     RUN(test_a_zero_boot_grace_extends_nothing);
+
+    RUN(test_a_registered_modem_never_rescans);
+    RUN(test_the_first_tick_out_of_service_only_arms);
+    RUN(test_the_cops_rung_deregisters_then_reselects);
+    RUN(test_the_cfun_rung_cycles_the_radio_without_resetting_it);
+    RUN(test_the_ladder_relaxes_once_the_urgency_window_passes);
+    RUN(test_no_rescan_during_a_call);
 
     RUN(test_the_thread_runs_and_stops_cleanly);
     RUN(test_requeue_puts_an_event_back_at_the_front);

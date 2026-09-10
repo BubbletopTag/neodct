@@ -70,6 +70,12 @@ extern "C" {
 /* Baked into the read-only rootfs beside the neodct-play binary. */
 #define ND_MEDIA_INPUT_CONF "/NeoDCT/System/core/MediaWidget/input.conf"
 
+/* neodct-play itself. The NetSurf fork has its own copy of this string
+ * (frontends/framebuffer/neodct/neodct_media.h) because it cannot include
+ * this header; anything inside this tree that needs to exec the player uses
+ * this one rather than spelling the path again. */
+#define ND_MEDIA_PLAYER "/NeoDCT/System/core/MediaWidget/neodct-play"
+
 /* The uinput keyboard the Browser bridges i2c presses onto. By the time mpv
  * starts, that bridge owns the i2c bus, so this is where the keypad is. */
 #define ND_MEDIA_KEYPAD_UINPUT_NAME "neodct-t9-keypad"

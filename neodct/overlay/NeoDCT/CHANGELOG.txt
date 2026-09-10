@@ -1,5 +1,55 @@
 # NeoDCT OS Changelog
 
+0.5.17a-dev
+The phone rests when you are not using it.
+
+Left alone on the home screen for a minute, the screen dims to its lowest
+setting and the processor drops to 600 MHz. Any key brings both straight back,
+and that key still does what it normally does -- you do not lose a press waking
+the phone up. Nothing is switched off: calls, messages and the clock carry on
+as they always did.
+
+Only the home screen does this. A menu left open, or an app, is never dimmed
+underneath you, so a game, a download or music playing is unaffected.
+
+- The screen dims and the processor slows after a minute on the home screen.
+- Both come back on the first key, in the state they were in before -- a
+  brightness you chose by hand is the brightness you get back.
+- Fixed: the screen brightness could not be set by anything except an
+  engineering app. The phone had permission to change the brightness but not
+  to switch the backlight on, so ordinary attempts reported a failure over a
+  screen that had actually changed.
+
+Service comes back faster after you have been somewhere without it.
+
+Carrying the phone out of a basement, a lift or a dead spot used to mean
+waiting, sometimes for minutes, because a phone that has lost the network
+looks for it again less and less often the longer it has been missing --
+which is slowest at exactly the moment you have walked somewhere it would
+work. The phone now keeps asking at a steady rate for the first ten minutes,
+and settles down after that so a phone genuinely out of range is not spending
+its battery searching all night.
+
+- The phone notices it has service the moment it gets it, instead of up to
+  twenty seconds later.
+- It no longer searches for 2G and 3G networks, which this network does not
+  run, so each search is quicker.
+- The signal bars react as the signal changes rather than on a timer.
+- The phone log now records every change of network state, with how long it
+  had been without service. "ndlink logs --os" turns "it takes ages" into a
+  number.
+
+Engineering mode is the only switch that decides.
+
+Pressing keys on the phone from a computer needed the phone to have been
+BUILT a particular way, so a phone already in engineering mode still refused,
+and told whoever asked to go and rebuild the image -- which is not something
+the person holding the phone can do. The switch in Settings now decides, the
+same one that already decides everything else developer-facing.
+
+- Engineering mode alone opens the key channel. Turn it on, restart the
+  phone, and "ndlink key" works.
+
 0.5.16a
 Bluetooth, the battery meter, and a log you can actually read.
 

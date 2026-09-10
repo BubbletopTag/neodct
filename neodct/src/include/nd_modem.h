@@ -58,6 +58,54 @@ extern "C" {
 #define ND_POLL_OPERATOR_S         60.0
 #define ND_PROBE_RETRY_S           10.0
 
+/* ============ THE OUT-OF-SERVICE RE-SCAN LADDER ============
+ *
+ * A modem that has lost the network searches for it again on its OWN
+ * schedule, and that schedule backs off: the longer it has been out of
+ * service, the longer it waits between attempts, out to minutes. That is
+ * correct for a phone in a dead zone and exactly wrong for a phone that has
+ * just been carried out of one -- the wait is longest precisely when somebody
+ * has walked upstairs and is looking at the screen.
+ *
+ * Nothing in the poll loop used to override it. It read CSQ, CEREG? and
+ * COPS? and never once asked the modem to look again, so "how fast does
+ * service come back" was entirely the firmware's back-off timer.
+ *
+ * So: a fixed, fast cadence for the first ND_RESCAN_URGENT_S of an outage,
+ * then a relaxed one. The urgency window is what makes this cheap -- a phone
+ * left overnight somewhere with no coverage spends all night at the relaxed
+ * cadence, while a phone that lost service a minute ago is trying hard.
+ *
+ * TWO RUNGS, because they are not equally disruptive:
+ *
+ *   COPS  AT+COPS=2 then AT+COPS=0 -- deregister, then re-select
+ *         automatically. A plain AT+COPS=0 on a modem ALREADY in automatic
+ *         mode is frequently a no-op, which is why the pair is used: the
+ *         deregister is what makes the re-select a genuinely fresh search.
+ *         Costs nothing when we are out of service anyway.
+ *
+ *   CFUN  AT+CFUN=4 then AT+CFUN=1 -- radio off, radio on. The hammer, and
+ *         the one that actually clears a firmware search state that has
+ *         wound down. Deliberately NOT AT+CFUN=1,1, which resets the whole
+ *         module and re-enumerates every /dev/ttyUSB under it: that would
+ *         take the AT port away from S45modem and the UI for half a minute
+ *         to fix a problem that CFUN=4 fixes without dropping the port.
+ *
+ * Neither runs during a call. */
+#define ND_RESCAN_COPS_S      30.0
+#define ND_RESCAN_CFUN_S      120.0
+#define ND_RESCAN_URGENT_S    600.0
+#define ND_RESCAN_RELAXED_S   300.0
+
+/* The radio-access-technology preference, spelled as AT+CNMP= wants it.
+ *
+ * "38" is LTE only, "51" keeps a GSM fallback, "59" is GSM+WCDMA+LTE and "2"
+ * is the modem's own automatic default. ONE definition, because the init
+ * sequence sets it and every rung of the ladder has to re-state it -- the
+ * setting does not survive a COPS change, which is a thing this was measured
+ * doing rather than a thing the datasheet says. */
+#define ND_RESCAN_RAT "38"
+
 /* THE BOOT GRACE. How long after the service starts "no modem has answered"
  * is nothing to report, and how often to ask during it.
  *

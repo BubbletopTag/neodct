@@ -8,9 +8,9 @@
  *     nd-key --socket PATH            somewhere other than the default
  *
  * It writes "<keycode> <0|1>" datagrams to the developer key channel that
- * nd_input listens on. That channel only exists on an image built with the
- * devenv marker, which is the whole of the access control: see
- * neodct/scripts/post-build-devenv-marker.sh and devkey_open() in nd_input.c.
+ * nd_input listens on. That channel exists only while the phone is in
+ * engineering mode, which is the whole of the access control -- one switch in
+ * Settings, nothing baked into the image: see devkey_open() in nd_input.c.
  *
  * ============ WHY A TAP IS TWO DATAGRAMS ============
  *
@@ -126,9 +126,9 @@ static int open_channel(const char *path)
              * everybody hits first and the cause is never guessable from
              * "connection refused". */
             (void)fprintf(stderr,
-                          "nd-key: no key channel at %s -- this phone was not built with the\n"
-                          "        devenv marker (/etc/neodct-devenv), so nd_input never opened\n"
-                          "        one. Rebuild with NEODCT_DEVENV_IMAGE=1.\n",
+                          "nd-key: no key channel at %s -- engineering mode is off, so\n"
+                          "        nd_input never opened one. Turn it on in Settings and\n"
+                          "        restart the phone.\n",
                           path);
         } else {
             (void)fprintf(stderr, "nd-key: connect %s: %s\n", path, strerror(errno));

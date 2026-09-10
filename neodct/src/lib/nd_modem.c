@@ -485,6 +485,29 @@ static bool starts_with(const char *s, const char *pfx)
     return strncmp(s, pfx, strlen(pfx)) == 0;
 }
 
+/* 3GPP 27.007's <stat>, in words. The numbers are in the log otherwise and
+ * "+CEREG: 3" tells a reader nothing about a registration the network
+ * REFUSED, which is a very different problem from not having found one. */
+static const char *reg_stat_name(int32_t stat)
+{
+    switch (stat) {
+    case 0:
+        return "not registered, not searching";
+    case 1:
+        return "registered";
+    case 2:
+        return "searching";
+    case 3:
+        return "registration denied";
+    case 4:
+        return "unknown";
+    case 5:
+        return "registered (roaming)";
+    default:
+        return "not reported";
+    }
+}
+
 void nd_modem__parse_reg(nd_modem *m, const char *line)
 {
     const char *rest = after_colon(line);
@@ -507,7 +530,32 @@ void nd_modem__parse_reg(nd_modem *m, const char *line)
     lock_state(m);
     m->reg_stat = v;
     unlock_state(m);
+
+    /* ============ THE LINE THAT MAKES THIS MEASURABLE ============
+     *
+     * "It takes ages to get service when I come back upstairs" is not a
+     * number, and the phone could not produce one: registration was a value
+     * the UI read, never an event anything recorded. So every CHANGE is
+     * logged, once -- not on every 20 s poll that re-reads the same state --
+     * and the one that matters carries how long the outage lasted.
+     *
+     * `ndlink logs --os` then answers the question directly, from a phone
+     * that was carried upstairs with no cable attached and brought back. */
+    if (m->logged_reg_stat != v) {
+        bool up = (v == 1 || v == 5);
+
+        if (up && m->unregistered_since > 0.0)
+            nd_log(ND_LOG_MODEM, "Network: %s, after %.0f s with no service", reg_stat_name(v),
+                   nd_modem__now() - m->unregistered_since);
+        else
+            nd_log(ND_LOG_MODEM, "Network: %s", reg_stat_name(v));
+        m->logged_reg_stat = v;
+    }
 }
+
+/* Defined below with the other reply parsers; used here because an
+ * unsolicited +CSQ arrives as one line rather than as a collection. */
+static bool parse_csq_line(nd_modem *m, const char *line);
 
 void nd_modem__handle_urc(nd_modem *m, const char *line)
 {
@@ -624,47 +672,65 @@ void nd_modem__handle_urc(nd_modem *m, const char *line)
         nd_modem__queue(m, &e);
         return;
     }
-    if (starts_with(line, "+CEREG:") || starts_with(line, "+CREG:"))
+    if (starts_with(line, "+CEREG:") || starts_with(line, "+CREG:")) {
         nd_modem__parse_reg(m, line);
+        return;
+    }
+    /* AT+AUTOCSQ=1,1 pushes these whenever the bars move, so the signal is
+     * known within a tick of it changing instead of at the next
+     * ND_POLL_SIGNAL_S. Same parser the polled reply goes through. */
+    (void)parse_csq_line(m, line);
 }
 
 /* ------------------------------------------------------------------ *
  * Reply parsers
  * ------------------------------------------------------------------ */
 
+/* ONE "+CSQ:" line. Split out of the loop below because AT+AUTOCSQ=1,1 makes
+ * the modem push these unsolicited, and _handle_urc has a single line rather
+ * than a collection -- building a one-element nd_lines for it would put that
+ * whole pool struct on the modem thread's stack to carry twelve characters.
+ *
+ * Returns whether the line was a +CSQ this understood, which the URC path
+ * uses and the loop does not. */
+static bool parse_csq_line(nd_modem *m, const char *line)
+{
+    const char *rest;
+    const char *second;
+    char seg[64];
+    char field[64];
+    size_t len;
+    int32_t v;
+
+    if (!starts_with(line, "+CSQ:"))
+        return false;
+    /* split(":")[1] -- no maxsplit, so it stops at a second colon. */
+    rest = after_colon(line);
+    if (rest == NULL)
+        return false;
+    second = strchr(rest, ':');
+    len = (second != NULL) ? (size_t)(second - rest) : strlen(rest);
+    if (len >= sizeof seg)
+        len = sizeof seg - 1u;
+    memcpy(seg, rest, len);
+    seg[len] = '\0';
+    if (!comma_field(seg, 0u, field, sizeof field))
+        return false;
+    if (!nd_modem__parse_int(field, &v))
+        return false; /* parse failure leaves _csq unchanged */
+    lock_state(m);
+    m->csq = v;
+    unlock_state(m);
+    return true;
+}
+
 void nd_modem__parse_csq(nd_modem *m, const nd_lines *lines)
 {
     size_t i;
 
-    for (i = 0u; i < lines->n; i++) {
-        const char *line = nd_modem__lines_get(lines, i);
-        const char *rest;
-        const char *second;
-        char seg[64];
-        char field[64];
-        size_t len;
-        int32_t v;
-
-        if (!starts_with(line, "+CSQ:"))
-            continue;
-        /* split(":")[1] -- no maxsplit, so it stops at a second colon. */
-        rest = after_colon(line);
-        if (rest == NULL)
-            continue;
-        second = strchr(rest, ':');
-        len = (second != NULL) ? (size_t)(second - rest) : strlen(rest);
-        if (len >= sizeof seg)
-            len = sizeof seg - 1u;
-        memcpy(seg, rest, len);
-        seg[len] = '\0';
-        if (!comma_field(seg, 0u, field, sizeof field))
-            continue;
-        if (!nd_modem__parse_int(field, &v))
-            continue; /* parse failure leaves _csq unchanged */
-        lock_state(m);
-        m->csq = v; /* the LAST matching line wins */
-        unlock_state(m);
-    }
+    /* Every matching line, so the LAST one wins -- unchanged from the port. */
+    for (i = 0u; i < lines->n; i++)
+        (void)parse_csq_line(m, nd_modem__lines_get(lines, i));
 }
 
 void nd_modem__parse_cops(nd_modem *m, const nd_lines *lines)
@@ -952,6 +1018,46 @@ void nd_modem__init_modem(nd_modem *m)
         "AT+COPS=3,1",       /* short operator names ("T-Mobile", "Tello")   */
         "AT+CMGF=1",         /* text-mode SMS everywhere                     */
         "AT+CNMI=2,1,0,0,0", /* push +CMTI URC on new SMS                    */
+        /* ============ REGISTRATION, PUSHED RATHER THAN POLLED ============
+         *
+         * _handle_urc has parsed unsolicited "+CEREG:" since the port, and
+         * nothing ever asked the modem to SEND one -- so the only +CEREG
+         * lines that ever existed were the replies to our own AT+CEREG?
+         * every ND_POLL_NET_S. Registration news was therefore up to twenty
+         * seconds stale, every time, including the twenty seconds after
+         * carrying the phone somewhere it can actually register. Measured on
+         * the phone: +CEREG: 0,4 -- n=0, URCs off.
+         *
+         * =1 and NOT =2. The richer =2 form appends the tracking area and
+         * cell id, which would be worth having, but its URC is
+         * "+CEREG: <stat>,"<tac>","<ci>",<AcT>" -- and nd_modem__parse_reg
+         * disambiguates the query form from the URC form by whether a second
+         * comma-field exists, taking it as <stat> when it does. Under =2 that
+         * second field is a QUOTED tac, nd_modem__parse_int fails on it, and
+         * the parser returns having updated nothing: every registration URC
+         * would be silently dropped. =1's URC is a bare "+CEREG: <stat>",
+         * which that rule reads correctly, and it carries the fact this is
+         * for. */
+        "AT+CEREG=1",
+        /* ============ LTE ONLY ============
+         *
+         * AT+COPS=? on the owner's phone returns T-Mobile, AT&T, Verizon and
+         * FirstNet, and every one of them at <AcT> 7 -- E-UTRAN. There is no
+         * 2G or 3G here to find: T-Mobile's UMTS network was switched off in
+         * 2022 and the SIM is a T-Mobile MVNO. Left at the default
+         * +CNMP: 2 (automatic) the modem spends part of every search cycle
+         * sweeping GSM and WCDMA bands that cannot answer, which lengthens
+         * exactly the loop that decides how soon service returns.
+         *
+         * Set 51 (GSM+LTE) instead of 38 to keep a 2G fallback for somewhere
+         * that still has one. Emergency calling does not go through this. */
+        "AT+CNMP=" ND_RESCAN_RAT,
+        /* Signal strength, pushed on change instead of polled. Frees the AT
+         * port, which is not cosmetic here -- see the fair-share block at the
+         * end of nd_modem_poll() for what contending with S45modem costs. The
+         * ND_POLL_SIGNAL_S poll is deliberately KEPT as a fallback until the
+         * URC is proven on air; it is idempotent with this. */
+        "AT+AUTOCSQ=1,1",
     };
     char final[64];
     nd_lines *lines = &m->collected;
@@ -1402,6 +1508,100 @@ static bool port_busy_elsewhere(nd_modem *m)
     return !m->lock_unusable;
 }
 
+/* Re-assert the radio-access-technology preference.
+ *
+ * Not a one-off in the init sequence, because it does not survive: setting
+ * AT+CNMP=38 on the phone and then changing AT+COPS put it back to 2 on its
+ * own, which was found by reading it back rather than by assuming. Every rung
+ * of the ladder moves COPS or CFUN, so every rung re-states this afterwards.
+ *
+ * Silent and best-effort. A modem that will not take it still works; it just
+ * searches the slow way, and there is already a log line for the outage. */
+static void nd_modem__apply_rat(nd_modem *m)
+{
+    (void)nd_modem__transact(m, "AT+CNMP=" ND_RESCAN_RAT, 5.0, NULL, 0u, NULL);
+}
+
+/* ============ THE OUT-OF-SERVICE RE-SCAN LADDER ============
+ *
+ * The rungs and the reasoning are in nd_modem.h. This is the timing.
+ *
+ * Called from inside nd_modem_poll()'s held AT-port lock, on the modem
+ * thread, at most once per ND_POLL_URC_S tick. */
+static void nd_modem__rescan_tick(nd_modem *m, double now)
+{
+    double since;
+    double cops_every;
+    double cfun_every;
+
+    /* Registered: the ladder resets, so the NEXT outage starts at the urgent
+     * cadence rather than wherever the last one had wound down to. */
+    if (nd_modem_registered(m)) {
+        m->unregistered_since = 0.0;
+        m->next_rescan_cops = 0.0;
+        m->next_rescan_cfun = 0.0;
+        return;
+    }
+
+    /* Never mid-call. AT+CFUN=4 would drop it, and a call that is up is
+     * proof the radio has the network whatever <stat> currently says. */
+    if (get_state(m) != ND_CALL_IDLE)
+        return;
+
+    /* Nor with no modem to ask -- the sim/stub backends have no AT port, and
+     * a fault is already being reported by something else. */
+    if (m->fd < 0 || m->faulted)
+        return;
+
+    if (m->unregistered_since == 0.0) {
+        m->unregistered_since = now;
+        /* The first rung waits a full interval rather than firing here. A
+         * modem that was just adopted, or that is a second into a perfectly
+         * normal re-selection, finds the network on its own -- and a re-scan
+         * on top of that would abort the attempt it was about to finish. */
+        m->next_rescan_cops = now + ND_RESCAN_COPS_S;
+        m->next_rescan_cfun = now + ND_RESCAN_CFUN_S;
+        return;
+    }
+
+    since = now - m->unregistered_since;
+    if (since < ND_RESCAN_URGENT_S) {
+        cops_every = ND_RESCAN_COPS_S;
+        cfun_every = ND_RESCAN_CFUN_S;
+    } else {
+        /* Past the urgency window this is a phone somewhere with no
+         * coverage, not a phone somebody just carried. Both rungs drop to
+         * the same slow beat: still trying, no longer spending a battery on
+         * it. */
+        cops_every = ND_RESCAN_RELAXED_S;
+        cfun_every = ND_RESCAN_RELAXED_S;
+    }
+
+    /* The hammer is checked FIRST, and pushes the cheaper rung out with it:
+     * a radio that has just been switched off and on is already performing
+     * the freshest search it can, and a COPS re-selection a moment later
+     * would interrupt exactly that. */
+    if (now >= m->next_rescan_cfun) {
+        m->next_rescan_cfun = now + cfun_every;
+        m->next_rescan_cops = now + cops_every;
+        nd_log(ND_LOG_MODEM, "No service for %.0f s: cycling the radio", since);
+        (void)nd_modem__transact(m, "AT+CFUN=4", 10.0, NULL, 0u, NULL);
+        (void)nd_modem__transact(m, "AT+CFUN=1", 10.0, NULL, 0u, NULL);
+        nd_modem__apply_rat(m);
+        return;
+    }
+
+    if (now >= m->next_rescan_cops) {
+        m->next_rescan_cops = now + cops_every;
+        nd_log(ND_LOG_MODEM, "No service for %.0f s: forcing a fresh network search", since);
+        /* Deregister, then re-select. See nd_modem.h for why a bare
+         * AT+COPS=0 on a modem already in automatic mode is not enough. */
+        (void)nd_modem__transact(m, "AT+COPS=2", 10.0, NULL, 0u, NULL);
+        (void)nd_modem__transact(m, "AT+COPS=0", 10.0, NULL, 0u, NULL);
+        nd_modem__apply_rat(m);
+    }
+}
+
 void nd_modem_poll(nd_modem *m)
 {
     double now;
@@ -1610,6 +1810,10 @@ void nd_modem_poll(nd_modem *m)
             strcmp(final, "OK") == 0)
             nd_modem__parse_cops(m, &m->collected);
     }
+
+    /* AFTER the read chain and inside the same held lock, so a re-scan costs
+     * no extra acquire and the fair-share back-off below measures it too. */
+    nd_modem__rescan_tick(m, now);
 
     nd_modem__release(m);
 
@@ -2365,6 +2569,10 @@ nd_err nd_modem__create(nd_modem **out)
     m->state = ND_CALL_IDLE;
     m->csq = -1;
     m->reg_stat = -1;
+    /* -2, not 0 and not -1: both of those are registration states this
+     * can legitimately be told, and either would swallow the first
+     * transition the log exists to record. */
+    m->logged_reg_stat = -2;
     m->call_stat = -1;
     m->audio_pid = -1;
     m->mic_pid = -1;
