@@ -583,6 +583,51 @@ static void test_spawn_same_session(void)
     CHECK(child_sid == our_sid);
 }
 
+static void test_spawn_new_process_group_stays_in_the_session(void)
+{
+    static const char *const SH_ARGV[] = {"/bin/sh", "-c",
+                                          "exec ps -o pgid= -o sid= -p $$", NULL};
+    nd_proc_spec spec;
+    nd_proc_status st;
+    pid_t pid = -1;
+    int pipefd[2];
+    char buf[64];
+    ssize_t got;
+    long child_pgid = -1;
+    long child_sid = -1;
+
+    if (pipe(pipefd) != 0) {
+        CHECK(pipefd[0] >= 0);
+        return;
+    }
+    memset(&spec, 0, sizeof spec);
+    spec.argv = SH_ARGV;
+    spec.owner = ND_OWNER_SYSTEM;
+    spec.new_process_group = true;
+    spec.fds[0].child_fd = 1;
+    spec.fds[0].our_fd = pipefd[1];
+    spec.n_fds = 1u;
+
+    CHECK_INT(nd_proc_spawn("/bin/sh", &spec, &pid), ND_OK);
+    (void)close(pipefd[1]);
+    if (pid > 0) {
+        got = read(pipefd[0], buf, sizeof buf - 1u);
+        if (got > 0) {
+            buf[got] = '\0';
+            (void)sscanf(buf, "%ld %ld", &child_pgid, &child_sid);
+        }
+        CHECK_INT(nd_proc_wait(pid, 5.0, &st), ND_OK);
+    }
+    (void)close(pipefd[0]);
+
+    if (child_pgid <= 0 || child_sid <= 0) {
+        fprintf(stderr, "SKIP new_process_group: ps gave no ids\n");
+        return;
+    }
+    CHECK(child_pgid == (long)pid);
+    CHECK(child_sid == (long)getsid(0));
+}
+
 /* A daemon must not carry the core's descriptors past execve.
  *
  * bluetoothd and bluealsa are spawned by the Settings app and deliberately
@@ -1688,6 +1733,7 @@ int main(void)
 
     test_spawn_new_session();
     test_spawn_same_session();
+    test_spawn_new_process_group_stays_in_the_session();
     test_spawn_can_close_inherited_fds();
     test_spawn_and_wait();
     test_reaper_keeps_the_status();

@@ -189,6 +189,61 @@ static void drop_stage(void)
         (void)nftw(g_stage, rm_cb, 16, FTW_DEPTH | FTW_PHYS);
 }
 
+static void test_charging_art_is_a_panel_frame(void)
+{
+    nd_image *art = nd_image_open(ND_PATH_CHARGING_IMAGE);
+
+    CHECK(art != NULL, "charging artwork loads");
+    if (art == NULL)
+        return;
+    CHECK_INT(art->w, 240, "charging artwork width");
+    CHECK_INT(art->h, 175, "charging artwork height");
+    nd_image_free(art);
+}
+
+static void test_charging_screen_restores_the_framebuffer(void)
+{
+    nd_fb *fb = NULL;
+    nd_image *canvas = NULL;
+    nd_ui ui;
+    const uint8_t *bytes;
+    uint8_t *before = NULL;
+    size_t size = 0u;
+    struct timespec a;
+    struct timespec b;
+    double elapsed;
+
+    CHECK(nd_fb_open_mem(&fb, 240, 175, 32, 0u) == ND_OK, "charging test framebuffer");
+    canvas = nd_image_new_filled(240, 175, ND_PIXFMT_RGB888, ND_RGB(17, 34, 51));
+    CHECK(canvas != NULL, "charging test canvas");
+    if (fb == NULL || canvas == NULL)
+        goto done;
+    CHECK(nd_fb_update(fb, canvas) == ND_OK, "charging test initial frame");
+    bytes = nd_fb_mem_bytes(fb, &size);
+    before = malloc(size);
+    CHECK(bytes != NULL && before != NULL, "charging test snapshot");
+    if (bytes == NULL || before == NULL)
+        goto done;
+    memcpy(before, bytes, size);
+
+    memset(&ui, 0, sizeof ui);
+    ui.fb = fb;
+    ui.canvas = canvas;
+    (void)clock_gettime(CLOCK_MONOTONIC, &a);
+    nd_ui_show_charging(&ui);
+    (void)clock_gettime(CLOCK_MONOTONIC, &b);
+    elapsed = (double)(b.tv_sec - a.tv_sec) + (double)(b.tv_nsec - a.tv_nsec) / 1e9;
+
+    bytes = nd_fb_mem_bytes(fb, &size);
+    CHECK(memcmp(bytes, before, size) == 0, "charging screen restores exact framebuffer bytes");
+    CHECK(elapsed >= 0.95 && elapsed < 2.0, "charging screen lasts one second");
+
+done:
+    free(before);
+    nd_image_free(canvas);
+    nd_fb_close(fb);
+}
+
 /* uistub._prepare_user_dir(): settings.prop with sorted keys, and the ack file
  * so the first-boot security modal is skipped. */
 /* NULL for either extra means "leave it out", which is what a phone that has
@@ -1510,6 +1565,8 @@ int main(void)
     }
 
     test_geometry();
+    test_charging_art_is_a_panel_frame();
+    test_charging_screen_restores_the_framebuffer();
     test_layout_scale();
     test_layout_load();
     test_image_cache();

@@ -35,6 +35,7 @@ extern "C" {
 #define ND_CRITICAL_WARN_V          3.25
 #define ND_SHUTDOWN_V               3.20
 #define ND_REARM_HYSTERESIS_V       0.05
+#define ND_CHARGING_JUMP_V          0.04
 #define ND_SHUTDOWN_CONFIRM_SAMPLES 3
 #define ND_BATT_POLL_INTERVAL_S     2.0
 #define ND_BATT_SMOOTH_WINDOW       5
@@ -169,6 +170,12 @@ bool nd_battery_vcell(const nd_battery *b, double *out);
 /* ND_BATT_WARN_LOW, ND_BATT_WARN_CRITICAL or NULL. Consuming it re-arms
  * nothing -- re-arming is by voltage hysteresis only. */
 const char *nd_battery_take_pending_warning(nd_battery *b);
+
+/* A rise in two consecutive raw VCELL samples greater than
+ * ND_CHARGING_JUMP_V is the only charging indication the fitted gauge gives
+ * us. This one-shot latch stays separate from the low-battery warnings so
+ * presentation remains outside BatteryService. */
+bool nd_battery_take_pending_charging(nd_battery *b);
 
 /* The engineering FuelGauge app's readout. false in simulation mode, which is
  * why that app refuses to run without hardware.

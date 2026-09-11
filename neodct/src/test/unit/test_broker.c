@@ -563,6 +563,11 @@ static void test_the_kill_verb_takes_two_signals_and_no_others(void)
     CHECK(!nd_broker__kill_signo_allowed(SIGHUP));
     CHECK(!nd_broker__kill_signo_allowed(0));  /* the "does it exist" probe */
     CHECK(!nd_broker__kill_signo_allowed(-1)); /* and the whole process group */
+
+    CHECK(nd_broker__group_signo_allowed(SIGSTOP));
+    CHECK(nd_broker__group_signo_allowed(SIGCONT));
+    CHECK(!nd_broker__group_signo_allowed(SIGTERM));
+    CHECK(!nd_broker__group_signo_allowed(SIGKILL));
 }
 
 /* Pin two: the pid. The broker signals only a process it forked itself and has
@@ -632,6 +637,7 @@ static void test_the_broker_stops_a_child_it_started(void)
     argv[1] = "30";
     argv[2] = NULL;
     spec_for(&spec, argv);
+    spec.new_process_group = true;
     CHECK_INT((int)nd_broker_spawn(b, path, &spec, ND_PRIV_USER, &pid), (int)ND_OK);
     CHECK(pid > 0);
     if (pid <= 0) {
@@ -643,6 +649,14 @@ static void test_the_broker_stops_a_child_it_started(void)
      * and return, which it can only do because the waiting happens here. */
     memset(&st, 0, sizeof st);
     CHECK_INT((int)nd_broker_wait(b, pid, 0.3, &st), (int)ND_ERR_TIMEOUT);
+
+    /* The charging overlay uses the second, deliberately narrower signal
+     * verb. It can stop and resume this isolated group, but cannot turn into
+     * another route for terminating a child or signalling an arbitrary pid. */
+    CHECK(nd_broker_signal_group(b, pid, SIGSTOP));
+    CHECK(nd_broker_signal_group(b, pid, SIGCONT));
+    CHECK(!nd_broker_signal_group(b, pid, SIGTERM));
+    CHECK(!nd_broker_signal_group(b, getpid(), SIGSTOP));
 
     /* And the broker was never stuck: it answers a completely different
      * request while the long-lived child is still running. Under the old

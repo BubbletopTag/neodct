@@ -60,6 +60,7 @@
 #include "nd_alarm.h"
 #include "nd_easteregg.h"
 #include "nd_fb.h"
+#include "nd_fb_priv.h"
 #include "nd_font.h"
 #include "nd_gif.h"
 #include "nd_idle.h"
@@ -109,6 +110,7 @@
 #pragma weak nd_battery_has_hardware
 #pragma weak nd_battery_poll
 #pragma weak nd_battery_take_pending_warning
+#pragma weak nd_battery_take_pending_charging
 #pragma weak nd_battery_vcell
 
 #pragma weak nd_notify_open
@@ -2224,6 +2226,58 @@ nd_err nd_ui_present(nd_ui *ui)
     return nd_fb_update(ui->fb, ui->canvas);
 }
 
+void nd_ui_show_charging(nd_ui *ui)
+{
+    nd_image *art;
+    uint8_t *saved = NULL;
+    struct timespec remaining;
+
+    if (ui == NULL || ui->fb == NULL)
+        return;
+    art = nd_image_open(ND_PATH_CHARGING_IMAGE);
+    if (art == NULL) {
+        nd_log_err(ND_LOG_BATT, "Charging screen: cannot load %s", ND_PATH_CHARGING_IMAGE);
+        return;
+    }
+
+    /* An app inherits this mapping but owns a different canvas. Saving the
+     * mapping is what restores NetSurf, mpv and ordinary apps exactly. The
+     * allocation is transient and 168 KB on the production framebuffer. */
+    if (ui->fb->mem != NULL && ui->fb->size != 0u) {
+        saved = malloc(ui->fb->size);
+        if (saved == NULL) {
+            nd_log_err(ND_LOG_BATT, "Charging screen: no memory for framebuffer snapshot");
+            nd_image_free(art);
+            return;
+        }
+        memcpy(saved, ui->fb->mem, ui->fb->size);
+    }
+
+    if (nd_fb_update(ui->fb, art) != ND_OK) {
+        nd_log_err(ND_LOG_BATT, "Charging screen: framebuffer update failed");
+        if (saved != NULL)
+            memcpy(ui->fb->mem, saved, ui->fb->size);
+        free(saved);
+        nd_image_free(art);
+        return;
+    }
+
+    remaining.tv_sec = 1;
+    remaining.tv_nsec = 0;
+    while (nanosleep(&remaining, &remaining) != 0 && errno == EINTR)
+        ;
+
+    if (saved != NULL) {
+        memcpy(ui->fb->mem, saved, ui->fb->size);
+    } else if (ui->canvas != NULL) {
+        /* Capture sinks have no readable mapping. Re-presenting the core
+         * canvas keeps the same visible show/restore contract in tests. */
+        (void)nd_fb_update(ui->fb, ui->canvas);
+    }
+    free(saved);
+    nd_image_free(art);
+}
+
 /* _battery_tick: the 3.20 V cutoff holds system-wide because every screen
  * funnels through read_keypress. The poll is rate-limited inside the service. */
 static void battery_tick(nd_ui *ui)
@@ -2235,6 +2289,9 @@ static void battery_tick(nd_ui *ui)
     event = nd_battery_poll(ui->battery, false);
     if (event != NULL && strcmp(event, "shutdown") == 0)
         ui->shutting_down = true;
+    if (nd_battery_take_pending_charging != NULL &&
+        nd_battery_take_pending_charging(ui->battery))
+        nd_ui_show_charging(ui);
 }
 
 static bool handle_modem_event(nd_ui *ui, const nd_modem_event *ev)

@@ -88,6 +88,11 @@ typedef struct {
      * screen exists to catch. */
     bool new_session;
 
+    /* setpgid(0, 0) without detaching from the caller's session. Apps use
+     * this so a system overlay can stop the app and every helper it spawned
+     * without stopping nd-core or changing terminal semantics. */
+    bool new_process_group;
+
     /* ============ DIE WITH THE PARENT ============
      *
      * SIGTERM (or any signal) delivered to this child when the process that

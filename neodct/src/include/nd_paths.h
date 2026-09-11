@@ -155,6 +155,7 @@ unsigned long nd_appgen_value(void);
 #define ND_PATH_HOME_LAYOUT      "/NeoDCT/System/ui/resources/ui_home.json"
 #define ND_PATH_ENVELOPE         "/NeoDCT/System/ui/resources/img/envelope.png"
 #define ND_PATH_CRASH_IMAGE      "/NeoDCT/System/ui/resources/CRASH.jpg"
+#define ND_PATH_CHARGING_IMAGE   "/NeoDCT/System/ui/resources/charging.png"
 #define ND_PATH_WARNING_ICON     "/NeoDCT/System/ui/resources/img/errorscreen/warning.png"
 #define ND_PATH_PLACEHOLDER_ICON "/NeoDCT/System/ui/resources/img/appselector/placeholder_icon.png"
 

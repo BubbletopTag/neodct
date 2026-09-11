@@ -928,6 +928,11 @@ void nd_svc_server_stop(nd_svc_server *s);
 /* Free a server that was never started. */
 void nd_svc_server_free(nd_svc_server *s);
 
+/* During an app run the service thread remains BatteryService's sole owner.
+ * This hands its charging edge to the UI pump without accessing the gauge
+ * concurrently from two threads. */
+bool nd_svc_server_take_charging(nd_svc_server *s);
+
 #ifdef __cplusplus
 }
 #endif

@@ -106,6 +106,9 @@ struct nd_battery {
 
     double smoothed;
     bool have_smoothed;
+    double previous_vcell;
+    bool have_previous_vcell;
+    bool charging_pending;
     int32_t level;
     bool low_armed;
     bool crit_armed;
@@ -459,6 +462,10 @@ static void probe_once(nd_battery *b)
     b->owns_fd = owned;
     b->version = version;
     b->read_error_streak = 0;
+    /* Do not compare the first recovered hardware sample with an explicit
+     * simulation override or with a reading from before the gauge vanished. */
+    if (b->source != ND_BATT_SRC_LIVE)
+        b->have_previous_vcell = false;
     settle(b, ND_BATT_SRC_LIVE, "", 0);
     nd_log(ND_LOG_BATT, "MAX1704x fuel gauge @ 0x%02X on %s (VERSION=0x%04X).", b->addr, dev,
            version);
@@ -777,6 +784,19 @@ const char *nd_battery_poll(nd_battery *b, bool force)
     if (!read_vcell(b, &vcell, now))
         return NULL;
 
+    /* A plug-in is visible in VCELL before it reaches the five-sample mean,
+     * so this deliberately compares consecutive gauge readings. The epsilon
+     * keeps decimal-to-binary noise from turning exactly 40 mV into "more
+     * than 40 mV". */
+    if (b->have_previous_vcell &&
+        vcell - b->previous_vcell > ND_CHARGING_JUMP_V + 1e-7) {
+        b->charging_pending = true;
+        nd_log(ND_LOG_BATT, "Charging detected: VCELL rose from %.3f V to %.3f V.",
+               b->previous_vcell, vcell);
+    }
+    b->previous_vcell = vcell;
+    b->have_previous_vcell = true;
+
     samples_append(b, vcell);
     v = samples_mean(b);
     b->smoothed = v;
@@ -861,6 +881,17 @@ const char *nd_battery_take_pending_warning(nd_battery *b)
         break;
     }
     return NULL;
+}
+
+bool nd_battery_take_pending_charging(nd_battery *b)
+{
+    bool pending;
+
+    if (b == NULL)
+        return false;
+    pending = b->charging_pending;
+    b->charging_pending = false;
+    return pending;
 }
 
 bool nd_battery_has_hardware(const nd_battery *b)

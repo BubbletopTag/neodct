@@ -277,6 +277,11 @@ nd_err nd_broker_wait(nd_broker *b, pid_t pid, double timeout_s, nd_proc_status 
  * signal it will not send, or a channel that has gone. */
 bool nd_broker_kill(nd_broker *b, pid_t pid, int signo);
 
+/* Suspend or resume the isolated group led by a live broker child. This is a
+ * separate verb because broadening nd_broker_kill() beyond TERM/KILL would
+ * weaken the format-helper escape hatch's policy. */
+bool nd_broker_signal_group(nd_broker *b, pid_t pid, int signo);
+
 /* How many live children the broker remembers. One app, plus the sdcard
  * helper, plus room to spare: the design has never had more than two at once,
  * and a table that overflows forgets its OLDEST entry, which makes that child
@@ -338,6 +343,7 @@ void nd_broker__root_env_filter(const char *const *in, uint32_t n_in, const char
  *   of mine" -- is a fact about the broker's own bookkeeping and is tested
  *   through a real spawn. */
 bool nd_broker__kill_signo_allowed(int32_t signo);
+bool nd_broker__group_signo_allowed(int32_t signo);
 
 #ifdef __cplusplus
 }

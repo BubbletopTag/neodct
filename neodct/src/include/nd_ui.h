@@ -362,6 +362,11 @@ int32_t nd_ui_read_keypress(nd_ui *ui, double timeout_s);
  * the way every widget spells it. */
 nd_err nd_ui_present(nd_ui *ui);
 
+/* Replace the physical framebuffer with the charging artwork for one second,
+ * then restore its exact bytes. A caller with an app child must stop that
+ * process before entering so it cannot repaint over the interruption. */
+void nd_ui_show_charging(nd_ui *ui);
+
 /* ------------------------------------------------------------------ *
  * The soft watchdog
  * ------------------------------------------------------------------ *

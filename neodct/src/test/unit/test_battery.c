@@ -328,6 +328,38 @@ static void test_a_latched_warning_survives_until_someone_reads_it(void)
     unmute_stdout();
 }
 
+static void test_a_rise_over_40mv_latches_one_charging_event(void)
+{
+    nd_battery *b = NULL;
+
+    (void)unsetenv(ND_SIM_ENV_VAR);
+    set_sim_vcell("3.800");
+    mute_stdout();
+    CHECK(nd_battery_open(&b, -1, -1) == ND_OK);
+    unmute_stdout();
+
+    /* The constructor's first reading establishes a baseline; it is not an
+     * event by itself. Exactly 40 mV is excluded by the requested rule. */
+    CHECK(!nd_battery_take_pending_charging(b));
+    set_sim_vcell("3.840");
+    CHECK(nd_battery_poll(b, true) == NULL);
+    CHECK(!nd_battery_take_pending_charging(b));
+
+    set_sim_vcell("3.881");
+    CHECK(nd_battery_poll(b, true) == NULL);
+    CHECK(nd_battery_take_pending_charging(b));
+    CHECK(!nd_battery_take_pending_charging(b)); /* consumed once */
+
+    /* The comparison is consecutive, not against a historical low. */
+    set_sim_vcell("3.850");
+    CHECK(nd_battery_poll(b, true) == NULL);
+    set_sim_vcell("3.889");
+    CHECK(nd_battery_poll(b, true) == NULL);
+    CHECK(!nd_battery_take_pending_charging(b));
+
+    nd_battery_close(b);
+}
+
 /* --- simulation plumbing --- */
 
 static void test_with_no_gauge_the_service_simulates_385(void)
@@ -742,6 +774,7 @@ int main(void)
 {
     RUN(test_a_discharge_warns_then_shuts_down);
     RUN(test_a_latched_warning_survives_until_someone_reads_it);
+    RUN(test_a_rise_over_40mv_latches_one_charging_event);
     RUN(test_with_no_gauge_the_service_simulates_385);
     RUN(test_the_environment_variable_overrides_the_default);
     RUN(test_the_file_beats_the_environment_variable);

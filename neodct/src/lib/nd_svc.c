@@ -34,13 +34,11 @@
  * ============ WHY NOTHING HERE NEEDS A LOCK IT DOES NOT TAKE ============
  *
  * nd_modem.h states its own calls are safe from another thread. The battery
- * has no lock and does not need one HERE, because OPEN-QUESTIONS.md X-13
- * records that the core ticks no service at all while an app child runs --
- * pump_keys() calls nd_input_read_event() directly, never
- * nd_ui_read_keypress(). For the exact window in which this thread exists,
- * it is the only thing in the process touching nd_battery. That is a
- * precondition: if the pump loop ever grows a battery tick, the battery
- * needs a mutex the same day.
+ * has no lock and does not need one HERE: while an app runs this serving
+ * thread performs both its service requests and its rate-limited poll. The UI
+ * pump takes only the boolean charging latch copied under `s->mu`; it never
+ * touches nd_battery. For the exact window in which this thread exists, it is
+ * still the only thing in the process touching BatteryService.
  *
  * ============ THE RECORDS ============
  *
@@ -1690,7 +1688,20 @@ struct nd_svc_server {
     bool quit;      /* the stopper wants the thread to leave      */
     bool finished;  /* the thread has left its loop               */
     bool abandoned; /* the stopper gave up: the thread frees this */
+    bool charging_pending; /* protected by mu */
 };
+
+static void server_battery_tick(nd_svc_server *s)
+{
+    if (s->ui == NULL || s->ui->battery == NULL)
+        return;
+    (void)nd_battery_poll(s->ui->battery, false);
+    if (!nd_battery_take_pending_charging(s->ui->battery))
+        return;
+    (void)pthread_mutex_lock(&s->mu);
+    s->charging_pending = true;
+    (void)pthread_mutex_unlock(&s->mu);
+}
 
 static void server_destroy(nd_svc_server *s)
 {
@@ -1717,6 +1728,7 @@ static void *svc_thread(void *arg)
         bool stop;
         bool sent;
 
+        server_battery_tick(s);
         (void)pthread_mutex_lock(&s->mu);
         stop = s->quit;
         (void)pthread_mutex_unlock(&s->mu);
@@ -1792,6 +1804,19 @@ static void *svc_thread(void *arg)
     if (abandoned)
         server_destroy(s);
     return NULL;
+}
+
+bool nd_svc_server_take_charging(nd_svc_server *s)
+{
+    bool pending;
+
+    if (s == NULL)
+        return false;
+    (void)pthread_mutex_lock(&s->mu);
+    pending = s->charging_pending;
+    s->charging_pending = false;
+    (void)pthread_mutex_unlock(&s->mu);
+    return pending;
 }
 
 nd_err nd_svc_server_open(nd_svc_server **out, uint32_t allowed_ops)

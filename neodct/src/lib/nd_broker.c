@@ -62,7 +62,8 @@ typedef enum {
     REQ_CLOCK = 4,
     /* Appended, so no number an existing build sends changes meaning. */
     REQ_KILL = 5,
-    REQ_BT_POWER = 6
+    REQ_BT_POWER = 6,
+    REQ_SIGNAL_GROUP = 7
 } nd_broker_op;
 
 typedef struct {
@@ -97,6 +98,8 @@ typedef struct {
      * of this socket are the same binary only by convention. */
     uint32_t bt_dev;
     uint8_t bt_up;
+    /* SPAWN. Appended so every existing field keeps its wire offset. */
+    uint8_t new_process_group;
 } nd_broker_req;
 
 typedef struct {
@@ -401,6 +404,35 @@ static void do_kill(const nd_broker_req *req, nd_broker_rep *rep)
     rep->err = ND_OK;
 }
 
+bool nd_broker__group_signo_allowed(int32_t signo)
+{
+    return signo == SIGSTOP || signo == SIGCONT;
+}
+
+static void do_signal_group(const nd_broker_req *req, nd_broker_rep *rep)
+{
+    pid_t pid = (pid_t)req->pid;
+
+    if (!nd_broker__group_signo_allowed(req->signo) || !child_is_ours(pid)) {
+        rep->err = ND_ERR_PERM;
+        return;
+    }
+    /* The group is safe to name only when the tracked child leads it. An
+     * ordinary child could share nd-core's group, which must never be
+     * stopped by a value arriving over this socket. */
+    if (getpgid(pid) != pid) {
+        rep->err = ND_ERR_PERM;
+        return;
+    }
+    if (kill(-pid, (int)req->signo) != 0 && errno != ESRCH) {
+        nd_log_err(ND_LOG_OS, "broker: kill group %ld, signal %ld: %s", (long)pid,
+                   (long)req->signo, strerror(errno));
+        rep->err = ND_ERR_IO;
+        return;
+    }
+    rep->err = ND_OK;
+}
+
 static bool user_is_allowed(const char *user)
 {
     static const char *const allowed[] = ND_BROKER_USERS;
@@ -696,6 +728,7 @@ static void do_spawn(const nd_broker_req *req, int *fds, size_t n_fds, nd_broker
     spec.owner = (nd_proc_owner)req->owner;
     spec.no_new_privs = req->no_new_privs != 0u;
     spec.new_session = req->new_session != 0u;
+    spec.new_process_group = req->new_process_group != 0u;
     /* Carried across, so an app spawned BY THE BROKER still dies with it --
      * and the broker dies with the core. See death_signal in nd_proc.h. */
     spec.death_signal = (int)req->death_signal;
@@ -894,6 +927,9 @@ static void broker_loop(int fd)
         } else if (req.op == REQ_KILL) {
             close_all(fds, n_fds);
             do_kill(&req, &rep);
+        } else if (req.op == REQ_SIGNAL_GROUP) {
+            close_all(fds, n_fds);
+            do_signal_group(&req, &rep);
         } else if (req.op == REQ_HALT) {
             close_all(fds, n_fds);
             rep.err = nd_svc_halt_now(req.reboot != 0u) ? (int32_t)ND_OK : (int32_t)ND_ERR_IO;
@@ -1074,6 +1110,7 @@ nd_err nd_broker_spawn(nd_broker *b, const char *path, const nd_proc_spec *spec,
     req.owner = (uint32_t)spec->owner;
     req.no_new_privs = spec->no_new_privs ? 1u : 0u;
     req.new_session = spec->new_session ? 1u : 0u;
+    req.new_process_group = spec->new_process_group ? 1u : 0u;
     req.death_signal = (int32_t)spec->death_signal;
     req.close_others = spec->close_others ? 1u : 0u;
     req.private_mounts = spec->private_mounts ? 1u : 0u;
@@ -1187,6 +1224,24 @@ bool nd_broker_kill(nd_broker *b, pid_t pid, int signo)
 
     memset(&req, 0, sizeof req);
     req.op = REQ_KILL;
+    req.pid = (int64_t)pid;
+    req.signo = (int32_t)signo;
+    memset(&rep, 0, sizeof rep);
+    if (round_trip(b, &req, NULL, 0u, &rep) != ND_OK)
+        return false;
+    return rep.err == (int32_t)ND_OK;
+}
+
+bool nd_broker_signal_group(nd_broker *b, pid_t pid, int signo)
+{
+    nd_broker_req req;
+    nd_broker_rep rep;
+
+    if (b == NULL || pid <= 0)
+        return false;
+
+    memset(&req, 0, sizeof req);
+    req.op = REQ_SIGNAL_GROUP;
     req.pid = (int64_t)pid;
     req.signo = (int32_t)signo;
     memset(&rep, 0, sizeof rep);

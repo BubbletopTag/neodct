@@ -723,15 +723,14 @@ nd_err nd_proc_spawn(const char *path, const nd_proc_spec *spec, pid_t *pid_out)
     if (pid == 0) {
         /* ==== ASYNC-SIGNAL-SAFE ONLY FROM HERE TO THE execve ==== */
 
-        /* setsid() first, before anything that can fail in a way worth
-         * reporting: a child that is going to be signalled by process group
-         * must be in its own group BEFORE it can spawn anything of its own.
-         * setsid() is async-signal-safe, and its only failure is EPERM when
-         * we are already a group leader -- which for a fresh fork() cannot
-         * happen. Ignoring the return is deliberate; there is nothing a
-         * child between fork and exec could usefully do about it. */
+        /* Isolate the process before anything it execs can spawn descendants.
+         * setsid() is for a daemon; setpgid() gives an app a group the core
+         * can briefly suspend without changing its terminal session. Both
+         * are async-signal-safe, and a fresh child can lead either. */
         if (spec->new_session)
             (void)setsid();
+        else if (spec->new_process_group)
+            (void)setpgid(0, 0);
 
         /* Right after setsid() and before anything that can fail: the window
          * this closes is the one between fork and exec, and a parent that dies
@@ -1293,6 +1292,42 @@ static bool pump_keys(nd_ui *ui, nd_input_channel *ch, app_keys *keys)
     return false;
 }
 
+static bool app_group_signal(pid_t pid, int signo)
+{
+    nd_broker *broker = nd_broker_default();
+
+    if (broker != NULL)
+        return nd_broker_signal_group(broker, pid, signo);
+    if (kill(-pid, signo) == 0 || errno == ESRCH)
+        return true;
+    nd_log_err(ND_LOG_OS, "cannot signal app process group %ld: %s", (long)pid,
+               strerror(errno));
+    return false;
+}
+
+static void show_charging_over_app(nd_ui *ui, pid_t pid, app_keys *keys)
+{
+    double stopped_at;
+
+    if (!app_group_signal(pid, SIGSTOP)) {
+        nd_log_err(ND_LOG_BATT, "Charging screen skipped: the running app could not be paused");
+        return;
+    }
+    stopped_at = monotonic_now();
+    /* SIGSTOP is asynchronous. One scheduler slice closes the last possible
+     * framebuffer write before its bytes are saved, and is 2% of the visible
+     * interruption rather than a second hidden delay. */
+    nap(0.02);
+    nd_ui_show_charging(ui);
+    if (!app_group_signal(pid, SIGCONT))
+        nd_log_err(ND_LOG_BATT, "Charging screen ended, but the running app could not be resumed");
+
+    /* A CLEAR hold is measured in active UI time. The charging interruption
+     * must not turn an ordinary press into the core's long-hold escape. */
+    if (keys->clear_down_at != 0.0)
+        keys->clear_down_at += monotonic_now() - stopped_at;
+}
+
 /* ------------------------------------------------------------------ *
  * Which user an app runs as -- see nd_proc.h for the reasoning
  * ------------------------------------------------------------------ */
@@ -1756,6 +1791,7 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
      * nd_proc.h: an orphaned app holds the framebuffer and spins on a pipe
      * that is at EOF forever, on the one core this phone has. */
     spec.death_signal = SIGTERM;
+    spec.new_process_group = true;
 
     /* Become ndusr unless this app is one of the two exceptions in
      * nd_proc_app_needs_root().
@@ -1955,6 +1991,9 @@ nd_err nd_proc_launch_app(nd_ui *ui, const nd_app_entry *app, const char *entry,
              * nd_ui_watch_beat() is what turns that into one log line naming
              * what it was blocked on. */
             nd_ui_watch_beat();
+
+            if (nd_svc_server_take_charging(svc))
+                show_charging_over_app(ui, pid, &keys);
 
             if (pump_keys(ui, &ch, &keys)) {
                 /* ============ THE ONE WAY OUT ============
