@@ -105,17 +105,15 @@ extern "C" {
  * pass ND_SET_HW_MIC_GAIN_DFLT -- and keeps this key off the write path of
  * every other read in the phone.
  *
- * 100 rather than the old 80, and 100 rather than "whatever the driver came
- * up with". A capture control at full scale is not a distortion risk the way
- * a playback one is: it is the preamp in front of an 8 kHz voice codec, the
- * far end's AGC is downstream of it, and every report of this phone's audio
- * has been "they cannot hear me", never "I am too loud".
+ * 70 is a modest reduction from the old full-scale default: enough to cut
+ * the acoustic return that made the far end hear an echo, without returning
+ * to the original problem where the electret was hard to hear.
  *
  * Bounded 0..100 by nd_mic_gain_from_setting() before it reaches an argv,
  * because the value is a string on a writable partition and amixer takes
  * arguments. Anything unparseable, negative or above 100 falls back here. */
-#define ND_SET_HW_MIC_GAIN      "system.hw.mic_gain" /* "100" */
-#define ND_SET_HW_MIC_GAIN_DFLT "100"
+#define ND_SET_HW_MIC_GAIN      "system.hw.mic_gain" /* "70" */
+#define ND_SET_HW_MIC_GAIN_DFLT "70"
 
 /* Wallpaper behind the framework's own chrome -- lists, dialogs, text boxes,
  * every screen that used to be flat black. ON by default, because that is the

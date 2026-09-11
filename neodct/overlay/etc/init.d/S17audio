@@ -106,9 +106,8 @@ find_usb_card() {
 # This used to be `NEODCT_CAPTURE_LEVEL=80`, a bare constant chosen against
 # the one microphone on the developer's desk. It is now the owner's, through
 # system.hw.mic_gain -- which MicTest writes while you listen to the effect --
-# and 100 when nothing has set it. See nd_settings.h for why 100 rather than
-# 80: this is the preamp in front of an 8 kHz voice codec, and every report
-# about this phone's audio has been "they cannot hear me".
+# and 70 when nothing has set it, chosen to reduce acoustic echo without
+# making the electret hard to hear.
 #
 # settings.prop is READ AS DATA AND NEVER SOURCED. It lives on the writable
 # user partition, which is the one place an attacker who has got a file onto
@@ -142,10 +141,10 @@ find_usb_card() {
         done < "$NEODCT_SETTINGS"
     fi
     case "$level" in
-        ''|*[!0-9]*) level=100 ;;
+        ''|*[!0-9]*) level=70 ;;
     esac
     if [ "${#level}" -gt 3 ] || [ "$level" -gt 100 ]; then
-        level=100
+        level=70
     fi
     echo "$level"
 )}"

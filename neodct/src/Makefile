@@ -173,6 +173,7 @@ SELF_SRCS   := $(wildcard tools/nd_selftest*.c)
 KEY_SRCS    := $(wildcard tools/nd_key*.c)
 GRAB_SRCS   := $(wildcard tools/nd_grab*.c)
 STATE_SRCS  := $(wildcard tools/nd_state*.c)
+CALLPLAY_SRCS := $(wildcard tools/nd_callplay.c)
 NAPCLI_SRCS := $(wildcard tools/nd_nap_cli.c)
 # nd-stage links the Update app's OWN package reader and stager, so there is
 # one implementation of "is this package allowed" and this is a second caller
@@ -219,6 +220,7 @@ KEY_LIB_OBJS := $(filter-out $(OBJDIR)/tools/nd_key.o,$(KEY_OBJS))
 GRAB_OBJS   := $(patsubst %.c,$(OBJDIR)/%.o,$(GRAB_SRCS))
 GRAB_LIB_OBJS := $(filter-out $(OBJDIR)/tools/nd_grab.o,$(GRAB_OBJS))
 STATE_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(STATE_SRCS))
+CALLPLAY_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(CALLPLAY_SRCS))
 NAPCLI_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(NAPCLI_SRCS))
 STAGE_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(STAGE_SRCS) $(STAGE_APP_SRCS))
 VERIFY_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(VERIFY_SRCS))
@@ -260,6 +262,7 @@ TARGETS += $(if $(SELF_SRCS),$(BINDIR)/nd-selftest)
 TARGETS += $(if $(KEY_SRCS),$(BINDIR)/nd-key)
 TARGETS += $(if $(GRAB_SRCS),$(BINDIR)/nd-grab)
 TARGETS += $(if $(STATE_SRCS),$(BINDIR)/nd-state)
+TARGETS += $(if $(CALLPLAY_SRCS),$(BINDIR)/nd-callplay)
 TARGETS += $(if $(NAPCLI_SRCS),$(BINDIR)/nd-nap)
 TARGETS += $(if $(STAGE_SRCS),$(BINDIR)/nd-stage)
 TARGETS += $(if $(VERIFY_SRCS),$(BINDIR)/nd-verify)
@@ -484,6 +487,11 @@ $(BINDIR)/nd-state: $(STATE_OBJS) $(LIB)
 	$(Q)mkdir -p $(dir $@)
 	$(say) LINK $@
 	$(Q)$(CC) -o $@ $(STATE_OBJS) -L$(LIBDIR) -lneodct $(LDFLAGS_ALL) $(PKG_LIBS) -lm
+
+$(BINDIR)/nd-callplay: $(CALLPLAY_OBJS) $(LIB)
+	$(Q)mkdir -p $(dir $@)
+	$(say) LINK $@
+	$(Q)$(CC) -o $@ $(CALLPLAY_OBJS) -L$(LIBDIR) -lneodct $(LDFLAGS_ALL) $(PKG_LIBS) -lasound -lm
 
 # ---- nd-nap: .nap packages from a shell ---------------------------
 # Deliberately thin: every rule about what a package may do stays in
@@ -717,6 +725,7 @@ install: all
 	@# you cannot see.
 	$(Q)$(if $(GRAB_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-grab $(DESTDIR)$(PREFIX)/bin/,:)
 	$(Q)$(if $(STATE_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-state $(DESTDIR)$(PREFIX)/bin/,:)
+	$(Q)$(if $(CALLPLAY_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-callplay $(DESTDIR)$(PREFIX)/bin/,:)
 	$(Q)$(if $(NAPCLI_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-nap $(DESTDIR)$(PREFIX)/bin/,:)
 	$(Q)$(if $(STAGE_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-stage $(DESTDIR)$(PREFIX)/bin/,:)
 	@# nd-panic ships. It is the only part of the UI that runs when nd-core

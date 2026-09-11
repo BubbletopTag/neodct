@@ -1,11 +1,12 @@
 /* nd_modem_audio.c -- full-duplex call audio over the SIM7600's PCM port.
  *
- *     speaker <- aplay   <- PCM port     (the far end's voice)
+ *     speaker <- nd-callplay <- PCM port (the far end's voice)
  *     far end <- PCM port <- arecord     (our mic, via the USB sound card)
  *
- * Zero in-process audio code, exactly as in the Python: two fire-and-forget
- * alsa-utils children write to and read from the bidirectional serial device
- * on USB interface 4 once AT+CPCMREG=1 has been sent.
+ * Two fire-and-forget children write to and read from the bidirectional
+ * serial device on USB interface 4 once AT+CPCMREG=1 has been sent. The
+ * speaker child is a small ALSA player rather than aplay so it can apply
+ * call-only software gain without moving the phone's hardware mixer.
  *
  * ============ THE SEQUENCE, AND WHY IT IS NOT "START BOTH AT DIAL" ============
  *
@@ -89,6 +90,7 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include "nd_callaudio.h"
 #include "nd_log.h"
 #include "nd_mic.h"
 #include "nd_modem_priv.h"
@@ -142,8 +144,8 @@ static int cmp_name(const void *a, const void *b)
  * here is nd_modem__pcm_port(): a miss falls through to a hardcoded
  * /dev/ttyUSB4 and stops being a detection at all, so a phone whose PCM port
  * enumerated as anything else got a call with no audio and no error. */
-static size_t sorted_listdir(const char *dir, const char *prefix,
-                             char names[][ND_MODEM_PORT_MAX], size_t max)
+static size_t sorted_listdir(const char *dir, const char *prefix, char names[][ND_MODEM_PORT_MAX],
+                             size_t max)
 {
     char resolved[ND_PATH_MAX];
     size_t plen = (prefix != NULL) ? strlen(prefix) : 0u;
@@ -328,7 +330,7 @@ static bool which_exec(const char *name, char *out, size_t out_sz)
 /* stdout and stderr to /dev/null, exactly as subprocess.DEVNULL does. The
  * path is NOT ND_ROOT-resolved: it is the child's plumbing, not phone data,
  * and a scratch root has no /dev/null. */
-static bool spawn_quiet(const char *const *argv, pid_t *pid_out)
+static bool spawn_quiet_with_fd(const char *const *argv, int child_fd, int our_fd, pid_t *pid_out)
 {
     char exe[ND_PATH_MAX];
     nd_proc_spec spec;
@@ -351,45 +353,60 @@ static bool spawn_quiet(const char *const *argv, pid_t *pid_out)
     spec.fds[1].child_fd = 2;
     spec.fds[1].our_fd = devnull;
     spec.n_fds = 2u;
+    if (child_fd >= 0 && our_fd >= 0) {
+        spec.fds[spec.n_fds].child_fd = child_fd;
+        spec.fds[spec.n_fds].our_fd = our_fd;
+        spec.n_fds++;
+    }
 
     rc = nd_proc_spawn(exe, &spec, pid_out);
     (void)close(devnull);
     return rc == ND_OK;
 }
 
+static bool spawn_quiet(const char *const *argv, pid_t *pid_out)
+{
+    return spawn_quiet_with_fd(argv, -1, -1, pid_out);
+}
+
 static void start_speaker_pipe(nd_modem *m, const char *port)
 {
     char rate[16];
+    char level[16];
+    char player[ND_PATH_MAX];
     char resolved[ND_PATH_MAX];
-    const char *argv[12];
+    const char *argv[5];
+    int ctl[2] = {-1, -1};
     pid_t pid;
 
     (void)snprintf(rate, sizeof rate, "%d", (int)m->pcm_rate);
+    (void)snprintf(level, sizeof level, "%d", (int)m->call_volume);
     if (nd_path_resolve(resolved, sizeof resolved, port) != ND_OK)
         return;
+    if (nd_path_resolve(player, sizeof player, "/NeoDCT/System/bin/nd-callplay") != ND_OK)
+        return;
+    if (pipe2(ctl, O_CLOEXEC | O_NONBLOCK) != 0)
+        return;
 
-    argv[0] = "aplay";
-    argv[1] = "-q";
-    argv[2] = "-t";
-    argv[3] = "raw";
-    argv[4] = "-f";
-    argv[5] = ND_MODEM_PCM_FORMAT;
-    argv[6] = "-r";
-    argv[7] = rate;
-    argv[8] = "-c";
-    argv[9] = "1";
-    argv[10] = resolved;
-    argv[11] = NULL;
+    argv[0] = player;
+    argv[1] = resolved;
+    argv[2] = rate;
+    argv[3] = level;
+    argv[4] = NULL;
 
-    if (spawn_quiet(argv, &pid)) {
+    if (spawn_quiet_with_fd(argv, 3, ctl[0], &pid)) {
+        (void)close(ctl[0]);
+        m->audio_ctl_fd = ctl[1];
         m->audio_pid = pid;
         m->audio_live = true;
-        nd_log(ND_LOG_MODEM, "Call audio: aplay <- %s (%d Hz %s).", port, (int)m->pcm_rate,
-               ND_MODEM_PCM_FORMAT);
+        nd_log(ND_LOG_MODEM, "Call audio: nd-callplay <- %s (%d Hz %s, volume %d).", port,
+               (int)m->pcm_rate, ND_MODEM_PCM_FORMAT, (int)m->call_volume);
     } else {
+        (void)close(ctl[0]);
+        (void)close(ctl[1]);
         m->audio_pid = -1;
         m->audio_live = false;
-        nd_log(ND_LOG_MODEM, "Speaker pipe unavailable: aplay: %s", strerror(errno));
+        nd_log(ND_LOG_MODEM, "Speaker pipe unavailable: nd-callplay: %s", strerror(errno));
     }
 }
 
@@ -674,6 +691,14 @@ static void kill_child(pid_t *pid, bool *live)
     *live = false;
 }
 
+static void stop_speaker(nd_modem *m)
+{
+    if (m->audio_ctl_fd >= 0)
+        (void)close(m->audio_ctl_fd);
+    m->audio_ctl_fd = -1;
+    kill_child(&m->audio_pid, &m->audio_live);
+}
+
 /* ------------------------------------------------------------------ *
  * The three starts
  * ------------------------------------------------------------------ */
@@ -689,7 +714,7 @@ void nd_modem__start_speaker(nd_modem *m)
 
 void nd_modem__restart_speaker(nd_modem *m)
 {
-    kill_child(&m->audio_pid, &m->audio_live);
+    stop_speaker(m);
     if (!pcm_port_ready(m, /*flush_input=*/true))
         return;
     start_speaker_pipe(m, m->active_pcm_port);
@@ -720,7 +745,7 @@ void nd_modem__stop_call_audio(nd_modem *m)
 {
     bool stopped = m->audio_live || m->mic_live;
 
-    kill_child(&m->audio_pid, &m->audio_live);
+    stop_speaker(m);
     kill_child(&m->mic_pid, &m->mic_live);
     if (stopped)
         nd_log(ND_LOG_MODEM, "Call audio stopped.");

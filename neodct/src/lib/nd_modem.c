@@ -71,6 +71,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "nd_callaudio.h"
 #include "nd_clock.h"
 #include "nd_log.h"
 #include "nd_mic.h"
@@ -913,8 +914,8 @@ static bool read_iface(const char *name, int32_t *out)
  *
  * Filtering first makes the cap mean what its name says. A NULL prefix keeps
  * the old take-everything behaviour for callers that want it. */
-static size_t sorted_listdir(const char *dir, const char *prefix,
-                             char names[][ND_MODEM_PORT_MAX], size_t max)
+static size_t sorted_listdir(const char *dir, const char *prefix, char names[][ND_MODEM_PORT_MAX],
+                             size_t max)
 {
     char resolved[ND_PATH_MAX];
     size_t plen = (prefix != NULL) ? strlen(prefix) : 0u;
@@ -1297,8 +1298,9 @@ static void announce_unreachable(nd_modem *m, const char *why)
     }
     unlock_state(m);
     if (first)
-        nd_log_err(ND_LOG_MODEM, "MODEM UNREACHABLE: a modem is enumerated and none of its "
-                                 "ports could be used (%s).",
+        nd_log_err(ND_LOG_MODEM,
+                   "MODEM UNREACHABLE: a modem is enumerated and none of its "
+                   "ports could be used (%s).",
                    (why != NULL && why[0] != '\0') ? why : "no reason recorded");
 }
 
@@ -2304,6 +2306,16 @@ static void run_request(nd_modem *m, nd_modem_req *r)
     case ND_REQ_READ_STORED:
         r->sms_st = do_read_stored(m, r->rec_out, r->rec_max, &r->rec_n);
         break;
+    case ND_REQ_SET_CALL_VOLUME: {
+        uint8_t level = (uint8_t)r->i1;
+
+        nd_modem__lock(m);
+        m->call_volume = r->i1;
+        nd_modem__unlock(m);
+        if (m->audio_ctl_fd >= 0 && write(m->audio_ctl_fd, &level, 1u) < 0 && errno != EAGAIN)
+            nd_log_err(ND_LOG_MODEM, "Call-volume control pipe: %s", strerror(errno));
+        break;
+    }
     case ND_REQ_SEND_AT:
     default:
         if (!m->hardware) {
@@ -2428,6 +2440,11 @@ static int32_t pcm_rate_setting(void)
 static int32_t mic_gain_setting(void)
 {
     return nd_mic_gain_from_setting(nd_settings_get(ND_SET_HW_MIC_GAIN, ND_SET_HW_MIC_GAIN_DFLT));
+}
+
+static int32_t call_volume_setting(void)
+{
+    return nd_call_volume_from_setting(nd_settings_get(ND_CALL_VOLUME_SETTING, ""));
 }
 
 static void port_from_settings(char *out, size_t out_sz)
@@ -2575,6 +2592,7 @@ nd_err nd_modem__create(nd_modem **out)
     m->logged_reg_stat = -2;
     m->call_stat = -1;
     m->audio_pid = -1;
+    m->audio_ctl_fd = -1;
     m->mic_pid = -1;
     /* All six timers start at 0.0, so the first poll() fires CSQ at once. */
 
@@ -2614,6 +2632,7 @@ nd_err nd_modem__create(nd_modem **out)
     port_from_settings(m->configured_port, sizeof m->configured_port);
     m->allow_calls = calls_enabled_setting();
     m->mic_gain = mic_gain_setting();
+    m->call_volume = call_volume_setting();
     m->boot_grace = boot_grace_setting();
     m->boot_deadline = nd_modem__now() + m->boot_grace;
     m->late_grace_deadline = nd_modem__now() + ND_MODEM_LATE_GRACE_MAX_S;
@@ -2749,6 +2768,42 @@ bool nd_modem_hangup(nd_modem *m)
     r.kind = ND_REQ_HANGUP;
     submit(m, &r);
     return r.ok;
+}
+
+int32_t nd_modem_call_volume(nd_modem *m)
+{
+    int32_t level;
+
+    if (m == NULL)
+        return ND_CALL_VOLUME_DEFAULT;
+    nd_modem__lock(m);
+    level = m->call_volume;
+    nd_modem__unlock(m);
+    return level;
+}
+
+void nd_modem_set_call_volume(nd_modem *m, int32_t level)
+{
+    nd_modem_req r;
+
+    if (m == NULL)
+        return;
+    if (level < ND_CALL_VOLUME_MIN)
+        level = ND_CALL_VOLUME_MIN;
+    if (level > ND_CALL_VOLUME_MAX)
+        level = ND_CALL_VOLUME_MAX;
+    memset(&r, 0, sizeof r);
+    r.kind = ND_REQ_SET_CALL_VOLUME;
+    r.i1 = level;
+    submit(m, &r);
+}
+
+void nd_modem_save_call_volume(nd_modem *m)
+{
+    char value[16];
+
+    if (m != NULL && nd_snprintf(value, sizeof value, "%d", (int)nd_modem_call_volume(m)) == ND_OK)
+        (void)nd_settings_set(ND_CALL_VOLUME_SETTING, value);
 }
 
 bool nd_modem_send_sms(nd_modem *m, const char *number, const char *text, char *detail,

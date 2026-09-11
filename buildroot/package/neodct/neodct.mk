@@ -114,7 +114,7 @@ define NEODCT_PRUNE_STALE_SOURCES
 endef
 NEODCT_POST_RSYNC_HOOKS += NEODCT_PRUNE_STALE_SOURCES
 
-NEODCT_DEPENDENCIES = host-pkgconf freetype jpeg libpng sqlite zlib openssl
+NEODCT_DEPENDENCIES = host-pkgconf alsa-lib freetype jpeg libpng sqlite zlib openssl
 
 # Make a plain `make` notice that the source changed.
 #

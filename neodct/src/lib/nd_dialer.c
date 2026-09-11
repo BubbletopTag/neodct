@@ -50,6 +50,7 @@
 
 #include <string.h>
 
+#include "nd_callaudio.h"
 #include "nd_db.h"
 #include "nd_draw.h"
 #include "nd_font.h"
@@ -436,10 +437,30 @@ void nd_dialer_draw_incoming(nd_ui *ui, const char *caller_text, bool blink_on)
  * show_calling
  * ------------------------------------------------------------------ */
 
+static void draw_call_volume(nd_ui *ui, int32_t level)
+{
+    int32_t i;
+    const int32_t seg_w = 12;
+    const int32_t gap = 2;
+    const int32_t total = ND_CALL_VOLUME_MAX * (seg_w + gap) - gap;
+    const int32_t x0 = (nd_ui_width(ui) - total) / 2;
+
+    for (i = 0; i < ND_CALL_VOLUME_MAX; i++) {
+        nd_rect seg = ND_RECT(x0 + i * (seg_w + gap), 126, x0 + i * (seg_w + gap) + seg_w - 1, 135);
+
+        if (i < level)
+            (void)nd_draw_rect_fill(ui->draw, seg, ND_WHITE);
+        else
+            (void)nd_draw_rect_outline(ui->draw, seg, ND_GRAY, 1);
+    }
+}
+
 void nd_dialer_show_calling(nd_ui *ui, const char *number, const char *name)
 {
     nd_softkey bar;
     double last_draw = 0.0;
+    double volume_until = 0.0;
+    bool volume_changed = false;
 
     if (ui == NULL)
         return;
@@ -457,6 +478,8 @@ void nd_dialer_show_calling(nd_ui *ui, const char *number, const char *name)
 
         if (now - last_draw >= ND_DIALER_REDRAW_S) {
             nd_dialer_draw_call(ui, number, name);
+            if (ui->modem != NULL && now < volume_until)
+                draw_call_volume(ui, nd_modem_call_volume(ui->modem));
             (void)nd_ui_present(ui);
             last_draw = now;
             /* present defaults to True: this is the second present of the
@@ -469,7 +492,7 @@ void nd_dialer_show_calling(nd_ui *ui, const char *number, const char *name)
         /* Remote hangup / call failure: the modem thread has already seen the
          * NO CARRIER or VOICE CALL: END urc, so IDLE means it is over. */
         if (ui->modem != NULL && nd_modem_state(ui->modem) == ND_CALL_IDLE)
-            return;
+            break;
 
         /* `if key is None: continue`. ND_KEY_NONE is the timeout;
          * ND_KEY_INCOMING_CALL cannot arrive because ui->handling_call gags
@@ -480,9 +503,19 @@ void nd_dialer_show_calling(nd_ui *ui, const char *number, const char *name)
         if (key == ND_KEY_CLEAR || key == ND_KEY_ENTER) {
             if (ui->modem != NULL)
                 (void)nd_modem_hangup(ui->modem);
-            return;
+            break;
+        }
+        if (ui->modem != NULL && (key == ND_KEY_UP || key == ND_KEY_DOWN)) {
+            int32_t delta = (key == ND_KEY_UP) ? 1 : -1;
+
+            nd_modem_set_call_volume(ui->modem, nd_modem_call_volume(ui->modem) + delta);
+            volume_until = nd_time_now() + 1.25;
+            last_draw = -1.0e30;
+            volume_changed = true;
         }
     }
+    if (volume_changed && ui->modem != NULL)
+        nd_modem_save_call_volume(ui->modem);
 }
 
 /* ------------------------------------------------------------------ *

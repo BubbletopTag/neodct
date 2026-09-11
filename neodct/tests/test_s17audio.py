@@ -131,16 +131,13 @@ def test_the_capture_switch_is_turned_on(tmp_path):
 
 
 def test_the_capture_volume_is_raised(tmp_path):
-    """100% with nothing configured, and 100 rather than the 80 this shipped
-    with for eight releases. It is the preamp in front of an 8 kHz voice
-    codec, not a playback level: every report about this phone's audio has
-    been "they cannot hear me"."""
+    """The default is 70% to reduce call echo."""
     proc = fake_proc_asound(tmp_path)
     amixer, log = fake_amixer(tmp_path)
 
     run_start(tmp_path, proc, amixer)
 
-    assert "cset numid=6 100%" in log.read_text(), log.read_text()
+    assert "cset numid=6 70%" in log.read_text(), log.read_text()
 
 
 def test_the_owner_can_set_the_level(tmp_path):
@@ -216,7 +213,7 @@ def test_a_nonsense_level_falls_back_to_the_default(tmp_path, value):
 
     assert result.returncode == 0, result.stderr
     calls = log.read_text()
-    assert "cset numid=6 100%" in calls, calls
+    assert "cset numid=6 70%" in calls, calls
     assert "pwned" not in calls, calls
 
 
@@ -252,7 +249,7 @@ def test_a_missing_settings_file_is_not_an_error(tmp_path):
                           settings=tmp_path / "never-written.prop")
 
     assert result.returncode == 0, result.stderr
-    assert "cset numid=6 100%" in log.read_text(), log.read_text()
+    assert "cset numid=6 70%" in log.read_text(), log.read_text()
 
 
 def test_the_microphone_monitor_path_is_left_alone(tmp_path):

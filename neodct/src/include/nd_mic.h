@@ -218,7 +218,7 @@ nd_err nd_mic_cset_command(nd_mic_mixer_command *out, int32_t card, const nd_mic
  * "80 dB" all give ND_MIC_GAIN_DEFAULT -- a settings file somebody has
  * hand-edited into nonsense must not be able to leave the microphone at zero,
  * which is the same rule system.ui.brightness follows for the same reason. */
-#define ND_MIC_GAIN_DEFAULT 100
+#define ND_MIC_GAIN_DEFAULT 70
 int32_t nd_mic_gain_from_setting(const char *value);
 
 /* card_of(): the card number out of an `arecord -D` string. "plughw:2,0" is

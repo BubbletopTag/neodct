@@ -185,6 +185,7 @@ typedef enum {
     ND_REQ_SEND_SMS,
     ND_REQ_FETCH_SMS,
     ND_REQ_READ_STORED,
+    ND_REQ_SET_CALL_VOLUME,
     ND_REQ_SEND_AT
 } nd_req_kind;
 
@@ -370,7 +371,8 @@ struct nd_modem {
 
     pid_t audio_pid; /* aplay:   PCM port -> speaker */
     bool audio_live;
-    pid_t mic_pid; /* arecord: mic -> PCM port     */
+    int audio_ctl_fd; /* newest call volume -> nd-callplay, or -1 */
+    pid_t mic_pid;    /* arecord: mic -> PCM port     */
     bool mic_live;
     double mic_started_at; /* for ND_MIC_STABLE_S */
     /* When to try the mic again after a start that never produced a pipe,
@@ -423,6 +425,7 @@ struct nd_modem {
      * level changed in MicTest reaches CALLS at the next core start, and
      * reaches MicTest's own live preview immediately. */
     int32_t mic_gain;
+    int32_t call_volume; /* 0..10; UI reads under st_mu */
 
     /* Scratch for one transaction, so nothing is allocated per command.
      * `rx_lines` holds what read_pending() just split off the wire; `collected`

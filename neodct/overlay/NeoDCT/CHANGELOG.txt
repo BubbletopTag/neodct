@@ -1,6 +1,6 @@
 # NeoDCT OS Changelog
 
-0.5.17a-dev
+0.5.17a
 The phone rests when you are not using it.
 
 Left alone on the home screen for a minute, the screen dims to its lowest
@@ -49,6 +49,17 @@ same one that already decides everything else developer-facing.
 
 - Engineering mode alone opens the key channel. Turn it on, restart the
   phone, and "ndlink key" works.
+
+Calls no longer have to be loud enough to feed themselves back into the
+microphone.
+
+- The default microphone gain is 70% to reduce echo.
+- Up and down adjust the speaker while a call is on screen. The setting is
+  remembered, but affects calls only; music, tones and the ringtone return to
+  their normal volume as soon as the call ends.
+- Call-volume changes reach the speaker promptly and repeated keys are
+  collapsed to the newest level instead of queueing mixer processes or flash
+  writes.
 
 0.5.16a
 Bluetooth, the battery meter, and a log you can actually read.

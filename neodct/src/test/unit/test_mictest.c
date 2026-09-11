@@ -109,7 +109,7 @@ static void test_the_two_spellings_of_the_default_agree(void)
 {
     CHECK_INT(nd_mic_gain_from_setting(ND_SET_HW_MIC_GAIN_DFLT), ND_MIC_GAIN_DEFAULT,
               "ND_SET_HW_MIC_GAIN_DFLT parses to ND_MIC_GAIN_DEFAULT");
-    CHECK_INT(ND_MIC_GAIN_DEFAULT, 100, "and it is 100, not the 80 this shipped with");
+    CHECK_INT(ND_MIC_GAIN_DEFAULT, 70, "and it is the release microphone level");
 }
 
 /* The loop calls this with whatever nd_ui_read_keypress() returned, which is

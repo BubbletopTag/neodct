@@ -50,13 +50,13 @@ extern "C" {
 #define ND_MODEM_PROBE_WHY_MAX 200
 
 /* Timings, all load-bearing for a 1:1 port of the poll cadence. */
-#define ND_POLL_URC_S              0.5
-#define ND_SMS_PROMPT_TIMEOUT_S    5.0
-#define ND_SMS_SEND_TIMEOUT_S      30.0
-#define ND_POLL_SIGNAL_S           5.0
-#define ND_POLL_NET_S              20.0
-#define ND_POLL_OPERATOR_S         60.0
-#define ND_PROBE_RETRY_S           10.0
+#define ND_POLL_URC_S           0.5
+#define ND_SMS_PROMPT_TIMEOUT_S 5.0
+#define ND_SMS_SEND_TIMEOUT_S   30.0
+#define ND_POLL_SIGNAL_S        5.0
+#define ND_POLL_NET_S           20.0
+#define ND_POLL_OPERATOR_S      60.0
+#define ND_PROBE_RETRY_S        10.0
 
 /* ============ THE OUT-OF-SERVICE RE-SCAN LADDER ============
  *
@@ -92,10 +92,10 @@ extern "C" {
  *         to fix a problem that CFUN=4 fixes without dropping the port.
  *
  * Neither runs during a call. */
-#define ND_RESCAN_COPS_S      30.0
-#define ND_RESCAN_CFUN_S      120.0
-#define ND_RESCAN_URGENT_S    600.0
-#define ND_RESCAN_RELAXED_S   300.0
+#define ND_RESCAN_COPS_S    30.0
+#define ND_RESCAN_CFUN_S    120.0
+#define ND_RESCAN_URGENT_S  600.0
+#define ND_RESCAN_RELAXED_S 300.0
 
 /* The radio-access-technology preference, spelled as AT+CNMP= wants it.
  *
@@ -159,7 +159,7 @@ extern "C" {
  * misses. Ninety seconds is roughly eighteen consecutive failed CSQ polls at
  * ND_POLL_SIGNAL_S spacing. A modem that has said nothing for a minute and a
  * half is not busy, it is gone. */
-#define ND_MODEM_FAULT_AFTER_S     90.0
+#define ND_MODEM_FAULT_AFTER_S 90.0
 
 /* How long a write to the AT port may make no progress before the port is
  * declared dead. A modem asserting flow control for a moment is not a modem
@@ -167,14 +167,14 @@ extern "C" {
  * returns EAGAIN for ever, and the UI thread blocked in dial() or hangup()
  * behind that write is the phone frozen solid. Two seconds is a hundred
  * times what any AT line needs. */
-#define ND_MODEM_WRITE_STALL_S     2.0
+#define ND_MODEM_WRITE_STALL_S 2.0
 
 /* What Simulation Mode puts on the home screen in place of an operator name,
  * and how many bars it draws. See nd_modem_signal_level() for why the two
  * numbers differ on network presence rather than being a fixed constant. */
-#define ND_MODEM_SIM_CARRIER       "Simulation"
-#define ND_MODEM_SIM_BARS_ONLINE   4
-#define ND_MODEM_SIM_BARS_OFFLINE  1
+#define ND_MODEM_SIM_CARRIER      "Simulation"
+#define ND_MODEM_SIM_BARS_ONLINE  4
+#define ND_MODEM_SIM_BARS_OFFLINE 1
 
 /* And what a modem that IS there but cannot be talked to puts there instead.
  *
@@ -185,15 +185,15 @@ extern "C" {
  * phone is not in a tunnel, its radio is unreachable. Eleven characters, one
  * more than "Simulation", so it fits the same slot in the home layout. */
 #define ND_MODEM_UNREACHABLE_CARRIER "Modem ERROR"
-#define ND_MODEM_SIM_ROUTE_TTL_S   2.0
-#define ND_CLCC_POLL_S             2.0
-#define ND_AUDIO_RESTART_HOLDOFF_S 3.0
-#define ND_TRANSACT_SLEEP_S        0.02
-#define ND_SMS_WAIT_SLEEP_S        0.05
-#define ND_PROMPT_SLEEP_S          0.02
-#define ND_MODEM_READ_CHUNK        512
-#define ND_MODEM_PROMPT_CHUNK      64
-#define ND_MODEM_EVENT_QUEUE_MAX   8 /* deque(maxlen=8) -- oldest is dropped */
+#define ND_MODEM_SIM_ROUTE_TTL_S     2.0
+#define ND_CLCC_POLL_S               2.0
+#define ND_AUDIO_RESTART_HOLDOFF_S   3.0
+#define ND_TRANSACT_SLEEP_S          0.02
+#define ND_SMS_WAIT_SLEEP_S          0.05
+#define ND_PROMPT_SLEEP_S            0.02
+#define ND_MODEM_READ_CHUNK          512
+#define ND_MODEM_PROMPT_CHUNK        64
+#define ND_MODEM_EVENT_QUEUE_MAX     8 /* deque(maxlen=8) -- oldest is dropped */
 
 /* CSQ rssi 0..31 (99 = unknown) mapped to 0..4 bars at roughly
  * -105/-93/-81/-73 dBm. */
@@ -298,6 +298,12 @@ void nd_modem_close(nd_modem *m);
 bool nd_modem_dial(nd_modem *m, const char *number);
 bool nd_modem_answer(nd_modem *m);
 bool nd_modem_hangup(nd_modem *m);
+
+/* Call-only speaker gain. This never touches ALSA's hardware mixer, so audio
+ * outside a call is unchanged. save writes once after repeated keypresses. */
+int32_t nd_modem_call_volume(nd_modem *m);
+void nd_modem_set_call_volume(nd_modem *m, int32_t level);
+void nd_modem_save_call_volume(nd_modem *m);
 
 /* (ok, detail). detail is rendered verbatim by Messages as
  * "Send failed: <detail>", so its wording is user-visible. */
