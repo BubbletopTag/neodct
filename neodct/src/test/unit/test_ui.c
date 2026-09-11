@@ -47,8 +47,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
+#include "nd_alarm.h"
 #include "nd_app.h"
 #include "nd_capture.h"
 #include "nd_clock.h"
@@ -692,6 +694,77 @@ static bool rect_matches(const nd_image *a, const nd_image *b, nd_rect r)
         }
     }
     return true;
+}
+
+/* The alarm mark belongs to the clock, not to the signal meter. Compare an
+ * otherwise identical pair of home renders so wallpaper pixels and font
+ * shapes cannot be mistaken for the indicator, then measure its changed
+ * bounds against the clock's actual width at this virtual instant. */
+static void test_alarm_indicator_follows_the_clock(nd_fb *fb)
+{
+    nd_ui ui;
+    nd_image *without;
+    const nd_home_layout *layout;
+    struct tm tmv;
+    char clock[6];
+    int32_t clock_w = 0;
+    int32_t alarm_x;
+    int32_t min_x = ND_UI_W;
+    int32_t min_y = ND_UI_H;
+    int32_t max_x = -1;
+    int32_t max_y = -1;
+    int32_t changed = 0;
+    int32_t x;
+    int32_t y;
+
+    write_settings(NULL);
+    nd_vclock_enable();
+    nd_ui_sim_clear(&ui);
+    if (nd_ui_init(&ui, fb) != ND_OK) {
+        CHECK(false, "nd_ui_init (alarm indicator)");
+        return;
+    }
+    nd_ui_sim_status(&ui, 4, 4, "Tello");
+    nd_ui_render_home(&ui);
+    without = nd_image_copy(ui.canvas);
+    CHECK(without != NULL, "copy the home screen without an alarm");
+    if (without == NULL) {
+        nd_ui_teardown(&ui);
+        return;
+    }
+
+    CHECK(nd_settings_set(ND_SET_ALARM_TIME, "0730") == ND_OK, "set an alarm for the render");
+    nd_ui_render_home(&ui);
+    for (y = 0; y < nd_ui_height(&ui); y++) {
+        for (x = 0; x < nd_ui_width(&ui); x++) {
+            nd_color a = nd_image_get_px(without, x, y);
+            nd_color b = nd_image_get_px(ui.canvas, x, y);
+
+            if (a.r == b.r && a.g == b.g && a.b == b.b)
+                continue;
+            min_x = nd_min32(min_x, x);
+            min_y = nd_min32(min_y, y);
+            max_x = nd_max32(max_x, x);
+            max_y = nd_max32(max_y, y);
+            changed++;
+        }
+    }
+
+    layout = nd_ui_home_layout(&ui);
+    nd_time_localtime(nd_time_now(), &tmv);
+    CHECK(strftime(clock, sizeof clock, "%H:%M", &tmv) != 0u, "format the home clock");
+    nd_ui_text_size(&ui, clock, ui.font_s, &clock_w, NULL);
+    /* The shipped layout's clock is element 3, right-anchored at x=213. The
+     * glyph occupies 17 columns, with its lit ink inset one column per side. */
+    alarm_x = nd_layout_scale_x(layout->elements[3].x, nd_ui_width(&ui)) - clock_w - 4 - 17;
+    CHECK(changed > 0, "setting an alarm adds visible pixels");
+    CHECK_INT(min_x, alarm_x + 1, "alarm indicator left edge follows the clock");
+    CHECK_INT(max_x, alarm_x + 15, "alarm indicator right edge follows the clock");
+    CHECK_INT(min_y, 5, "alarm indicator top matches the clock band");
+    CHECK_INT(max_y, 20, "alarm indicator height matches the clock band");
+
+    nd_image_free(without);
+    nd_ui_teardown(&ui);
 }
 
 /* The whole of nd_ui_paint_chrome()'s contract, on a context built the way the
@@ -1459,6 +1532,7 @@ int main(void)
             /* After the frames: these rebuild the context several times and
              * would otherwise renumber the virtual clock ticks the six
              * reference frames depend on. */
+            test_alarm_indicator_follows_the_clock(nd_capture_fb(cap));
             test_chrome_background(nd_capture_fb(cap));
             test_animated_wallpaper(nd_capture_fb(cap));
             test_the_t9_flag_is_re_derived_not_remembered(nd_capture_fb(cap));

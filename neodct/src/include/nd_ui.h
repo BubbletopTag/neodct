@@ -60,6 +60,7 @@ extern "C" {
 /* Declared here so the geometry helpers below can take a pointer to it
  * before the full definition appears. */
 struct nd_ui;
+struct nd_idle;
 
 /* ------------------------------------------------------------------ *
  * Geometry
@@ -275,6 +276,10 @@ typedef struct nd_ui {
     nd_modem *modem;
     nd_battery *battery;
     nd_notify *notify;
+
+    /* Non-NULL only in nd-core. App processes build their own UI context and
+     * must not run a second idle timer against the same hardware. */
+    struct nd_idle *idle;
 
     /* --- how a BLOCKED widget repaints itself; see nd_ui_set_repaint() --- */
     struct nd_ui_repaint_slot {

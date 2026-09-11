@@ -1,8 +1,9 @@
 /* nd_idle.c -- dim the panel and slow the CPU when nobody is using the phone.
  *
- * See the block in nd_idle.h for what this is and why it lives on the home
- * screen only. This file is the half that touches hardware, and every bit of
- * it is arranged around one rule: A DIM MUST ALWAYS BE UNDOABLE.
+ * See the block in nd_idle.h for how one timer follows the keypad through the
+ * core and its app-forwarding loop. This file is the half that touches
+ * hardware, and every bit of it is arranged around one rule: A DIM MUST
+ * ALWAYS BE UNDOABLE.
  *
  * That is why the state to restore is captured BEFORE anything is written,
  * why `dimmed` is set even when the writes fail, and why nd_idle_wake()
@@ -240,4 +241,12 @@ void nd_idle_wake(nd_idle *s, double now)
         }
         s->wake_percent = -1;
     }
+}
+
+void nd_idle_poll(nd_idle *s, double now, bool activity)
+{
+    if (activity)
+        nd_idle_wake(s, now);
+    else
+        nd_idle_tick(s, now);
 }

@@ -62,6 +62,7 @@
 #include "nd_fb.h"
 #include "nd_font.h"
 #include "nd_gif.h"
+#include "nd_idle.h"
 #include "nd_image.h"
 #include "nd_input.h"
 #include "nd_json.h"
@@ -2509,6 +2510,7 @@ static void repaint_if_wallpaper_moved(nd_ui *ui)
 
 int32_t nd_ui_read_keypress(nd_ui *ui, double timeout_s)
 {
+    int32_t key;
     /* The main beat: every loop in the system that waits for a key comes
      * through here, so this alone covers the home screen, every widget, every
      * app's own loop and the format progress bar. Before the NULL check for
@@ -2527,8 +2529,10 @@ int32_t nd_ui_read_keypress(nd_ui *ui, double timeout_s)
     calendar_tick(ui);
     alarm_tick(ui);
     keypad_tick(ui);
-    if (ring_tick(ui))
+    if (ring_tick(ui)) {
+        nd_idle_poll(ui->idle, nd_time_monotonic(), true);
         return ND_KEY_INCOMING_CALL;
+    }
 
     if (ui->input == NULL) {
         /* Nothing above waited, so sleep out the timeout rather than
@@ -2540,9 +2544,12 @@ int32_t nd_ui_read_keypress(nd_ui *ui, double timeout_s)
             ts.tv_nsec = (long)((timeout_s - (double)ts.tv_sec) * 1e9);
             (void)nanosleep(&ts, NULL);
         }
+        nd_idle_poll(ui->idle, nd_time_monotonic(), false);
         return ND_KEY_NONE;
     }
-    return nd_input_read_key(ui->input, timeout_s);
+    key = nd_input_read_key(ui->input, timeout_s);
+    nd_idle_poll(ui->idle, nd_time_monotonic(), key != ND_KEY_NONE);
+    return key;
 }
 
 double nd_ui_widget_timeout(nd_ui *ui, double dflt)
@@ -2675,15 +2682,48 @@ static const char *const ALARM_GLYPH[ALARM_GLYPH_H] = {
     "   #         #   ", "   ##       ##   ", "    ##     ##    ", "  ## ####### ##  ",
 };
 
-/* Where it goes: immediately RIGHT of the signal meter, in the top strip.
- *
- * ui_home.json puts the signal meter at x = 7 with a 26-wide sprite, so it
- * owns x 7..33 and this starts at 36. y = 5 puts the glyph's 16 rows across
- * the same band as the clock text on the other side of the screen (ink y
- * 9..21), which is what makes the two read as one row of status rather than
- * as two unrelated marks. */
-#define ALARM_GLYPH_X 36
+/* The clock is right-anchored, so its left edge moves as narrow digits come
+ * and go. Keep the indicator attached to that edge rather than assigning it
+ * another absolute slot and letting the gap change with the time. */
+#define ALARM_GLYPH_GAP 4
 #define ALARM_GLYPH_Y 5
+
+static int32_t alarm_glyph_x(nd_ui *ui, const nd_home_layout *layout)
+{
+    size_t i;
+
+    if (ui->font_s != NULL && layout != NULL) {
+        for (i = 0u; i < layout->n_elements; i++) {
+            const nd_element *el = &layout->elements[i];
+
+            /* ui_home.json has no marker syntax. nd_layout.c recognises this
+             * authored value as the clock placeholder, so use the same value
+             * to find the element whose rendered left edge we need. */
+            if (el->type == ND_EL_TEXT && strcmp(el->text, "12:00") == 0) {
+                char text[6];
+                struct tm tmv;
+                int32_t text_w = 0;
+                int32_t clock_x;
+
+                nd_time_localtime(nd_time_now(), &tmv);
+                if (strftime(text, sizeof text, "%H:%M", &tmv) == 0u)
+                    break;
+                nd_ui_text_size(ui, text, ui->font_s, &text_w, NULL);
+                clock_x = nd_layout_scale_x(el->x, nd_ui_width(ui));
+                if (el->anchor == ND_ANCHOR_RIGHT)
+                    clock_x -= text_w;
+                else if (el->anchor == ND_ANCHOR_CENTER_H)
+                    clock_x -= text_w / 2;
+                return clock_x - ALARM_GLYPH_GAP - ALARM_GLYPH_W;
+            }
+        }
+    }
+
+    /* The stock layout right-anchors the widest clock 47 px from x=213.
+     * This fallback keeps the indicator in the same place if the layout or
+     * font could not be loaded, rather than putting it back by the signal. */
+    return 213 - 47 - ALARM_GLYPH_GAP - ALARM_GLYPH_W;
+}
 
 static void draw_alarm_glyph(nd_ui *ui, int32_t ox, int32_t oy)
 {
@@ -2793,7 +2833,7 @@ void nd_ui_render_home(nd_ui *ui)
         (void)nd_draw_text(ui->draw, 10, 10, "No Layout Found", ui->font_s, ND_RGB(255, 0, 0));
     }
 
-    /* --- 2b. the alarm clock, top left ---
+    /* --- 2b. the alarm clock, beside the top-right clock ---
      *
      * PIXEL ART DRAWN IN CODE, not a PNG like the envelope beside it. The
      * envelope is scaled by h/240 and blitted with alpha, which is right for
@@ -2801,8 +2841,9 @@ void nd_ui_render_home(nd_ui *ui)
      * exactly the pixels it is. Scaling it would put grey on the edges of a
      * two-colour panel.
      *
-     * It sits to the right of the signal meter -- see ALARM_GLYPH_X -- which
-     * is where a phone of this shape has always put its indicators.
+     * Its right edge stays four pixels left of the clock's rendered text.
+     * That text is right-anchored and changes width with its digits, so the
+     * indicator follows it instead of drifting away at narrower times.
      *
      * Drawn whenever an alarm is SET -- not while it is going off. It is a
      * statement about the phone's configuration, like the battery meter, and
@@ -2812,7 +2853,7 @@ void nd_ui_render_home(nd_ui *ui)
 
         nd_alarm_load(&a);
         if (a.set)
-            draw_alarm_glyph(ui, ALARM_GLYPH_X, ALARM_GLYPH_Y);
+            draw_alarm_glyph(ui, alarm_glyph_x(ui, layout), ALARM_GLYPH_Y);
     }
 
     /* --- 3. notification layer: a flashing envelope while unread mail

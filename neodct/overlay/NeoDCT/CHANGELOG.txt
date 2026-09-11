@@ -1,5 +1,17 @@
 # NeoDCT OS Changelog
 
+0.5.18a
+The idle timer follows the screen you are actually using.
+
+Keys in menus and apps now wake the phone and restart the same sixty-second
+countdown as keys on the home screen. The home timer no longer expires unseen
+behind an app, dimming the screen and holding the processor at 600 MHz as soon
+as the app closes.
+
+- The idle timeout works across the home screen, menus and apps.
+- There is one core-owned timer; app processes do not run a competing timer.
+- The normal brightness and CPU range return before a waking key is handled.
+
 0.5.17a
 The phone rests when you are not using it.
 

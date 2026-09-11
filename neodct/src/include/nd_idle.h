@@ -1,4 +1,4 @@
-/* nd_idle.h -- the home screen's idle dimmer.
+/* nd_idle.h -- the phone's idle dimmer.
  *
  * Sixty seconds with nobody touching the keypad, and the phone drops the
  * panel to its dimmest lit step and pins the CPU to 600 MHz. The next key
@@ -7,20 +7,13 @@
  * registered and the screen keeps its picture. It is the cheap nine tenths of
  * sleep that costs no bring-up.
  *
- * ============ WHY THE HOME SCREEN AND NOT EVERYWHERE ============
+ * ============ ONE TIMER, WHEREVER THE KEYS GO ============
  *
- * The tick lives in nd_main.c's loop, which runs only while the home screen
- * is the thing on the panel: opening a menu or an app hands control to that
- * screen's own key loop and this one stops being called. So a menu left open
- * never dims, and an app is never dimmed underneath itself -- which is the
- * behaviour a media player, a download or a game needs, and getting it for
- * free from where the code sits is better than getting it from a list of
- * exceptions that would have to be maintained.
- *
- * The cost is that a phone left in Settings stays bright. That is a real gap
- * and a deliberate one; widening it means moving the tick into
- * nd_ui_read_keypress(), which every screen shares, and then teaching it
- * which screens must be exempt.
+ * The core attaches this state to its UI. nd_ui_read_keypress() observes it
+ * for home and every in-core widget; nd_proc.c observes the same state while
+ * it owns the physical keypad and forwards events to an app. There is no
+ * second background countdown for an app to race. A key in any screen wakes
+ * the phone and restarts the same sixty seconds.
  *
  * ============ WHY THE DECISION IS A SEPARATE PURE FUNCTION ============
  *
@@ -50,7 +43,7 @@ extern "C" {
 #define ND_IDLE_DIM_PERCENT 10
 
 /* 600 MHz is the second entry in the RV1103's OPP table (408, 600, 816,
- * 1104 on this kernel), so it is a real operating point and not a request the
+ * 1008, 1200 MHz), so it is a real operating point and not a request the
  * driver has to round. 408 would be lower and is deliberately not used: the
  * home screen still animates a wallpaper and still repaints a clock, and the
  * bottom step makes that visibly jerky for a few milliwatts. */
@@ -60,7 +53,7 @@ extern "C" {
  * the caller and zero-initialised by nd_idle_init(); there is no global,
  * because the one thing worse than a phone that will not dim is two of these
  * disagreeing about whether it already did. */
-typedef struct {
+typedef struct nd_idle {
     double last_activity; /* monotonic seconds, from nd_time_monotonic() */
     bool dimmed;          /* whether the phone is currently held down */
     int32_t wake_percent; /* brightness to restore, -1 when unknown */
@@ -82,8 +75,7 @@ void nd_idle_init(nd_idle *s, double now);
 bool nd_idle_should_dim(bool dimmed, double last_activity, double now, double timeout_s);
 
 /* Somebody pressed something. Restarts the countdown without touching the
- * panel -- call this after a menu or an app returns, where the keys went to
- * that screen's loop and this one never saw them. */
+ * panel. Most callers want nd_idle_poll(), which also wakes a dimmed phone. */
 void nd_idle_note_activity(nd_idle *s, double now);
 
 /* One beat of the idle countdown. Dims when nd_idle_should_dim() says so and
@@ -96,12 +88,17 @@ void nd_idle_tick(nd_idle *s, double now);
 
 /* Put the panel and the CPU back, if they were moved, and restart the
  * countdown. Safe and cheap when nothing was dimmed, which is the common
- * case: every keypress on the home screen goes through here.
+ * case: every keypress on every screen goes through here.
  *
  * MUST also be called on the way out of the main loop. A phone that powers
  * off dimmed is merely odd; one that reboots into recovery dimmed, or hands a
  * pinned 600 MHz CPU to the updater, is not. */
 void nd_idle_wake(nd_idle *s, double now);
+
+/* One input poll, expressed once so the direct UI path and the app-forwarding
+ * path cannot disagree. `activity` means a real key event was observed; an
+ * empty poll advances the timeout. */
+void nd_idle_poll(nd_idle *s, double now, bool activity);
 
 #ifdef __cplusplus
 }

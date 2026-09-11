@@ -140,6 +140,27 @@ static void test_activity_restarts_the_countdown(void)
     CHECK(s.dimmed);
 }
 
+/* Both physical-input owners call this same operation: the UI while a menu
+ * owns the screen and nd_proc while an app owns it. This is the regression
+ * for an app spending the home timer in the background and returning into an
+ * immediate dim. */
+static void test_poll_follows_activity_across_screen_owners(void)
+{
+    nd_idle s;
+
+    nd_idle_init(&s, 0.0);
+    nd_idle_poll(&s, 59.0, true);  /* key handled by a menu */
+    nd_idle_poll(&s, 118.0, true); /* key forwarded to an app */
+    nd_idle_poll(&s, 177.0, false);
+    CHECK(!s.dimmed);
+    nd_idle_poll(&s, 178.0, false);
+    CHECK(s.dimmed);
+
+    nd_idle_poll(&s, 179.0, true);
+    CHECK(!s.dimmed);
+    CHECK(s.last_activity == 179.0);
+}
+
 /* ------------------------------------------------------------------ *
  * What actually gets written
  * ------------------------------------------------------------------ */
@@ -311,6 +332,7 @@ int main(void)
     RUN(test_a_zero_timeout_never_dims);
     RUN(test_init_starts_the_countdown_undimmed);
     RUN(test_activity_restarts_the_countdown);
+    RUN(test_poll_follows_activity_across_screen_owners);
     RUN(test_the_dim_drops_the_panel_to_its_lowest_lit_step);
     RUN(test_waking_puts_the_brightness_back);
     RUN(test_waking_restores_a_partial_brightness);

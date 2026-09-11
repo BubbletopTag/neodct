@@ -48,6 +48,7 @@
 #include "nd_cpufreq.h"
 #include "nd_crash.h"
 #include "nd_fb_priv.h"
+#include "nd_idle.h"
 #include "nd_input.h"
 #include "nd_json.h"
 #include "nd_keycodes.h"
@@ -1252,12 +1253,16 @@ static void keydev_feed(app_keys *k, const nd_key_event *ev)
 static bool pump_keys(nd_ui *ui, nd_input_channel *ch, app_keys *keys)
 {
     nd_key_event ev;
+    bool activity = false;
 
     if (ui == NULL || ui->input == NULL) {
         nap(0.05);
+        if (ui != NULL)
+            nd_idle_poll(ui->idle, monotonic_now(), false);
         return false;
     }
     if (nd_input_read_event(ui->input, 0.05, &ev)) {
+        activity = true;
         keydev_feed(keys, &ev);
         if (nd_input_channel_send(ch, ev.code, ev.pressed) != ND_OK) {
             /* The child stopped reading, or has gone. Neither is our problem
@@ -1279,6 +1284,7 @@ static bool pump_keys(nd_ui *ui, nd_input_channel *ch, app_keys *keys)
             keys->clear_down_at = 0.0;
         }
     }
+    nd_idle_poll(ui->idle, monotonic_now(), activity);
     if (keys->clear_down_at != 0.0 &&
         monotonic_now() - keys->clear_down_at >= ND_PROC_APP_ABORT_HOLD_S) {
         keys->clear_down_at = 0.0;

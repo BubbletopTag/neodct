@@ -480,10 +480,11 @@ static int core_run(nd_fb *fb, bool idle_measure)
 
     nd_log(ND_LOG_CORE, "Entering Main Loop...");
 
-    /* The idle dimmer's countdown starts here rather than at boot, so the
-     * sixty seconds are sixty seconds of the home screen being up and not of
-     * whatever the boot took. */
+    /* The countdown starts when the interactive UI is ready. This is the one
+     * state followed by the core's direct key path and its app-forwarding
+     * path; app processes never attach a second one. */
     nd_idle_init(&idle, nd_time_monotonic());
+    ui.idle = &idle;
 
     while (g_quit == 0) {
         int32_t key;
@@ -497,25 +498,11 @@ static int core_run(nd_fb *fb, bool idle_measure)
         if (key == ND_KEY_INCOMING_CALL) {
             /* Where the Python raised IncomingCall from inside read_keypress
              * and let it unwind to here. */
-            nd_idle_wake(&idle, nd_time_monotonic());
             nd_ui_handle_incoming_call(&ui, NULL);
             nd_idle_note_activity(&idle, nd_time_monotonic());
         } else if (key != ND_KEY_NONE) {
-            /* Undimmed BEFORE the key is acted on, so that the screen it
-             * opens is drawn at the brightness and the clock speed it is
-             * going to be read at rather than fading up underneath it. */
-            nd_idle_wake(&idle, nd_time_monotonic());
             nd_log(ND_LOG_INPUT, "Code: %d", key);
             nd_ui_handle_input(&ui, key);
-            /* And the countdown restarted AFTER it returns. handle_input owns
-             * the phone for as long as a menu or an app is open, and every
-             * key pressed in that time went to that screen's own loop and was
-             * never seen here -- so without this, closing an app would land
-             * on a countdown that had been spent minutes ago and the phone
-             * would dim in the owner's hands. */
-            nd_idle_note_activity(&idle, nd_time_monotonic());
-        } else {
-            nd_idle_tick(&idle, nd_time_monotonic());
         }
     }
 

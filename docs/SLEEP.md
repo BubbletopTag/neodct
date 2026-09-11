@@ -1,8 +1,7 @@
 # Sleep
 
-There isn't one yet. This is the note that records what it is going to be,
-why it is going to be that rather than a real suspend, and which parts of it
-exist today.
+There is an idle mode, but no kernel suspend. This note records why it is a
+deliberately shallow state and which deeper pieces do not exist yet.
 
 ## Sleep on this phone is a fake, on purpose
 
@@ -31,10 +30,14 @@ this board.
 
 ## What exists today
 
-**`Sleepy`**, in the Engineering menu. One row per primitive plus the two ways
-back out of them, and it does nothing else — it does not enter a sleep,
-schedule one, or own a timeout. It exists so that the thing built on top of
-these two has something known-good to stand on.
+After sixty seconds without a keypad event, the core dims the panel to its
+lowest lit step and pins the CPU to 600 MHz. One timer follows the physical
+input path through the home screen, menus and apps; a key handled anywhere
+wakes the phone and restarts it. The app process never owns a second timer.
+
+**`Sleepy`**, in the Engineering menu, also exposes each primitive directly.
+It does not schedule the automatic idle mode; it exists so the two hardware
+operations can be exercised separately.
 
 | Row | What it does |
 | --- | --- |
@@ -124,11 +127,9 @@ Anything built on top of this inherits that obligation.
   but no Luckfox has run it. QEMU's kernel has no `CONFIG_CPU_FREQ` and no
   backlight, so on the emulator both screens correctly report that there is
   nothing there, which is the one thing the emulator *can* confirm.
-- **There is still no idle screen-off.** `Screen off` is a row somebody
-  presses, not a timeout. A real blanker belongs beside `battery_tick()` in
-  `nd_ui.c`, and needs the same call in `nd_proc.c`'s key pump or it will
-  blank the home screen and never blank inside an app — the core's UI thread
-  is not in `nd_ui_read_keypress()` while an app is running.
+- **Idle dims rather than blanks.** `Screen off` is still a row somebody
+  presses. The automatic state leaves the panel legible at its lowest lit
+  step so an unattended transition never looks like a dead phone.
 
 ## Why the blank did not blank
 
