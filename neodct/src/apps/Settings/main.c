@@ -79,6 +79,7 @@
 #include "nd_storage.h"
 #include "nd_svc.h"
 #include "nd_text.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_widgets.h"
@@ -300,11 +301,13 @@ static void bt_say_working(nd_ui *ui, const char *what)
     int32_t w = 0;
     int32_t h = 0;
 
-    (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, nd_ui_width(ui), nd_ui_content_bottom(ui)),
-                            ND_BLACK);
+    /* The chrome background, not a black fill. AGENTS.md's Conventions: a
+    * literal black fill is right only for a surface that is not chrome, and
+    * a transient "Working..." over the phone's own wallpaper is chrome. */
+    nd_ui_paint_chrome_content(ui);
     nd_text_size(ui->font_n, what, &w, &h);
-    (void)nd_draw_text(ui->draw, (nd_ui_width(ui) - w) / 2, (nd_ui_content_bottom(ui) - h) / 2,
-                       what, ui->font_n, ND_WHITE);
+    nd_theme_text_light(ui->draw, (nd_ui_width(ui) - w) / 2, (nd_ui_content_bottom(ui) - h) / 2,
+                        what, ui->font_n);
     nd_softkey_init(&bar, ui, false);
     nd_softkey_update(&bar, "", true);
 }
@@ -414,7 +417,7 @@ static void bt_scan_and_pair(nd_ui *ui)
 
     /* bluealsa has to be listening before the connection completes, or the
      * A2DP transport arrives with nothing to hand it to. */
-    (void)nd_svc_bt_audio_start();
+    (void)nd_btaudio_bluealsa_start();
 
     if (nd_btaudio_cmd_build(&cmd, "connect", devices[choice].addr, 0) == ND_OK)
         (void)nd_btaudio_run(&cmd, NULL, 0u);
@@ -473,55 +476,29 @@ static void show_bt_audio(nd_ui *ui)
             bt_say_working(ui, "Starting...");
             if (nd_ui_present(ui) != ND_OK)
                 return;
-            /* THE CORE, NOT THIS PROCESS. Three root daemons and one
-             * CAP_NET_ADMIN ioctl, none of which this app has been able to do
-             * since 0.5.0a -- it forked two daemons that died on the spot and
-             * then got EPERM from HCIDEVUP, and reported the whole thing as
-             * "I/O error". nd_svc.h has the trace. */
-            if (!nd_svc_bt_start()) {
-                /* A MessageDialog and not an InfoScreen, which is where this
-                 * sentence used to go. InfoScreen centres one line of each
-                 * font and does not wrap, so it drew "Bluetooth would not
-                 * start" off both edges of a 240 px panel as "etooth would
-                 * not st" -- visible in the owner's own photograph of the
-                 * failure. Measured with nd-dialogfit: 3 lines of a 5-line
-                 * budget. */
-                nd_msgdialog dialog;
-
-                nd_msgdialog_init(&dialog, ui,
-                                  "Bluetooth would not start. The phone could not bring "
-                                  "the adapter up.");
-                (void)nd_msgdialog_show(&dialog);
+            if (nd_btaudio_daemons_start() != ND_OK) {
+                (void)nd_infoscreen_show(ui, "No Bluetooth stack", NULL, "Back");
             } else {
                 nd_btaudio_cmd cmd;
+                nd_err power = nd_bt_power(0u, true);
 
-                /* bluetoothctl, and it stays here: it talks to bluetoothd over
-                 * the system bus, which the shipped policy opens to every
-                 * user, so this works as ndusr. The adapter is already up --
-                 * nd_svc_bt_start() did that -- and this is bluetoothd's own
-                 * view of it catching up. */
-                if (nd_btaudio_cmd_build(&cmd, "power", "on", 0) == ND_OK)
+                /* NOT discarded any more. This return was thrown away, and
+                 * from 0.5.0a it was a failure every time: the ioctl needs
+                 * CAP_NET_ADMIN and this app is ndusr. The screen went back to
+                 * the menu with Bluetooth still off and said nothing at all,
+                 * which is the whole reason it took a hardware report to find.
+                 * The adapter is the thing being switched on; if it did not
+                 * come up there is nothing further worth trying. */
+                if (power != ND_OK) {
+                    (void)nd_infoscreen_show(ui, "Bluetooth would not start", nd_strerror(power),
+                                             "Back");
+                } else if (nd_btaudio_cmd_build(&cmd, "power", "on", 0) == ND_OK) {
                     (void)nd_btaudio_run(&cmd, NULL, 0u);
+                }
             }
         } else if (enabled && choice == 0) {
-            /* The routing here and the daemons there. asound.conf is in
-             * /run and is this app's to write; the three daemons and hci0 are
-             * the core's, for the reason the start path gives. Routing FIRST,
-             * so nothing is left pointing at a bluealsa PCM that has stopped
-             * existing.
-             *
-             * ONLY IF SOMETHING IS CONNECTED. Switching Bluetooth off after
-             * merely switching it on had nothing to route back -- and
-             * rewriting the file anyway is not free, because with no saved
-             * copy route_to() regenerates it from bt_speaker_card(), which
-             * answers card 0 where S17audio wrote card 1. Measured on the
-             * phone: Disable left "default" on the onboard codec, which is
-             * wired to nothing, so the phone went silent. Leaving a file
-             * alone that this app never changed is both the fix and the
-             * smaller claim. */
-            if (connected)
-                (void)nd_btaudio_route_to(NULL, bt_speaker_card());
-            (void)nd_svc_bt_stop();
+            nd_btaudio_daemons_stop(bt_speaker_card());
+            (void)nd_bt_power(0u, false);
         } else if (enabled && choice == 1) {
             bt_scan_and_pair(ui);
         } else if (enabled && choice == 2 && connected) {
@@ -538,9 +515,13 @@ static void show_bt_audio(nd_ui *ui)
     }
 }
 
+/* "Theme" sits next to "Wallpaper" because they are the same question asked
+ * twice -- what the phone looks like -- and an owner who has just changed one
+ * is the owner most likely to want the other. It is second rather than first
+ * because Wallpaper is the older habit. */
 const char *const nd_setapp_menu[ND_SETAPP_MENU_ITEMS] = {
-    "Wallpaper", "Memory card",      "Install apps", "Messages Style",
-    "BT Audio",  "Engineering Mode", "About"};
+    "Wallpaper", "Theme",            "Memory card", "Install apps",
+    "Messages Style", "BT Audio",    "Engineering Mode", "About"};
 
 /* ------------------------------------------------------------------ *
  * Install apps -- the strings
@@ -1225,7 +1206,6 @@ void nd_setapp_draw_about(nd_ui *ui)
     int32_t screen_w;
     int32_t content_bottom;
     int32_t header_y;
-    int32_t line_pad;
     int32_t y;
     int32_t w = 0;
     int32_t h = 0;
@@ -1266,11 +1246,20 @@ void nd_setapp_draw_about(nd_ui *ui)
 
     nd_ui_paint_chrome_full(ui);
 
+    /* The About screen centres its title and insets its rule, unlike every
+     * other screen -- it is a nameplate, not a navigation bar. So it keeps
+     * doing both, on a plate: nd_theme_titlebar draws the plate with no title,
+     * and the centred string goes on afterwards. */
+    (void)nd_theme_titlebar(ui->canvas, d, screen_w, header_y, NULL, NULL, NULL, NULL);
     nd_ui_text_size(ui, TITLE, ui->font_n, &w, &h);
-    (void)nd_draw_text(d, floordiv2(screen_w - w), 12, TITLE, ui->font_n, ND_WHITE);
+    nd_theme_text_light(d, floordiv2(screen_w - w), (header_y - h) / 2, TITLE,
+                        nd_ui_font_bold(ui, ui->font_n));
 
-    line_pad = nd_max32(10, (int32_t)((double)screen_w * 0.12)); /* 28 */
-    (void)nd_draw_line(d, line_pad, header_y, screen_w - line_pad, header_y, ND_WHITE, 1);
+    /* The inset rule this screen used to draw under its title is gone: the
+     * plate is the rule now, and it runs the full width like every other bar
+     * in the OS. The 28 px inset it used was the only thing distinguishing
+     * this header from a navigation one, and the centred nameplate above
+     * already says that better. */
 
     y = header_y + 12;
 
@@ -1285,7 +1274,7 @@ void nd_setapp_draw_about(nd_ui *ui)
             nd_ui_text_size(ui, line, ui->font_s, &w, &h);
             if (y > content_bottom - 18)
                 break;
-            (void)nd_draw_text(d, floordiv2(screen_w - w), y, line, ui->font_s, ND_WHITE);
+            nd_theme_text_light(d, floordiv2(screen_w - w), y, line, ui->font_s);
             y += 16;
         }
         y += 6;
@@ -1295,22 +1284,34 @@ void nd_setapp_draw_about(nd_ui *ui)
         if (y <= content_bottom - 18) {
             char label[96];
 
+            /* ============ THE QUIET LINES USE THE MUTED INK ============
+             *
+             * All three were drawn in ND_TH_SKY_TOP -- the BACKGROUND colour
+             * -- which worked only because the glass theme's background is a
+             * pale sky while its content sits on a darker scrim. Under a
+             * theme whose background is black, and the shipped one is, that
+             * is type painted in the colour behind it: invisible.
+             *
+             * ink_muted is the palette's own name for "quieter than the
+             * headline", which is the role actually wanted here, and it is
+             * legible in both. */
             (void)nd_snprintf(label, sizeof label, "Version: %s", version_number);
-            (void)nd_draw_text(d, 10, y, label, ui->font_s, ND_GRAY);
+            nd_theme_text(d, 10, y, label, ui->font_s, ND_TH_INK_MUTED, ND_TH_TEXT_SHADOW);
         }
         /* The += 16 is OUTSIDE the `if y <=` in the Python too: a version
          * number that did not fit still costs its row. */
         y += 16;
     }
     if (y <= content_bottom - 18)
-        (void)nd_draw_text(d, 10, y, "Build time:", ui->font_s, ND_GRAY);
+        nd_theme_text(d, 10, y, "Build time:", ui->font_s, ND_TH_INK_MUTED, ND_TH_TEXT_SHADOW);
     y += 16;
 
     nd_setapp_wrap_text(&lines, ui, build_time, screen_w - 20, ui->font_s);
     for (i = 0u; i < lines.n && i < 2u; i++) {
         if (y > content_bottom - 18)
             break;
-        (void)nd_draw_text(d, 10, y, nd_lines_at(&lines, i), ui->font_s, ND_GRAY);
+        nd_theme_text(d, 10, y, nd_lines_at(&lines, i), ui->font_s, ND_TH_INK_MUTED,
+                      ND_TH_TEXT_SHADOW);
         y += 16;
     }
 
@@ -2217,6 +2218,45 @@ static void show_install_apps(nd_ui *ui)
  * run()
  * ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ *
+ * Theme
+ * ------------------------------------------------------------------ */
+
+/* The picker owns the whole interaction -- it previews by applying, and it
+ * persists what it applies -- so there is nothing here but the frame around
+ * it and the notice afterwards.
+ *
+ * The notice matters more than it looks. Applying a theme changes THIS
+ * process immediately and every other process when it next starts, so the
+ * phone the owner is holding is half-changed until they leave Settings: the
+ * home screen behind them is still the old look. Saying so is the difference
+ * between a feature and a bug report. */
+static void show_theme_menu(nd_ui *ui)
+{
+    nd_themepicker picker;
+    nd_msgdialog dialog;
+    int32_t chosen;
+
+    if (nd_themepicker_init(&picker, ui) != ND_OK) {
+        nd_msgdialog_init(&dialog, ui, "No themes found.");
+        (void)nd_msgdialog_show(&dialog);
+        return;
+    }
+
+    chosen = nd_themepicker_show(&picker);
+    if (chosen == ND_WIDGET_BACK || nd_app_should_exit())
+        return;
+
+    {
+        char message[ND_THEME_NAME_MAX + 64];
+
+        (void)nd_snprintf(message, sizeof message, "Theme set to\n%s.\nLeave Settings to see\nthe rest of the phone.",
+                          picker.themes[chosen].name);
+        nd_msgdialog_init(&dialog, ui, message);
+        (void)nd_msgdialog_show(&dialog);
+    }
+}
+
 int app_run(nd_ui *ui)
 {
     if (ui == NULL)
@@ -2238,16 +2278,18 @@ int app_run(nd_ui *ui)
         if (selection == 0)
             show_wallpaper_menu(ui);
         else if (selection == 1)
-            show_memory_card(ui);
+            show_theme_menu(ui);
         else if (selection == 2)
-            show_install_apps(ui);
+            show_memory_card(ui);
         else if (selection == 3)
-            show_messages_style(ui);
+            show_install_apps(ui);
         else if (selection == 4)
-            show_bt_audio(ui);
+            show_messages_style(ui);
         else if (selection == 5)
-            show_engineering_mode(ui);
+            show_bt_audio(ui);
         else if (selection == 6)
+            show_engineering_mode(ui);
+        else if (selection == 7)
             show_about(ui);
 
         if (nd_app_should_exit())

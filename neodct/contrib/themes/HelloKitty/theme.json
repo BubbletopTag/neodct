@@ -1,0 +1,72 @@
+{
+  "id": "hellokitty",
+  "name": "Hello Kitty",
+  "author": "NeoDCT",
+  "version": "1.0",
+  "description": "Pink, with a bow on everything. Glossy plates in rich Sanrio pink over a blush sky, white type on the bars and charcoal on the panels, a rounded typeface, thirteen themed icons and a polka dot wallpaper.",
+
+  "style": {
+    "gloss":             true,
+    "bevel":             true,
+    "gradients":         true,
+    "round":             true,
+    "type_shadow":       true,
+    "plate_shadow":      true,
+    "bevel_divider":     true,
+    "icon_glow":         true,
+    "reflection":        true,
+    "scrim":             false,
+    "pixel_font":        false,
+    "game_colour":      true,
+    "wallpaper_dim":     100,
+    "app_wallpaper_dim": 90
+  },
+
+  "palette": {
+    "blue_hi":     "#FF9EC7",
+    "blue_top":    "#ED538E",
+    "blue_mid":    "#D93A75",
+    "blue_bot":    "#B02E5F",
+    "blue_deep":   "#4A1129",
+
+    "bar_top":     "#E84285",
+    "bar_bot":     "#B02E5F",
+    "bar_ink":     "#FFFFFF",
+    "sel_ink":     "#FFFFFF",
+    "warn_ink":    "#C4102E",
+
+    "glass_top":   "#FFF4F8",
+    "glass_bot":   "#F7D3E2",
+
+    "chrome_hi":   "#FFFFFF",
+    "chrome_top":  "#F7DCE6",
+    "chrome_bot":  "#C29AAC",
+
+    "sky_top":     "#FFD2E3",
+    "sky_bot":     "#E88BB0",
+
+    "green_top":   "#9EE84A",
+    "green_bot":   "#3D9A14",
+
+    "amber_top":   "#FFD95C",
+    "amber_bot":   "#D8880A",
+    "red_top":     "#FF8A7A",
+    "red_bot":     "#B41C14",
+
+    "ink_dark":    "#30232D",
+    "ink_light":   "#3A2430",
+    "ink_muted":   "#8A5B72",
+
+    "text_shadow": "#FFF0F6",
+    "text_sheen":  "#FFFFFF",
+    "scrim_ink":   "#33081E"
+  },
+
+  "alpha": {
+    "scrim_top":    78,
+    "scrim_bot":     0,
+    "appsel_scrim": 70,
+    "shadow":      150,
+    "sheen":       110
+  }
+}

@@ -53,6 +53,7 @@
 #include <unistd.h>
 
 #include "nd_capture.h"
+#include "uifont_test.h"
 #include "nd_fb.h"
 #include "nd_image.h"
 #include "nd_input.h"
@@ -61,6 +62,7 @@
 #include "nd_keypad.h"
 #include "nd_paths.h"
 #include "nd_types.h"
+#include "nd_theme.h"
 #include "nd_ui.h"
 #include "nd_ui_sim.h"
 #include "nd_vclock.h"
@@ -175,6 +177,47 @@ static int rm_cb(const char *path, const struct stat *st, int flag, struct FTW *
     ND_UNUSED(flag);
     ND_UNUSED(ftw);
     return remove(path);
+}
+
+
+/* Is `c` a pixel of the theme's background?
+ *
+ * The background is a vertical ramp from sky_top to sky_bot, so every row of
+ * it lies between the two PER CHANNEL -- and with a flat theme, where the two
+ * are the same colour, that collapses to "equals the background" without the
+ * check needing to know which kind of theme it is looking at.
+ *
+ * This replaced "blue leads red by 30", which was true of the glass look and
+ * of nothing else: the phone ships the flat black look now and the assertion
+ * was really asking "is the theme Frutiger Aero". What these tests mean is
+ * "the wallpaper did not get through", and that is what this says. */
+
+/* Two pixels the same? Used by checks that mean "something was drawn here"
+ * rather than "this exact colour was drawn here", which is what keeps them
+ * true of whatever theme is active. */
+static bool colour_eq(nd_color a, nd_color b)
+{
+    return a.r == b.r && a.g == b.g && a.b == b.b;
+}
+
+static bool is_theme_sky(nd_color c)
+{
+    nd_color a = ND_TH_SKY_TOP;
+    nd_color b = ND_TH_SKY_BOT;
+    int32_t lo;
+    int32_t hi;
+
+    lo = (a.r < b.r) ? a.r : b.r;
+    hi = (a.r > b.r) ? a.r : b.r;
+    if ((int32_t)c.r < lo || (int32_t)c.r > hi)
+        return false;
+    lo = (a.g < b.g) ? a.g : b.g;
+    hi = (a.g > b.g) ? a.g : b.g;
+    if ((int32_t)c.g < lo || (int32_t)c.g > hi)
+        return false;
+    lo = (a.b < b.b) ? a.b : b.b;
+    hi = (a.b > b.b) ? a.b : b.b;
+    return (int32_t)c.b >= lo && (int32_t)c.b <= hi;
 }
 
 static void drop_stage(void)
@@ -819,23 +862,36 @@ static void test_overflowing_name(nd_capture *cap, nd_ui *ui)
         return;
     }
     {
-        /* Ink on BOTH outermost columns of the title band: the string is
-         * clipped at each edge, not shrunk to fit, not ellipsised and not
-         * dropped. The band starts at the 24 px face's first ink row,
-         * title_y + bbox_top = 14 + 3, and ends before the scrollbar's
-         * track_top of 36 plus the descenders. */
+        /* ============ THIS USED TO ASSERT THE OPPOSITE ============
+         *
+         * It checked for ink on both outermost columns and called that "the
+         * title runs off the edges, clipped rather than ellipsised". That has
+         * not been true since the selector started trimming the name against
+         * the page badge: nd_text_fit() shortens with "..." until the string
+         * fits screen_w - 2 * (badge_w + 12), so a centred title physically
+         * cannot reach column 0.
+         *
+         * It passed anyway for four months, because the test asked whether
+         * the outer columns had any RED in them and the glass theme's
+         * background is a blue gradient -- every pixel of it answers yes. The
+         * check was measuring the wallpaper. Putting the flat black look back
+         * as the shipped one is what exposed it.
+         *
+         * So it now asserts what the widget actually does: the name is
+         * shortened, and it stays inside the panel. */
         bool left = false;
         bool right = false;
         int32_t y;
 
-        for (y = 17; y <= 37; y++) {
-            if (nd_image_get_px(frame, 0, y).r > 0u)
+        for (y = 0; y < 40; y++) {
+            if (!colour_eq(nd_image_get_px(frame, 0, y), nd_image_get_px(frame, 1, y)))
                 left = true;
-            if (nd_image_get_px(frame, nd_ui_width(ui) - 1, y).r > 0u)
+            if (!colour_eq(nd_image_get_px(frame, nd_ui_width(ui) - 1, y),
+                           nd_image_get_px(frame, nd_ui_width(ui) - 2, y)))
                 right = true;
         }
-        CHECK(left, "the title runs off the left edge");
-        CHECK(right, "and off the right edge");
+        CHECK(!left, "the title does not reach the left edge: it is trimmed to fit");
+        CHECK(!right, "nor the right");
     }
     (void)nd_capture_save(cap, "menu-overflow", frame);
 }
@@ -854,13 +910,23 @@ static void test_empty_list(nd_capture *cap, nd_ui *ui)
     frame = nd_capture_recent(cap, 0u);
     CHECK(frame != NULL, "the empty menu still produces a frame");
     if (frame != NULL) {
-        /* Black background, and the only white is the centred "No Apps": the
-         * scrollbar track at x=232..233 must NOT be there. */
-        nd_color px = nd_image_get_px(frame, 232, 100);
+        /* The empty branch returns before the scrollbar, so the track's
+          * columns carry nothing but the ground. The ground is the sky
+          * gradient rather than a black fill now, and the sky varies with y
+          * and NOT with x -- so "nothing was drawn here" is the track column
+          * matching the same row twenty columns to its left. */
+        nd_color track = nd_image_get_px(frame, 232, 100);
+        nd_color beside = nd_image_get_px(frame, 212, 100);
 
-        CHECK(px.r == 0u && px.g == 0u && px.b == 0u, "no scrollbar on the empty menu");
-        px = nd_image_get_px(frame, 0, 0);
-        CHECK(px.r == 0u, "background filled black without a wallpaper");
+        CHECK(track.r == beside.r && track.g == beside.g && track.b == beside.b,
+              "no scrollbar on the empty menu");
+        /* And the ground really is the theme's background rather than a
+         * wallpaper, whichever theme is on. */
+        {
+            nd_color sky = nd_image_get_px(frame, 0, 0);
+
+            CHECK(is_theme_sky(sky), "the ground is the theme's background");
+        }
     }
     (void)nd_capture_save(cap, "menu-empty", nd_capture_recent(cap, 0u));
 }
@@ -881,17 +947,27 @@ static void test_single_item_scrollbar(nd_capture *cap, nd_ui *ui)
         return;
     }
     {
-        nd_color top = nd_image_get_px(frame, 230, 36);
-        nd_color below = nd_image_get_px(frame, 228, 60);
-        nd_color track = nd_image_get_px(frame, 232, 60);
-        nd_color track2 = nd_image_get_px(frame, 233, 60);
-        nd_color past = nd_image_get_px(frame, 232, 136);
+        /* nd_theme_scrollbar's count<=1 branch: the thumb IS the track. A
+         * one-item menu has nothing to scroll, so a marker parked at the top
+         * would be saying "you are at the start of something longer", which
+         * was never true -- the old fixed notch said exactly that. */
+        nd_color at_top = nd_image_get_px(frame, 232, 40);
+        nd_color at_bottom = nd_image_get_px(frame, 232, 130);
+        nd_color beside = nd_image_get_px(frame, 212, 130);
+        nd_color past = nd_image_get_px(frame, 232, 138);
+        nd_color past_beside = nd_image_get_px(frame, 212, 138);
 
-        CHECK(top.r == 255u, "the notch is at the top of the track");
-        CHECK(below.r == 0u, "the notch does not extend down the track");
-        CHECK(track.r == 255u, "the track is drawn at x=232");
-        CHECK(track2.r == 255u, "width 2 grows into the MINOR axis: x=233 too");
-        CHECK(past.r == 0u, "the track stops at y=135 inclusive");
+        /* "Is it blue" was the old test and it only ever meant "is the theme
+         * Frutiger Aero". What is actually claimed is that the thumb is drawn
+         * at both ends of the track -- i.e. it fills it, because there is
+         * nothing to scroll -- and a thumb is visible exactly where the track
+         * column differs from the untouched column beside it. */
+        CHECK(!colour_eq(at_top, nd_image_get_px(frame, 212, 40)),
+              "the thumb starts at the track top");
+        CHECK(!colour_eq(at_bottom, beside), "and fills the track: nothing to scroll");
+        CHECK(at_bottom.r != beside.r || at_bottom.b != beside.b, "the track is drawn at x=232");
+        CHECK(past.r == past_beside.r && past.g == past_beside.g && past.b == past_beside.b,
+              "the track stops at y=135 inclusive");
     }
     (void)nd_capture_save(cap, "menu-single", frame);
 }
@@ -917,7 +993,7 @@ static void shoot_menu_frames(nd_capture *cap, const nd_json_doc *golden)
     nd_appsel selector;
     size_t i;
 
-    write_settings("Palestine.jpg", true);
+    write_settings(ND_TEST_REF_WALLPAPER, true);
     nd_vclock_enable();
     nd_ui_sim_clear(&ui);
     if (nd_ui_init(&ui, fb) != ND_OK) {

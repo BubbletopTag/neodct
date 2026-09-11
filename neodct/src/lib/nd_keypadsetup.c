@@ -772,6 +772,10 @@ static void screen_prompt(setup_screen *s, const char *label, size_t index, size
 
     (void)nd_kpsetup_counter(counter, sizeof counter, index, total);
     nd_text_size(s->font_small, counter, &w, NULL);
+    /* NOT through nd_theme: the keypad setup screen runs before the UI face
+     * is loaded and draws with its own small font onto a bare framebuffer.
+     * A shadow here would be a second rasterisation of a face that may be the
+     * pixel one, for a counter nobody reads twice. */
     (void)nd_draw_text(&s->draw, ND_KPSETUP_UI_W - 8 - w, 6, counter, s->font_small, ND_WHITE);
 
     screen_center(s, nd_kpsetup_press, s->font, 46, ND_WHITE);

@@ -45,6 +45,7 @@
 #include <unistd.h>
 
 #include "nd_app.h"
+#include "uifont_test.h"
 #include "nd_crash.h"
 #include "nd_draw.h"
 #include "nd_font.h"
@@ -61,7 +62,7 @@
 
 #include "platform_test.h"
 
-#define FONT_REL "overlay/NeoDCT/System/ui/resources/fonts/font.ttf"
+#define FONT_REL ND_TEST_UI_FONT_REL
 
 /* Where the staged apps live. Under User, not System: System is a symlink
  * onto neodct/overlay and nothing may be written there. */
@@ -301,6 +302,8 @@ typedef struct {
     nd_font *font_md;
     nd_font *font_n;
     nd_font *font_xl;
+    nd_font *font_n_b;
+    nd_font *font_xl_b;
     nd_input *input;
     int write_fd;
 } fixture;
@@ -320,6 +323,19 @@ static bool fx_init(fixture *fx)
     fx->font_md = nd_font_load(path, 18);
     fx->font_n = nd_font_load(path, 20);
     fx->font_xl = nd_font_load(path, 24);
+
+    /* The bold pair. Optional -- nd_ui_font_bold() answers the regular
+     * weight for a NULL -- but a fixture that skips it renders every
+     * title a stroke too light and matches no reference frame.
+     * See uifont_test.h. */
+    {
+        char bold[ND_PATH_MAX];
+
+        if (ui_bold_face_path(path, bold, sizeof bold)) {
+            fx->font_n_b = nd_font_load(bold, ND_FONT_PX_N);
+            fx->font_xl_b = nd_font_load(bold, ND_FONT_PX_XL);
+        }
+    }
     if (fx->font_s == NULL || fx->font_md == NULL || fx->font_n == NULL || fx->font_xl == NULL)
         return false;
 
@@ -355,6 +371,8 @@ static bool fx_init(fixture *fx)
     fx->ui.font_md = fx->font_md;
     fx->ui.font_n = fx->font_n;
     fx->ui.font_xl = fx->font_xl;
+    fx->ui.font_n_b = fx->font_n_b;
+    fx->ui.font_xl_b = fx->font_xl_b;
     fx->ui.input = fx->input;
     fx->ui.keypad_fd = nd_input_fd(fx->input);
     fx->ui.softkey_exists = true;
@@ -380,6 +398,8 @@ static void fx_free(fixture *fx)
     nd_font_free(fx->font_md);
     nd_font_free(fx->font_n);
     nd_font_free(fx->font_xl);
+    nd_font_free(fx->font_n_b);
+    nd_font_free(fx->font_xl_b);
     memset(fx, 0, sizeof *fx);
 }
 

@@ -52,6 +52,7 @@
 
 #include "nd_alarm.h"
 #include "nd_app.h"
+#include "uifont_test.h"
 #include "nd_capture.h"
 #include "nd_clock.h"
 #include "nd_fb.h"
@@ -63,6 +64,7 @@
 #include "nd_paths.h"
 #include "nd_settings.h"
 #include "nd_types.h"
+#include "nd_theme.h"
 #include "nd_ui.h"
 #include "nd_ui_sim.h"
 #include "nd_vclock.h"
@@ -182,6 +184,38 @@ static int rm_cb(const char *path, const struct stat *st, int flag, struct FTW *
 
 /* CODING-STANDARDS.md section 1.7 applies to the filesystem too: a leak
  * detector's output is only worth reading if the run leaves nothing behind. */
+
+/* Is `c` a pixel of the theme's background?
+ *
+ * The background is a vertical ramp from sky_top to sky_bot, so every row of
+ * it lies between the two PER CHANNEL -- and with a flat theme, where the two
+ * are the same colour, that collapses to "equals the background" without the
+ * check needing to know which kind of theme it is looking at.
+ *
+ * This replaced "blue leads red by 30", which was true of the glass look and
+ * of nothing else: the phone ships the flat black look now and the assertion
+ * was really asking "is the theme Frutiger Aero". What these tests mean is
+ * "the wallpaper did not get through", and that is what this says. */
+static bool is_theme_sky(nd_color c)
+{
+    nd_color a = ND_TH_SKY_TOP;
+    nd_color b = ND_TH_SKY_BOT;
+    int32_t lo;
+    int32_t hi;
+
+    lo = (a.r < b.r) ? a.r : b.r;
+    hi = (a.r > b.r) ? a.r : b.r;
+    if ((int32_t)c.r < lo || (int32_t)c.r > hi)
+        return false;
+    lo = (a.g < b.g) ? a.g : b.g;
+    hi = (a.g > b.g) ? a.g : b.g;
+    if ((int32_t)c.g < lo || (int32_t)c.g > hi)
+        return false;
+    lo = (a.b < b.b) ? a.b : b.b;
+    hi = (a.b > b.b) ? a.b : b.b;
+    return (int32_t)c.b >= lo && (int32_t)c.b <= hi;
+}
+
 static void drop_stage(void)
 {
     (void)nd_path_set_root(NULL);
@@ -273,6 +307,13 @@ static void write_settings_full(const char *wallpaper_name, const char *wpeveryw
     if (wallpaper_name != NULL) {
         /* Stock wallpapers ship inside the read-only image. */
         (void)fprintf(f, "system.ui.wallpaper=/NeoDCT/System/wallpapers/%s\n", wallpaper_name);
+    } else {
+        /* "NONE" EXPLICITLY. Omitting the key used to mean the same thing,
+         * because the shipped default was itself "NONE"; the phone boots with
+         * a wallpaper now, so an absent key means THE DEFAULT WALLPAPER and
+         * every caller passing NULL here to mean "no wallpaper" would get
+         * one. */
+        (void)fputs("system.ui.wallpaper=NONE\n", f);
     }
     if (wpeverywhere != NULL)
         (void)fprintf(f, "system.ui.wpeverywhere=%s\n", wpeverywhere);
@@ -832,7 +873,7 @@ static void test_chrome_background(nd_fb *fb)
     nd_rect content;
 
     /* --- 1. on by default, with a wallpaper configured --- */
-    write_settings("Palestine.jpg");
+    write_settings(ND_TEST_REF_WALLPAPER);
     nd_vclock_enable();
     nd_ui_sim_clear(&ui);
     if (nd_ui_init(&ui, fb) != ND_OK) {
@@ -879,6 +920,20 @@ static void test_chrome_background(nd_fb *fb)
     keep = nd_image_copy(chrome);
     CHECK(keep != NULL, "copy the chrome image");
     if (keep != NULL) {
+        /* THE SCRIM GOES ON THE EXPECTATION TOO.
+         *
+         * nd_ui_paint_chrome() lays the picture down and then washes a graded
+         * darkening over it (nd_theme.h) -- that is what replaced dimming the
+         * whole wallpaper to 30%, and it is part of what the painter paints.
+         * Comparing against the undarkened picture would be comparing against
+         * a screen the OS never draws.
+         *
+         * The ramp is over the PANEL, not over whatever rectangle is being
+         * painted, which is exactly the property the mid-screen band check
+         * below is testing: a band from rows 90..120 has to come out the same
+         * whether it was painted alone or as part of a full clear. */
+        nd_theme_scrim(keep, ND_RECT(0, 0, nd_ui_width(&ui) - 1, nd_ui_height(&ui) - 1), 0,
+                       nd_ui_content_bottom(&ui), ND_TH_SCRIM_TOP_A, ND_TH_SCRIM_BOT_A);
         (void)nd_image_fill(ui.canvas, ND_RGB(7, 11, 13));
         nd_ui_paint_chrome_content(&ui);
         CHECK(rect_matches(ui.canvas, keep, content), "paint_chrome_content lays down its region");
@@ -918,7 +973,17 @@ static void test_chrome_background(nd_fb *fb)
     CHECK(nd_ui_chrome_wallpaper(&ui) == NULL, "wpeverywhere=OFF means no chrome wallpaper");
     (void)nd_image_fill(ui.canvas, ND_RGB(7, 11, 13));
     nd_ui_paint_chrome_content(&ui);
-    CHECK(rect_is_flat(ui.canvas, content, ND_BLACK), "and the background goes back to black");
+    /* Not black: with no chrome wallpaper the painter falls back to the sky
+     * gradient, so the region is no longer FLAT. What it must be is
+     * everything except the caller's fill -- the point of the check is that
+     * the wallpaper did not get through. */
+    CHECK(!rect_is_flat(ui.canvas, content, ND_RGB(7, 11, 13)),
+          "the region was repainted");
+    {
+        nd_color c = nd_image_get_px(ui.canvas, 120, 20);
+
+        CHECK(is_theme_sky(c), "and the background is the theme's, not the picture");
+    }
     /* The HOME screen still has its wallpaper: this setting is about chrome. */
     CHECK(nd_ui_wallpaper(&ui) != NULL, "the home wallpaper is unaffected by wpeverywhere");
     nd_ui_teardown(&ui);
@@ -935,7 +1000,7 @@ static void test_chrome_background(nd_fb *fb)
     nd_ui_teardown(&ui);
 
     /* --- 4. an app that opted out never even loads one --- */
-    write_settings("Palestine.jpg");
+    write_settings(ND_TEST_REF_WALLPAPER);
     nd_vclock_enable();
     nd_ui_sim_clear(&ui);
     if (nd_ui_init(&ui, fb) != ND_OK) {
@@ -1314,7 +1379,7 @@ static void test_animated_wallpaper(nd_fb *fb)
     }
 
     /* A .jpg opens no decoder at all -- 226 KB not spent on a still. */
-    write_settings("Palestine.jpg");
+    write_settings(ND_TEST_REF_WALLPAPER);
     nd_vclock_enable();
     nd_ui_sim_clear(&ui);
     if (nd_ui_init(&ui, fb) == ND_OK) {
@@ -1350,7 +1415,7 @@ static void test_the_t9_flag_is_re_derived_not_remembered(nd_fb *fb)
 {
     nd_ui ui;
 
-    write_settings("Palestine.jpg");
+    write_settings(ND_TEST_REF_WALLPAPER);
     nd_vclock_enable();
     nd_ui_sim_clear(&ui);
     (void)unsetenv(ND_ENV_T9);
@@ -1433,7 +1498,7 @@ static void shoot_home_frames(nd_capture *cap, const nd_json_doc *golden)
     size_t i;
 
     /* --- group A: wallpaper, a healthy phone --- */
-    write_settings("Palestine.jpg");
+    write_settings(ND_TEST_REF_WALLPAPER);
     nd_vclock_enable();
     nd_ui_sim_clear(&ui);
     if (nd_ui_init(&ui, fb) != ND_OK) {
@@ -1494,7 +1559,7 @@ static void shoot_home_frames(nd_capture *cap, const nd_json_doc *golden)
 
     /* OPEN-QUESTIONS decision 3: Settings writes only the setting, and the
      * core picks it up on the next app exit -- never before. */
-    write_settings("Palestine.jpg");
+    write_settings(ND_TEST_REF_WALLPAPER);
     CHECK(nd_ui_wallpaper(&ui) == NULL, "the setting alone changes nothing");
     nd_ui_refresh_after_app(&ui);
     CHECK(nd_ui_wallpaper(&ui) != NULL, "refresh_after_app re-reads the wallpaper");
@@ -1503,7 +1568,7 @@ static void shoot_home_frames(nd_capture *cap, const nd_json_doc *golden)
     nd_ui_teardown(&ui);
 
     /* --- group C: no fuel gauge and no modem, the honest QEMU look --- */
-    write_settings("Palestine.jpg");
+    write_settings(ND_TEST_REF_WALLPAPER);
     nd_vclock_enable();
     nd_ui_sim_clear(&ui);
     if (nd_ui_init(&ui, fb) != ND_OK) {
@@ -1526,7 +1591,7 @@ static void shoot_home_frames(nd_capture *cap, const nd_json_doc *golden)
     /* --- group D: the 3310-style banner. shoot_calls draws the two call
      * screens first, so this is the block's THIRD frame and the envelope's
      * blink phase depends on it. --- */
-    write_settings("Palestine.jpg");
+    write_settings(ND_TEST_REF_WALLPAPER);
     nd_vclock_enable();
     nd_ui_sim_clear(&ui);
     if (nd_ui_init(&ui, fb) != ND_OK) {

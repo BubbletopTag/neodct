@@ -26,6 +26,7 @@
 #include "nd_draw.h"
 #include "nd_font.h"
 #include "nd_keycodes.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_widgets.h"
@@ -69,7 +70,7 @@ int32_t nd_infoscreen_show(nd_ui *ui, const char *title, const char *value,
 
     if (value == NULL) {
         ty = nd_max32(0, floordiv2(content_bottom - th));
-        (void)nd_draw_text(d, floordiv2(screen_w - tw), ty, title, ui->font_n, ND_WHITE);
+        nd_theme_text_light(d, floordiv2(screen_w - tw), ty, title, ui->font_n);
     } else {
         int32_t vw = 0;
         int32_t vh = 0;
@@ -79,9 +80,12 @@ int32_t nd_infoscreen_show(nd_ui *ui, const char *title, const char *value,
         nd_text_size(ui->font_xl, value, &vw, &vh);
         total = th + gap + vh;
         ty = nd_max32(0, floordiv2(content_bottom - total));
-        (void)nd_draw_text(d, floordiv2(screen_w - tw), ty, title, ui->font_n, ND_WHITE);
-        (void)nd_draw_text(d, floordiv2(screen_w - vw), ty + th + gap, value, ui->font_xl,
-                           ND_WHITE);
+        nd_theme_text_light(d, floordiv2(screen_w - tw), ty, title, ui->font_n);
+        /* The value is the point of this screen -- an IMEI, a version, a
+         * capacity -- so it gets the bold cut and the caption above it does
+         * not. */
+        nd_theme_text_light(d, floordiv2(screen_w - vw), ty + th + gap, value,
+                            nd_ui_font_bold(ui, ui->font_xl));
     }
 
     /* A fresh, opaque bar at its default present=true -- this is what pushes

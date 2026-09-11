@@ -42,6 +42,7 @@
 #include "nd_app.h"
 #include "nd_draw.h"
 #include "nd_keycodes.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
@@ -242,25 +243,93 @@ void nd_snake_render(nd_snake *g)
     if (g == NULL || g->ui == NULL || g->ui->draw == NULL)
         return;
 
-    /* The WHOLE screen, softkey band included. */
-    (void)nd_draw_rect_fill(g->ui->draw, ND_RECT(0, 0, g->screen_w, g->screen_h), ND_BLACK);
+    /* ============ TWO GAMES, AND THE THEME PICKS ============
+     *
+     * Monochrome tells the food from the snake by SHAPE -- an outlined cell
+     * against filled ones -- and that is not a limitation being worked
+     * around, it is how this game has looked since the phone it is imitating.
+     * Colour tells them apart by hue and can fill both. A palette alone
+     * cannot choose between those: hand the monochrome version two colours
+     * and it still has one ink, so a filled apple and a filled snake are the
+     * same square. Hence a style switch; see nd_theme_style's game_colour.
+     *
+     * The ink is ink_light rather than white, so a light theme that turns
+     * colour off gets dark pieces on its light field instead of white on
+     * white. In the built-in look ink_light IS white over a black field,
+     * which is the game exactly as it always drew.
+     */
+    if (!ND_TH_GAME_COLOUR) {
+        /* The WHOLE screen, softkey band included. A play field is one of the
+         * three surfaces AGENTS.md says may fill their own background rather
+         * than calling the chrome painter. */
+        nd_theme_gradient_v(g->ui->canvas, ND_RECT(0, 0, g->screen_w - 1, g->screen_h - 1),
+                            ND_TH_SKY_TOP, ND_TH_SKY_BOT, 255u);
 
+        (void)nd_snprintf(score, sizeof score, "%d", g->score);
+        nd_theme_text_light(g->ui->draw, 4, 1, score, g->ui->font_md);
+
+        (void)nd_draw_rect_outline(g->ui->draw,
+                                   ND_RECT(g->board_x - 2, g->board_y - 2,
+                                           g->board_x + g->board_w + 1, g->board_y + g->board_h + 1),
+                                   ND_TH_INK_LIGHT, 1);
+
+        if (g->has_food) {
+            (void)nd_draw_rect_outline(g->ui->draw, nd_snake_cell_rect(g, g->food.x, g->food.y),
+                                       ND_TH_INK_LIGHT, 1);
+        }
+        for (i = 0u; i < g->n_body; i++) {
+            (void)nd_draw_rect_fill(g->ui->draw, nd_snake_cell_rect(g, g->body[i].x, g->body[i].y),
+                                    ND_TH_INK_LIGHT);
+        }
+        (void)nd_ui_present(g->ui);
+        return;
+    }
+
+    /* A dark field, taken from the theme's own deepest colour rather than the
+     * navy that used to be spelled here: the game needs contrast under bright
+     * pieces whatever the interface around it looks like, and blue_deep is
+     * the colour every theme already names for the cut under a plate. */
+    nd_theme_gradient_v(g->ui->canvas, ND_RECT(0, 0, g->screen_w - 1, g->screen_h - 1),
+                        ND_TH_BLUE_DEEP, ND_RGB(0x03, 0x0C, 0x1A), 255u);
+
+    /* The score stands on the FIELD, and the field here is dark by
+     * construction -- blue_deep, whatever the interface around the game looks
+     * like. So it takes chrome_hi, the palette's light, and NOT ink_light:
+     * that one means "type over the background", and a theme with a pale
+     * background has a dark one, which on this field is unreadable. It was
+     * exactly that under Hello Kitty -- a charcoal score on a plum board. */
     (void)nd_snprintf(score, sizeof score, "%d", g->score);
-    (void)nd_draw_text(g->ui->draw, 4, 1, score, g->ui->font_md, ND_WHITE);
+    nd_theme_text(g->ui->draw, 4, 1, score, nd_ui_font_bold(g->ui, g->ui->font_md),
+                  ND_TH_CHROME_HI, ND_TH_TEXT_SHADOW);
 
-    (void)nd_draw_rect_outline(g->ui->draw,
-                               ND_RECT(g->board_x - 2, g->board_y - 2, g->board_x + g->board_w + 1,
-                                       g->board_y + g->board_h + 1),
-                               ND_WHITE, 1);
+    nd_theme_round_outline(g->ui->canvas,
+                           ND_RECT(g->board_x - 2, g->board_y - 2, g->board_x + g->board_w + 1,
+                                   g->board_y + g->board_h + 1),
+                           3, ND_TH_CHROME_HI, 190u);
 
+    /* The food is red and the snake is green, which is the oldest colour
+     * convention in this genre. */
     if (g->has_food) {
-        (void)nd_draw_rect_outline(g->ui->draw, nd_snake_cell_rect(g, g->food.x, g->food.y),
-                                   ND_WHITE, 1);
+        nd_theme_plate p = nd_theme_plate_blue(2);
+
+        p.top = ND_TH_RED_TOP;
+        p.bot = ND_TH_RED_BOT;
+        p.drop_shadow = false;
+        nd_theme_plate_draw(g->ui->canvas, nd_snake_cell_rect(g, g->food.x, g->food.y), &p);
     }
 
     for (i = 0u; i < g->n_body; i++) {
-        (void)nd_draw_rect_fill(g->ui->draw, nd_snake_cell_rect(g, g->body[i].x, g->body[i].y),
-                                ND_WHITE);
+        nd_theme_plate p = nd_theme_plate_blue(2);
+
+        /* The head is lighter than the rest, so which way it is going is
+         * readable at a glance on a 240 px panel. Lighter BY THE PALETTE --
+         * it used to be a pale green spelled here, which a pink theme had no
+         * way to reach. */
+        p.top = (i == 0u) ? ND_TH_CHROME_HI : ND_TH_GREEN_TOP;
+        p.bot = (i == 0u) ? ND_TH_GREEN_TOP : ND_TH_GREEN_BOT;
+        p.drop_shadow = false;
+        p.border_a = 150u;
+        nd_theme_plate_draw(g->ui->canvas, nd_snake_cell_rect(g, g->body[i].x, g->body[i].y), &p);
     }
 
     (void)nd_ui_present(g->ui);

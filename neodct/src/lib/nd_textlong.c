@@ -67,6 +67,7 @@
 #include "nd_predictive_priv.h"
 #include "nd_t9.h"
 #include "nd_text.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_widgets.h"
@@ -413,12 +414,15 @@ void nd_textlong_draw(nd_textlong *t, bool blink_state)
     /* The title is drawn with no fitting and the character count is drawn
      * flush right, so a long title runs UNDER the count. widget-textinputlong
      * is captured with exactly that overlap; port the bug. */
-    (void)nd_draw_text(d, 5, 5, nz(t->title), ui->font_xl, ND_WHITE);
     (void)snprintf(count, sizeof count, "%zu", utf8_len(t->text));
     nd_ui_text_size(ui, count, ui->font_n, &cw, NULL);
-    (void)nd_draw_text(d, screen_w - 5 - cw, 5, count, ui->font_n, ND_WHITE);
+    /* Title and character count both go through the plate, which is what puts
+     * the overlap the comment above describes onto one code path instead of
+     * two. The T9 pencil is drawn after, on top of the plate, at the x it
+     * always used. */
+    (void)nd_theme_titlebar(ui->canvas, d, screen_w, header_y, nz(t->title),
+                            nd_ui_font_bold(ui, ui->font_xl), count, ui->font_n);
     (void)nd_t9ind_draw(ui, screen_w - 5 - cw - 10, 5, &t->t9);
-    (void)nd_draw_line(d, 0, header_y, screen_w, header_y, ND_WHITE, 1);
 
     /* line_h is the INK height of "Ag" plus 3 -- a fixed leading over a
      * measurement that happens to include both an ascender and a descender. */
@@ -449,7 +453,7 @@ void nd_textlong_draw(nd_textlong *t, bool blink_state)
     for (i = 0u; i < shown; i++) {
         const char *line = nd_lines_at(&lines, start + i);
 
-        (void)nd_draw_text(d, 10, y, line, t->font, ND_WHITE);
+        nd_theme_text_light(d, 10, y, line, t->font);
         if (t->predict.pending_len != 0u && i == shown - 1u) {
             /* The provisional word is always at the end of the text, so it is
              * on the last line -- minus the blinking cursor, which is not

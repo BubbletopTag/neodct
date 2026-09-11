@@ -51,6 +51,7 @@
 #include "nd_fb.h"
 #include "nd_log.h"
 #include "nd_types.h"
+#include "nd_theme.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
 
@@ -324,8 +325,8 @@ static bool pause_menu(koki_engine *eng)
      * border, both inclusive of the corners. */
     (void)nd_draw_rect_fill(ui->draw, ND_RECT(30, 55, 210, 120), ND_BLACK);
     (void)nd_draw_rect_outline(ui->draw, ND_RECT(30, 55, 210, 120), ND_WHITE, 1);
-    (void)nd_draw_text(ui->draw, 45, 62, "Quit Koki?", ui->font_n, ND_WHITE);
-    (void)nd_draw_text(ui->draw, 45, 90, "Enter=Yes  C=No", ui->font_s, ND_WHITE);
+    nd_theme_text_light(ui->draw, 45, 62, "Quit Koki?", nd_ui_font_bold(ui, ui->font_n));
+    nd_theme_text_light(ui->draw, 45, 90, "Enter=Yes  C=No", ui->font_s);
     if (ui->fb != NULL && nd_fb_update(ui->fb, eng->canvas) != ND_OK)
         return true; /* the frame budget ran out: end the run, as ScriptExhausted does */
 

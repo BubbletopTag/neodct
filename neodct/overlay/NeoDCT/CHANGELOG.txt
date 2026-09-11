@@ -1,105 +1,81 @@
 # NeoDCT OS Changelog
 
-0.5.19a
-Detect charging from a rapid fuel-gauge VCELL rise.
+0.6.0a-dev
+Themes. The phone's look is now something you install and change, not
+something the software was built with.
 
-- A VCELL increase greater than 0.04V shows the charging screen for one
-  second, including when an app is running.
-- The foreground app is paused during the charging notification and resumes
-  with its framebuffer restored afterward.
+There is a new screen at Settings -> Theme. It shows one theme per page --
+press * and # to turn the pages -- and each page is drawn IN the theme it is
+offering, so you are looking at the real thing at full size rather than a
+swatch beside a name. Press NaviKey to keep the one on screen. Press C and
+the phone goes back to the look it had, so trying them all costs nothing.
 
-0.5.18a
-The idle timer follows the screen you are actually using.
+A theme is a small folder: the colours, and optionally a typeface, the app
+icons, the battery and signal indicators, and a wallpaper. It can also turn
+the decoration itself on and off -- the gloss on a button, the rounded
+corners, the shadow under text -- so a theme is not limited to recolouring
+what is already there. Anything a theme leaves out stays as it was.
 
-Keys in menus and apps now wake the phone and restart the same sixty-second
-countdown as keys on the home screen. The home timer no longer expires unseen
-behind an app, dimming the screen and holding the processor at 600 MHz as soon
-as the app closes.
+Themes are installed the way apps are: copy the .nap onto the memory card and
+open Settings -> Install apps. Unlike an app, a theme is usable the moment it
+is installed -- there is nothing to restart. Changing a theme changes the
+screen you are on straight away; the rest of the phone follows as you leave
+Settings.
 
-- The idle timeout works across the home screen, menus and apps.
-- There is one core-owned timer; app processes do not run a competing timer.
-- The normal brightness and CPU range return before a waking key is handled.
+The phone itself looks the way it always did: white text on black in the
+pixel typeface, which is now the built-in "Classic" theme rather than
+something baked into the software. The glossy Frutiger Aero look from the
+0.5.16a preview is available as a theme you install.
 
-0.5.17a
-The phone rests when you are not using it.
+Snake is black and white again on the stock phone, exactly as it was. It had
+gained a green snake and a red apple; those now come with a theme, and the
+phone's own game is the one it always was.
 
-Left alone on the home screen for a minute, the screen dims to its lowest
-setting and the processor drops to 600 MHz. Any key brings both straight back,
-and that key still does what it normally does -- you do not lose a press waking
-the phone up. Nothing is switched off: calls, messages and the clock carry on
-as they always did.
+Fixed: on the engineering Modem and Fuel Gauge screens, and in a few other
+places, the smaller grey labels were drawn in the same colour as the
+background and could not be seen at all. Twenty of them.
 
-Only the home screen does this. A menu left open, or an app, is never dimmed
-underneath you, so a game, a download or music playing is unaffected.
+0.5.16a-dev
+A new look across the whole phone, and a debug link that follows
+engineering mode.
 
-- The screen dims and the processor slows after a minute on the home screen.
-- Both come back on the first key, in the state they were in before -- a
-  brightness you chose by hand is the brightness you get back.
-- Fixed: the screen brightness could not be set by anything except an
-  engineering app. The phone had permission to change the brightness but not
-  to switch the backlight on, so ordinary attempts reported a failure over a
-  screen that had actually changed.
+The whole interface has been redrawn. Nothing is flat any more: titles, list
+rows, buttons and dialogs are glossy plates with a light source at the top, a
+sheen filling their upper half and a white bevel one pixel inside every edge.
+Text carries a soft shadow below it so it stays readable over a photograph.
+The old look was white type on black, which was easy to read and said nothing;
+this one is the phone saying what it is.
 
-Service comes back faster after you have been somewhere without it.
+The home screen shows the wallpaper properly. It used to be dimmed to under a
+third of its brightness so that white text could sit on top of it, which made
+every wallpaper look like the same dark smudge. The text now has its own
+shading -- a scrim under the status row and a shadow under each line -- so the
+picture behind it can be nearly full brightness and still be read against.
+Inside an app the picture is dimmed further, because there is far more type
+there to read.
 
-Carrying the phone out of a basement, a lift or a dead spot used to mean
-waiting, sometimes for minutes, because a phone that has lost the network
-looks for it again less and less often the longer it has been missing --
-which is slowest at exactly the moment you have walked somewhere it would
-work. The phone now keeps asking at a steady rate for the first ten minutes,
-and settles down after that so a phone genuinely out of range is not spending
-its battery searching all night.
+Every app has a new icon, and the shipped wallpaper is one of the family.
 
-- The phone notices it has service the moment it gets it, instead of up to
-  twenty seconds later.
-- It no longer searches for 2G and 3G networks, which this network does not
-  run, so each search is quicker.
-- The signal bars react as the signal changes rather than on a timer.
-- The phone log now records every change of network state, with how long it
-  had been without service. "ndlink logs --os" turns "it takes ages" into a
-  number.
+The interface has its own typeface. The phone previously drew its menus in the
+same pixel face the startup screen uses, which is pinned to the boot loader and
+cannot be changed. That face is still there and still does that job; the menus
+are now drawn in a rounded sans with a bold weight for titles, which is what
+makes a plate look like a button rather than a rectangle with a word on it.
 
-Engineering mode is the only switch that decides.
+The battery and signal indicators were redrawn to match, and the battery now
+changes colour as it empties -- green, then amber at two bars, then red at one.
 
-Pressing keys on the phone from a computer needed the phone to have been
-BUILT a particular way, so a phone already in engineering mode still refused,
-and told whoever asked to go and rebuild the image -- which is not something
-the person holding the phone can do. The switch in Settings now decides, the
-same one that already decides everything else developer-facing.
+Ethernet, and the telnet, FTP and screen-sharing services on it, now only come
+up when Engineering Mode is on in Settings. With it off the phone puts no
+address on the ethernet port at all and starts nothing, which is what a phone
+that is not being worked on should do. Turning Engineering Mode on and
+plugging in a cable is now the whole of enabling it; there is no longer a
+rebuild in the way.
 
-- Engineering mode alone opens the key channel. Turn it on, restart the
-  phone, and "ndlink key" works.
-
-Calls no longer have to be loud enough to feed themselves back into the
-microphone.
-
-- The default microphone gain is 70% to reduce echo.
-- Up and down adjust the speaker while a call is on screen. The setting is
-  remembered, but affects calls only; music, tones and the ringtone return to
-  their normal volume as soon as the call ends.
-- Call-volume changes reach the speaker promptly and repeated keys are
-  collapsed to the newest level instead of queueing mixer processes or flash
-  writes.
-
-0.5.16a
-Bluetooth, the battery meter, and a log you can actually read.
-
-Bluetooth switches on. Enable in BT Audio has never worked on this phone -- it
-said "Bluetooth would not start / I/O error", which describes a broken
-adapter, and the adapter was fine. Settings was trying to start Bluetooth
-itself, and it has not had the permission to do that since it stopped running
-as root; it now asks the phone to.
-
-- Bluetooth enables, finds nearby devices, and switches off again.
-- The battery meter works. The gauge sleeps between readings and the first
-  reading after it wakes was being thrown away, so some phones showed no
-  percentage, no low-battery warning and no protective shutdown.
-- The phone keeps its own log, in /var/log/messages, instead of sending it
-  only to a serial port that is usually not connected to anything.
-- Switching Bluetooth off no longer leaves sound pointed at the wrong card.
-- "Bluetooth would not start" now fits on the screen and says why.
-- Ethernet and the developer services on it follow Engineering Mode: with it
-  off the phone puts no address on the port and starts nothing.
+The battery gauge works. It reported nothing at all on some phones -- no
+percentage, no low-battery warning and no protective shutdown -- because the
+gauge sleeps between readings and the first one after it wakes was being
+thrown away. It is now retried, which is all it needed.
 
 0.5.15a
 The microphone, the apps you download, and the keys on the keypad.

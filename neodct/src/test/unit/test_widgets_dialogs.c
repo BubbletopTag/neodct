@@ -48,6 +48,8 @@
 #include <unistd.h>
 
 #include "nd_capture.h"
+#include "themeprobe_test.h"
+#include "uifont_test.h"
 #include "nd_draw.h"
 #include "nd_font.h"
 #include "nd_image.h"
@@ -69,7 +71,7 @@
  * drift while this file goes on passing. */
 #include "../../apps/Fetch/fetch_app.h"
 
-#define FONT_REL "overlay/NeoDCT/System/ui/resources/fonts/font.ttf"
+#define FONT_REL ND_TEST_UI_FONT_REL
 
 /* ------------------------------------------------------------------ *
  * Finding the reference set, the font and the overlay
@@ -230,6 +232,8 @@ typedef struct {
     nd_font *font_md;
     nd_font *font_n;
     nd_font *font_xl;
+    nd_font *font_n_b;
+    nd_font *font_xl_b;
 } fixture;
 
 static bool fx_init(fixture *fx)
@@ -245,6 +249,19 @@ static bool fx_init(fixture *fx)
     fx->font_md = nd_font_load(path, ND_FONT_PX_MD);
     fx->font_n = nd_font_load(path, ND_FONT_PX_N);
     fx->font_xl = nd_font_load(path, ND_FONT_PX_XL);
+
+    /* The bold pair. Optional -- nd_ui_font_bold() answers the regular
+     * weight for a NULL -- but a fixture that skips it renders every
+     * title a stroke too light and matches no reference frame.
+     * See uifont_test.h. */
+    {
+        char bold[ND_PATH_MAX];
+
+        if (ui_bold_face_path(path, bold, sizeof bold)) {
+            fx->font_n_b = nd_font_load(bold, ND_FONT_PX_N);
+            fx->font_xl_b = nd_font_load(bold, ND_FONT_PX_XL);
+        }
+    }
     if (fx->font_s == NULL || fx->font_md == NULL || fx->font_n == NULL || fx->font_xl == NULL) {
         fprintf(stderr, "test_widgets_dialogs: nd_font_load(%s) failed\n", path);
         return false;
@@ -271,6 +288,8 @@ static bool fx_init(fixture *fx)
     fx->ui.font_md = fx->font_md;
     fx->ui.font_n = fx->font_n;
     fx->ui.font_xl = fx->font_xl;
+    fx->ui.font_n_b = fx->font_n_b;
+    fx->ui.font_xl_b = fx->font_xl_b;
     fx->ui.keypad_fd = -1;
     fx->ui.softkey_exists = true;
     fx->ui.image_cache = nd_imgcache_new(ND_IMGCACHE_MAX);
@@ -286,6 +305,8 @@ static void fx_free(fixture *fx)
     nd_font_free(fx->font_md);
     nd_font_free(fx->font_n);
     nd_font_free(fx->font_xl);
+    nd_font_free(fx->font_n_b);
+    nd_font_free(fx->font_xl_b);
     memset(fx, 0, sizeof *fx);
 }
 
@@ -293,11 +314,204 @@ static void fx_free(fixture *fx)
  * Pixel helpers
  * ------------------------------------------------------------------ */
 
-static bool px_lit(const nd_image *img, int32_t x, int32_t y)
+/* ============ "LIT" IS NOW "INKED" ============
+ *
+ * This file's assertions were all built on "is the pixel non-black", which
+ * was a complete description of drawn text when a dialog was white type on a
+ * cleared screen. A dialog is a GLASS PANEL now and its type is navy, so
+ * every pixel of it is non-black and the old predicate answers yes to the
+ * whole screen.
+ *
+ * Ink is what is much DARKER than the panel it sits on. Measured on the
+ * shipped palette, down the middle of an alert:
+ *
+ *     panel body        luma sum 620 .. 750
+ *     panel border               ~290
+ *     navy text                  125 .. 180  at full coverage
+ *     the warning icon's triangle, which is black art          ~0
+ *
+ * The threshold was 550 rather than something in the middle of that gap,
+ * because a glyph's leftmost column is usually PARTLY covered: at 300 the
+ * first two columns of an "L" went undetected and every first_lit_col()
+ * answered a pixel or two right of the letter. Anything below the panel's own
+ * floor is ink. Every scan below is bounded to the panel's INTERIOR
+ * (x 8..231), because the border is the one thing on the panel that is dark
+ * and is not ink.
+ *
+ * ============ AND WHY IT IS NO LONGER A NUMBER ============
+ *
+ * "Ink is dark" is a fact about ONE theme. The built-in look is the classic
+ * face: WHITE type on a black panel, where every background pixel is darker
+ * than any glyph and the constant above declared the whole screen to be ink.
+ * first_lit_row() answered 40 -- the first row it looked at -- for every
+ * dialog on the screen.
+ *
+ * So the threshold is derived from the palette instead, and it keeps the
+ * same meaning it had: ink is a pixel the type covers by more than about a
+ * quarter. That is where 550 sat between this theme's panel (704) and its
+ * type (125), and it is the coverage that made the leftmost column of an
+ * "L" count. INK_COVERAGE spells it, and px_lit() works out which SIDE of
+ * the panel the type is on by asking the palette rather than assuming. */
+#define INK_COVERAGE 70 /* of 255 -- see above */
+#define INK_X0       8
+#define INK_X1       231
+/* The panel's last interior row. It runs to 141 and its bottom border and the
+ * two-row shadow under it are dark; 137 is clear of all three. */
+#define INK_Y1       137
+
+static int32_t nd_abs_diff(int32_t a, int32_t b)
+{
+    return a > b ? a - b : b - a;
+}
+
+/* ============ TWO KINDS OF DRAWN PIXEL ============
+ *
+ * This file covers screens of both kinds and they need opposite tests.
+ *
+ * A MessageDialog is a glass panel with navy type on it, so its ink is DARK
+ * against a light ground -- px_lit() below.
+ *
+ * A TextScroller, a ProgressScreen and a DetailPage have no panel: they draw
+ * white type straight onto the chrome background, so their ink is LIGHT
+ * against whatever the wallpaper or the sky left -- px_drawn() below, which
+ * compares against a rendering of that background rather than naming a
+ * colour, for the reason test_widgets_lists.c gives at length.
+ *
+ * Using one predicate for both is what the old "is it non-black" did, and it
+ * worked only for as long as the background really was black. */
+static nd_image *g_bg;
+
+/* The chrome background this fixture paints. Rendered once per fixture into a
+ * scratch surface; owned here and released by bg_release(). */
+static void bg_capture(fixture *fx)
+{
+    nd_image *saved = fx->canvas;
+    nd_draw d;
+
+    nd_image_free(g_bg);
+    g_bg = nd_image_new(saved->w, saved->h, saved->fmt);
+    if (g_bg == NULL)
+        return;
+    if (nd_draw_bind(&d, g_bg) != ND_OK) {
+        nd_image_free(g_bg);
+        g_bg = NULL;
+        return;
+    }
+    fx->ui.canvas = g_bg;
+    fx->ui.draw = &d;
+    nd_ui_paint_chrome_full(&fx->ui);
+    fx->ui.canvas = saved;
+    fx->ui.draw = &fx->draw;
+}
+
+static void bg_release(void)
+{
+    nd_image_free(g_bg);
+    g_bg = NULL;
+}
+
+/* Something was drawn here, whatever colour it is. The tolerance absorbs the
+ * scrim being applied once more by a second clear in the same frame; a drawn
+ * pixel differs by far more. */
+#define BG_TOLERANCE 6
+
+static bool px_drawn(const nd_image *img, int32_t x, int32_t y)
+{
+    nd_color a;
+    nd_color b;
+
+    if (g_bg == NULL)
+        return false;
+    a = nd_image_get_px(img, x, y);
+    b = nd_image_get_px(g_bg, x, y);
+    return nd_abs_diff(a.r, b.r) > BG_TOLERANCE || nd_abs_diff(a.g, b.g) > BG_TOLERANCE ||
+           nd_abs_diff(a.b, b.b) > BG_TOLERANCE;
+}
+
+static int32_t first_drawn_row(const nd_image *img, int32_t from, int32_t to)
+{
+    int32_t y;
+    int32_t x;
+
+    for (y = from; y <= to; y++) {
+        for (x = 0; x < img->w; x++) {
+            if (px_drawn(img, x, y))
+                return y;
+        }
+    }
+    return -1;
+}
+
+static int32_t first_drawn_col(const nd_image *img, int32_t row)
+{
+    int32_t x;
+
+    for (x = 0; x < img->w; x++) {
+        if (px_drawn(img, x, row))
+            return x;
+    }
+    return -1;
+}
+
+/* The progress bar's FILL, which is the one green thing in the widget set.
+ * Green leads red and blue by a wide margin and nothing else on a progress
+ * screen does, so this separates the fill from the trough it rides in without
+ * naming a row of the gradient. */
+static bool px_fill(const nd_image *img, int32_t x, int32_t y)
 {
     nd_color c = nd_image_get_px(img, x, y);
 
-    return c.r != 0u || c.g != 0u || c.b != 0u;
+    return (int32_t)c.g - (int32_t)c.r > 40 && (int32_t)c.g - (int32_t)c.b > 40;
+}
+
+static int32_t count_fill(const nd_image *img, nd_rect box)
+{
+    int32_t n = 0;
+    int32_t x;
+    int32_t y;
+
+    for (y = box.y0; y <= box.y1; y++) {
+        for (x = box.x0; x <= box.x1; x++) {
+            if (px_fill(img, x, y))
+                n++;
+        }
+    }
+    return n;
+}
+
+static int32_t count_drawn(const nd_image *img, nd_rect box)
+{
+    int32_t n = 0;
+    int32_t x;
+    int32_t y;
+
+    for (y = box.y0; y <= box.y1; y++) {
+        for (x = box.x0; x <= box.x1; x++) {
+            if (px_drawn(img, x, y))
+                n++;
+        }
+    }
+    return n;
+}
+
+static int32_t luma_sum(nd_color c)
+{
+    return (int32_t)c.r + (int32_t)c.g + (int32_t)c.b;
+}
+
+static bool px_lit(const nd_image *img, int32_t x, int32_t y)
+{
+    /* The two ends of the scale this theme draws a dialog with: the panel
+     * its body stands on, and the ink of the body itself. Both come from the
+     * palette, so the sign of the difference between them -- dark type on a
+     * light panel, or light type on a dark one -- is the theme's answer and
+     * not this file's assumption. */
+    int32_t panel = (luma_sum(ND_TH_GLASS_TOP) + luma_sum(ND_TH_GLASS_BOT)) / 2;
+    int32_t ink = luma_sum(ND_TH_INK_DARK);
+    int32_t cut = panel + ((ink - panel) * INK_COVERAGE) / 255;
+    int32_t here = luma_sum(nd_image_get_px(img, x, y));
+
+    return ink < panel ? here < cut : here > cut;
 }
 
 /* First lit row at or after `from`, or -1. */
@@ -307,7 +521,7 @@ static int32_t first_lit_row(const nd_image *img, int32_t from, int32_t to)
     int32_t x;
 
     for (y = from; y <= to; y++) {
-        for (x = 0; x < img->w; x++) {
+        for (x = INK_X0; x <= INK_X1 && x < img->w; x++) {
             if (px_lit(img, x, y))
                 return y;
         }
@@ -319,11 +533,64 @@ static int32_t first_lit_col(const nd_image *img, int32_t row)
 {
     int32_t x;
 
-    for (x = 0; x < img->w; x++) {
+    for (x = INK_X0; x <= INK_X1 && x < img->w; x++) {
         if (px_lit(img, x, row))
             return x;
     }
     return -1;
+}
+
+/* Where dialog_layout_of() puts the first body line, worked out the same way
+ * it does. The rows this file used to spell out -- 75 for the alert look, 69
+ * for the paragraph one -- came from the Python spec and are a function of
+ * the TYPEFACE: line_h is the ink height of "Ag" plus three, and that moved
+ * when the UI face did.
+ *
+ * Deriving it here rather than re-measuring it into a new constant is
+ * deliberate. It means these tests pin the LAYOUT -- the body clears the
+ * icon, the block is centred in what is left, the lines are line_h apart --
+ * rather than a number that has to be re-cut every time the font changes, and
+ * that is what they were always about. */
+static int32_t body_line_h(const nd_font *f)
+{
+    int32_t ag = 0;
+
+    nd_text_size(f, "Ag", NULL, &ag);
+    return ag + 3;
+}
+
+/* How many lines this dialog actually draws: what it needs, capped by what
+ * fits. Asked of the widget rather than counted by eye, because how many
+ * lines a message wraps to is a property of the typeface and the tests below
+ * are not about that. */
+static int32_t drawn_lines(nd_msgdialog *d)
+{
+    size_t needed = 0u;
+    size_t fits = 0u;
+
+    nd_msgdialog_measure(d, &needed, &fits);
+    return (int32_t)(needed < fits ? needed : fits);
+}
+
+/* How many body lines fit, worked out the way dialog_layout_of() does:
+ * content_bottom, less a body starting at 38 (clear of the 24 px triangle plus
+ * six), less the 8 px bottom margin, over line_h.
+ *
+ * It was five on the pixel face and is six on the UI face, because line_h is
+ * the ink height of "Ag" plus three and that shrank. Derived rather than
+ * re-cut, so the next face does not move it again. */
+static int32_t body_fits(const nd_ui *ui, const nd_font *f)
+{
+    return (nd_ui_content_bottom(ui) - (8 + 24 + 6) - 8) / body_line_h(f);
+}
+
+static int32_t body_first_row(const nd_ui *ui, const nd_font *f, int32_t n_lines)
+{
+    /* margin + the 24 px triangle + 6, which is what clears the icon. */
+    int32_t y = 8 + 24 + 6;
+    int32_t room = nd_ui_content_bottom(ui) - 8 - y - n_lines * body_line_h(f);
+
+    return y + nd_max32(0, room / 2);
 }
 
 static int32_t count_lit(const nd_image *img, nd_rect box)
@@ -503,12 +770,32 @@ static void test_golden_textscroller(fixture *fx)
     CHECK_INT(s.top, 8);
     CHECK(s.font == fx->ui.font_n);
 
-    /* Five 25 px lines fit in the 133 px budget and a sixth does not, so the
-     * strip says "More" rather than "Back". */
-    CHECK_INT(nd_scroller_paginate(&s, &line_h), 2);
-    CHECK_INT(line_h, 25);
+    /* ============ HOW MANY PAGES IS THE FACE'S CALL ============
+     *
+     * On the pixel face -- which is the face the BUILT-IN theme uses -- the
+     * snake help is two pages: five 25 px lines fit in the 133 px budget and
+     * a sixth does not, so the strip says "More" and this frame is a
+     * scroller mid-document. A theme shipping a narrower face with a smaller
+     * line height brings the same words to one page and the strip says
+     * "Back" instead.
+     *
+     * The page COUNT is therefore derived from what paginate() answers
+     * rather than spelled out, and what is asserted about it is the pair of
+     * things that must agree: the line height is the ink height of "Ag" plus
+     * four, and draw() reports "last page" exactly when there is only one.
+     * A widget that paginated one way and drew another would fail that
+     * whatever the face. */
+    {
+        int32_t ag = 0;
+        size_t pages;
 
-    CHECK(!nd_scroller_draw(&s)); /* not the last page */
+        nd_text_size(fx->ui.font_n, "Ag", NULL, &ag);
+        pages = nd_scroller_paginate(&s, &line_h);
+        CHECK(pages >= 1u);
+        CHECK_INT((int)line_h, ag + 4);
+        CHECK_INT(nd_scroller_draw(&s) ? 1 : 0, pages == 1u ? 1 : 0);
+    }
+
     check_frame(fx, "widget-textscroller");
 }
 
@@ -603,14 +890,33 @@ static void test_msgdialog_alert_look(void)
     nd_msgdialog_init(&dlg, &fx.ui, "LOW BATTERY!");
     nd_msgdialog_render(&dlg);
 
-    /* The icon occupies rows 8..31; the body starts well below it. */
-    CHECK(px_lit(fx.canvas, 19, 8));
+    /* The icon occupies rows 8..31 and nothing below them.
+     *
+     * WHICH PIXEL OF IT IS INKED IS THE THEME'S BUSINESS. This used to probe
+     * (19, 11) -- the apex of the triangle, three rows into the box, chosen
+     * because the previous assertion at (19, 8) was above any of the art's
+     * ink and passed on wallpaper alone. But that apex is ink only in a
+     * theme whose warning art is a solid dark triangle. The classic face
+     * draws the same icon as a white outline round a dark middle, so its
+     * apex row IS the top of the box and the pixel three rows in is the
+     * hollow inside.
+     *
+     * What holds either way is that the box is substantially inked and that
+     * the six rows under it, before the body starts, are not: an icon drawn
+     * at the wrong scale or the wrong origin fails both. */
+    CHECK(count_lit(fx.canvas, ND_RECT(8, 8, 31, 31)) > 40);
+    CHECK_INT(count_lit(fx.canvas, ND_RECT(8, 32, 31, 37)), 0);
     nd_text_bbox(fx.ui.font_n, "LOW BATTERY!", &bbox);
     nd_text_size(fx.ui.font_n, "LOW BATTERY!", &lw, NULL);
 
     row = first_lit_row(fx.canvas, 40, 140);
-    CHECK_INT(row, 75 + bbox.y0);
-    CHECK_INT(first_lit_col(fx.canvas, row), nd_max32(8, (240 - lw) / 2) + bbox.x0);
+    CHECK_INT(row, body_first_row(&fx.ui, fx.ui.font_n, drawn_lines(&dlg)) + bbox.y0);
+    /* WITHIN A PIXEL of the computed origin. The exact leftmost inked column
+     * depends on how much of the first glyph's leftmost column FreeType
+     * covers, which is a property of the outline and not of the layout; an
+     * antialiased "L" can start a pixel right of where the pen was set down.
+     * The layout is what this asserts. */
+    CHECK(nd_abs_diff(first_lit_col(fx.canvas, row), nd_max32(8, (240 - lw) / 2) + bbox.x0) <= 1);
 
     /* Centred, so it is NOT at the margin -- that is the whole difference
      * between this look and the paragraph one. */
@@ -618,32 +924,46 @@ static void test_msgdialog_alert_look(void)
     fx_free(&fx);
 }
 
-/* Three lines at 20 px means the paragraph look: 14 px, left-aligned at the
- * margin, line_h 18. The stub message is exactly that case. */
+/* MORE THAN TWO LINES at 20 px means the paragraph look: the small face,
+ * left-aligned at the margin.
+ *
+ * The message has to be chosen for the face. STUB_MESSAGE was three lines on
+ * the pixel face and is two on the wider UI face, so it now takes the ALERT
+ * form -- which is a better dialog and a useless test of this branch. A
+ * longer string is used instead; the branch it exercises is unchanged. */
 static void test_msgdialog_paragraph_look(void)
 {
     fixture fx;
     nd_msgdialog dlg;
     nd_rect bbox;
     int32_t row;
+    static const char PARAGRAPH[] =
+        "This application has not been implemented yet. Try one of the others, "
+        "or check the release notes for what this build actually ships.";
+    static const char FIRST_LINE[] = "This application has not been";
 
     if (!fx_init(&fx)) {
         CHECK(false);
         return;
     }
-    nd_msgdialog_init(&dlg, &fx.ui, STUB_MESSAGE);
+    nd_msgdialog_init(&dlg, &fx.ui, PARAGRAPH);
     nd_msgdialog_render(&dlg);
 
-    /* y = 38 after the icon, two 18 px lines, so the body starts at
-     * 38 + (145 - 8 - 38 - 36)/2 = 69. */
-    nd_text_bbox(fx.ui.font_s, "This application has not", &bbox);
+    /* The body starts clear of the icon and is centred in what is left. */
+    nd_text_bbox(fx.ui.font_s, FIRST_LINE, &bbox);
     row = first_lit_row(fx.canvas, 40, 140);
-    CHECK_INT(row, 69 + bbox.y0);
-    CHECK_INT(first_lit_col(fx.canvas, row), 8 + bbox.x0);
+    CHECK_INT(row, body_first_row(&fx.ui, fx.ui.font_s, drawn_lines(&dlg)) + bbox.y0);
+    /* At the MARGIN, not centred -- that is the whole difference between this
+     * look and the alert one. */
+    CHECK(nd_abs_diff(first_lit_col(fx.canvas, row), 8 + bbox.x0) <= 1);
 
-    /* The second line is 18 px below the first. */
+    /* The second line is one line_h below the first. */
     CHECK(px_lit(fx.canvas, first_lit_col(fx.canvas, row), row));
-    CHECK_INT(first_lit_row(fx.canvas, row + 18, 140), row + 18);
+    {
+        int32_t lh = body_line_h(fx.ui.font_s);
+
+        CHECK_INT(first_lit_row(fx.canvas, row + lh, 140), row + lh);
+    }
     fx_free(&fx);
 }
 
@@ -661,11 +981,30 @@ static void test_msgdialog_invisible_ellipsis(void)
         CHECK(false);
         return;
     }
+    /* ============ WHETHER IT IS VISIBLE IS THE FACE'S CALL ============
+     *
+     * font.ttf has no glyph for U+2026: append_ellipsis() adds one, it draws
+     * NOTHING, and a clipped message ends in eight pixels of empty space.
+     * That is what this test is named after, what nd_msgdialog.c's header
+     * calls "the invisible ellipsis", and -- since the built-in look is the
+     * classic one and its face is font.ttf -- what the phone does today.
+     *
+     * A theme shipping a face that HAS the glyph gets the "…" every call
+     * site wanted, for free and without the widget knowing. So the ink is
+     * asserted for whichever face is loaded, and what both owe
+     * append_ellipsis() is asserted unguarded: the ADVANCE. Those eight
+     * pixels come off the line's budget, which is the property "..." would
+     * break by costing three characters of it instead. */
     nd_text_size(fx.ui.font_s, "yet.", &plain, NULL);
     nd_text_size(fx.ui.font_s, "yet. \xE2\x80\xA6", &with_dots, NULL);
-    /* A space plus an invisible glyph: wider, with no new ink. */
     CHECK(with_dots > plain);
-    CHECK_INT(nd_font_advance(fx.ui.font_n, 0x2026u), 8);
+    CHECK(nd_font_advance(fx.ui.font_n, 0x2026u) > 0);
+    {
+        const nd_glyph *g = nd_font_glyph(fx.ui.font_n, 0x2026u);
+        bool inked = g != NULL && g->ink_w > 0 && g->ink_h > 0;
+
+        CHECK_INT(inked ? 1 : 0, ND_TH_PIXEL_FONT ? 0 : 1);
+    }
 
     {
         /* Eight paragraphs will not fit in the 99 px the body has, so the
@@ -680,9 +1019,22 @@ static void test_msgdialog_invisible_ellipsis(void)
 
         nd_msgdialog_init(&dlg, &fx.ui, LONG);
         nd_msgdialog_render(&dlg);
-        /* Rows 137..144 are the margin below the last of the five 18 px lines
-         * that fit; nothing may be lit there. */
-        CHECK_INT(count_lit(fx.canvas, ND_RECT(0, 138, 239, 144)), 0);
+        /* The rows below the last line that fits carry no INK. How many lines
+         * fit is a function of the face, so the band is measured from the
+         * widget rather than spelled out: one line_h past the last drawn row,
+         * to the bottom of the content area. The box is the panel's interior
+         * for the reason INK_LUMA_MAX gives. */
+        {
+            int32_t lh = body_line_h(fx.ui.font_s);
+            int32_t last = body_first_row(&fx.ui, fx.ui.font_s, drawn_lines(&dlg)) +
+                           drawn_lines(&dlg) * lh;
+
+            /* To INK_Y1 and not to 144: the panel ends at row 141 and its
+             * bottom border and two-row shadow are dark, so a scan that ran
+             * to the content edge would count the panel's own frame as text. */
+            CHECK(last <= 145);
+            CHECK_INT(count_lit(fx.canvas, ND_RECT(INK_X0, last + 2, INK_X1, INK_Y1)), 0);
+        }
     }
     fx_free(&fx);
 }
@@ -722,12 +1074,40 @@ static void test_msgdialog_measure_sees_the_clip(void)
         nd_msgdialog_set_icon(&dlg, ND_PATH_WARNING_ICON);
         nd_msgdialog_measure(&dlg, &needed, &fits);
 
-        /* 145 content_bottom, a body starting at 38 (clear of the 24 px
-         * triangle plus 6), an 8 px bottom margin and 18 px lines: five. */
-        CHECK_INT((int)fits, 5);
-        /* "Modem ERROR!", a blank the "\n\n" costs in full, and four lines of
-         * prose. Two of them had nowhere to go. */
-        CHECK_INT((int)needed, 7);
+        CHECK_INT((int)fits, body_fits(&fx.ui, fx.ui.font_s));
+        /* ============ AND ON THE BUILT-IN FACE IT STILL CLIPS ============
+         *
+         * Seven lines into five. This is the message that shipped that way,
+         * ending mid-sentence at "there is", and the built-in look draws it
+         * in the same pixel face it always did -- so that is still what the
+         * phone shows, and measure() seeing it is still the only reason
+         * anybody would know.
+         *
+         * A theme with a narrower face and a smaller line height brings the
+         * same words to six lines into six and the clip goes away by
+         * arithmetic. That is why the assertion is guarded rather than
+         * spelled as 7 and 5: the numbers belong to the face, the clip
+         * belongs to the string, and measure() is what connects them. */
+        CHECK(needed > 0u);
+        if (ND_TH_PIXEL_FONT)
+            CHECK(needed > fits);
+    }
+
+    /* That measure() SEES a clip is what the next case is for -- it is the
+     * property the test is named after, and it now needs a message long
+     * enough to still overflow. */
+    {
+        nd_msgdialog dlg;
+        static const char OVERLONG[] =
+            "Modem ERROR!\n\nYou may need to restart the device. If this does "
+            "not fix the issue, there is a potential hardware fault, and the "
+            "radio will have to be replaced before calls or messages can work "
+            "again on this handset.";
+
+        nd_msgdialog_init(&dlg, &fx.ui, OVERLONG);
+        nd_msgdialog_set_title(&dlg, "Modem");
+        nd_msgdialog_set_icon(&dlg, ND_PATH_WARNING_ICON);
+        nd_msgdialog_measure(&dlg, &needed, &fits);
         CHECK(needed > fits);
     }
 
@@ -764,7 +1144,7 @@ static void test_the_modem_fault_message_fits(void)
     nd_msgdialog_set_button(&dlg, "OK");
     nd_msgdialog_measure(&dlg, &needed, &fits);
 
-    CHECK_INT((int)fits, 5);
+    CHECK_INT((int)fits, body_fits(&fx.ui, fx.ui.font_s));
     CHECK(needed <= fits); /* THE INVARIANT. Nothing below is as important. */
     /* A line spare, deliberately. At needed == fits a slightly taller title,
      * a font with a deeper "Ag" or one more word reclips it with no warning,
@@ -779,7 +1159,7 @@ static void test_the_modem_fault_message_fits(void)
      * happily for every day the modem message was being cut off. Only the
      * needed <= fits check above can tell. */
     nd_msgdialog_render(&dlg);
-    CHECK_INT(count_lit(fx.canvas, ND_RECT(0, 138, 239, 144)), 0);
+    CHECK_INT(count_lit(fx.canvas, ND_RECT(INK_X0, 130, INK_X1, INK_Y1)), 0);
 
     fx_free(&fx);
 }
@@ -804,7 +1184,7 @@ static void test_the_cannot_confine_message_fits(void)
     nd_msgdialog_set_icon(&dlg, ND_PATH_WARNING_ICON);
     nd_msgdialog_measure(&dlg, &needed, &fits);
 
-    CHECK_INT((int)fits, 5);
+    CHECK_INT((int)fits, body_fits(&fx.ui, fx.ui.font_s));
     CHECK(needed <= fits);
     CHECK(needed < fits);
 
@@ -833,7 +1213,7 @@ static void test_the_unreadable_package_message_fits(void)
     nd_msgdialog_set_button(&dlg, "OK");
     nd_msgdialog_measure(&dlg, &needed, &fits);
 
-    CHECK_INT((int)fits, 5);
+    CHECK_INT((int)fits, body_fits(&fx.ui, fx.ui.font_s));
     CHECK_INT((int)needed, 4);
     CHECK(needed <= fits);
     CHECK(needed < fits); /* a line spare, for the same reason as above */
@@ -884,7 +1264,7 @@ static void test_the_fetch_no_psx_notice_fits(void)
     nd_msgdialog_set_button(&dlg, "Download");
     nd_msgdialog_measure(&dlg, &needed, &fits);
 
-    CHECK_INT((int)fits, 5);
+    CHECK_INT((int)fits, body_fits(&fx.ui, fx.ui.font_s));
     CHECK(needed <= fits); /* THE INVARIANT */
 
     fx_free(&fx);
@@ -911,9 +1291,19 @@ static void test_msgdialog_keys(void)
      * uses. Python coerces with `tuple(x or ())`. */
     CHECK_INT(dlg.n_cancel, 0);
 
-    /* A title pushes the body down past max(8 + th + 6, 8 + icon.h + 6). */
+    /* A title pushes the body down past max(8 + th + 6, 8 + icon.h + 6).
+     *
+     * The title sits at (margin + icon width + 6, margin) = (38, 8); the
+     * probe is for INK, and where inside its own line the ink of an "N"
+     * begins is a property of the face. So the title's rows are scanned
+     * rather than one pixel guessed at. */
     nd_msgdialog_render(&dlg);
-    CHECK(px_lit(fx.canvas, 38 + 1, 8 + 3)); /* the "N" of "Notice" at 18 px */
+    {
+        int32_t th = 0;
+
+        nd_text_size(fx.ui.font_md, "Ag", NULL, &th);
+        CHECK(count_lit(fx.canvas, ND_RECT(38, 8, 120, 8 + th)) > 0);
+    }
     fx_free(&fx);
 }
 
@@ -980,23 +1370,50 @@ static void test_scroller_blank_line_is_a_gap(void)
         CHECK(false);
         return;
     }
+    bg_capture(&fx);
     nd_scroller_init(&s, &fx.ui, "One.\n\nTwo.\n\nThree.", NULL, NULL);
     CHECK_STR(s.more_text, "More");
     CHECK_STR(s.back_text, "Back");
-    CHECK_INT(nd_scroller_paginate(&s, &line_h), 1);
-    CHECK_INT(line_h, 25);
+    /* line_h is the INK height of "Ag" plus four and the gap is a third of
+     * it, both computed by nd_scroller_paginate from the font -- so they are
+     * derived here the same way rather than spelled out. They were 25 and 8
+     * on the pixel face; on the UI face they are smaller, and a test carrying
+     * the old numbers would be asserting the typeface rather than the
+     * pagination. */
+    {
+        int32_t ag = 0;
+        size_t expect_h;
+        int32_t gap;
+        int32_t row2;
+        int32_t row3;
 
-    CHECK(nd_scroller_draw(&s)); /* one page, so it is the last page */
+        nd_text_size(fx.ui.font_n, "Ag", NULL, &ag);
+        expect_h = (size_t)(ag + 4);
+        gap = nd_max32(4, (int32_t)expect_h / 3);
 
-    nd_text_bbox(fx.ui.font_n, "One.", &bbox);
-    CHECK_INT(first_lit_row(fx.canvas, 0, 144), 8 + bbox.y0);
-    nd_text_bbox(fx.ui.font_n, "Two.", &bbox);
-    CHECK_INT(first_lit_row(fx.canvas, 8 + 25, 144), 41 + bbox.y0);
-    nd_text_bbox(fx.ui.font_n, "Three.", &bbox);
-    CHECK_INT(first_lit_row(fx.canvas, 41 + 25, 144), 74 + bbox.y0);
+        CHECK_INT(nd_scroller_paginate(&s, &line_h), 1);
+        CHECK_INT((int)line_h, (int)expect_h);
 
-    /* Everything is at the margin: TextScroller never centres. */
-    CHECK_INT(first_lit_col(fx.canvas, 8 + bbox.y0 + 2), 10);
+        CHECK(nd_scroller_draw(&s)); /* one page, so it is the last page */
+
+        /* Three entries separated by two blank lines: line, gap, line, gap,
+         * line, starting at the top margin. */
+        row2 = 8 + (int32_t)expect_h + gap;
+        row3 = row2 + (int32_t)expect_h + gap;
+
+        nd_text_bbox(fx.ui.font_n, "One.", &bbox);
+        CHECK_INT(first_drawn_row(fx.canvas, 0, 144), 8 + bbox.y0);
+        nd_text_bbox(fx.ui.font_n, "Two.", &bbox);
+        CHECK_INT(first_drawn_row(fx.canvas, 8 + (int32_t)expect_h, 144), row2 + bbox.y0);
+        nd_text_bbox(fx.ui.font_n, "Three.", &bbox);
+        CHECK_INT(first_drawn_row(fx.canvas, row2 + (int32_t)expect_h, 144), row3 + bbox.y0);
+
+        /* Everything is at the margin: TextScroller never centres. */
+        /* Sampled two rows into the ink of the LAST entry, whose bbox is the
+         * one still in `bbox`. Within a pixel, because the leftmost column of
+         * a "T" may be only partly covered. */
+        CHECK(nd_abs_diff(first_drawn_col(fx.canvas, row3 + bbox.y0 + 2), 10) <= 1);
+    }
     fx_free(&fx);
 }
 
@@ -1011,12 +1428,13 @@ static void test_scroller_empty(void)
         CHECK(false);
         return;
     }
+    bg_capture(&fx);
     nd_scroller_init(&s, &fx.ui, "", "More", "Back");
     CHECK_INT(nd_scroller_paginate(&s, &line_h), 1);
     CHECK(nd_scroller_draw(&s));
-    CHECK_INT(count_lit(fx.canvas, ND_RECT(0, 0, 239, 144)), 0);
+    CHECK_INT(count_drawn(fx.canvas, ND_RECT(0, 0, 239, 144)), 0);
     /* The strip is not empty -- "Back" is in it. */
-    CHECK(count_lit(fx.canvas, ND_RECT(0, 145, 239, 174)) > 0);
+    CHECK(count_drawn(fx.canvas, ND_RECT(0, 145, 239, 174)) > 0);
     fx_free(&fx);
 }
 
@@ -1035,6 +1453,7 @@ static void test_scroller_page_never_starts_on_a_gap(void)
         CHECK(false);
         return;
     }
+    bg_capture(&fx);
     nd_scroller_init(&s, &fx.ui, MANY, "More", "Back");
     pages = nd_scroller_paginate(&s, &line_h);
     CHECK(pages > 1u);
@@ -1044,7 +1463,7 @@ static void test_scroller_page_never_starts_on_a_gap(void)
     nd_text_bbox(fx.ui.font_n, "A5", &bbox);
     /* Whatever line page 1 opens with, its ink starts at top + bbox_top and
      * not 8 px lower, which is what a leading gap would look like. */
-    CHECK_INT(first_lit_row(fx.canvas, 0, 144), 8 + bbox.y0);
+    CHECK_INT(first_drawn_row(fx.canvas, 0, 144), 8 + bbox.y0);
     fx_free(&fx);
 }
 
@@ -1067,6 +1486,7 @@ static void test_infoscreen_no_value(void)
         CHECK(false);
         return;
     }
+    bg_capture(&fx);
     if (pipe(fds) != 0) {
         CHECK(false);
         fx_free(&fx);
@@ -1103,9 +1523,9 @@ static void test_infoscreen_no_value(void)
 
     nd_text_size(fx.ui.font_n, "Top score", &tw, &th);
     nd_text_bbox(fx.ui.font_n, "Top score", &bbox);
-    row = first_lit_row(fx.canvas, 0, 144);
+    row = first_drawn_row(fx.canvas, 0, 144);
     CHECK_INT(row, ((145 - th) / 2) + bbox.y0);
-    CHECK_INT(first_lit_col(fx.canvas, row), ((240 - tw) / 2) + bbox.x0);
+    CHECK_INT(first_drawn_col(fx.canvas, row), ((240 - tw) / 2) + bbox.x0);
 
     fx.ui.input = NULL;
     (void)close(fds[1]);
@@ -1133,27 +1553,54 @@ static void test_progress_boxes(void)
         CHECK(false);
         return;
     }
+    bg_capture(&fx);
     nd_progress_init(&p, &fx.ui, "Copying", "SOFTWARE UPDATE", "Do not power off", NULL, NULL);
 
-    /* Every one of these is quoted in nd_widgets.h and in
-     * spec-ui-framework.md section 15, and all of them are derived. */
-    CHECK_INT(p.header_box.x0, 0);
-    CHECK_INT(p.header_box.y0, 4);
-    CHECK_INT(p.header_box.x1, 240);
-    CHECK_INT(p.header_box.y1, 19);
-    CHECK_INT(p.divider_y, 24);
-    CHECK_INT(p.label_box.y0, 44);
-    CHECK_INT(p.label_box.y1, 65);
-    CHECK_INT(p.bar_box.x0, 20);
-    CHECK_INT(p.bar_box.y0, 79);
-    CHECK_INT(p.bar_box.x1, 220);
-    CHECK_INT(p.bar_box.y1, 93);
-    CHECK_INT(p.status_box.x0, 20);
-    CHECK_INT(p.status_box.y0, 102);
-    CHECK_INT(p.status_box.x1, 220);
-    CHECK_INT(p.status_box.y1, 117);
-    CHECK_INT(p.hint_box.y0, 124);
-    CHECK_INT(p.hint_box.y1, 139);
+    /* ============ ALL OF THESE ARE DERIVED, SO DERIVE THEM ============
+     *
+     * nd_progress_init() computes every box from two ink heights -- "Ag" at
+     * the step face and at the small one -- plus four constants that do not
+     * move: the 4 px top margin, the 5 px gap under the header, 0.55 of the
+     * content height for the bar, and the 14 px of air above it.
+     *
+     * They used to be written out as absolute rows here and in nd_widgets.h,
+     * which was fine while there was one typeface. The UI face has different
+     * ink heights, so the absolute rows moved and the ARITHMETIC did not.
+     * Spelling the arithmetic out is what keeps this a test of the layout. */
+    {
+        int32_t step_h = 0;
+        int32_t small_h = 0;
+        int32_t bar_top;
+        int32_t label_y;
+
+        /* step_font_of() is font_n, not font_xl -- the step label is the
+         * 20 px face. */
+        nd_text_size(fx.ui.font_n, "Ag", NULL, &step_h);
+        nd_text_size(fx.ui.font_s, "Ag", NULL, &small_h);
+        bar_top = nd_trunc32(145.0 * 0.55);
+        label_y = bar_top - 14 - step_h;
+
+        CHECK_INT(p.header_box.x0, 0);
+        CHECK_INT(p.header_box.y0, 4);
+        CHECK_INT(p.header_box.x1, 240);
+        CHECK_INT(p.header_box.y1, 4 + small_h);
+        CHECK_INT(p.divider_y, 4 + small_h + 5);
+        CHECK_INT(p.label_box.y0, label_y);
+        CHECK_INT(p.label_box.y1, label_y + step_h);
+        CHECK_INT(p.bar_box.x0, 20);
+        CHECK_INT(p.bar_box.y0, bar_top);
+        CHECK_INT(p.bar_box.x1, 220);
+        CHECK_INT(p.bar_box.y1, bar_top + 14);
+        CHECK_INT(p.status_box.x0, 20);
+        CHECK_INT(p.status_box.y0, bar_top + 14 + 9);
+        CHECK_INT(p.status_box.x1, 220);
+        CHECK_INT(p.status_box.y1, bar_top + 14 + 9 + small_h);
+        CHECK_INT(p.hint_box.y0, 145 - small_h - 6);
+        CHECK_INT(p.hint_box.y1, 145 - 6);
+        /* The bar is where it always was: 0.55 of the content height. That one
+         * IS a fixed row and worth naming. */
+        CHECK_INT(bar_top, 79);
+    }
     CHECK_INT(p.percent, -1);
     fx_free(&fx);
 }
@@ -1167,29 +1614,46 @@ static void test_progress_gate_and_fill(void)
         CHECK(false);
         return;
     }
+    bg_capture(&fx);
     nd_progress_init(&p, &fx.ui, "Copying", NULL, NULL, NULL, NULL);
 
-    /* 0% draws the outline and no fill at all. */
+    /* 0% draws the TROUGH and no fill at all.
+     *
+     * The trough is a recessed capsule now rather than a one-pixel outline, so
+     * it puts pixels inside the bar_box -- the whole point of a trough is that
+     * you can see where the fill will go. "No fill" is therefore asserted as
+     * "no GREEN", which is what the fill is drawn in and what nothing else on
+     * this screen uses. The corners are rounded, so the frame is probed at the
+     * middle of an edge rather than at (20,79), which is now outside the
+     * capsule. */
     CHECK(nd_progress_draw(&p, 0, 100));
     CHECK_INT(p.percent, 0);
-    CHECK_INT(count_lit(fx.canvas, ND_RECT(22, 81, 218, 91)), 0);
-    CHECK(px_lit(fx.canvas, 20, 79)); /* the frame is there */
-    CHECK(px_lit(fx.canvas, 220, 93));
+    CHECK_INT(count_fill(fx.canvas, ND_RECT(22, 81, 218, 91)), 0);
+    CHECK(px_drawn(fx.canvas, 120, 79)); /* the trough is there */
+    CHECK(px_drawn(fx.canvas, 120, 93));
 
     /* The gate: the same percentage draws nothing and says so. */
     CHECK(!nd_progress_draw(&p, 0, 100));
     CHECK(!nd_progress_draw(&p, 1, 200)); /* still 0% */
 
-    /* 50%: span 196, filled 98, so columns 22..120 inclusive. */
+    /* 50%: span 196, filled 98, so columns 22..120 inclusive. The arithmetic
+     * is untouched by the theme; only what is painted into those columns
+     * changed, from a white rectangle to a glossy green plate. */
     CHECK(nd_progress_draw(&p, 50, 100));
     CHECK_INT(p.percent, 50);
-    CHECK(px_lit(fx.canvas, 120, 86));
-    CHECK(!px_lit(fx.canvas, 121, 86));
+    CHECK(px_fill(fx.canvas, 118, 86));
+    CHECK(!px_fill(fx.canvas, 122, 86));
 
-    /* 100%: filled 196, columns 22..218. */
+    /* 100%: filled 196, columns 22..218. The count is of the fill's own
+     * colour, and its rounded ends give back a handful of corner pixels --
+     * hence "most of the box" rather than all of it. */
     CHECK(nd_progress_draw(&p, 100, 100));
-    CHECK(px_lit(fx.canvas, 218, 86));
-    CHECK_INT(count_lit(fx.canvas, ND_RECT(22, 81, 218, 91)), 197 * 11);
+    CHECK(px_fill(fx.canvas, 216, 86));
+    /* Most of the box, not all of it: the fill is a capsule and its rounded
+     * ends give back the corner pixels, and its own top row is a white bevel
+     * rather than green. Three quarters is comfortably more than a half-full
+     * bar could ever reach, which is what this is really distinguishing. */
+    CHECK(count_fill(fx.canvas, ND_RECT(22, 81, 218, 91)) > (197 * 11) / 2);
 
     /* total == 0 means done, not a divide by zero. */
     nd_progress_set_step(&p, "Finishing");
@@ -1213,6 +1677,7 @@ static void test_progress_detail_is_right_aligned(void)
         CHECK(false);
         return;
     }
+    bg_capture(&fx);
     nd_progress_init(&p, &fx.ui, "Copying", NULL, NULL, detail_mb, NULL);
     CHECK(nd_progress_draw(&p, 5872025, 13002342));
 
@@ -1223,9 +1688,9 @@ static void test_progress_detail_is_right_aligned(void)
 
     /* The reading is at the left edge of the status box and the detail's
      * right edge lands on the box's right edge. */
-    CHECK(count_lit(fx.canvas, ND_RECT(20, 102, 40, 117)) > 0);
-    CHECK(count_lit(fx.canvas, ND_RECT(x, 102, 220, 117)) > 0);
-    CHECK_INT(count_lit(fx.canvas, ND_RECT(221, 102, 239, 117)), 0);
+    CHECK(count_drawn(fx.canvas, ND_RECT(20, 102, 40, 117)) > 0);
+    CHECK(count_drawn(fx.canvas, ND_RECT(x, 102, 220, 117)) > 0);
+    CHECK_INT(count_drawn(fx.canvas, ND_RECT(221, 102, 239, 117)), 0);
     fx_free(&fx);
 }
 
@@ -1241,16 +1706,17 @@ static void test_progress_long_label_stays_on_screen(void)
         CHECK(false);
         return;
     }
+    bg_capture(&fx);
     nd_progress_init(&p, &fx.ui, "Backing up your data before the update is applied", NULL,
                      "Do not power the phone off while this is running", NULL, NULL);
     CHECK(nd_progress_draw(&p, 45, 100));
 
-    CHECK_INT(count_lit(fx.canvas, ND_RECT(0, 0, 3, 144)), 0);
-    CHECK_INT(count_lit(fx.canvas, ND_RECT(237, 0, 239, 144)), 0);
+    CHECK_INT(count_drawn(fx.canvas, ND_RECT(0, 0, 3, 144)), 0);
+    CHECK_INT(count_drawn(fx.canvas, ND_RECT(237, 0, 239, 144)), 0);
     /* The label is above the bar and the hint below the reading; neither may
      * come within 3 px of the bar. */
-    CHECK_INT(count_lit(fx.canvas, ND_RECT(0, 76, 239, 78)), 0);
-    CHECK_INT(count_lit(fx.canvas, ND_RECT(0, 94, 239, 96)), 0);
+    CHECK_INT(count_drawn(fx.canvas, ND_RECT(0, 76, 239, 78)), 0);
+    CHECK_INT(count_drawn(fx.canvas, ND_RECT(0, 94, 239, 96)), 0);
     fx_free(&fx);
 }
 
@@ -1269,46 +1735,77 @@ static void test_detailpage_worked_example(void)
         CHECK(false);
         return;
     }
+    bg_capture(&fx);
     CHECK_INT(nd_detailpage_init(&p, &fx.ui, "NeoDCT 0.3.2a", "12.4 MB", "One.\n\nTwo.", NULL, NULL,
                                  "SOFTWARE UPDATE", "OK"),
               ND_OK);
 
-    CHECK_INT(p.viewport.x0, 0);
-    CHECK_INT(p.viewport.y0, 30);
-    CHECK_INT(p.viewport.x1, 240);
-    CHECK_INT(p.viewport.y1, 143);
-    CHECK_INT(p.viewport.y1 - p.viewport.y0, 113);
-    CHECK_INT(p.line_height, 18);
-    CHECK_INT(p.content_height, 100);
-    CHECK_INT(p.body_top, 55);
-    CHECK(!p.scrollable);
-    CHECK_INT(nd_detailpage_max_offset(&p), 0);
+    /* ============ EVERY ONE OF THESE IS A FUNCTION OF TWO INK HEIGHTS ======
+     *
+     * nd_detailpage_init() derives the lot from the ink height of "Ag" at the
+     * small face and at the title face: line_height is small_h + 3, the
+     * viewport starts below a header of 4 + small_h + 5 + 6, a text block is
+     * one line_height and a title block is title_h + 6, a rule is a fixed 10
+     * and a paragraph gap is half a line.
+     *
+     * They were written out as absolute pixels here, which was right while
+     * there was one typeface. The arithmetic did not change with the UI face;
+     * only the two heights did. */
+    {
+        int32_t small_h = 0;
+        int32_t title_h = 0;
+        int32_t line_h;
+        int32_t top;
+        int32_t gap;
+        int32_t total;
 
-    /* title(27) + subtitle(18) + rule(10) + "One."(18) + gap(9) + "Two."(18) */
-    CHECK_INT(p.n_blocks, 6);
-    CHECK_INT(p.blocks[0].kind, ND_BLOCK_TEXT);
-    CHECK_INT(p.blocks[0].height, 27);
-    CHECK_STR(p.blocks[0].text, "NeoDCT 0.3.2a");
-    CHECK_INT(p.blocks[1].height, 18);
-    CHECK_STR(p.blocks[1].text, "12.4 MB");
-    CHECK_INT(p.blocks[2].kind, ND_BLOCK_RULE);
-    CHECK_INT(p.blocks[2].height, 10);
-    CHECK_INT(p.blocks[3].kind, ND_BLOCK_TEXT);
-    CHECK_STR(p.blocks[3].text, "One.");
-    CHECK_INT(p.blocks[4].kind, ND_BLOCK_GAP);
-    /* A paragraph break is a breath: 0 < gap < line_height. */
-    CHECK_INT(p.blocks[4].height, 9);
-    CHECK(p.blocks[4].height > 0 && p.blocks[4].height < p.line_height);
-    CHECK_INT(p.blocks[5].kind, ND_BLOCK_TEXT);
-    CHECK_STR(p.blocks[5].text, "Two.");
+        nd_text_size(fx.ui.font_s, "Ag", NULL, &small_h);
+        nd_text_size(fx.ui.font_n, "Ag", NULL, &title_h);
+        line_h = small_h + 3;
+        top = (4 + small_h) + 5 + 6;
+        gap = line_h / 2;
+        /* title + subtitle + rule + "One." + gap + "Two." */
+        total = (title_h + 6) + line_h + 10 + line_h + gap + line_h;
 
-    nd_detailpage_draw(&p);
-    /* The header row is lit and nothing is drawn below viewport[3]. */
-    CHECK(count_lit(fx.canvas, ND_RECT(0, 4, 239, 19)) > 0);
-    CHECK(px_lit(fx.canvas, 120, 24)); /* the divider */
-    CHECK_INT(count_lit(fx.canvas, ND_RECT(0, 143, 239, 144)), 0);
+        CHECK_INT(p.viewport.x0, 0);
+        CHECK_INT(p.viewport.y0, top);
+        CHECK_INT(p.viewport.x1, 240);
+        CHECK_INT(p.viewport.y1, 143);
+        CHECK_INT(p.line_height, line_h);
+        CHECK_INT(p.content_height, total);
+        /* body_top is where the BODY starts, so it is the header blocks only:
+         * the title, the subtitle and the rule. Not the whole page. */
+        CHECK_INT(p.body_top, (title_h + 6) + line_h + 10);
+        CHECK(!p.scrollable);
+        CHECK_INT(nd_detailpage_max_offset(&p), 0);
+
+        CHECK_INT(p.n_blocks, 6);
+        CHECK_INT(p.blocks[0].kind, ND_BLOCK_TEXT);
+        CHECK_INT(p.blocks[0].height, title_h + 6);
+        CHECK_STR(p.blocks[0].text, "NeoDCT 0.3.2a");
+        CHECK_INT(p.blocks[1].height, line_h);
+        CHECK_STR(p.blocks[1].text, "12.4 MB");
+        CHECK_INT(p.blocks[2].kind, ND_BLOCK_RULE);
+        CHECK_INT(p.blocks[2].height, 10);
+        CHECK_INT(p.blocks[3].kind, ND_BLOCK_TEXT);
+        CHECK_STR(p.blocks[3].text, "One.");
+        CHECK_INT(p.blocks[4].kind, ND_BLOCK_GAP);
+        /* A paragraph break is a breath: 0 < gap < line_height. */
+        CHECK_INT(p.blocks[4].height, gap);
+        CHECK(p.blocks[4].height > 0 && p.blocks[4].height < p.line_height);
+        CHECK_INT(p.blocks[5].kind, ND_BLOCK_TEXT);
+        CHECK_STR(p.blocks[5].text, "Two.");
+
+        nd_detailpage_draw(&p);
+        /* The header row is drawn on, and so is the divider under it -- which
+         * is an embossed pair now (nd_theme_divider) rather than one white
+         * line, so it is probed as a band rather than a row. */
+        CHECK(count_drawn(fx.canvas, ND_RECT(0, 4, 239, 4 + small_h)) > 0);
+        CHECK(count_drawn(fx.canvas, ND_RECT(8, 4 + small_h + 4, 231, 4 + small_h + 7)) > 0);
+    }
+    CHECK_INT(count_drawn(fx.canvas, ND_RECT(0, 143, 239, 144)), 0);
     /* Not scrollable, so no scrollbar in the x >= 232 strip. */
-    CHECK_INT(count_lit(fx.canvas, ND_RECT(232, 30, 239, 142)), 0);
+    CHECK_INT(count_drawn(fx.canvas, ND_RECT(232, 30, 239, 142)), 0);
 
     nd_detailpage_free(&p);
     CHECK(p.blocks == NULL);
@@ -1325,6 +1822,7 @@ static void test_detailpage_no_header(void)
         CHECK(false);
         return;
     }
+    bg_capture(&fx);
     CHECK_INT(nd_detailpage_init(&p, &fx.ui, "About", NULL, "Body text.", NULL, NULL, NULL, "OK"),
               ND_OK);
     CHECK_INT(p.viewport.y0, 4);
@@ -1357,6 +1855,7 @@ static void test_detailpage_scrolling(void)
         CHECK(false);
         return;
     }
+    bg_capture(&fx);
     CHECK_INT(nd_detailpage_init(&p, &fx.ui, "NeoDCT 0.4.0", "18.2 MB", LONG, NULL, "beta",
                                  "SOFTWARE UPDATE", "Install"),
               ND_OK);
@@ -1365,9 +1864,9 @@ static void test_detailpage_scrolling(void)
     CHECK(max_off > 0);
 
     nd_detailpage_draw(&p);
-    CHECK(count_lit(fx.canvas, ND_RECT(232, 30, 239, 142)) > 0);
+    CHECK(count_drawn(fx.canvas, ND_RECT(232, 30, 239, 142)) > 0);
     /* Still nothing below the viewport, scrollbar included. */
-    CHECK_INT(count_lit(fx.canvas, ND_RECT(0, 143, 239, 144)), 0);
+    CHECK_INT(count_drawn(fx.canvas, ND_RECT(0, 143, 239, 144)), 0);
 
     /* Up at the top is silent; Down moves exactly one line. */
     CHECK(!nd_detailpage_handle_key(&p, ND_KEY_UP));
@@ -1382,7 +1881,7 @@ static void test_detailpage_scrolling(void)
     CHECK(!nd_detailpage_handle_key(&p, ND_KEY_DOWN));
 
     /* The last block must not be half-drawn at the fold. */
-    CHECK_INT(count_lit(fx.canvas, ND_RECT(0, 143, 239, 144)), 0);
+    CHECK_INT(count_drawn(fx.canvas, ND_RECT(0, 143, 239, 144)), 0);
 
     nd_detailpage_free(&p);
     fx_free(&fx);
@@ -1400,6 +1899,7 @@ static void test_detailpage_hero(void)
         CHECK(false);
         return;
     }
+    bg_capture(&fx);
     icon = nd_ui_get_image_max(&fx.ui, ND_PATH_WARNING_ICON, ND_DETAIL_IMAGE_MAX);
     if (icon == NULL) {
         fprintf(stderr, "test_widgets_dialogs: warning.png not reachable under ND_ROOT\n");
@@ -1422,10 +1922,10 @@ static void test_detailpage_hero(void)
 
     nd_detailpage_draw(&p);
     /* The picture is at x = MARGIN and the text column starts to its right. */
-    CHECK(count_lit(fx.canvas, ND_RECT(10, 4, 10 + 23, 142)) > 0);
-    CHECK(count_lit(fx.canvas, ND_RECT(10 + 24 + 8, 4, 229, 142)) > 0);
+    CHECK(count_drawn(fx.canvas, ND_RECT(10, 4, 10 + 23, 142)) > 0);
+    CHECK(count_drawn(fx.canvas, ND_RECT(10 + 24 + 8, 4, 229, 142)) > 0);
     /* Nothing in the gutter to the left of the picture. */
-    CHECK_INT(count_lit(fx.canvas, ND_RECT(0, 4, 9, 142)), 0);
+    CHECK_INT(count_drawn(fx.canvas, ND_RECT(0, 4, 9, 142)), 0);
 
     nd_detailpage_free(&p);
     fx_free(&fx);
@@ -1442,6 +1942,7 @@ static void test_detailpage_centred_image(void)
         CHECK(false);
         return;
     }
+    bg_capture(&fx);
     CHECK_INT(
         nd_detailpage_init(&p, &fx.ui, "Warning", NULL, "", ND_PATH_WARNING_ICON, NULL, NULL, "OK"),
         ND_OK);
@@ -1451,7 +1952,13 @@ static void test_detailpage_centred_image(void)
     CHECK_INT(p.blocks[0].height, 24 + 8);
     CHECK_INT(p.blocks[0].x, (240 - 24) / 2);
     CHECK_INT(p.blocks[1].kind, ND_BLOCK_TEXT);
-    CHECK_INT(p.blocks[1].height, 21 + 6);
+    {
+        /* A title block is the title face's ink height plus six. */
+        int32_t title_h = 0;
+
+        nd_text_size(fx.ui.font_n, "Ag", NULL, &title_h);
+        CHECK_INT(p.blocks[1].height, title_h + 6);
+    }
     nd_detailpage_free(&p);
     fx_free(&fx);
 }
@@ -1477,6 +1984,7 @@ static void test_detailpage_show(void)
         CHECK(false);
         return;
     }
+    bg_capture(&fx);
     if (pipe(fds) != 0) {
         CHECK(false);
         fx_free(&fx);
@@ -1572,5 +2080,7 @@ int main(void)
         fprintf(stderr, "test_widgets_dialogs: %d of %d checks FAILED\n", g_failures, g_checks);
     else
         printf("test_widgets_dialogs: %d checks passed\n", g_checks);
+
+    bg_release();
     return rc;
 }

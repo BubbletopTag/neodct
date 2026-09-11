@@ -72,6 +72,7 @@
 #include "nd_paths.h"
 #include "nd_proc.h"
 #include "nd_settings.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
@@ -251,8 +252,8 @@ static void draw_waveform(nd_ui *ui, const char *label, const nd_mic_column *col
     band.y1 = ND_UI_H - 1;
     nd_ui_paint_chrome(ui, band);
 
-    (void)nd_draw_text(ui->draw, 5, 0, nd_mictest_title, ui->font_xl, ND_WHITE);
-    (void)nd_draw_text(ui->draw, 5, 22, label, ui->font_s, ND_GRAY);
+    nd_theme_text_light(ui->draw, 5, 0, nd_mictest_title, ui->font_xl);
+    nd_theme_text(ui->draw, 5, 22, label, ui->font_s, ND_TH_INK_MUTED, ND_TH_TEXT_SHADOW);
 
     /* The silence line, drawn first so the waveform sits on top of it. Without
      * it a dead microphone draws nothing at all, and nothing at all looks like
@@ -289,14 +290,15 @@ static void draw_readout(nd_ui *ui, int32_t gain, int32_t peak, bool live)
     int32_t h = 0;
 
     (void)nd_snprintf(left, sizeof left, "Gain %d%%", (int)gain);
-    (void)nd_draw_text(ui->draw, 8, ND_MICTEST_READOUT_Y, left, ui->font_s, ND_WHITE);
+    nd_theme_text_light(ui->draw, 8, ND_MICTEST_READOUT_Y, left, ui->font_s);
 
     if (live)
         (void)nd_snprintf(right, sizeof right, "Peak %d%%", (int)peak);
     else
         (void)nd_strlcpy(right, "no samples -- device in use?", sizeof right);
     nd_text_size(ui->font_s, right, &w, &h);
-    (void)nd_draw_text(ui->draw, ND_UI_W - 8 - w, ND_MICTEST_READOUT_Y, right, ui->font_s, ND_GRAY);
+    nd_theme_text(ui->draw, ND_UI_W - 8 - w, ND_MICTEST_READOUT_Y, right, ui->font_s, ND_TH_INK_MUTED,
+                  ND_TH_TEXT_SHADOW);
 }
 
 /* ============ THE MIXER, AND WHY IT IS LISTED ONCE ============

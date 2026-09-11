@@ -32,6 +32,7 @@
 #include "nd_layout.h"
 #include "nd_log.h"
 #include "nd_paths.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_ui_sim.h"
@@ -107,10 +108,28 @@ static nd_color layout_colour(const char *s)
     size_t i;
     nd_color c;
 
+    /* ============ TWO NAMES ARE THE THEME'S, NOT PILLOW'S ============
+     *
+     * ui_home.json says "white" for the carrier line and the clock, and "red"
+     * for the engineering-mode warning. Those were literal colours because
+     * the interface was white on black when the file was written -- "white"
+     * has always MEANT "the foreground ink", and "red" has meant "a warning".
+     *
+     * Under a theme with a pale background, resolving them literally is white
+     * type on a pale ground: the home screen's carrier name and clock wash
+     * out while every other string on the phone is legible. So the two names
+     * that carry a role resolve to the palette, and the rest of Pillow's
+     * table stays literal for anything that really does want a fixed colour.
+     *
+     * A layout that wants exact white can still spell "#FFFFFF". */
     if (s == NULL || s[0] == '\0')
-        return ND_WHITE;
+        return ND_TH_INK_LIGHT;
     if (s[0] == '#' && parse_hex_colour(s, &c))
         return c;
+    if (strcmp(s, "white") == 0)
+        return ND_TH_INK_LIGHT;
+    if (strcmp(s, "red") == 0)
+        return ND_TH_WARN_INK;
     for (i = 0u; i < ND_ARRAY_LEN(named); i++) {
         if (strcmp(s, named[i].name) == 0)
             return ND_RGB(named[i].r, named[i].g, named[i].b);
@@ -336,8 +355,27 @@ static void draw_status_label(nd_ui *ui, const char *text, int32_t icon_x, int32
     nd_ui_text_size(ui, text, ui->font_s, &tw, &th);
     tx = nd_max32(0, icon_x + left - tw - 4);
     ty = icon_y + top + nd_max32(0, ((bottom - top) - th) / 2);
-    (void)nd_draw_text(ui->draw, tx, ty, text, ui->font_s, ND_WHITE);
+    nd_theme_text_light(ui->draw, tx, ty, text, ui->font_s);
 }
+
+/* ============ THE CENTRED LABELS WEAR NO FURNITURE ============
+ *
+ * The carrier name and the engineering notice sit in the middle of the
+ * wallpaper with nothing else near them, and a glass lozenge was tried behind
+ * each -- sized to the ink, so it grew with the operator name. It read as two
+ * badges stuck onto the photograph: the home screen is the one screen in the
+ * OS with no chrome on it, and putting the only two plates on the phone there
+ * made the picture look like a backdrop rather than the screen.
+ *
+ * So they are bare type, and the contrast comes from the shadow alone. It is
+ * a DARKER shadow than the rest of the screen uses and still only one row --
+ * two rows and three-across were both tried against this wallpaper and both
+ * lost the letterforms: at 12 px the strokes are thin enough that any shadow
+ * wide enough to be a halo is also wide enough to fill the counters, and
+ * "Tello" came out as a smudge in the shape of a word. One row of something
+ * near-black separates the glyphs from the picture and leaves them sharp,
+ * which is the whole job. */
+#define ND_LAYOUT_LABEL_SHADOW ND_RGB(0x04, 0x10, 0x1E)
 
 static void render_text_element(nd_ui *ui, const nd_element *el)
 {
@@ -379,7 +417,18 @@ static void render_text_element(nd_ui *ui, const nd_element *el)
     else if (el->anchor == ND_ANCHOR_RIGHT)
         x -= w;
 
-    (void)nd_draw_text(ui->draw, x, y, text, f, el->color);
+    /* The carrier and the engineering notice, the two labels in the middle of
+     * the picture, take the heavier shadow. The clock does not: it is anchored
+     * into a corner, under the status scrim, and it has never had trouble
+     * being read. The authored colour is kept in both cases -- the engineering
+     * notice is red because it means "every app here runs as root" (nd_ui.c),
+     * and it stays red. */
+    if (el->anchor == ND_ANCHOR_CENTER_H && text[0] != '\0') {
+        nd_theme_text(ui->draw, x, y, text, f, el->color, ND_LAYOUT_LABEL_SHADOW);
+        return;
+    }
+
+    nd_theme_text(ui->draw, x, y, text, f, el->color, ND_TH_TEXT_SHADOW);
 }
 
 static void render_icon_set_element(nd_ui *ui, const nd_element *el)

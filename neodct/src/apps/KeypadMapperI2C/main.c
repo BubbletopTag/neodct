@@ -104,6 +104,7 @@
 #include "nd_paths.h"
 #include "nd_platform.h"
 #include "nd_text.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
@@ -966,12 +967,13 @@ static void draw_capture_prompt(nd_ui *ui, nd_softkey *bar, const nd_kmi2c_confi
     nd_ui_paint_chrome_full(ui);
 
     nd_ui_text_size(ui, nd_kmi2c_title, ui->font_n, &tw, &th);
-    (void)nd_draw_text(d, floordiv2(screen_w - tw), 8, nd_kmi2c_title, ui->font_n, ND_WHITE);
+    nd_theme_text_light(d, floordiv2(screen_w - tw), 8, nd_kmi2c_title, ui->font_n);
     (void)nd_draw_line(d, 12, 32, screen_w - 12, 32, ND_WHITE, 1);
 
     (void)nd_kmi2c_progress(progress, sizeof progress, index, total);
     nd_ui_text_size(ui, progress, ui->font_s, &tw, &th);
-    (void)nd_draw_text(d, screen_w - tw - 8, 38, progress, ui->font_s, ND_GRAY);
+    nd_theme_text(d, screen_w - tw - 8, 38, progress, ui->font_s, ND_TH_INK_MUTED,
+                  ND_TH_TEXT_SHADOW);
 
     /* line_h = get_text_size("Ag", font_s)[1] + 4. Ink height, so the '+ 4' is
      * the whole of the leading and the 'g' descender is what sets the rest. */
@@ -989,7 +991,7 @@ static void draw_capture_prompt(nd_ui *ui, nd_softkey *bar, const nd_kmi2c_confi
              * line, so nothing more is drawn -- see the header comment. */
             if (y > bottom - line_h)
                 break;
-            (void)nd_draw_text(d, 8, y, nd_lines_at(&lines, j), ui->font_s, ND_WHITE);
+            nd_theme_text_light(d, 8, y, nd_lines_at(&lines, j), ui->font_s);
             y += line_h;
         }
     }

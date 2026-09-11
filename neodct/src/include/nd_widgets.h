@@ -24,12 +24,20 @@
  *    the frame. MessageDialog and PagedList clear the full 0..175 instead.
  *    Getting either wrong loses or double-draws the softkey.
  *
+ *    This is also why nd_ui_paint_chrome() ramps its gradient and its scrim
+ *    over the PANEL rather than over the rectangle it was asked to paint --
+ *    see the note in nd_theme.h. A background whose colour depended on which
+ *    of the two clears a screen did would put a seam at row 145.
+ *
  * 2. TEXT IS MEASURED BY ITS INK. nd_text_size() returns the ink box of that
  *    specific string, so centring visibly shifts depending on which letters
  *    are in it. "_" is 3 px tall at 20 px; "Ag" is 21. That is not a bug.
  *
  * 3. SCROLLBAR NOTCHES TRUNCATE. notch_y = track_top + selected * step is a
  *    float and Pillow truncates it. Compute in double, cast with nd_trunc32().
+ *    Four of the five scrollbars go through nd_theme_scrollbar(), which does
+ *    this once; DetailPage's rides a pixel offset rather than an item index
+ *    and keeps its own copy.
  *
  * 4. SIX WIDGETS BUILD A FRESH SOFTKEY BAR INSIDE draw(), and three of those
  *    then present a second time. The double present is visible on the panel as
@@ -41,6 +49,7 @@
 
 #include "nd_t9.h"
 #include "nd_text.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 
@@ -111,6 +120,24 @@ void nd_header_text_for(const nd_header *h, int32_t sub_index, char *out, size_t
 int32_t nd_header_width(const nd_header *h, int32_t sub_index);
 
 void nd_header_draw(const nd_header *h, int32_t sub_index);
+
+/* The whole top-of-screen furniture in one call: the glossy title plate, the
+ * title on it, and the breadcrumb as its badge.
+ *
+ * This exists because seven screens across four apps hand-rolled the same
+ * three calls -- a 24 px title at (5, 5), a one-pixel rule at
+ * nd_ui_header_divider_y(), and nd_header_draw() beside it -- and a theme that
+ * only reached the widgets would have left every one of them looking like the
+ * old OS. They are not widgets and they should not have to become widgets to
+ * get a title bar.
+ *
+ * The title is drawn AS GIVEN. Trimming it against the badge is the caller's
+ * decision, because only the caller knows whether the answer is to ellipsize,
+ * to step down a font size, or to let it run (which is what two of these
+ * screens have always done, on purpose, and nd_textlong.c says why).
+ *
+ * Returns the y of the first content row below the bar. */
+int32_t nd_header_bar(const nd_header *h, const char *title, int32_t sub_index);
 
 /* ================================================================== *
  * 3. AppSelector -- the main menu, one big icon at a time
@@ -618,6 +645,37 @@ bool nd_detailpage_handle_key(nd_detailpage *p, int32_t key);
 
 /* Returns the key that dismissed the page. */
 int32_t nd_detailpage_show(nd_detailpage *p);
+
+/* ================================================================== *
+ * ThemePicker -- nd_detailpage, paged, one theme per page
+ * ================================================================== *
+ *
+ * The screen the owner changes the look from. It is nd_detailpage with * and
+ * # turning the pages, and the page it is showing is drawn IN THE THEME IT IS
+ * OFFERING -- moving onto a theme applies it to this process, so the chrome
+ * around the description is the preview. nd_themepicker.c explains why that
+ * is the honest way to preview a look and a swatch is not.
+ *
+ * Leaving without choosing puts the previous theme back, so a browse costs
+ * the owner nothing.
+ */
+typedef struct {
+    nd_ui *ui;
+    nd_theme_info themes[ND_THEME_MAX_FOUND];
+    size_t n;
+    size_t sel;
+    char entry_id[ND_THEME_ID_MAX]; /* the look on entry, restored on cancel */
+} nd_themepicker;
+
+/* Reads the installed themes and parks the selection on the active one.
+ * ND_ERR_NOTFOUND when there are none at all, which cannot happen on a phone
+ * -- the built-in is always in the list -- but is worth a caller's check. */
+nd_err nd_themepicker_init(nd_themepicker *p, nd_ui *ui);
+
+/* Runs until the owner chooses or backs out. Returns the index of the theme
+ * applied, or ND_WIDGET_BACK. Applying persists it (nd_theme_select), so the
+ * caller has nothing to write. */
+int32_t nd_themepicker_show(nd_themepicker *p);
 
 /* ================================================================== *
  * The T9 mode indicator (drawn by both text widgets)

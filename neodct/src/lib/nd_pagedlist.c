@@ -41,6 +41,7 @@
 #include "nd_keycodes.h"
 #include "nd_log.h"
 #include "nd_text.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_widgets.h"
@@ -319,7 +320,6 @@ void nd_pagedlist_draw(nd_pagedlist *p)
     char storage[PAGEDLIST_WRAP_LINES][ND_TEXT_LINE_MAX];
     nd_lines lines;
     size_t li;
-    double notch_y;
 
     if (p == NULL || p->ui == NULL || p->ui->draw == NULL)
         return;
@@ -331,25 +331,37 @@ void nd_pagedlist_draw(nd_pagedlist *p)
 
     /* Full-screen clear: this widget owns the softkey strip too. */
     nd_ui_paint_chrome_full(ui);
-    (void)nd_draw_text(d, 5, 5, (p->title != NULL) ? p->title : "", ui->font_xl, ND_WHITE);
-    (void)nd_draw_line(d, 0, header_y, screen_w, header_y, ND_WHITE, 1);
+
+    /* The same title plate every other screen has, occupying the same rows the
+     * title and its rule occupied. The breadcrumb goes in as the badge, which
+     * is why nd_header_draw() is no longer called here -- the two used to be
+     * drawn by different code at different y values (5 and 5, but centred by
+     * different rules) and they now come from one place. The EMPTY STATE STILL
+     * SHOWS THE ROOT ID ALONE, with no "-n": that distinction is what tells
+     * you a list is empty rather than on item one. */
+    {
+        char badge[32];
+
+        nd_header_text_for(&p->header, p->n_items == 0u ? -1 : (int32_t)p->selected_index + 1,
+                           badge, sizeof badge);
+        (void)nd_theme_titlebar(ui->canvas, d, screen_w, header_y,
+                                (p->title != NULL) ? p->title : "",
+                                nd_ui_font_bold(ui, ui->font_xl), badge, ui->font_n);
+    }
 
     if (p->n_items == 0u) {
         int32_t w = 0;
         int32_t h = 0;
         int32_t y;
 
-        nd_header_draw(&p->header, -1); /* the root id alone, no "-n" */
         nd_text_size(ui->font_n, "No Items", &w, &h);
         y = p->content_top + nd_max32(0, ((p->content_bottom - p->content_top) - h) / 2);
-        (void)nd_draw_text(d, floor_div2(screen_w - w), y, "No Items", ui->font_n, ND_WHITE);
+        nd_theme_text_light(d, floor_div2(screen_w - w), y, "No Items", ui->font_n);
         if (p->show_select_hint)
             nd_softkey_update(&p->softkey, NULL, false);
         (void)nd_ui_present(ui);
         return;
     }
-
-    nd_header_draw(&p->header, (int32_t)p->selected_index + 1);
 
     max_w = nd_max32(20, p->bar_x - 12);
     nd_lines_init(&lines, storage, PAGEDLIST_WRAP_LINES);
@@ -381,7 +393,8 @@ void nd_pagedlist_draw(nd_pagedlist *p)
         nd_text_size(ui->font_xl, line, &w, NULL);
         /* Centred inside max_w, NOT inside screen_w. See the header comment. */
         x = nd_max32(5, floor_div2(max_w - w));
-        (void)nd_draw_text(d, x, y0 + (int32_t)li * (line_h + 6), line, ui->font_xl, ND_WHITE);
+        nd_theme_text_light(d, x, y0 + (int32_t)li * (line_h + 6), line,
+                            nd_ui_font_bold(ui, ui->font_xl));
     }
 
     if (value[0] != '\0') {
@@ -391,24 +404,18 @@ void nd_pagedlist_draw(nd_pagedlist *p)
 
         nd_text_size(ui->font_n, value, &w, NULL);
         x = nd_max32(5, floor_div2(max_w - w));
-        (void)nd_draw_text(d, x, y, value, ui->font_n, ND_WHITE);
+        /* Muted, because it is the answer and the name above it is the
+         * question. On a monochrome screen the only way to say that was size;
+         * there is a second axis now. */
+        nd_theme_text(d, x, y, value, ui->font_n, ND_TH_INK_MUTED, ND_TH_TEXT_SHADOW);
     }
 
-    /* Scrollbar: white, width 2, so columns bar_x and bar_x + 1. */
+    /* Scrollbar. Same centre column and same extent as the white width-2 line
+     * it replaces; nd_theme_scrollbar carries the truncating notch arithmetic. */
     track_top = p->content_top;
     track_bottom = nd_max32(track_top, p->content_bottom);
-    (void)nd_draw_line(d, p->bar_x, track_top, p->bar_x, track_bottom, ND_WHITE, 2);
-
-    if (p->n_items > 1u) {
-        double step = (double)(track_bottom - track_top) / (double)(p->n_items - 1u);
-        notch_y = (double)track_top + ((double)p->selected_index * step);
-    } else {
-        notch_y = (double)track_top;
-    }
-    (void)nd_draw_rect_fill(
-        d,
-        ND_RECT(p->bar_x - 4, nd_trunc32(notch_y - 3.0), p->bar_x + 2, nd_trunc32(notch_y + 3.0)),
-        ND_WHITE);
+    nd_theme_scrollbar(ui->canvas, p->bar_x, track_top, track_bottom, p->selected_index,
+                       p->n_items);
 
     if (p->show_select_hint)
         nd_softkey_update(&p->softkey, "Select", false);
