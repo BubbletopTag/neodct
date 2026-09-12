@@ -1,43 +1,5 @@
-/* nd_themepicker.c -- choosing a look, by wearing it.
- *
- * ============ THE PREVIEW IS THE SCREEN ============
- *
- * A picker normally shows a swatch: a little picture of what you would get,
- * drawn beside a list of names. This one does not, because it does not have
- * to. nd_theme_apply() replaces the palette of the RUNNING PROCESS, so moving
- * onto a theme and repainting IS the preview -- the title plate, the panel,
- * the softkey and the type all become that theme, full size, in the real
- * widgets, at the real 240x175. Nothing is simulated and nothing can drift
- * from what the phone actually draws, because it is what the phone actually
- * draws.
- *
- * That is the whole argument for making the framework patchable at runtime
- * rather than at build time, and it is worth stating plainly: this screen is
- * not a feature that the theme system happens to allow, it is the theme
- * system being visible.
- *
- * The theme's own preview.png is still shown INSIDE the page, and it is not a
- * duplicate: it is a picture of the app selector, which is the screen a theme
- * changes most and the one screen the owner cannot be standing on while they
- * choose. The chrome around it is live; the picture is of somewhere else.
- *
- * ============ WHY IT IS BUILT ON nd_detailpage ============
- *
- * The page has a title, a picture, several paragraphs and a softkey, and it
- * has to scroll when the description is long. That is nd_detailpage exactly
- * -- the widget the update changelog and the .nap installer already use -- so
- * the picker is that widget PAGED rather than a fourteenth way of laying out
- * a page. A theme is one page; * and # turn to the previous and the next.
- *
- * ============ AND WHY * AND # ============
- *
- * There is no left and no right on this phone (nd_keypadsetup.c has the
- * sixteen keys). Up and Down are already spoken for here -- they scroll the
- * page, which a long description needs -- so the second axis comes off the
- * number pad, which is what MusicPlayer and Messages do for the same reason.
- * * and # sit either side of 0 and read as "back one" and "on one" without a
- * legend.
- */
+/* Theme selection is deferred to reboot. Preview images are safe to browse
+ * without mixing a new palette with the current process's cached resources. */
 
 #include <string.h>
 
@@ -133,9 +95,7 @@ nd_err nd_themepicker_init(nd_themepicker *p, nd_ui *ui)
     return ND_OK;
 }
 
-/* Wear `i` and lay its page out. The apply is what makes the page a preview:
- * everything nd_detailpage_init() measures and everything it later draws
- * reads the palette that was just installed. */
+/* Preview artwork uses its own image; the surrounding UI keeps its current look. */
 static nd_err build_page(nd_themepicker *p, size_t i, nd_detailpage *page, char *body,
                          size_t body_sz, char *badge, size_t badge_sz)
 {
@@ -143,18 +103,15 @@ static nd_err build_page(nd_themepicker *p, size_t i, nd_detailpage *page, char 
     char preview[ND_PATH_MAX];
     bool active = strcmp(t->id, p->entry_id) == 0;
 
-    nd_theme_apply(t->builtin ? NULL : t);
     page_body(t, active, body, body_sz);
     page_badge(i, p->n, badge, badge_sz);
     if (!nd_theme_preview_path(t, preview, sizeof preview))
         preview[0] = '\0';
 
-    /* The softkey says what NaviKey will do, and for the theme already in use
-     * that is nothing -- so it says so rather than offering to re-apply it and
-     * leaving the owner to wonder whether anything happened. */
+    /* Keeping the current theme also cancels a previously queued change. */
     return nd_detailpage_init(page, p->ui, t->name, NULL, body,
                               preview[0] != '\0' ? preview : NULL, badge, "Theme",
-                              active ? "In use" : "Apply");
+                              active ? "Keep" : "Use on reboot");
 }
 
 int32_t nd_themepicker_show(nd_themepicker *p)
@@ -198,27 +155,19 @@ int32_t nd_themepicker_show(nd_themepicker *p)
             const nd_theme_info *t = &p->themes[p->sel];
 
             if (nd_theme_select(t->id) != ND_OK) {
-                nd_log_err(ND_LOG_UI, "theme picker: could not apply %s", t->id);
+                nd_msgdialog error;
+
+                nd_log_err(ND_LOG_UI, "theme picker: could not save %s", t->id);
+                nd_msgdialog_init(&error, p->ui, "Could not save theme.\nCheck the memory card\nand try again.");
+                (void)nd_msgdialog_show(&error);
                 goto restore;
             }
-            nd_log(ND_LOG_UI, "Theme set to %s (%s).", t->name, t->id);
+            nd_log(ND_LOG_UI, "Theme queued for reboot: %s (%s).", t->name, t->id);
             return (int32_t)p->sel;
         }
         goto restore;
     }
 
 restore:
-    /* Walking away puts back what was on when we walked in. Without this the
-     * process keeps whatever the owner last hovered over -- Settings would
-     * carry on drawing in a theme it did not apply, which is worse than
-     * either outcome the owner was choosing between. */
-    {
-        nd_theme_info back;
-
-        if (strcmp(p->entry_id, ND_THEME_ID_BUILTIN) == 0 || !nd_theme_find(p->entry_id, &back))
-            nd_theme_apply(NULL);
-        else
-            nd_theme_apply(&back);
-    }
     return ND_WIDGET_BACK;
 }

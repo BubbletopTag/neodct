@@ -194,7 +194,9 @@ void nd_textinput_draw(nd_textinput *t, bool blink_state)
      * The box's geometry is untouched, so text_y below still centres on the
      * same rows and the underline that marks a T9 word still lands under the
      * same glyphs. */
-    {
+    if (nd_theme_active()->builtin) {
+        (void)nd_draw_rect_outline(d, ND_RECT(10, box_y, box_right, box_y + box_h), ND_WHITE, 1);
+    } else {
         nd_rect well = ND_RECT(10, box_y, box_right, box_y + box_h);
 
         nd_theme_round_gradient(ui->canvas, well, 5, ND_TH_GLASS_BOT, ND_TH_GLASS_TOP, 240u);
