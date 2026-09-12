@@ -2217,15 +2217,7 @@ static void show_install_apps(nd_ui *ui)
  * Theme
  * ------------------------------------------------------------------ */
 
-/* The picker owns the whole interaction -- it previews by applying, and it
- * persists what it applies -- so there is nothing here but the frame around
- * it and the notice afterwards.
- *
- * The notice matters more than it looks. Applying a theme changes THIS
- * process immediately and every other process when it next starts, so the
- * phone the owner is holding is half-changed until they leave Settings: the
- * home screen behind them is still the old look. Saying so is the difference
- * between a feature and a bug report. */
+/* Keep the current UI consistent until all processes restart at boot. */
 static void show_theme_menu(nd_ui *ui)
 {
     nd_themepicker picker;
@@ -2245,7 +2237,7 @@ static void show_theme_menu(nd_ui *ui)
     {
         char message[ND_THEME_NAME_MAX + 64];
 
-        (void)nd_snprintf(message, sizeof message, "Theme set to\n%s.\nLeave Settings to see\nthe rest of the phone.",
+        (void)nd_snprintf(message, sizeof message, "Theme saved:\n%s.\nReboot to apply.",
                           picker.themes[chosen].name);
         nd_msgdialog_init(&dialog, ui, message);
         (void)nd_msgdialog_show(&dialog);

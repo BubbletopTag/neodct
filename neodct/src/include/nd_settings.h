@@ -84,6 +84,7 @@ extern "C" {
 #define ND_SET_AUDIO_RINGTONE   "system.audio.ringtone"
 #define ND_SET_UI_WALLPAPER     "system.ui.wallpaper"
 #define ND_SET_UI_THEME         "system.ui.theme"
+#define ND_SET_UI_THEME_PENDING "system.ui.theme.pending"
 #define ND_SET_UI_ENGINEERING   "system.ui.engineering_mode"
 #define ND_SET_OS_VERSIONNUMBER "system.os.versionnumber"
 #define ND_SET_OS_VERSIONNAME   "system.os.versionname"

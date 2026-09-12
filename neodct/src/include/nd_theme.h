@@ -774,10 +774,9 @@ const nd_theme_info *nd_theme_active(void);
  * draw. */
 void nd_theme_load_active(void);
 
-/* Persists `id` as the choice and applies it here. The setting is written
- * FIRST, because a process that applied a theme it failed to record would
- * show the owner a change that vanishes at the next boot with nothing to say
- * why. */
+/* Queues `id` for the next Linux boot. Keeps the running palette and
+ * wallpaper unchanged, including in subsequently opened apps. Returns an
+ * error if the theme is missing or the pending choice cannot be saved. */
 nd_err nd_theme_select(const char *id);
 
 /* ------------------------------------------------------------------ *

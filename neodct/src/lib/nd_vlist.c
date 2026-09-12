@@ -89,8 +89,127 @@ void nd_vlist_init(nd_vlist *l, nd_ui *ui, const char *title, const char *const 
     l->max_lines = 3u;
 }
 
+/* Preserve the 0.5.19a stock layout independently of theme decoration. */
+static void nd_vlist_draw_classic(nd_vlist *l)
+{
+    nd_ui *ui;
+    nd_draw *d;
+    int32_t screen_w;
+    int32_t content_bottom;
+    int32_t header_y;
+    int32_t reserved;
+    int32_t y_start;
+    int32_t content_height;
+    int32_t line_height;
+    int32_t item_height;
+    int32_t bar_x;
+    int32_t selected_right;
+    int32_t track_top;
+    int32_t track_bottom;
+    const nd_font *item_font;
+    char title[ND_TEXT_LINE_MAX];
+    size_t max_start;
+    size_t i;
+    double notch_y;
+
+    if (l == NULL || l->ui == NULL || l->ui->draw == NULL)
+        return;
+
+    ui = l->ui;
+    d = ui->draw;
+    screen_w = nd_ui_width(ui);
+    content_bottom = nd_ui_content_bottom(ui);
+    header_y = nd_ui_header_divider_y(ui);
+
+    /* 1. Clear -- rows 0..content_bottom only. See the header comment. */
+    nd_ui_paint_chrome_content(ui);
+
+    /* 2. Title, trimmed so it cannot run under the right-aligned breadcrumb,
+     *    and drawn at y = 0 -- every other widget's title sits at y = 5. */
+    reserved = nd_header_width(&l->header, (int32_t)l->selected_index + 1);
+    (void)nd_text_fit(title, sizeof title, l->title, ui->font_xl, screen_w - 5 - reserved - 6);
+    (void)nd_draw_text(d, 5, 0, title, ui->font_xl, ND_WHITE);
+    nd_header_draw(&l->header, (int32_t)l->selected_index + 1);
+
+    /* 3. Divider. */
+    (void)nd_draw_line(d, 0, header_y, screen_w, header_y, ND_WHITE, 1);
+
+    /* 4. Row metrics, recomputed every frame exactly as the Python does. */
+    y_start = header_y + 10;
+    content_height = nd_max32(1, content_bottom - y_start - 4);
+    line_height = nd_max32(28, content_height / 3);
+    item_height = nd_max32(24, line_height - 4);
+    l->max_lines = (size_t)nd_min32(3, nd_max32(1, content_height / line_height));
+    item_font = (ui->font_md != NULL) ? ui->font_md : ui->font_n;
+
+    if (l->selected_index < l->window_start)
+        l->window_start = l->selected_index;
+    /* And the same the other way. The key loop below keeps this invariant
+     * itself, so this only ever fires on the first draw after a CALLER set
+     * selected_index by hand -- Settings and Sleepy both open a list on the
+     * value already in force. Without it a preselected row past the first
+     * windowful is simply not in the window, and the frame comes back with no
+     * selection bar at all: a menu that looks like it has lost its place. */
+    else if (l->selected_index >= l->window_start + l->max_lines)
+        l->window_start = l->selected_index - l->max_lines + 1u;
+    max_start = (l->n_items > l->max_lines) ? (l->n_items - l->max_lines) : 0u;
+    if (l->window_start > max_start)
+        l->window_start = max_start;
+
+    bar_x = screen_w - 5;
+    selected_right = nd_max32(20, bar_x - 10);
+
+    for (i = 0u; i < l->max_lines; i++) {
+        size_t item_idx = l->window_start + i;
+        const char *item_text;
+        int32_t y;
+        int32_t text_h = 0;
+        int32_t text_y;
+
+        if (item_idx >= l->n_items)
+            break;
+
+        y = y_start + (int32_t)i * line_height;
+        item_text = (l->items[item_idx] != NULL) ? l->items[item_idx] : "";
+        /* The INK height of this particular string, so a row of "Erase" and a
+         * row of "Send entry" do not sit at the same y. That is what the
+         * screens look like today. */
+        nd_text_size(item_font, item_text, NULL, &text_h);
+        text_y = y + nd_max32(0, (item_height - text_h) / 2);
+
+        if (item_idx == l->selected_index) {
+            (void)nd_draw_rect_fill(d, ND_RECT(0, y, selected_right, y + item_height), ND_WHITE);
+            (void)nd_draw_text(d, 10, text_y, item_text, item_font, ND_BLACK);
+        } else {
+            (void)nd_draw_text(d, 10, text_y, item_text, item_font, ND_WHITE);
+        }
+    }
+
+    /* 5. Scrollbar: grey, width 1. The only grey in the framework. */
+    track_top = y_start;
+    track_bottom = nd_max32(track_top, content_bottom - 5);
+    (void)nd_draw_line(d, bar_x, track_top, bar_x, track_bottom, ND_GRAY, 1);
+
+    if (l->n_items > 1u) {
+        double step = (double)(track_bottom - track_top) / (double)(l->n_items - 1u);
+        notch_y = (double)track_top + ((double)l->selected_index * step);
+    } else {
+        notch_y = (double)track_top;
+    }
+    (void)nd_draw_rect_fill(
+        d, ND_RECT(bar_x - 2, nd_trunc32(notch_y - 3.0), bar_x + 2, nd_trunc32(notch_y + 3.0)),
+        ND_WHITE);
+
+    (void)nd_ui_present(ui);
+}
+
 void nd_vlist_draw(nd_vlist *l)
 {
+    if (nd_theme_active()->builtin) {
+        nd_vlist_draw_classic(l);
+        return;
+    }
+
     nd_ui *ui;
     nd_draw *d;
     int32_t screen_w;

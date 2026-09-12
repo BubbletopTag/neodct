@@ -81,8 +81,84 @@ void nd_softkey_init(nd_softkey *bar, nd_ui *ui, bool transparent)
     bar->has_text = false;
 }
 
+/* Preserve the 0.5.19a stock layout independently of theme decoration. */
+static void nd_softkey_update_classic(nd_softkey *bar, const char *text, bool present)
+{
+    nd_ui *ui;
+    int32_t screen_w;
+    int32_t screen_h;
+    bool painted_slice = false;
+
+    const nd_image *paper;
+
+    if (bar == NULL || bar->ui == NULL)
+        return;
+    ui = bar->ui;
+    if (ui->canvas == NULL || ui->draw == NULL)
+        return;
+
+    screen_w = nd_ui_width(ui);
+    screen_h = nd_ui_height(ui);
+
+    paper = bar->transparent ? nd_ui_wallpaper(ui) : NULL;
+    if (paper != NULL) {
+        /* wallpaper.crop((0, y_start, w, h)) then canvas.paste(slice, box).
+         * PIL's box is half-open, so the last row copied is screen_h - 1;
+         * nd_rect is inclusive, hence the -1 on both far edges. blit_region
+         * skips the temporary the Python allocates thirty times a second. */
+        nd_rect src = ND_RECT(0, bar->y_start, screen_w - 1, screen_h - 1);
+
+        painted_slice = nd_image_blit_region(ui->canvas, paper, src, 0, bar->y_start) == ND_OK;
+        if (!painted_slice) {
+            /* The Python's bare `except: rectangle(..., fill="black")`. */
+            (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, bar->y_start, screen_w, screen_h),
+                                    ND_BLACK);
+        }
+    } else {
+        /* OPAQUE. Still opaque: nd_ui_paint_chrome() either blits the
+         * wallpaper's own rows 145..175 or fills black, and both cover
+         * whatever the widget above left in the strip -- a scrolling list or
+         * a game's graphics still cannot show through.
+         *
+         * It has to be the chrome background rather than black, because the
+         * widget that just cleared rows 0..145 used the chrome background
+         * too, and a black band under a wallpapered list is a seam a third of
+         * the way up the phone. The literal (0, y_start, w, h) is
+         * Pillow-inclusive and therefore one row and one column past the
+         * canvas; both are clipped, which is what Pillow does too. */
+        nd_ui_paint_chrome(ui, ND_RECT(0, bar->y_start, screen_w, screen_h));
+    }
+
+    if (text != NULL && text[0] != '\0' && ui->font_n != NULL) {
+        int32_t w = 0;
+        int32_t h = 0;
+
+        /* The INK height, so a label of "OK" and a label of "Options" do not
+         * sit on the same row. That is what the screens look like today. */
+        nd_ui_text_size(ui, text, ui->font_n, &w, &h);
+        (void)nd_draw_text(ui->draw, floordiv2(screen_w - w),
+                           bar->y_start + floordiv2(bar->height - h), text, ui->font_n, ND_WHITE);
+    }
+
+    if (text != NULL) {
+        (void)nd_strlcpy(bar->current_text, text, sizeof bar->current_text);
+        bar->has_text = true;
+    } else {
+        bar->current_text[0] = '\0';
+        bar->has_text = false;
+    }
+
+    if (present)
+        (void)nd_ui_present(ui);
+}
+
 void nd_softkey_update(nd_softkey *bar, const char *text, bool present)
 {
+    if (nd_theme_active()->builtin) {
+        nd_softkey_update_classic(bar, text, present);
+        return;
+    }
+
     nd_ui *ui;
     int32_t screen_w;
     int32_t screen_h;

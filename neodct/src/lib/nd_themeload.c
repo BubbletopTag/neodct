@@ -23,6 +23,7 @@
 
 #include <dirent.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -590,11 +591,14 @@ const nd_theme_info *nd_theme_active(void)
     return &active;
 }
 
+static void apply_pending_theme(void);
+
 void nd_theme_load_active(void)
 {
     char id[ND_THEME_ID_MAX];
     nd_theme_info t;
 
+    apply_pending_theme();
     if (nd_settings_get_copy(ND_SET_UI_THEME, ND_SET_UI_THEME_DFLT, id, sizeof id) != ND_OK ||
         id[0] == '\0') {
         nd_theme_apply(NULL);
@@ -617,7 +621,7 @@ void nd_theme_load_active(void)
     nd_log(ND_LOG_UI, "Theme: %s (%s).", t.name, t.id);
 }
 
-nd_err nd_theme_select(const char *id)
+static nd_err select_at_boot(const char *id)
 {
     nd_theme_info t;
     nd_err rc;
@@ -658,11 +662,75 @@ nd_err nd_theme_select(const char *id)
         char wp[ND_PATH_MAX];
 
         if (nd_theme_wallpaper(wp, sizeof wp)) {
-            if (nd_settings_set(ND_SET_UI_WALLPAPER, wp) != ND_OK)
-                nd_log_err(ND_LOG_UI, "theme: %s applied, but its wallpaper could not be set", id);
+            rc = nd_settings_set(ND_SET_UI_WALLPAPER, wp);
+            if (rc != ND_OK)
+                return rc;
         }
     }
     return ND_OK;
+}
+
+/* Store the boot identity and choice together, so a newly opened app cannot
+ * apply a pending theme before the rest of the phone has rebooted. */
+static bool boot_id(char *out, size_t out_sz)
+{
+    char path[ND_PATH_MAX];
+    FILE *f;
+    bool ok;
+
+    if (nd_path_resolve(path, sizeof path, "/proc/sys/kernel/random/boot_id") != ND_OK)
+        return false;
+    f = fopen(path, "r");
+    if (f == NULL)
+        return false;
+    ok = fgets(out, (int)out_sz, f) != NULL;
+    (void)fclose(f);
+    if (!ok)
+        return false;
+    out[strcspn(out, "\r\n")] = '\0';
+    return strlen(out) == 36u;
+}
+
+nd_err nd_theme_select(const char *id)
+{
+    nd_theme_info t;
+    char boot[40];
+    char pending[ND_PROP_VALUE_MAX];
+
+    if (id == NULL || id[0] == '\0')
+        return ND_ERR_INVAL;
+    if (strcmp(id, ND_THEME_ID_BUILTIN) != 0 && !nd_theme_find(id, &t))
+        return ND_ERR_NOTFOUND;
+    if (!boot_id(boot, sizeof boot))
+        return ND_ERR_IO;
+    if (nd_snprintf(pending, sizeof pending, "%s:%s", boot, id) != ND_OK)
+        return ND_ERR_TOOLONG;
+    return nd_settings_set(ND_SET_UI_THEME_PENDING, pending);
+}
+
+static void apply_pending_theme(void)
+{
+    char pending[ND_PROP_VALUE_MAX];
+    char boot[40];
+    nd_err rc;
+
+    if (nd_settings_get_copy(ND_SET_UI_THEME_PENDING, "", pending, sizeof pending) != ND_OK ||
+        pending[0] == '\0' || !boot_id(boot, sizeof boot))
+        return;
+    if (strlen(pending) <= 37u || pending[36] != ':')
+        return;
+    if (strncmp(pending, boot, 36u) == 0)
+        return;
+    rc = select_at_boot(pending + 37);
+    if (rc == ND_OK)
+        rc = nd_settings_set(ND_SET_UI_THEME_PENDING, "");
+    if (rc != ND_OK) {
+        /* A card inserted later in this boot must not switch only new apps. */
+        memcpy(pending, boot, 36u);
+        if (nd_settings_set(ND_SET_UI_THEME_PENDING, pending) != ND_OK)
+            nd_log_err(ND_LOG_UI, "theme: could not defer the pending choice");
+        nd_log_err(ND_LOG_UI, "theme: pending choice could not be applied (%d)", (int)rc);
+    }
 }
 
 /* ------------------------------------------------------------------ *

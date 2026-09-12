@@ -2,7 +2,7 @@
   "id": "aero",
   "name": "Frutiger Aero",
   "author": "NeoDCT",
-  "version": "1.0",
+  "version": "1.1",
   "description": "Glass and gradients in deep sky blue. Glossy plates lit from above with a hard-edged sheen across their top half, white type carrying a soft shadow, and a bright bevel inside every edge. Brings its own icons, status indicators, rounded typeface and sky wallpaper.",
 
   "style": {
@@ -18,8 +18,8 @@
     "scrim":         true,
     "pixel_font":    false,
     "game_colour":  true,
-    "wallpaper_dim": 88,
-    "app_wallpaper_dim": 68
+    "wallpaper_dim": 48,
+    "app_wallpaper_dim": 70
   },
 
   "palette": {

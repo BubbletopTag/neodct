@@ -369,7 +369,8 @@ static void dialog_draw(nd_msgdialog *d)
      * number of lines, which matters: nd-dialogfit and four call sites
      * (nd_ui.c's cannot-confine notice among them) budget their wording
      * against it. */
-    nd_theme_fill(ui->canvas, ND_RECT(0, 0, screen_w - 1, nd_ui_height(ui) - 1), ND_TH_BLUE_DEEP,
+    if (!nd_theme_active()->builtin)
+        nd_theme_fill(ui->canvas, ND_RECT(0, 0, screen_w - 1, nd_ui_height(ui) - 1), ND_TH_BLUE_DEEP,
                   ND_MSGDIALOG_BACKDROP_A);
     {
         int32_t inset = nd_max32(1, d->margin / 2);
