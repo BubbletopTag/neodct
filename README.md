@@ -1,224 +1,177 @@
 # NeoDCT
 
-NeoDCT is a custom embedded Linux device designed to fit inside a Nokia 5110 / 5190 enclosure.
+**A modern LTE feature phone built inside a Nokia 5190.**
 
-## Planned Hardware
+NeoDCT began as an idea about two years ago (around 2024), the looming T-Mobile's 2G
+shutdown would make the original Nokia 5190 impractical to use. The idea was simple:
+keep the shape, keypad, and single-purpose feel of the 5190, but replace its
+internals with hardware that could work on a modern network.
 
-- **Compute**: Luckfox Pico Mini B (RV1103, Cortex-A7 w/ NEON, 64 MB RAM)
-- **Display**: 240 × 240 ST7789 IPS LCD
-- **Input**: Original Nokia keypad, wired directly to GPIO (using publicly available schematics)
-- **Connectivity**: Waveshare SIM7600G-H 4G LTE modem (with GPS)
-- **Audio**: IMP441 microphone, PCM5102 DAC, PAM8302 amplifier
-- **Power**: 3000 mAh LiPo, USB-C charging
+It is now a working embedded-Linux prototype. It boots a custom Buildroot
+image on a 64 MB ARM board, drives a physical display and the original keypad,
+connects to LTE, makes and receives calls, sends and receives SMS, and runs a
+small native phone interface.
 
-> **Note:** Minor faceplate modifications will be required to accommodate the taller display.  
-> Finding an ST7789 panel that matches the original Nokia aspect ratio is unfortunately difficult.
->
-> I've decided recently to switch the hardware target from a Radxa Zero 3W to a Luckfox Pico Mini B. The Luckfox is a MUCH smaller and more limited. In my opinion, this better fits the vibe of a dumb phone.
-
-# NeoDCT OS
-
-NeoDCT OS is a Linux-based, Python-driven feature phone OS inspired by classic Nokia devices—currently focused on UI and architecture, with full telephony planned next.
-
-The UI is intentionally minimal, inspired by classic feature phones, but built on a modern Linux base using Buildroot.
-
----
-
-## Screenshots
-
-### QEMU (Development Environment)
-
-Running NeoDCT OS in QEMU for rapid development and testing.
-
-<p float="left">
-  <img src="docs/img/qemu-mainmenu.png" width="240">
-  <img src="docs/img/qemu-appselector.png" width="240">
-  <img src="docs/img/qemu-linux.png" width="240">
-  <img src="docs/img/qemu-snake.png" width="240">
+<p align="center">
+  <img src="docs/img/readme/phone-home.jpg" width="30%" alt="NeoDCT home screen running on the Nokia 5190 hardware">
+  <img src="docs/img/readme/phone-web.jpg" width="30%" alt="NeoDCT web browser running on the phone">
+  <img src="docs/img/readme/phone-doom.jpg" width="30%" alt="Doom running on NeoDCT">
+</p>
+<p align="center">
+  <img src="docs/img/readme/phone-about.jpg" width="30%" alt="NeoDCT system information screen">
+  <img src="docs/img/readme/phone-shell.jpg" width="30%" alt="Linux shell running on NeoDCT">
 </p>
 
-Because NeoDCT OS is built on top of Linux, it can run more than just classic feature-phone style apps:
+## What this project demonstrates
 
-<p float="left">
-  <img src="docs/img/qemu-mp3player.png" width="240">
+- Linux bring-up: Buildroot, BusyBox, musl, kernel/device-tree work, boot
+  scripts, framebuffer graphics, and a 64 MB RAM budget
+- Hardware integration: SPI, I2C, UART, USB, GPIO, audio, battery management,
+  removable storage, Ethernet, and LTE
+- IT troubleshooting: static networking, service isolation, logs, repeatable
+  diagnostics, QEMU, automated tests, on-device self-tests, and recovery
+- Real-hardware fault isolation involving permissions, startup timing, modem
+  state, audio routing, framebuffer formats, RF reception, and power stability
+
+## Current hardware
+
+<p align="center">
+  <img src="docs/img/readme/hardware-front-annotated.jpg" width="62%" alt="Annotated front half of the NeoDCT phone showing its internal components">
+  <img src="docs/img/readme/hardware-back-annotated.jpg" width="31%" alt="Annotated rear half of the NeoDCT phone showing the modem, battery, Bluetooth adapter, and fuel gauge">
 </p>
 
----
+| Component | Current implementation |
+| --- | --- |
+| Enclosure and input | Nokia 5190 shell and original 16-key matrix, read through a PCF8575 I2C GPIO expander |
+| Computer | Luckfox Pico Mini B: RV1103 Cortex-A7, 64 MB RAM, 128 MB SPI NAND |
+| Display | 240×240 ST7789 IPS panel over SPI; NeoDCT renders a centered 240×175 interface |
+| Cellular | SIMCom SIM7600G-H LTE modem with FPC antenna, tested on Tello/T-Mobile |
+| Audio | C-Media USB sound card, electret microphone, speaker, and full-duplex 16 kHz call audio |
+| Power | 3000 mAh LiPo, USB-C charging, and MAX1704x battery fuel gauge |
+| Storage | Read-only verified system image plus writable user storage and removable microSD support |
+| Development link | RV1103 10/100 BASE-TX exposed through a custom USB-C-to-RJ45 cable |
+| Other | USB Bluetooth adapter; support remains dependent on the kernel/image being tested |
 
-### Real Hardware (Prototype)
+The case is a hand-built prototype, everything was wired by hand, no drop in PCB unfortunately.
 
-> Early hardware prototype (and yes, it’s literally being held together by hand.)
+## What works
 
-```
-docs/img/hardware-prototype1.jpg
-docs/img/hardware-prototype2.jpg
-docs/img/hardware-prototype3.jpg
-```
+- Incoming and outgoing LTE voice calls with microphone and speaker audio
+- SMS, contacts, call history, signal/carrier reporting, and IPv6 mobile data
+- Original physical keypad, multi-tap entry, predictive T9, and keypad-driven
+  recovery
+- Battery monitoring, low-battery warnings, display brightness, and idle CPU
+  downclocking
+- Web browsing, music playback, calendar/reminders, calculator, clock, tones,
+  games, a Linux shell, and installable app packages
+- Experimental: installable UI themes. The framework is in place and two
+  example themes ship, but the stock look is what is verified on hardware
+- Read-only squashfs under dm-verity, separated user data, app confinement,
+  signed updates, crash recovery, QEMU, and automated regression tests
 
-<img src="docs/img/hardware-prototype1.jpg" width="300">
-<img src="docs/img/hardware-prototype2.jpg" width="300">
-<img src="docs/img/hardware-prototype3.jpg" width="300">
+This is not yet a daily-driver phone. It does not enter true kernel suspend,
+so standby life is limited, and the FPC antenna I'm using has unreliable
+reception indoors. LTE works much more consistently outdoors.
 
-Currently, this device and operating system is a **work-in-progress**, not even close to a finished product.
+## Solving the development-port problem
 
----
+The Luckfox board has one USB controller, and NeoDCT needs it in host mode for
+the LTE modem and USB sound card. That ruled out the normal embedded-device
+workflow of connecting the phone to a PC as a USB gadget.
 
-## Architecture Overview
+The RV1103 also contains a 10/100 BASE-TX MAC and PHY. Its two transmit and two
+receive conductors are available on the board even though the Pico Mini has no
+RJ45 jack. A USB 2.0 connector also provides four convenient conductors, so I
+used male and female USB-C/USB 2.0 breakout boards as a compact **physical
+connector only** and wired those conductors to Ethernet. A custom USB-C-to-RJ45
+cable connects the phone directly to a development PC.
 
-* **Kernel**: Linux (Buildroot-managed)
-* **Userspace**: Minimal Linux on musl
-* **UI**: `nd-core`, a custom C framework drawing straight to the framebuffer
-* **Apps**: native C, one `app.so` per app, **one process each**
-* **Graphics**: no desktop stack at all — no X11, no Wayland, no compositor
-* **Input**: physical keypad, sixteen keys
-* **Target hardware**: Luckfox Pico Mini B; QEMU for development
+> This is not USB networking and must not be connected to a normal USB port.
+> The USB-C connector is repurposed for the phone's Ethernet pairs.
 
-The UI and every app are C. The original Python implementation is kept under
-`neodct/python-reference/` for comparison and is not built or shipped.
+<p align="center">
+  <img src="docs/img/readme/luckfox-ethernet-pins.png" width="56%" alt="Luckfox Pico Mini B pinout with the Ethernet transmit and receive pins highlighted">
+  <img src="docs/img/readme/usb2-pinout.png" width="34%" alt="USB 2.0 Type-A four-conductor pinout used as the connector inspiration">
+</p>
+<p align="center">
+  <img src="docs/img/readme/debug-cable.webp" width="280" alt="The custom NeoDCT USB-C-to-RJ45 Ethernet cable">
+</p>
 
-### Security at a glance
+The PC uses `192.168.99.1/24`; the phone configures itself as
+`192.168.99.2/24`. The link has no default route, and the debug services bind
+only to the wired interface so they are not exposed over LTE. Engineering mode
+starts a telnet shell, FTP file access, and VNC screen/control for bench work.
 
-Nothing on the phone runs as root except one small broker.
+That link became **ndlink**, an adb-like tool for the phone and QEMU. It runs
+commands, transfers files, captures and controls the screen, collects bug
+reports, runs the on-device self-test, installs apps, and delivers updates.
 
-* `nd-core` — the UI — runs as **`ndusr`**, an ordinary user.
-* Apps run as **`ndusr`**, or as **`ndusr_ut`** if they are the browser or came
-  from `/NeoDCT/User/apps`. `ndusr_ut` cannot reach the modem, your contacts,
-  your messages or the signing keys — those folders are not merely unreadable
-  to it, they are *absent* from its view of the filesystem.
-* A **broker** process keeps root and does exactly four things: start an app,
-  wait for one, halt the phone, set the clock. It refuses to run anything as
-  root outside a fixed list of three programs on the read-only image.
-* `/` and `/NeoDCT/System` are read-only squashfs under dm-verity.
-
-**[`docs/HOW-IT-WORKS.md`](docs/HOW-IT-WORKS.md) explains all of it in plain
-language** and is the best place to start. The design reasoning is in
-`docs/c-rewrite/SECURITY.md`; the threat model it answers is in
-`docs/c-rewrite/SECURITY-AUDIT.md`.
-
----
-
-## Repository Layout
-
-```
-neodct/
-├── buildroot/              # Vendored Buildroot source
-├── neodct/
-│   ├── overlay/            # Rootfs overlay (apps, UI, assets)
-│   └── configs/            # Buildroot defconfigs
-├── docs/
-│   └── images/             # README screenshots
-├── .gitignore
-└── README.md
-```
-
-* `neodct/overlay/` is copied directly into the root filesystem
-* No generated files or user data are tracked in git
-
----
-
-## Building NeoDCT OS
-
-### QEMU (recommended for development)
-
-```bash
-make -C buildroot \
-  BR2_DEFCONFIG=../neodct/configs/neodct_qemu_defconfig defconfig
-
-make -C buildroot
+```sh
+neodct/tools/ndlink devices
+neodct/tools/ndlink doctor
+neodct/tools/ndlink --json state
+neodct/tools/ndlink shell 'uname -a'
+neodct/tools/ndlink shot phone.png
+neodct/tools/ndlink watch
+neodct/tools/ndlink bugreport
+neodct/tools/ndlink selftest
 ```
 
-Produces a bootable image suitable for QEMU.
+An iTunes-style desktop companion was also prototyped on top of the same LAN
+for browsing music and apps, checking device state, and syncing selected
+content.
 
----
+<p align="center">
+  <img src="docs/img/readme/neodct-sync.png" width="900" alt="NeoDCT Sync desktop companion showing the music library and connected phone">
+</p>
 
-### Real Hardware (Luckfox Pico Mini B)
+See [NDLINK.md](docs/NDLINK.md) and [DEBUG_LAN.md](docs/DEBUG_LAN.md) for the
+tool and network details.
 
-```bash
-make -C buildroot O=../build-luckfox \
-  BR2_DEFCONFIG=../neodct/configs/luckfox_pico_mini_defconfig defconfig
+## Software design
 
-make -C buildroot O=../build-luckfox
+Buildroot generates the Linux userspace. `nd-core` and the apps are native C
+and draw through fbdev without X11, Wayland, or a compositor; the original
+Python implementation remains as a reference. Apps run in separate processes,
+the UI drops root privileges, and a small broker owns a fixed set of privileged
+operations. The verified read-only OS and writable user data are separate, so
+updates do not erase personal data. [How NeoDCT works](docs/HOW-IT-WORKS.md)
+explains the architecture in plain language.
+
+## Build and test
+
+QEMU is the fastest supported development path:
+
+```sh
+cd buildroot
+make neodct_qemu_defconfig
+make
+cd ..
+neodct/tools/run_qemu.sh
 ```
 
-Output images will appear in the corresponding `output/images/` directory.
+Re-run the defconfig after it changes: Buildroot otherwise keeps an older
+generated `.config`. Run both test suites before shipping a change:
 
-Note that the hardware target still builds the older writable-UBIFS layout: the
-read-only squashfs, dm-verity and over-the-air update system described below
-currently exist on QEMU only.
+```sh
+cd neodct/src
+make test
+make ASAN=1 test
 
----
+cd ../..
+python3 -m pytest neodct/tests/ -q
+```
 
-## Project Status
+The C suite runs inside bubblewrap because it exercises system operations such
+as reboot and poweroff. Hardware changes are also checked with
+`ndlink selftest`.
 
-NeoDCT OS is an early-stage prototype. The core UI and app framework work (including on real hardware), but most telephony features are still unimplemented.
+## Development note and license
 
-**Legend**: 🟢 Working · 🟡 Mostly Working · 🟠 Stubbed · 🔴 Not Implemented
+AI assistants were used for portions of code generation and review. The
+hardware selection and assembly, wiring, Linux bring-up, failure diagnosis,
+component integration, and real-device verification were performed by the
+project author.
 
-### 🟢 Working
-- Snake
-- Core Python UI framework
-- Renders wallpapers and basic UI on QEMU + real hardware, ST7789 240×240
-
-### 🟡 Mostly Working
-- Phonebook (SQLite-backed; calling action is buggy)
-- Web Browser (WebKitGTK via cage; QEMU-only; no video/downloads)
-- Music Player (MP3 playback; browse by artist/album/song from ID3 tags, volume control)
-
-### 🟠 Stubbed
-- Messages (menu only)
-- Dialer (UI only, no modem logic)
-- Call Log
-- ModemService (simulation mode for QEMU)
-- Placeholder / test apps
-- Clock (technically works, but you can't change its settings easily)
-
-### 🔴 Not Implemented
-- Telephony (calls, SMS, MMS)
-- Modem integration logic in NeoDCT
-- Settings, Calculator, Tones, Memory/Logic games
-- Battery & signal indicators
-- Clock settings
-- Physical keypad support (currently external keyboard only)
-- T9 / predictive text
-
-
-
----
-
-## Licensing
-
-* **NeoDCT OS code**: GPLv3
-* **Linux kernel**: GPLv2
-* **Buildroot**: GPLv2
-* Third-party components retain their original licenses
-
-See individual files for details.
-
----
-
-## Goals
-
-* Recreate the feel of classic Nokia feature phones (5110 / 3310)
-* Modernize the concept with 4G LTE connectivity
-* Add practical comfort features (GPS, MMS, etc.)
-* Build on top of Linux to allow deep customization and extensibility
----
-
-## Non-Goals
-
-* Touch-first UX
-* Heavy graphics stacks
-* Doomscrollibility!! / engagement-driven UX
-
----
-
-## Contributing
-
-Contributions are welcome! I'm not the most experienced programmer! AI is the new stack overflow! :P
-
-If you’re experimenting with NeoDCT OS and want to help out, go ahead and:
-
-* Fork it
-* Break it
-* Fix it
-* Send a PR
+NeoDCT code is GPLv3. Linux, Buildroot, and bundled third-party components
+retain their own licenses.
