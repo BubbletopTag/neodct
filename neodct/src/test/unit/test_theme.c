@@ -261,18 +261,54 @@ static void test_a_missing_theme_falls_back_without_forgetting(void)
     CHECK_STR(got, "gone");
 }
 
-static void test_select_persists_and_applies(void)
+static void test_select_waits_for_reboot(void)
 {
-    char got[ND_THEME_ID_MAX];
+    char got[ND_PROP_VALUE_MAX];
 
+    pt_mkdir("/proc/sys/kernel/random");
+    pt_write_text("/proc/sys/kernel/random/boot_id", "00000000-0000-0000-0000-000000000001\n");
     (void)make_theme("Mint", "{\"id\":\"mint\",\"palette\":{\"sky_top\":\"#00FF88\"}}");
-
+    touch(ND_PATH_THEMES_DIR "/Mint", "wallpaper.jpg");
+    CHECK_INT(nd_settings_set(ND_SET_UI_WALLPAPER, "NONE"), ND_OK);
+    CHECK_INT(nd_settings_set(ND_SET_UI_THEME, "classic"), ND_OK);
+    nd_theme_apply(NULL);
     CHECK_INT(nd_theme_select("mint"), ND_OK);
-    CHECK_INT(nd_theme_pal->sky_top.g, 0xFF);
+    CHECK_STR(nd_theme_active()->id, "classic");
+    nd_theme_load_active();
+    CHECK_STR(nd_theme_active()->id, "classic");
     (void)nd_settings_get_copy(ND_SET_UI_THEME, "", got, sizeof got);
-    CHECK_STR(got, "mint");
-
+    CHECK_STR(got, "classic");
+    (void)nd_settings_get_copy(ND_SET_UI_WALLPAPER, "", got, sizeof got);
+    CHECK_STR(got, "NONE");
     CHECK_INT(nd_theme_select("nosuch"), ND_ERR_NOTFOUND);
+
+    pt_write_text("/proc/sys/kernel/random/boot_id", "00000000-0000-0000-0000-000000000002\n");
+    nd_theme_load_active();
+    CHECK_STR(nd_theme_active()->id, "mint");
+    CHECK_INT(nd_theme_pal->sky_top.g, 0xFF);
+    (void)nd_settings_get_copy(ND_SET_UI_WALLPAPER, "", got, sizeof got);
+    CHECK_STR(got, ND_PATH_THEMES_DIR "/Mint/wallpaper.jpg");
+    (void)nd_settings_get_copy(ND_SET_UI_THEME_PENDING, "", got, sizeof got);
+    CHECK_STR(got, "");
+    nd_theme_apply(NULL);
+}
+
+static void test_missing_pending_theme_waits_for_another_boot(void)
+{
+    pt_mkdir("/proc/sys/kernel/random");
+    pt_write_text("/proc/sys/kernel/random/boot_id", "00000000-0000-0000-0000-000000000002\n");
+    CHECK_INT(nd_settings_set(ND_SET_UI_THEME, "classic"), ND_OK);
+    CHECK_INT(nd_settings_set(ND_SET_UI_THEME_PENDING,
+                             "00000000-0000-0000-0000-000000000001:late"), ND_OK);
+    nd_theme_load_active();
+    CHECK_STR(nd_theme_active()->id, "classic");
+    (void)make_theme("Late", "{\"id\":\"late\"}");
+    nd_theme_load_active();
+    CHECK_STR(nd_theme_active()->id, "classic");
+    pt_write_text("/proc/sys/kernel/random/boot_id", "00000000-0000-0000-0000-000000000003\n");
+    nd_theme_load_active();
+    CHECK_STR(nd_theme_active()->id, "late");
+    nd_theme_apply(NULL);
 }
 
 /* ------------------------------------------------------------------ *
@@ -370,7 +406,8 @@ int main(void)
     RUN(test_one_broken_theme_does_not_cost_the_list);
     RUN(test_apply_swaps_the_palette_and_keeps_its_own_copy);
     RUN(test_a_missing_theme_falls_back_without_forgetting);
-    RUN(test_select_persists_and_applies);
+    RUN(test_select_waits_for_reboot);
+    RUN(test_missing_pending_theme_waits_for_another_boot);
     RUN(test_no_theme_overrides_nothing);
     RUN(test_the_resource_mapping);
     RUN(test_an_installed_apps_icon_is_themed_by_name);

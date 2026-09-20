@@ -407,15 +407,32 @@ void nd_pagedlist_draw(nd_pagedlist *p)
         /* Muted, because it is the answer and the name above it is the
          * question. On a monochrome screen the only way to say that was size;
          * there is a second axis now. */
-        nd_theme_text(d, x, y, value, ui->font_n, ND_TH_INK_MUTED, ND_TH_TEXT_SHADOW);
+        nd_theme_text(d, x, y, value, ui->font_n, nd_theme_active()->builtin ? ND_WHITE : ND_TH_INK_MUTED, ND_TH_TEXT_SHADOW);
     }
 
     /* Scrollbar. Same centre column and same extent as the white width-2 line
      * it replaces; nd_theme_scrollbar carries the truncating notch arithmetic. */
     track_top = p->content_top;
     track_bottom = nd_max32(track_top, p->content_bottom);
-    nd_theme_scrollbar(ui->canvas, p->bar_x, track_top, track_bottom, p->selected_index,
-                       p->n_items);
+    if (nd_theme_active()->builtin) {
+        double notch_y;
+
+        (void)nd_draw_line(d, p->bar_x, track_top, p->bar_x, track_bottom, ND_WHITE, 2);
+
+        if (p->n_items > 1u) {
+            double step = (double)(track_bottom - track_top) / (double)(p->n_items - 1u);
+            notch_y = (double)track_top + ((double)p->selected_index * step);
+        } else {
+            notch_y = (double)track_top;
+        }
+        (void)nd_draw_rect_fill(
+            d,
+            ND_RECT(p->bar_x - 4, nd_trunc32(notch_y - 3.0), p->bar_x + 2, nd_trunc32(notch_y + 3.0)),
+            ND_WHITE);
+    } else {
+        nd_theme_scrollbar(ui->canvas, p->bar_x, track_top, track_bottom, p->selected_index,
+                           p->n_items);
+    }
 
     if (p->show_select_hint)
         nd_softkey_update(&p->softkey, "Select", false);

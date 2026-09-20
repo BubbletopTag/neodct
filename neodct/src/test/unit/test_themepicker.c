@@ -1,22 +1,9 @@
-/* test_themepicker.c -- the paged theme chooser.
- *
- * The picker's own loop cannot be driven from here: nd_detailpage_show()
- * blocks on the key channel, and smallapp_test.h's note about a blocking
- * widget draining the channel before its first draw applies to it exactly.
- * So what is checked is everything up to the loop -- which theme the picker
- * opens on, what the list contains, and that a page for each theme actually
- * lays out with that theme applied.
- *
- * That last one is the claim worth defending. The picker previews a theme by
- * WEARING it: it applies the palette and then measures and draws the page. If
- * a theme could be applied but not laid out -- an empty name, a description
- * longer than the block array -- the preview would be a blank screen with no
- * way back, and it would happen on the owner's phone rather than here.
- */
+/* test_themepicker.c -- browsing must leave the running theme unchanged. */
 
 #include <string.h>
 
 #include "nd_theme.h"
+#include "nd_settings.h"
 #include "nd_widgets.h"
 #include "smallapp_test.h"
 
@@ -94,7 +81,8 @@ static void test_it_opens_on_the_active_theme(void)
     CHECK_STR(picker.themes[1].name, "Mint", "then the disk themes, by name");
     CHECK_STR(picker.themes[2].name, "Rose", "M before R");
 
-    CHECK_INT(nd_theme_select("rose"), ND_OK, "wear one");
+    CHECK_INT(nd_settings_set(ND_SET_UI_THEME, "rose"), ND_OK, "saved at previous boot");
+    nd_theme_load_active();
     CHECK_INT(nd_themepicker_init(&picker, &fx.ui), ND_OK, "and open the picker again");
     CHECK_STR(picker.themes[picker.sel].id, "rose", "it opens on the one being worn");
     CHECK_STR(picker.entry_id, "rose", "and remembers it, to put back on a cancel");
@@ -132,8 +120,7 @@ static void test_every_theme_lays_a_page_out(void)
         nd_detailpage page;
         char badge[16];
 
-        /* What the picker does on every keypress: wear it, then lay out. */
-        nd_theme_apply(picker.themes[i].builtin ? NULL : &picker.themes[i]);
+        /* Preview pages are laid out in the current theme. */
         (void)nd_snprintf(badge, sizeof badge, "%zu/%zu", i + 1u, picker.n);
 
         CHECK_INT(nd_detailpage_init(&page, &fx.ui, picker.themes[i].name, NULL,
@@ -153,13 +140,10 @@ static void test_every_theme_lays_a_page_out(void)
     sa_fx_free(&fx);
 }
 
-/* Wearing a theme to preview it must not leak past the picker: whatever was
- * on when the owner walked in is what they walk out with unless they choose. */
-static void test_the_palette_is_restored_when_nothing_is_chosen(void)
+static void test_browsing_keeps_the_running_palette(void)
 {
     sa_fixture fx;
     nd_themepicker picker;
-    nd_color before;
 
     if (!sa_fx_init(&fx)) {
         CHECK(false, "fixture");
@@ -167,31 +151,14 @@ static void test_the_palette_is_restored_when_nothing_is_chosen(void)
         return;
     }
     reset_themes();
-
     mk("Loud", "{\"id\":\"loud\",\"palette\":{\"blue_top\":\"#FF0000\"}}");
-
     nd_theme_apply(NULL);
-    before = ND_TH_BLUE_TOP;
-    CHECK_INT(nd_themepicker_init(&picker, &fx.ui), ND_OK, "the picker opens");
-
-    /* Hover it, as moving onto its page would. */
-    CHECK(at(&picker, "loud") != (size_t)-1, "the loud one is in the list");
-    nd_theme_apply(&picker.themes[at(&picker, "loud")]);
-    CHECK_INT(ND_TH_BLUE_TOP.r, 0xFF, "the preview is really applied");
-
-    /* nd_themepicker_show() ends by restoring entry_id; do what it does. */
-    {
-        nd_theme_info back;
-
-        if (strcmp(picker.entry_id, ND_THEME_ID_BUILTIN) == 0 ||
-            !nd_theme_find(picker.entry_id, &back))
-            nd_theme_apply(NULL);
-        else
-            nd_theme_apply(&back);
-    }
-    CHECK_INT(ND_TH_BLUE_TOP.r, before.r, "and put back when nothing is chosen");
-    CHECK_STR(nd_theme_active()->id, ND_THEME_ID_BUILTIN, "back to what was worn");
-
+    CHECK_INT(nd_themepicker_init(&picker, &fx.ui), ND_OK, "picker opens");
+    picker.sel = at(&picker, "loud");
+    CHECK(sa_hold(&fx, ND_KEY_BACK), "hold back through the input drain");
+    CHECK_INT(nd_themepicker_show(&picker), ND_WIDGET_BACK, "cancel the actual picker");
+    CHECK_STR(nd_theme_active()->id, ND_THEME_ID_BUILTIN, "browsing did not change the theme");
+    CHECK_INT(ND_TH_BLUE_TOP.g, 255, "stock palette remains intact");
     sa_fx_free(&fx);
 }
 
@@ -205,7 +172,7 @@ int main(void)
 
     RUN(test_it_opens_on_the_active_theme);
     RUN(test_every_theme_lays_a_page_out);
-    RUN(test_the_palette_is_restored_when_nothing_is_chosen);
+    RUN(test_browsing_keeps_the_running_palette);
 
     nd_theme_apply(NULL);
     rc = sa_end(h, "test_themepicker");

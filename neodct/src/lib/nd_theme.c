@@ -407,6 +407,10 @@ nd_theme_plate nd_theme_plate_bar(int32_t radius)
     p.bevel = true;
     p.drop_shadow = true;
     plate_style(&p);
+    if (nd_theme_active()->builtin) {
+        p.body_a = 0u;
+        p.border_a = 0u;
+    }
     return p;
 }
 
@@ -428,6 +432,10 @@ nd_theme_plate nd_theme_plate_glass(int32_t radius)
     p.bevel = true;
     p.drop_shadow = true;
     plate_style(&p);
+    if (nd_theme_active()->builtin) {
+        p.body_a = 0u;
+        p.border_a = 0u;
+    }
     return p;
 }
 
@@ -672,10 +680,11 @@ void nd_theme_panel(nd_image *img, nd_rect r, int32_t radius)
 {
     nd_theme_plate p = nd_theme_plate_glass(radius);
 
+    if (nd_theme_active()->builtin)
+        return;
     nd_theme_plate_draw(img, r, &p);
 
-    
-/* A second, tighter hairline just inside the border: the bezel. It is
+    /* A second, tighter hairline just inside the border: the bezel. It is
      * what makes the panel read as a pane of glass in a frame rather than a
      * painted rectangle, and it costs one outline. */
     if (r.x1 - r.x0 > 4 && r.y1 - r.y0 > 4)
@@ -725,6 +734,20 @@ int32_t nd_theme_titlebar(nd_image *img, nd_draw *d, int32_t w, int32_t bar_h, c
 
     if (img == NULL || bar_h <= 0)
         return bar_h > 0 ? bar_h : 0;
+
+    if (nd_theme_active()->builtin) {
+        if (d != NULL) {
+            if (title != NULL && title_font != NULL)
+                (void)nd_draw_text(d, 5, 5, title, title_font, ND_WHITE);
+            if (badge != NULL && badge_font != NULL) {
+                int32_t bw = 0;
+                nd_text_size(badge_font, badge, &bw, NULL);
+                (void)nd_draw_text(d, w - 5 - bw, 5, badge, badge_font, ND_WHITE);
+            }
+            (void)nd_draw_line(d, 0, bar_h, w, bar_h, ND_WHITE, 1);
+        }
+        return bar_h;
+    }
 
     /* Square, and flush to three edges. A bar with rounded top corners would
      * show the wallpaper in two notches at the very top of the screen, which

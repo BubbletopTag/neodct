@@ -2,7 +2,7 @@
   "id": "hellokitty",
   "name": "Hello Kitty",
   "author": "NeoDCT",
-  "version": "1.0",
+  "version": "1.1",
   "description": "Pink, with a bow on everything. Glossy plates in rich Sanrio pink over a blush sky, white type on the bars and charcoal on the panels, a rounded typeface, thirteen themed icons and a polka dot wallpaper.",
 
   "style": {
@@ -15,11 +15,11 @@
     "bevel_divider":     true,
     "icon_glow":         true,
     "reflection":        true,
-    "scrim":             false,
+    "scrim":             true,
     "pixel_font":        false,
     "game_colour":      true,
-    "wallpaper_dim":     100,
-    "app_wallpaper_dim": 90
+    "wallpaper_dim":     42,
+    "app_wallpaper_dim": 70
   },
 
   "palette": {
@@ -54,10 +54,10 @@
     "red_bot":     "#B41C14",
 
     "ink_dark":    "#30232D",
-    "ink_light":   "#3A2430",
-    "ink_muted":   "#8A5B72",
+    "ink_light":   "#FFFFFF",
+    "ink_muted":   "#FFD8E8",
 
-    "text_shadow": "#FFF0F6",
+    "text_shadow": "#33081E",
     "text_sheen":  "#FFFFFF",
     "scrim_ink":   "#33081E"
   },

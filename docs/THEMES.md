@@ -216,10 +216,16 @@ the same thing at all twenty-seven call sites across the OS and now reads the
 active palette instead of a folded-in literal. Nothing had to be touched to
 make the whole interface themeable.
 
-Applying a theme replaces the palette of the running process, which is why
-the picker can preview a look by simply wearing it and repainting. Other
-processes pick the change up when they next start; the setting
-(`system.ui.theme`) is the single source of truth.
+Choosing a theme saves it for the next reboot. The picker shows the package's
+preview image without changing the running palette, fonts, icons or wallpaper.
+`system.ui.theme.pending` stores the choice alongside the current Linux boot ID;
+new apps in that boot continue using `system.ui.theme`. At the next boot the
+loader applies the pending choice and its wallpaper before loading fonts.
+A missing package leaves the pending choice available for a later boot.
+
+Classic keeps the stock menu, list and softkey geometry from 0.5.19a, with
+transparent chrome over the wallpaper. Frutiger Aero and Hello Kitty dim their
+wallpapers to 48% and 42% respectively, with further dimming inside apps.
 
 `docs/NAP-PACKAGES.md` covers the package format, `nd_theme.h` the C contract,
 and `nd_themeload.c` the loader.

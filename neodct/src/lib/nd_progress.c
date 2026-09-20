@@ -203,7 +203,18 @@ bool nd_progress_draw(nd_progress *p, int64_t done, int64_t total)
      * The radius is half the trough's height, which makes it a capsule at any
      * size; clamp_radius() inside nd_theme caps it if the caller ever gives
      * this a box too short to round. */
-    {
+    if (nd_theme_active()->builtin) {
+        (void)nd_draw_rect_outline(d, p->bar_box, ND_WHITE, 1);
+        span = (p->bar_box.x1 - ND_PROGRESS_INSET) - (p->bar_box.x0 + ND_PROGRESS_INSET);
+        filled = nd_trunc32((double)span * (double)percent / 100.0);
+        if (filled > 0) {
+            (void)nd_draw_rect_fill(
+                d,
+                ND_RECT(p->bar_box.x0 + ND_PROGRESS_INSET, p->bar_box.y0 + ND_PROGRESS_INSET,
+                        p->bar_box.x0 + ND_PROGRESS_INSET + filled, p->bar_box.y1 - ND_PROGRESS_INSET),
+                ND_WHITE);
+        }
+    } else {
         int32_t trough_r = nd_max32(2, nd_rect_h(p->bar_box) / 2);
         nd_theme_plate fill = nd_theme_plate_blue(nd_max32(1, trough_r - ND_PROGRESS_INSET));
 

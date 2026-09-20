@@ -86,8 +86,138 @@ void nd_appsel_init(nd_appsel *s, nd_ui *ui, const char *title, const nd_app_ent
     s->selected_index = 0u;
 }
 
+/* Preserve the 0.5.19a stock layout independently of theme decoration. */
+static void nd_appsel_draw_classic(nd_appsel *s)
+{
+    nd_ui *ui;
+    nd_draw *d;
+    int32_t screen_w;
+    int32_t screen_h;
+    int32_t softkey_h;
+    int32_t content_bottom;
+    int32_t header_y;
+    int32_t icon_y;
+    int32_t icon_cap;
+    int32_t bar_x;
+    int32_t track_top;
+    int32_t track_bottom;
+    int32_t w = 0;
+    int32_t h = 0;
+    const nd_app_entry *current;
+    const char *icon_path;
+    double notch_y;
+    char page_num[16];
+
+    if (s == NULL || s->ui == NULL || s->ui->draw == NULL)
+        return;
+
+    ui = s->ui;
+    d = ui->draw;
+    screen_w = nd_ui_width(ui);
+    screen_h = nd_ui_height(ui);
+    softkey_h = nd_ui_softkey_height(ui);
+    content_bottom = nd_ui_content_bottom(ui);
+    header_y = nd_ui_header_divider_y(ui);
+
+    /* 1. Background. The wallpaper is pasted WITHOUT a mask -- it is opaque
+     *    RGB and the Python passes no third argument. This is also the only
+     *    full-height clear in the widget set that is not a rectangle: when
+     *    there is no wallpaper the fill runs 0..H inclusive, i.e. one row
+     *    past the bottom, and is clipped. */
+    if (s->background != NULL) {
+        (void)nd_image_blit(ui->canvas, s->background, 0, 0);
+    } else {
+        (void)nd_draw_rect_fill(d, ND_RECT(0, 0, screen_w, screen_h), ND_BLACK);
+    }
+
+    /* An empty list is a real state: the scan can fail, and every later step
+     * would divide by zero or index past the end. */
+    if (s->n_items == 0u) {
+        int32_t y;
+
+        nd_ui_text_size(ui, "No Apps", ui->font_n, &w, &h);
+        y = nd_max32(header_y, header_y + ((content_bottom - header_y - h) / 2));
+        (void)nd_draw_text(d, floordiv2(screen_w - w), y, "No Apps", ui->font_n, ND_WHITE);
+        (void)nd_ui_present(ui);
+        return;
+    }
+
+    if (s->selected_index >= s->n_items)
+        s->selected_index = 0u;
+    current = &s->items[s->selected_index];
+
+    /* 2. The app's name, centred, at 24 px. */
+    nd_ui_text_size(ui, current->name, ui->font_xl, &w, &h);
+    (void)nd_draw_text(d, floordiv2(screen_w - w), header_y - 16, current->name, ui->font_xl,
+                       ND_WHITE);
+
+    /* 3. The icon, centred horizontally at a fixed y. */
+    icon_y = header_y + nd_max32(24, nd_trunc32((double)(content_bottom - header_y) * 0.22));
+    icon_path = current->icon;
+    if (icon_path != NULL && icon_path[0] != '\0') {
+        const nd_image *img;
+
+        icon_cap = nd_min32(ND_APP_SELECTOR_ICON_MAX, nd_max32(24, content_bottom - icon_y - 8));
+        img = nd_ui_get_image_max(ui, icon_path, icon_cap);
+        if (img != NULL) {
+            /* paste(img, (ix, iy), img): composited through the icon's own
+             * alpha, so a transparent corner shows the wallpaper rather than
+             * punching a black square into it. */
+            (void)nd_image_blit_alpha(ui->canvas, img, floordiv2(screen_w - img->w), icon_y);
+        } else {
+            int32_t px = floordiv2(screen_w - icon_cap);
+            int32_t qw = 0;
+            int32_t qh = 0;
+
+            (void)nd_draw_rect_outline(d, ND_RECT(px, icon_y, px + icon_cap, icon_y + icon_cap),
+                                       ND_WHITE, 1);
+            nd_ui_text_size(ui, "?", ui->font_xl, &qw, &qh);
+            (void)nd_draw_text(d, px + ((icon_cap - qw) / 2), icon_y + ((icon_cap - qh) / 2), "?",
+                               ui->font_xl, ND_WHITE);
+        }
+    }
+
+    /* 4. "Select" sits INSIDE the softkey strip, vertically centred on the
+     *    string's own ink height -- the core's transparent bar has already
+     *    been overwritten by the background paste above, so this is the only
+     *    thing in those 30 rows. */
+    nd_ui_text_size(ui, "Select", ui->font_n, &w, &h);
+    (void)nd_draw_text(d, floordiv2(screen_w - w),
+                       content_bottom + nd_max32(0, (softkey_h - h) / 2), "Select", ui->font_n,
+                       ND_WHITE);
+
+    /* 5. The scrollbar. */
+    bar_x = screen_w - 8;
+    track_top = header_y + 6;
+    track_bottom = nd_max32(track_top, content_bottom - 10);
+    (void)nd_draw_line(d, bar_x, track_top, bar_x, track_bottom, ND_WHITE, 2);
+
+    if (s->n_items > 1u) {
+        double step = (double)(track_bottom - track_top) / (double)(s->n_items - 1u);
+
+        notch_y = (double)track_top + ((double)s->selected_index * step);
+    } else {
+        notch_y = (double)track_top;
+    }
+    (void)nd_draw_rect_fill(
+        d, ND_RECT(bar_x - 4, nd_trunc32(notch_y - 3.0), bar_x + 2, nd_trunc32(notch_y + 3.0)),
+        ND_WHITE);
+
+    /* 6. The page number, right-aligned 5 px in from the edge. */
+    (void)snprintf(page_num, sizeof page_num, "%zu", s->selected_index + 1u);
+    nd_ui_text_size(ui, page_num, ui->font_n, &w, &h);
+    (void)nd_draw_text(d, screen_w - 5 - w, 10, page_num, ui->font_n, ND_WHITE);
+
+    (void)nd_ui_present(ui);
+}
+
 void nd_appsel_draw(nd_appsel *s)
 {
+    if (nd_theme_active()->builtin) {
+        nd_appsel_draw_classic(s);
+        return;
+    }
+
     nd_ui *ui;
     nd_draw *d;
     int32_t screen_w;

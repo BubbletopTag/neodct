@@ -439,7 +439,7 @@ static void calc_draw(calc_app *a)
      *
      * `x` is untouched, so the number is right-aligned on the same column and
      * still pins to a 5 px left margin once it outgrows the screen. */
-    {
+    if (!nd_theme_active()->builtin) {
         nd_rect well = ND_RECT(4, 6, a->screen_w - 5, 6 + ND_CALC_DISPLAY_H);
 
         nd_theme_round_gradient(ui->canvas, well, 6, ND_TH_GLASS_BOT, ND_TH_GLASS_TOP, 235u);
