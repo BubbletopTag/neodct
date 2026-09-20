@@ -185,20 +185,35 @@ more than UI tests here, because a blocking widget drains the key channel
 before its first draw and a scripted keypress never arrives. `sa_hold()` is the
 workaround for the one key you can inject.
 
-**Golden frames are a regression net, not a gate.** `CODING-STANDARDS.md`
-section 7 is explicit. A frame that changes because you deliberately changed a
-screen gets re-cut, not argued with:
+**Screens: snapshot before, snapshot after.** Capture a baseline before you
+touch anything, capture again when you are done, and compare the two:
 
 ```sh
-./build/default/bin/nd-shoot --out /tmp/frames
-python3 neodct/tools/goldenframe.py --compare neodct/tests/golden /tmp/frames
+./build/default/bin/nd-shoot --out /tmp/frames-before
+#   ... do the work ...
+./build/default/bin/nd-shoot --out /tmp/frames-after
+python3 neodct/tools/goldenframe.py --compare /tmp/frames-before /tmp/frames-after
 ```
 
-then copy the changed PNGs over and update `manifest.json`'s sha256 entries.
-Say so in the commit. Adding an app moves the app selector's scrollbar notch
-and the breadcrumb index, so expect the `menu-*` frames to shift, and expect
-`test_appreg`/`test_appsel` to need their app counts updated. Do **not** cut a
-new frame for a new screen -- its test is its unit test.
+The frames that moved should be the screens you meant to move. Anything else is
+the finding. Four seconds, and it answers the only question worth asking: did I
+disturb something I was not looking at?
+
+**`neodct/tests/golden/` is not part of that.** It is the Python build's output
+from 0.4.0a, kept from the port. Screens are deliberately redesigned now, so it
+drifts by design: a golden frame is never a reason to leave a screen alone,
+never something to ask permission about, and a mismatch against it is not a
+finding to report. `CODING-STANDARDS.md` section 7 is explicit.
+
+It does still gate `make test` -- `test_appsel`, `test_widgets_*`,
+`test_messages`, `test_dialer` and others fail on a digest mismatch. When that
+goes red, re-cut it as a chore and move on: `nd-shoot --out /tmp/frames`,
+`goldenframe.py --compare neodct/tests/golden /tmp/frames`, copy the changed
+PNGs over, update `manifest.json`'s sha256 entries, one line in the commit. No
+deliberation, no paragraph. Adding an app also moves the app selector's
+scrollbar notch and the breadcrumb index, so `menu-*` shifts and
+`test_appreg`/`test_appsel` need their app counts updated -- same chore. Do
+**not** cut a new frame for a new screen; its test is its unit test.
 
 ## Seeing it actually run
 
