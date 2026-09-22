@@ -1,4 +1,18 @@
-﻿Copyright 2019 The Baloo 2 Project Authors (https://github.com/EkType/Baloo2)
+Blossom UI typeface -- licence and provenance
+============================================
+
+ui.ttf and ui-bold.ttf are SUBSETS of Baloo 2 (Regular and Bold), cut to Latin
+plus the punctuation this OS draws, renamed to "NeoDCT Blossom Rounded", and
+with their vertical metrics fitted to the glyphs that survived the subset (the
+upstream face reserves room above its capitals for Devanagari, which the subset
+drops). neodct/tools/mkuifont.py --fit-metrics is the script that produces both
+files and the only supported way to regenerate them.
+
+Upstream:  https://github.com/EkType/Baloo2
+
+--------------------------------------------------------------------------
+
+Copyright 2019 The Baloo 2 Project Authors (https://github.com/EkType/Baloo2)
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
 This license is copied below, and is also available with a FAQ at:

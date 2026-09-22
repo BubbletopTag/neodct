@@ -1,9 +1,9 @@
 {
-  "id": "hellokitty",
-  "name": "Hello Kitty",
+  "id": "blossom",
+  "name": "Blossom",
   "author": "NeoDCT",
-  "version": "1.0",
-  "description": "Pink, with a bow on everything. Glossy plates in rich Sanrio pink over a blush sky, white type on the bars and charcoal on the panels, a rounded typeface, thirteen themed icons and a polka dot wallpaper.",
+  "version": "2.0",
+  "description": "Glossy rose plates on a polka dot ground, white type with a plum shadow, dark type on blush glass panels, a rounded typeface and a pink icon set.",
 
   "style": {
     "gloss":             true,
@@ -15,11 +15,11 @@
     "bevel_divider":     true,
     "icon_glow":         true,
     "reflection":        true,
-    "scrim":             false,
+    "scrim":             true,
     "pixel_font":        false,
-    "game_colour":      true,
-    "wallpaper_dim":     100,
-    "app_wallpaper_dim": 90
+    "game_colour":       true,
+    "wallpaper_dim":     92,
+    "app_wallpaper_dim": 72
   },
 
   "palette": {
@@ -33,7 +33,7 @@
     "bar_bot":     "#B02E5F",
     "bar_ink":     "#FFFFFF",
     "sel_ink":     "#FFFFFF",
-    "warn_ink":    "#C4102E",
+    "warn_ink":    "#FFE45C",
 
     "glass_top":   "#FFF4F8",
     "glass_bot":   "#F7D3E2",
@@ -42,8 +42,8 @@
     "chrome_top":  "#F7DCE6",
     "chrome_bot":  "#C29AAC",
 
-    "sky_top":     "#FFD2E3",
-    "sky_bot":     "#E88BB0",
+    "sky_top":     "#E4608E",
+    "sky_bot":     "#8E1F52",
 
     "green_top":   "#9EE84A",
     "green_bot":   "#3D9A14",
@@ -54,18 +54,18 @@
     "red_bot":     "#B41C14",
 
     "ink_dark":    "#30232D",
-    "ink_light":   "#3A2430",
-    "ink_muted":   "#8A5B72",
+    "ink_light":   "#FFFFFF",
+    "ink_muted":   "#FFD0E2",
 
-    "text_shadow": "#FFF0F6",
+    "text_shadow": "#5C1535",
     "text_sheen":  "#FFFFFF",
-    "scrim_ink":   "#33081E"
+    "scrim_ink":   "#3D0A24"
   },
 
   "alpha": {
-    "scrim_top":    78,
+    "scrim_top":    80,
     "scrim_bot":     0,
-    "appsel_scrim": 70,
+    "appsel_scrim": 60,
     "shadow":      150,
     "sheen":       110
   }

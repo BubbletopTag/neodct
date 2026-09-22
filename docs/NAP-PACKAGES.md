@@ -49,7 +49,7 @@ From 0.6.0a a `.nap` holds either an app or a **theme** -- a look the owner
 installs, described in `docs/THEMES.md`. The manifest says which:
 
 ```json
-{ "name": "Hello Kitty", "type": "theme", "icon": "icon.png" }
+{ "name": "Blossom", "type": "theme", "icon": "icon.png" }
 ```
 
 **`"type"` absent means `"app"`.** That is the whole of the backwards
@@ -63,7 +63,7 @@ code in it, so the same file installs on every phone -- and one that does
 carry program code is refused. It is built without `--so`:
 
 ```sh
-neodct/tools/mknap.py --app-dir HelloKitty/ -o HelloKitty.nap
+neodct/tools/mknap.py --app-dir Blossom/ -o Blossom.nap
 ```
 
 It unpacks into `/NeoDCT/User/sdcard/themes/<Name>/` rather than `apps/`, and

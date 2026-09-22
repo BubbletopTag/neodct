@@ -30,13 +30,31 @@ goes wrong:
 
 Build a theme's pair:
 
-    python3 neodct/tools/mkuifont.py --family "NeoDCT Kitty Rounded" \
-        --out neodct/contrib/themes/HelloKitty/fonts \
-        Baloo2-Regular.ttf Baloo2-Bold.ttf
+    python3 neodct/tools/mkuifont.py --family "NeoDCT Aero Sans" \
+        --out neodct/overlay/NeoDCT/System/themes/FrutigerAero/fonts \
+        LiberationSans-Regular.ttf LiberationSans-Bold.ttf
 
 Ship the upstream licence next to it as fonts/LICENSE.txt; this script does
 not copy it, because only the person who fetched the face knows where it came
 from.
+
+--fit-metrics, and when a face needs it. nd_draw_text()'s y is the face's
+ASCENDER LINE, and most of the OS centres a row by its ink height without
+subtracting how far below that line the ink starts. That is invisible for a
+face whose ascender sits just above its capitals, and it is not for one that
+reserves room for scripts the subset has just thrown away: Baloo 2 keeps half
+an em above its Latin capitals for Devanagari, so every list row, text field
+and message line drawn in it sat eight rows low -- the selected row's text on
+the bottom edge of its own lozenge. The flag resets the vertical metrics to
+the glyphs that SURVIVED the subset, shared by both weights so a bold row and
+a regular one still sit on the same line:
+
+    python3 neodct/tools/mkuifont.py --family "NeoDCT Blossom Rounded" \
+        --fit-metrics --out neodct/overlay/NeoDCT/System/themes/Blossom/fonts \
+        Baloo2-Regular.ttf Baloo2-Bold.ttf
+
+Faces whose metrics already describe Latin -- Liberation, the Aero pair --
+do not want it, and without the flag nothing about them changes.
 
 Needs fonttools on the build host only; nothing on the phone reads this.
 """
@@ -143,6 +161,51 @@ def build(src, dst, subfamily, family):
     return os.path.getsize(dst)
 
 
+def glyph_extents(path):
+    """The highest and lowest point any glyph in the file actually reaches."""
+    from fontTools.ttLib import TTFont
+
+    tt = TTFont(path)
+    top = bottom = 0
+    for name in tt.getGlyphOrder():
+        g = tt["glyf"][name]
+        if getattr(g, "numberOfContours", 0) == 0 or not hasattr(g, "yMax"):
+            continue
+        top = max(top, g.yMax)
+        bottom = min(bottom, g.yMin)
+    tt.close()
+    return top, bottom
+
+
+def fit_metrics(paths):
+    """Every vertical metric FreeType might read, set to what the glyphs use.
+
+    hhea, OS/2 typo and OS/2 win all move together because FreeType picks
+    between them on flags a subsetter can leave either way, and a pair that
+    disagreed would fix the face on one renderer and not another."""
+    from fontTools.ttLib import TTFont
+
+    top = bottom = 0
+    for p in paths:
+        t, b = glyph_extents(p)
+        top = max(top, t)
+        bottom = min(bottom, b)
+    for p in paths:
+        tt = TTFont(p)
+        tt["hhea"].ascent = top
+        tt["hhea"].descent = bottom
+        tt["hhea"].lineGap = 0
+        os2 = tt["OS/2"]
+        os2.sTypoAscender = top
+        os2.sTypoDescender = bottom
+        os2.sTypoLineGap = 0
+        os2.usWinAscent = top
+        os2.usWinDescent = -bottom
+        tt.save(p)
+        tt.close()
+    return top, bottom
+
+
 def main(argv):
     import argparse
 
@@ -156,6 +219,8 @@ def main(argv):
                     help="the family name to rewrite the subset to; must not carry the "
                          "upstream's reserved font name")
     ap.add_argument("--out", default=DEFAULT_OUT, help="directory to write ui.ttf into")
+    ap.add_argument("--fit-metrics", action="store_true",
+                    help="reset the vertical metrics to the subset's own glyphs; see above")
     args = ap.parse_args(argv)
 
     os.makedirs(args.out, exist_ok=True)
@@ -168,6 +233,9 @@ def main(argv):
         after = build(src, dst, sub, args.family)
         print(f"{name}: {before:,} -> {after:,} bytes "
               f"({100 * after // before}%)  {len(wanted_codepoints())} codepoints")
+    if args.fit_metrics:
+        top, bottom = fit_metrics([os.path.join(args.out, name) for _, name, _ in pairs])
+        print(f"vertical metrics fitted to the glyphs: ascent {top}, descent {bottom}")
     return 0
 
 

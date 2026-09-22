@@ -411,17 +411,36 @@ void nd_textlong_draw(nd_textlong *t, bool blink_state)
 
     nd_ui_paint_chrome_content(ui);
 
-    /* The title is drawn with no fitting and the character count is drawn
-     * flush right, so a long title runs UNDER the count. widget-textinputlong
-     * is captured with exactly that overlap; port the bug. */
+    /* ============ THE TITLE STEPS DOWN A SIZE BEFORE IT REACHES THE COUNT ==
+     *
+     * It was drawn with no fitting and the character count flush right, so a
+     * long title ran UNDER the count -- a bug ported on purpose from the
+     * Python, captured in widget-textinputlong, and invisible in a narrow
+     * face. The classic look's pixel face is not narrow: "Write Message" at
+     * 24 px bold reaches the "35" and the two print on top of each other.
+     *
+     * So it takes the calendar's answer rather than an ellipsis: the first
+     * size in the ladder whose ink stops short of the count and of the T9
+     * indicator beside it, and the smallest when none does. A title is a
+     * screen's name and is still wanted whole. */
     (void)snprintf(count, sizeof count, "%zu", utf8_len(t->text));
     nd_ui_text_size(ui, count, ui->font_n, &cw, NULL);
-    /* Title and character count both go through the plate, which is what puts
-     * the overlap the comment above describes onto one code path instead of
-     * two. The T9 pencil is drawn after, on top of the plate, at the x it
-     * always used. */
-    (void)nd_theme_titlebar(ui->canvas, d, screen_w, header_y, nz(t->title),
-                            nd_ui_font_bold(ui, ui->font_xl), count, ui->font_n);
+    {
+        const nd_font *ladder[3];
+        size_t n_ladder = 0u;
+        int32_t room = screen_w - 8 - (5 + cw + 10 + nd_t9ind_size(ui, &t->t9, NULL, NULL)) - 6;
+        const nd_font *tf;
+
+        if (ui->font_xl != NULL)
+            ladder[n_ladder++] = nd_ui_font_bold(ui, ui->font_xl);
+        if (ui->font_n != NULL)
+            ladder[n_ladder++] = nd_ui_font_bold(ui, ui->font_n);
+        if (ui->font_md != NULL)
+            ladder[n_ladder++] = ui->font_md;
+        tf = (n_ladder > 0u) ? nd_fit_font(nz(t->title), room, ladder, n_ladder) : NULL;
+        (void)nd_theme_titlebar(ui->canvas, d, screen_w, header_y, nz(t->title), tf, count,
+                                ui->font_n);
+    }
     (void)nd_t9ind_draw(ui, screen_w - 5 - cw - 10, 5, &t->t9);
 
     /* line_h is the INK height of "Ag" plus 3 -- a fixed leading over a

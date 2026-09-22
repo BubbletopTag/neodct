@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Draw a theme's preview.png and icon.png by ACTUALLY RENDERING the theme.
 
-    mkthemeart.py neodct/contrib/themes/HelloKitty
+    mkthemeart.py neodct/overlay/NeoDCT/System/themes/Blossom
 
 A theme has to carry two pictures that are not part of the look itself: a
 preview for the picker and the installer, and an icon for the installer's
@@ -59,9 +59,14 @@ def render(theme_dir, theme_id, keep=None):
     # A copy rather than a symlink: nd-shoot symlinks most of System into its
     # own staged root, and a theme dropped into the tree's real overlay would
     # be a build artefact left in the source.
+    #
+    # A theme that ships in the image is already in the overlay, and is the
+    # copy that gets rendered -- replaced with the working directory's so a
+    # theme being edited somewhere else is still the one in the picture.
     shutil.copytree(OVERLAY, ov, symlinks=True)
     dst = os.path.join(ov, "NeoDCT", "System", "themes", os.path.basename(theme_dir))
     os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.rmtree(dst, ignore_errors=True)
     shutil.copytree(theme_dir, dst)
     os.makedirs(out, exist_ok=True)
 

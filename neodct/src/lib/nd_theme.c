@@ -117,6 +117,13 @@ static void span_blend(nd_image *img, int32_t x0, int32_t x1, int32_t y, nd_colo
  * Fills
  * ------------------------------------------------------------------ */
 
+nd_color nd_theme_darken(nd_color c, uint8_t keep)
+{
+    return ND_RGB((uint8_t)(((uint32_t)c.r * keep + 127u) / 255u),
+                  (uint8_t)(((uint32_t)c.g * keep + 127u) / 255u),
+                  (uint8_t)(((uint32_t)c.b * keep + 127u) / 255u));
+}
+
 void nd_theme_fill(nd_image *img, nd_rect r, nd_color c, uint8_t alpha)
 {
     nd_rect q;
@@ -355,6 +362,35 @@ void nd_theme_round_outline(nd_image *img, nd_rect r, int32_t radius, nd_color c
  * The glossy plate
  * ------------------------------------------------------------------ */
 
+/* Channel-wise "the same colour", to the tolerance nd_theme.h gives. */
+#define ND_THEME_SAME 6
+
+static bool same_colour(nd_color a, nd_color b)
+{
+    int32_t dr = (int32_t)a.r - (int32_t)b.r;
+    int32_t dg = (int32_t)a.g - (int32_t)b.g;
+    int32_t db = (int32_t)a.b - (int32_t)b.b;
+
+    return dr >= -ND_THEME_SAME && dr <= ND_THEME_SAME && dg >= -ND_THEME_SAME &&
+           dg <= ND_THEME_SAME && db >= -ND_THEME_SAME && db <= ND_THEME_SAME;
+}
+
+bool nd_theme_bars_painted(void)
+{
+    return !same_colour(ND_TH_BAR_TOP, ND_TH_SKY_TOP) || !same_colour(ND_TH_BAR_BOT, ND_TH_SKY_BOT);
+}
+
+bool nd_theme_panels_painted(void)
+{
+    return !same_colour(ND_TH_GLASS_TOP, ND_TH_SKY_TOP) ||
+           !same_colour(ND_TH_GLASS_BOT, ND_TH_SKY_BOT);
+}
+
+uint8_t nd_theme_panel_a(uint8_t alpha)
+{
+    return nd_theme_panels_painted() ? alpha : 0u;
+}
+
 /* The decoration every plate shares, applied after its own fields are set so
  * that one theme switch reaches all four constructors. */
 static void plate_style(nd_theme_plate *p)
@@ -402,7 +438,10 @@ nd_theme_plate nd_theme_plate_bar(int32_t radius)
     p.border = ND_TH_BLUE_DEEP;
     p.border_a = ND_TH_GRADIENTS ? 210u : 0u;
     p.sheen_a = 90u;
-    p.body_a = 255u;
+    /* A bar that IS the ground is not painted at all, so over a wallpaper the
+     * strip is the picture with type on it -- which is what the classic face
+     * always was -- rather than a black band. See nd_theme_bars_painted(). */
+    p.body_a = nd_theme_bars_painted() ? 255u : 0u;
     p.radius = radius;
     p.bevel = true;
     p.drop_shadow = true;
@@ -422,8 +461,12 @@ nd_theme_plate nd_theme_plate_glass(int32_t radius)
     p.sheen_a = 70u;
     /* Not opaque: the panel is glass and the wallpaper belongs under it.
      * 216 is the point at which 20 px navy type is still comfortably legible
-     * over the busiest shipped wallpaper -- measured, not chosen. */
-    p.body_a = 216u;
+     * over the busiest shipped wallpaper -- measured, not chosen.
+     *
+     * And none at all when the glass is the ground: the classic face draws a
+     * panel as a hollow rule, and filling it in the sky colour was a black
+     * box on every wallpaper. See nd_theme_panels_painted(). */
+    p.body_a = nd_theme_panel_a(216u);
     p.radius = radius;
     p.bevel = true;
     p.drop_shadow = true;

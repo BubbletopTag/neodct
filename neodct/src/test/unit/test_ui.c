@@ -1565,6 +1565,32 @@ static void shoot_home_frames(nd_capture *cap, const nd_json_doc *golden)
     CHECK(nd_ui_wallpaper(&ui) != NULL, "refresh_after_app re-reads the wallpaper");
     CHECK(nd_ui_engineering_mode(&ui), "refresh_after_app re-reads engineering mode");
     CHECK(nd_ui_app_count(&ui) >= 13u, "refresh_after_app rescans the app directories");
+
+    /* The theme is chosen in Settings, which is an app, so it arrives the
+     * same way -- and the core used to ignore it until the next boot, drawing
+     * the home screen and the menu in the old look while every app opened
+     * afterwards wore the new one. Fonts are part of it: a theme may bring
+     * its own face, and the pixel face and the Aero one measure differently. */
+    {
+        int32_t w_before = 0;
+        int32_t w_after = 0;
+
+        CHECK_STR(nd_theme_active()->id, ND_THEME_ID_BUILTIN, "the stock look to start with");
+        nd_ui_text_size(&ui, "Settings", ui.font_n, &w_before, NULL);
+        CHECK_INT(nd_settings_set(ND_SET_UI_THEME, "aero"), ND_OK, "an app picks a theme");
+        CHECK_STR(nd_theme_active()->id, ND_THEME_ID_BUILTIN, "the setting alone changes nothing");
+        nd_ui_refresh_after_app(&ui);
+        CHECK_STR(nd_theme_active()->id, "aero", "refresh_after_app puts on the theme an app chose");
+        CHECK(ui.font_n != NULL, "and loads a face for it");
+        nd_ui_text_size(&ui, "Settings", ui.font_n, &w_after, NULL);
+        CHECK(w_after != w_before, "the face is the THEME's, not the one the core started with");
+
+        CHECK_INT(nd_settings_set(ND_SET_UI_THEME, ND_THEME_ID_BUILTIN), ND_OK, "and back");
+        nd_ui_refresh_after_app(&ui);
+        CHECK_STR(nd_theme_active()->id, ND_THEME_ID_BUILTIN, "the stock look comes back");
+        nd_ui_text_size(&ui, "Settings", ui.font_n, &w_after, NULL);
+        CHECK_INT(w_after, w_before, "with the stock face");
+    }
     nd_ui_teardown(&ui);
 
     /* --- group C: no fuel gauge and no modem, the honest QEMU look --- */

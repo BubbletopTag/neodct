@@ -420,6 +420,12 @@ void nd_theme_gradient_v_ramped(nd_image *img, nd_rect paint, int32_t ramp_y0, i
 void nd_theme_gradient_fade_ramped(nd_image *img, nd_rect paint, int32_t ramp_y0, int32_t ramp_y1,
                                    nd_color c, uint8_t a_top, uint8_t a_bot);
 
+/* `c` with each channel scaled to keep/255 -- the far end of a field that
+ * starts at one of the palette's colours and has to fall away from it. A
+ * game board used to spell that end as a navy literal, which is a piece of
+ * the glass look inside every theme that is not glass. */
+nd_color nd_theme_darken(nd_color c, uint8_t keep);
+
 /* ------------------------------------------------------------------ *
  * Rounded rectangles
  * ------------------------------------------------------------------ *
@@ -486,6 +492,37 @@ nd_theme_plate nd_theme_plate_glass(int32_t radius);
 nd_theme_plate nd_theme_plate_chrome(int32_t radius);
 
 void nd_theme_plate_draw(nd_image *img, nd_rect r, const nd_theme_plate *p);
+
+/* ============ THE GROUND IS NOT A COLOUR ============
+ *
+ * A flat theme says "the title strip is the background" by giving bar_* the
+ * sky's colours, and "a field is a hollow rule" by giving glass_* the sky's
+ * colours too. With no wallpaper those two sentences and a fill in the sky
+ * colour are the same pixels, which is why nobody noticed that the plates
+ * were being FILLED rather than left out.
+ *
+ * With a wallpaper they are not the same pixels. The sky is what the screen
+ * stands on when there is no picture; painting it over a picture punches a
+ * black rectangle into the photograph wherever a title, a softkey, a dialog
+ * or a text field happens to be -- the classic look's "black bars".
+ *
+ * So these answer the question the palette was actually asking, and the plate
+ * constructors below leave the body out when the answer is no. The border
+ * and the type are unaffected: a hollow rule keeps its rule.
+ *
+ * "Same" is within a few levels per channel rather than exact, because a
+ * theme may spell its bar and its sky with values that differ only in
+ * rounding and still mean "no bar". test/unit/themeprobe_test.h asks the
+ * same question the same way, so a pixel test and the renderer agree. */
+bool nd_theme_bars_painted(void);
+bool nd_theme_panels_painted(void);
+
+/* The coverage to give a surface the caller would have filled in glass_* at
+ * `alpha`: `alpha` when the theme paints panels, 0 when a panel is the ground.
+ * For the few wells drawn with nd_theme_round_gradient() directly rather than
+ * through nd_theme_plate_glass() -- the text field, the calculator readout,
+ * the composer -- so they follow the same rule without restating it. */
+uint8_t nd_theme_panel_a(uint8_t alpha);
 
 /* ------------------------------------------------------------------ *
  * Edges
@@ -768,17 +805,41 @@ const nd_theme_info *nd_theme_active(void);
 /* Reads the persisted choice (ND_SET_UI_THEME) and applies it. What every
  * process calls at startup -- the core through nd_ui_init(), an app through
  * the same path -- so that one setting is the only thing deciding the look.
+ * An app reads it from ND_ENV_UI_THEME, which the core fills from that same
+ * setting, because a confined app cannot open settings.prop (nd_proc.h).
  *
  * An id naming a theme that is no longer installed falls back to the built-in
  * rather than failing: a card pulled out must not leave the phone unable to
  * draw. */
 void nd_theme_load_active(void);
 
+/* Has the choice moved since this process last loaded it?
+ *
+ * The core is the one process that outlives a theme change -- the owner picks
+ * a theme in Settings, which is an app, and comes back to a home screen the
+ * core has been drawing all along. Without asking this, the core kept the old
+ * theme until the next boot while every app opened afterwards wore the new
+ * one, and the phone showed two looks at once. nd_ui_refresh_after_app()
+ * asks, and reloads the theme and the fonts when the answer is yes.
+ *
+ * Compared against what was ASKED for, not what is worn, so a theme that
+ * cannot be found does not read as a change on every app exit. */
+bool nd_theme_is_stale(void);
+
 /* Persists `id` as the choice and applies it here. The setting is written
  * FIRST, because a process that applied a theme it failed to record would
  * show the owner a change that vanishes at the next boot with nothing to say
- * why. */
+ * why.
+ *
+ * The wallpaper follows: set to the theme's own when it ships one, and put
+ * back to the default when it does not and the current one belonged to a
+ * theme -- see nd_theme_owns_path(). */
 nd_err nd_theme_select(const char *id);
+
+/* Is this path inside a themes directory -- the image's or the card's? That is
+ * how a wallpaper is known to be a theme's rather than the owner's own, which
+ * decides whether choosing a theme without a picture takes it away. */
+bool nd_theme_owns_path(const char *path);
 
 /* ------------------------------------------------------------------ *
  * Resource override

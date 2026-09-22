@@ -4,7 +4,7 @@ from its memory card.
 
     mknap.py --app-dir Bible/ --so luckfox-armv7=build/luckfox/app.so -o Bible.nap
     mknap.py --app-dir Bible/ --so luckfox-armv7=a.so --so qemu-aarch64=b.so -o Bible.nap
-    mknap.py --app-dir HelloKitty/ -o HelloKitty.nap        # a theme: no --so
+    mknap.py --app-dir Blossom/ -o Blossom.nap              # a theme: no --so
     mknap.py --list Bible.nap
 
 A .nap is a plain, uncompressed POSIX ustar archive. The phone's reader is

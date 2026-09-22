@@ -509,7 +509,7 @@ static void chat_draw(nd_ui *ui, chat_view *v, const char *title, nd_softkey *ba
              * is white everywhere, so it looked right for as long as there
              * was only one theme. It is white on a WHITE bubble under the
              * classic look -- the message simply is not there -- and charcoal
-             * on rich pink under Hello Kitty. */
+             * on rich pink under a pink theme whose type is dark. */
             if (out)
                 nd_theme_text_sel(d, bx + BUBBLE_PAD_X, ty, bl->lines[k], ui->font_s);
             else
@@ -547,8 +547,9 @@ static void chat_draw(nd_ui *ui, chat_view *v, const char *title, nd_softkey *ba
          * Making the unfocused state a hollow outline, as it was, now reads
          * as a disabled control rather than an unfocused one. */
         nd_theme_round_gradient(ui->canvas, box, 5, ND_TH_GLASS_BOT, ND_TH_GLASS_TOP,
-                                on_box(v) ? 240u : 150u);
-        nd_theme_shadow_band(ui->canvas, box.x0 + 2, box.x1 - 2, box.y0 + 1, 3, 110u);
+                                nd_theme_panel_a(on_box(v) ? 240u : 150u));
+        if (ND_TH_PLATE_SHADOW)
+            nd_theme_shadow_band(ui->canvas, box.x0 + 2, box.x1 - 2, box.y0 + 1, 3, 110u);
         nd_theme_round_outline(ui->canvas, box, 5, on_box(v) ? ND_TH_CHROME_HI : ND_TH_BLUE_DEEP,
                                on_box(v) ? 230u : 150u);
         nd_theme_text_dark(d, box.x0 + 5, box.y0 + 2, "Message", ui->font_s);

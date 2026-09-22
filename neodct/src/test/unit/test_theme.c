@@ -8,8 +8,11 @@
  * registry's precedence, the fallbacks, and the resource mapping.
  */
 
+#include <stdlib.h>
 #include <string.h>
 
+#include "nd_image.h"
+#include "nd_proc.h"
 #include "nd_settings.h"
 #include "nd_theme.h"
 #include "platform_test.h"
@@ -275,6 +278,127 @@ static void test_select_persists_and_applies(void)
     CHECK_INT(nd_theme_select("nosuch"), ND_ERR_NOTFOUND);
 }
 
+/* A confined app cannot read settings.prop, so the core says which theme is
+ * on. When it has spoken, that is the answer -- even against a setting the
+ * app happens to be able to read -- or an installed app draws the built-in
+ * look inside a themed phone, which is the bug this closes. */
+static void test_the_cores_word_beats_the_setting(void)
+{
+    (void)make_theme("Mint", "{\"id\":\"mint\",\"palette\":{\"sky_top\":\"#00FF88\"}}");
+    CHECK_INT(nd_settings_set(ND_SET_UI_THEME, ND_THEME_ID_BUILTIN), ND_OK);
+
+    CHECK_INT(setenv(ND_ENV_UI_THEME, "mint", 1), 0);
+    nd_theme_load_active();
+    CHECK_STR(nd_theme_active()->id, "mint");
+    CHECK_INT(nd_theme_pal->sky_top.g, 0xFF);
+
+    /* And absent means "no core told me": the setting decides again. */
+    CHECK_INT(unsetenv(ND_ENV_UI_THEME), 0);
+    nd_theme_load_active();
+    CHECK_STR(nd_theme_active()->id, ND_THEME_ID_BUILTIN);
+}
+
+/* The core asks this after every app exit. It must say yes when the owner
+ * picked something else, and it must NOT keep saying yes for a theme that
+ * cannot be found -- the core would reload its fonts on every app exit. */
+static void test_stale_means_the_choice_moved(void)
+{
+    (void)make_theme("Mint", "{\"id\":\"mint\"}");
+
+    CHECK_INT(nd_settings_set(ND_SET_UI_THEME, "gone"), ND_OK);
+    nd_theme_load_active();
+    CHECK(nd_theme_pal == nd_theme_palette_builtin());
+    CHECK(!nd_theme_is_stale());
+
+    CHECK_INT(nd_settings_set(ND_SET_UI_THEME, "mint"), ND_OK);
+    CHECK(nd_theme_is_stale());
+    nd_theme_load_active();
+    CHECK(!nd_theme_is_stale());
+    CHECK_STR(nd_theme_active()->id, "mint");
+
+    /* Selecting is loading: the process that chose it is wearing it. */
+    CHECK_INT(nd_theme_select(ND_THEME_ID_BUILTIN), ND_OK);
+    CHECK(!nd_theme_is_stale());
+}
+
+/* A theme's picture arrives with it and LEAVES with it. Going back to Classic
+ * used to keep the last theme's wallpaper, so the stock look wore part of a
+ * theme the owner had just taken off. A picture the owner chose is theirs and
+ * is never touched. */
+static void test_a_themes_wallpaper_leaves_with_it(void)
+{
+    char got[ND_PATH_MAX];
+    char want[TP_MAX];
+    const char *dir = make_theme("Sunny", "{\"id\":\"sunny\"}");
+
+    touch(dir, "wallpaper.jpg");
+    (void)snprintf(want, sizeof want, "%s/wallpaper.jpg", dir);
+
+    CHECK_INT(nd_theme_select("sunny"), ND_OK);
+    (void)nd_settings_get_copy(ND_SET_UI_WALLPAPER, "", got, sizeof got);
+    CHECK_STR(got, want);
+    CHECK(nd_theme_owns_path(got));
+
+    CHECK_INT(nd_theme_select(ND_THEME_ID_BUILTIN), ND_OK);
+    (void)nd_settings_get_copy(ND_SET_UI_WALLPAPER, "", got, sizeof got);
+    CHECK_STR(got, ND_SET_UI_WALLPAPER_DFLT);
+
+    CHECK_INT(nd_settings_set(ND_SET_UI_WALLPAPER, "/NeoDCT/System/wallpapers/Grasslands.jpg"),
+              ND_OK);
+    CHECK(!nd_theme_owns_path("/NeoDCT/System/wallpapers/Grasslands.jpg"));
+    CHECK_INT(nd_theme_select(ND_THEME_ID_BUILTIN), ND_OK);
+    (void)nd_settings_get_copy(ND_SET_UI_WALLPAPER, "", got, sizeof got);
+    CHECK_STR(got, "/NeoDCT/System/wallpapers/Grasslands.jpg");
+}
+
+/* ------------------------------------------------------------------ *
+ * The ground
+ * ------------------------------------------------------------------ */
+
+/* The classic look's bars and panels ARE the background. Over a wallpaper,
+ * filling them in the background colour is a black band across the picture,
+ * so a title strip drawn there must leave the picture alone. A theme whose
+ * bars are a colour of their own still gets them painted. */
+static void test_a_bar_that_is_the_ground_is_not_painted(void)
+{
+    nd_image *img;
+    nd_theme_info t;
+    nd_color px;
+    const char *dir;
+
+    nd_theme_apply(NULL);
+    CHECK(!nd_theme_bars_painted());
+    CHECK(!nd_theme_panels_painted());
+    CHECK_INT(nd_theme_plate_bar(0).body_a, 0);
+    CHECK_INT(nd_theme_plate_glass(4).body_a, 0);
+    CHECK_INT(nd_theme_panel_a(240u), 0);
+
+    img = nd_image_new_filled(40, 40, ND_PIXFMT_RGB888, ND_RGB(0x30, 0x80, 0x20));
+    CHECK(img != NULL);
+    if (img == NULL)
+        return;
+    (void)nd_theme_titlebar(img, NULL, 40, 20, NULL, NULL, NULL, NULL);
+    px = nd_image_get_px(img, 20, 10);
+    CHECK_INT(px.r, 0x30);
+    CHECK_INT(px.g, 0x80);
+    CHECK_INT(px.b, 0x20);
+
+    dir = make_theme("Barred", "{\"id\":\"barred\",\"palette\":{\"bar_top\":\"#2A9BE8\","
+                               "\"bar_bot\":\"#0A4A9B\",\"glass_top\":\"#F2F9FF\"}}");
+    CHECK_INT(nd_theme_read(dir, &t), ND_OK);
+    nd_theme_apply(&t);
+    CHECK(nd_theme_bars_painted());
+    CHECK(nd_theme_panels_painted());
+    CHECK_INT(nd_theme_plate_bar(0).body_a, 255);
+    CHECK_INT(nd_theme_panel_a(240u), 240);
+    (void)nd_theme_titlebar(img, NULL, 40, 20, NULL, NULL, NULL, NULL);
+    px = nd_image_get_px(img, 20, 2);
+    CHECK(px.r != 0x30 || px.g != 0x80 || px.b != 0x20);
+
+    nd_image_free(img);
+    nd_theme_apply(NULL);
+}
+
 /* ------------------------------------------------------------------ *
  * The resource override
  * ------------------------------------------------------------------ */
@@ -371,6 +495,10 @@ int main(void)
     RUN(test_apply_swaps_the_palette_and_keeps_its_own_copy);
     RUN(test_a_missing_theme_falls_back_without_forgetting);
     RUN(test_select_persists_and_applies);
+    RUN(test_the_cores_word_beats_the_setting);
+    RUN(test_stale_means_the_choice_moved);
+    RUN(test_a_themes_wallpaper_leaves_with_it);
+    RUN(test_a_bar_that_is_the_ground_is_not_painted);
     RUN(test_no_theme_overrides_nothing);
     RUN(test_the_resource_mapping);
     RUN(test_an_installed_apps_icon_is_themed_by_name);

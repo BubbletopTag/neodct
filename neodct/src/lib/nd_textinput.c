@@ -197,8 +197,15 @@ void nd_textinput_draw(nd_textinput *t, bool blink_state)
     {
         nd_rect well = ND_RECT(10, box_y, box_right, box_y + box_h);
 
-        nd_theme_round_gradient(ui->canvas, well, 5, ND_TH_GLASS_BOT, ND_TH_GLASS_TOP, 240u);
-        nd_theme_shadow_band(ui->canvas, well.x0 + 2, well.x1 - 2, well.y0 + 1, 3, 120u);
+        /* Both halves of the recess are the theme's to give. A flat theme's
+         * field is a hollow rule over whatever is behind it, and the inner
+         * shadow is decoration -- drawn unconditionally it was a white band
+         * across the top of every classic text field, because the classic
+         * look's "cut" colour is white line art. */
+        nd_theme_round_gradient(ui->canvas, well, 5, ND_TH_GLASS_BOT, ND_TH_GLASS_TOP,
+                                nd_theme_panel_a(240u));
+        if (ND_TH_PLATE_SHADOW)
+            nd_theme_shadow_band(ui->canvas, well.x0 + 2, well.x1 - 2, well.y0 + 1, 3, 120u);
         nd_theme_round_outline(ui->canvas, well, 5, ND_TH_BLUE_DEEP, 170u);
     }
 

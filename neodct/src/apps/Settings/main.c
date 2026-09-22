@@ -2222,10 +2222,11 @@ static void show_install_apps(nd_ui *ui)
  * it and the notice afterwards.
  *
  * The notice matters more than it looks. Applying a theme changes THIS
- * process immediately and every other process when it next starts, so the
- * phone the owner is holding is half-changed until they leave Settings: the
- * home screen behind them is still the old look. Saying so is the difference
- * between a feature and a bug report. */
+ * process immediately -- colours, typeface and all, see nd_ui_wear_theme() --
+ * and the core when Settings exits (nd_ui_refresh_after_app()), so the phone
+ * the owner is holding is half-changed until they leave: the home screen
+ * behind them is still the old look. Saying so is the difference between a
+ * feature and a bug report. */
 static void show_theme_menu(nd_ui *ui)
 {
     nd_themepicker picker;

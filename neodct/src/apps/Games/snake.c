@@ -290,14 +290,15 @@ void nd_snake_render(nd_snake *g)
      * pieces whatever the interface around it looks like, and blue_deep is
      * the colour every theme already names for the cut under a plate. */
     nd_theme_gradient_v(g->ui->canvas, ND_RECT(0, 0, g->screen_w - 1, g->screen_h - 1),
-                        ND_TH_BLUE_DEEP, ND_RGB(0x03, 0x0C, 0x1A), 255u);
+                        ND_TH_BLUE_DEEP, nd_theme_darken(ND_TH_BLUE_DEEP, 80u), 255u);
 
     /* The score stands on the FIELD, and the field here is dark by
      * construction -- blue_deep, whatever the interface around the game looks
      * like. So it takes chrome_hi, the palette's light, and NOT ink_light:
      * that one means "type over the background", and a theme with a pale
      * background has a dark one, which on this field is unreadable. It was
-     * exactly that under Hello Kitty -- a charcoal score on a plum board. */
+     * exactly that under the first pink theme -- a charcoal score on a plum
+     * board. */
     (void)nd_snprintf(score, sizeof score, "%d", g->score);
     nd_theme_text(g->ui->draw, 4, 1, score, nd_ui_font_bold(g->ui, g->ui->font_md),
                   ND_TH_CHROME_HI, ND_TH_TEXT_SHADOW);

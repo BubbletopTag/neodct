@@ -159,9 +159,18 @@ void nd_softkey_update(nd_softkey *bar, const char *text, bool present)
             /* Glass over the home screen's wallpaper. The border stays
              * opaque; it is what keeps the shape readable over a busy
              * picture, and a translucent border on a translucent body leaves
-             * the whole control looking like a smudge. */
-            p.body_a = 180u;
-            p.sheen_a = 70u;
+             * the whole control looking like a smudge.
+             *
+             * ONLY SOFTENED, NEVER SWITCHED ON. These used to be assigned
+             * outright, which overrode what nd_theme_plate_bar() had just
+             * decided from the theme: the classic look, whose bar is not
+             * painted and whose plates carry no gloss, got a translucent
+             * black band with a sheen across its top half under "Menu" --
+             * the one piece of the glass look the stock phone still wore. */
+            if (p.body_a != 0u)
+                p.body_a = 180u;
+            if (p.sheen_a != 0u)
+                p.sheen_a = 70u;
         }
         nd_theme_plate_draw(ui->canvas, plate, &p);
 

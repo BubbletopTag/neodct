@@ -2011,6 +2011,22 @@ static void ui_font_paths(char *ui_face, size_t ui_sz, char *bold, size_t bold_s
         bold[0] = '\0';
 }
 
+static void ui_free_fonts(nd_ui *ui)
+{
+    nd_font_free(ui->font_s);
+    nd_font_free(ui->font_md);
+    nd_font_free(ui->font_n);
+    nd_font_free(ui->font_xl);
+    nd_font_free(ui->font_n_b);
+    nd_font_free(ui->font_xl_b);
+    ui->font_s = NULL;
+    ui->font_md = NULL;
+    ui->font_n = NULL;
+    ui->font_xl = NULL;
+    ui->font_n_b = NULL;
+    ui->font_xl_b = NULL;
+}
+
 static void ui_load_fonts(nd_ui *ui)
 {
     char font[ND_PATH_MAX];
@@ -2042,18 +2058,7 @@ static void ui_load_fonts(nd_ui *ui)
      * draw becomes a no-op, which is at least visibly wrong rather than
      * subtly wrong. Recorded in OPEN-QUESTIONS.md as U-2. */
     nd_log(ND_LOG_UI, "Font load failed, using default.");
-    nd_font_free(ui->font_s);
-    nd_font_free(ui->font_md);
-    nd_font_free(ui->font_n);
-    nd_font_free(ui->font_xl);
-    nd_font_free(ui->font_n_b);
-    nd_font_free(ui->font_xl_b);
-    ui->font_s = NULL;
-    ui->font_md = NULL;
-    ui->font_n = NULL;
-    ui->font_xl = NULL;
-    ui->font_n_b = NULL;
-    ui->font_xl_b = NULL;
+    ui_free_fonts(ui);
 }
 
 const nd_font *nd_ui_font_bold(const nd_ui *ui, const nd_font *f)
@@ -2152,6 +2157,7 @@ static nd_err ui_common_init(nd_ui *ui, nd_fb *fb)
      * parse of a file measured in hundreds of bytes. */
     nd_theme_load_active();
     ui_load_fonts(ui);
+    ui->owns_fonts = true;
     nd_bench_mark("ui_common: 4 faces");
 
     /* --- step 13 is CORE ONLY; see nd_ui_init --- */
@@ -2382,18 +2388,7 @@ void nd_ui_teardown(nd_ui *ui)
     nd_image_free(ui->home_.chrome);
     ui->home_.chrome = NULL;
 
-    nd_font_free(ui->font_s);
-    nd_font_free(ui->font_md);
-    nd_font_free(ui->font_n);
-    nd_font_free(ui->font_xl);
-    nd_font_free(ui->font_n_b);
-    nd_font_free(ui->font_xl_b);
-    ui->font_s = NULL;
-    ui->font_md = NULL;
-    ui->font_n = NULL;
-    ui->font_xl = NULL;
-    ui->font_n_b = NULL;
-    ui->font_xl_b = NULL;
+    ui_free_fonts(ui);
 
     nd_image_free(ui->scratch);
     ui->scratch = NULL;
@@ -3792,6 +3787,30 @@ void nd_ui_show_pending_modem_fault(nd_ui *ui)
  * After every app exit
  * ------------------------------------------------------------------ */
 
+/* The wallpaper as loaded, dropped so the next nd_ui_wallpaper() reads the
+ * setting and the theme's dim afresh. */
+static void wallpaper_forget(nd_ui *ui)
+{
+    if (ui->home_.wallpaper_gif != NULL)
+        nd_gif_close(ui->home_.wallpaper_gif);
+    ui->home_.wallpaper_gif = NULL;
+    nd_image_free(ui->home_.wallpaper);
+    ui->home_.wallpaper = NULL;
+    ui->home_.wallpaper_ready = false;
+}
+
+void nd_ui_wear_theme(nd_ui *ui)
+{
+    if (ui == NULL)
+        return;
+    if (ui->owns_fonts) {
+        ui_free_fonts(ui);
+        ui_load_fonts(ui);
+    }
+    wallpaper_forget(ui);
+    nd_ui_invalidate_chrome(ui);
+}
+
 /* OPEN-QUESTIONS decision 3. Settings no longer writes into the core's live
  * memory; it writes the setting and the core re-reads it here, exactly as
  * launch_app already re-read the unread-SMS count. Nothing an app changed is
@@ -3801,12 +3820,7 @@ void nd_ui_refresh_after_app(nd_ui *ui)
     if (ui == NULL)
         return;
 
-    if (ui->home_.wallpaper_gif != NULL)
-        nd_gif_close(ui->home_.wallpaper_gif);
-    ui->home_.wallpaper_gif = NULL;
-    nd_image_free(ui->home_.wallpaper);
-    ui->home_.wallpaper = NULL;
-    ui->home_.wallpaper_ready = false;
+    wallpaper_forget(ui);
     ui->home_.eng_mode_ready = false;
 
     /* ONLY when something could actually have changed the app list. This used
@@ -3819,6 +3833,29 @@ void nd_ui_refresh_after_app(nd_ui *ui)
         apps_generation(ui, now, sizeof now);
         if (strcmp(now, ui->home_.apps_gen) != 0)
             ui->home_.apps_ready = false;
+    }
+
+    /* ============ THE THEME, WHICH THE CORE USED TO KEEP UNTIL REBOOT ======
+     *
+     * Settings is where a theme is chosen and Settings is an app, so the
+     * choice is made in a process that is about to exit. Every app opened
+     * afterwards read the new setting at startup; the core, which draws the
+     * home screen and the menu and never restarts, did not -- so the phone
+     * showed the old look on the screens the owner sees most and the new one
+     * inside apps, until the next boot.
+     *
+     * Before the wallpaper is next loaded, because the theme decides how far
+     * it is dimmed. The fonts follow the theme (it may bring its own face, or
+     * ask for the pixel one) and nothing in the core holds a face across an
+     * app launch -- every launch returns to the home screen, which reads
+     * ui->font_* afresh. The image cache is emptied rather than left to age
+     * out: the old theme's icons and status sprites are keyed by their own
+     * paths and would otherwise sit in RAM this phone does not have. */
+    if (nd_theme_is_stale()) {
+        nd_theme_load_active();
+        nd_ui_wear_theme(ui);
+        if (ui->image_cache != NULL)
+            nd_imgcache_clear(ui->image_cache);
     }
 
     /* Settings is an app. Turning wallpaper-everywhere off, or moving the

@@ -284,9 +284,19 @@ void nd_memory_render(nd_memory *g)
         return;
 
     /* See the note in snake.c: a play field may paint its own background, and
-     * the theme's is a deep blue rather than black. */
-    nd_theme_gradient_v(g->ui->canvas, ND_RECT(0, 0, g->screen_w - 1, g->screen_h - 1),
-                        ND_RGB(0x0B, 0x2B, 0x4E), ND_RGB(0x03, 0x0C, 0x1A), 255u);
+     * which one is game_colour's to decide. Off, it is the theme's ground --
+     * black on the stock phone, which is the board the game always had. On,
+     * it is the theme's deepest colour falling away to near black.
+     *
+     * It was a navy gradient spelled in literals here, whatever the theme:
+     * the stock phone played Memory on Frutiger Aero's board, and the pink
+     * theme did too. */
+    if (ND_TH_GAME_COLOUR)
+        nd_theme_gradient_v(g->ui->canvas, ND_RECT(0, 0, g->screen_w - 1, g->screen_h - 1),
+                            ND_TH_BLUE_DEEP, nd_theme_darken(ND_TH_BLUE_DEEP, 80u), 255u);
+    else
+        nd_theme_gradient_v(g->ui->canvas, ND_RECT(0, 0, g->screen_w - 1, g->screen_h - 1),
+                            ND_TH_SKY_TOP, ND_TH_SKY_BOT, 255u);
 
     for (row = 0; row < ND_MEMORY_ROWS; row++) {
         for (col = 0; col < ND_MEMORY_COLS; col++) {
@@ -326,9 +336,14 @@ void nd_memory_render(nd_memory *g)
     if (g->state[idx] == ND_MEMORY_DOWN) {
         /* The inner ring, on the card itself. It was black-on-white; on a blue
          * card back it has to be the dark edge of the palette instead, or the
-         * cursor disappears on exactly the cards you are about to turn. */
+         * cursor disappears on exactly the cards you are about to turn.
+         *
+         * And black-on-white again where the card back is the classic white
+         * lozenge: blue_deep is white line art in that look, which drew the
+         * ring white on white. sel_ink is the palette's ink for "on the
+         * signature plate", and it is black exactly there. */
         nd_theme_round_outline(g->ui->canvas, nd_memory_card_rect(g, g->cursor_col, g->cursor_row),
-                               3, ND_TH_BLUE_DEEP, 240u);
+                               3, ND_TH_GAME_COLOUR ? ND_TH_BLUE_DEEP : ND_TH_SEL_INK, 240u);
     }
 
     (void)nd_ui_present(g->ui);

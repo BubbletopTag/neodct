@@ -15,7 +15,7 @@
  * The phone ships ONE face again. The UI face is the pixel face: the built-in
  * look is the classic one and nd_theme_style's pixel_font says so, and
  * aero.ttf left the image with the rest of the glass look when that became a
- * theme (neodct/contrib/themes/FruitigerAero ships its own fonts/ui.ttf).
+ * theme (System/themes/FrutigerAero ships its own fonts/ui.ttf).
  *
  * So the constants below are font.ttf -- not because the distinction stopped
  * mattering, but because the two answers have converged for the shipped
