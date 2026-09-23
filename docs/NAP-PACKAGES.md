@@ -43,6 +43,33 @@ package. An `app.so` or a `lib/` found inside the directory is ignored with a
 warning: the code that ships is the code named on the command line, so a
 stale host build sitting next to the manifest cannot be packed by mistake.
 
+## A package can also be a theme
+
+From 0.6.0a a `.nap` holds either an app or a **theme** -- a look the owner
+installs, described in `docs/THEMES.md`. The manifest says which:
+
+```json
+{ "name": "Hello Kitty", "type": "theme", "icon": "icon.png" }
+```
+
+**`"type"` absent means `"app"`.** That is the whole of the backwards
+compatibility story: every package built before this field existed keeps
+installing exactly as it did, because the field it does not have already
+means what it always meant. A value this build does not recognise is refused
+rather than assumed to be an app.
+
+A theme package carries **no `app.so` and no `"arch"`** -- there is no native
+code in it, so the same file installs on every phone -- and one that does
+carry program code is refused. It is built without `--so`:
+
+```sh
+neodct/tools/mknap.py --app-dir HelloKitty/ -o HelloKitty.nap
+```
+
+It unpacks into `/NeoDCT/User/sdcard/themes/<Name>/` rather than `apps/`, and
+appears in **Settings → Theme** immediately -- a theme needs no restart to be
+usable, because nothing has to launch it.
+
 `tar` makes an acceptable package too, as long as it is ustar and the layout
 below is followed:
 

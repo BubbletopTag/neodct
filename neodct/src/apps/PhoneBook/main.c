@@ -51,6 +51,7 @@
 #include "nd_paths.h"
 #include "nd_t9.h"
 #include "nd_text.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
@@ -189,9 +190,9 @@ void nd_phonebook_calling_screen(nd_ui *ui, const nd_contact *contact)
      * 145 * 0.30 is 43 and not 44. The three lines are then spaced by a hard
      * 35 and 60 rather than by the fonts' heights. */
     y = nd_max32(12, nd_trunc32((double)content_bottom * 0.30));
-    (void)nd_draw_text(ui->draw, 10, y, "Calling...", ui->font_xl, ND_WHITE);
-    (void)nd_draw_text(ui->draw, 10, y + 35, contact->name, ui->font_n, ND_WHITE);
-    (void)nd_draw_text(ui->draw, 10, y + 60, contact->number, ui->font_s, ND_WHITE);
+    nd_theme_text_light(ui->draw, 10, y, "Calling...", nd_ui_font_bold(ui, ui->font_xl));
+    nd_theme_text_light(ui->draw, 10, y + 35, contact->name, ui->font_n);
+    nd_theme_text_light(ui->draw, 10, y + 60, contact->number, ui->font_s);
     (void)nd_ui_present(ui);
 
     /* AND THAT IS ALL IT DOES. No nd_modem_dial, no call screen, no hang-up

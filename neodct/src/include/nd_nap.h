@@ -116,6 +116,7 @@
 #define ND_NAP_H_INCLUDED
 
 #include "nd_storage.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 
@@ -180,6 +181,31 @@ extern "C" {
 /* How many .nap files a scan of the card reports. */
 #define ND_NAP_MAX_FOUND 64
 
+/* ============ WHAT IS IN THE PACKAGE ============
+ *
+ * A .nap was an app and only an app, and the manifest said so by saying
+ * nothing. It now carries a look as well, and the two are different objects:
+ * an app is native code that has to match the phone's ABI and gets confined
+ * when it runs, a theme is JSON and pictures that nothing executes.
+ *
+ * "type": "theme" in the manifest says which. ABSENT MEANS APP, and that is
+ * the entire backwards-compatibility story: every package built before this
+ * field existed keeps installing exactly as it did, because the field it does
+ * not have already means what it always meant.
+ *
+ * A value this build does not recognise is REFUSED rather than assumed to be
+ * an app -- "assume app" is right for silence and wrong for a package that
+ * has told us it is something else, because installing a future "widget" as
+ * an app would unpack code into a directory the core launches. */
+typedef enum {
+    ND_NAP_KIND_APP = 0, /* the default, and what an absent "type" means */
+    ND_NAP_KIND_THEME
+} nd_nap_kind;
+
+/* The manifest spellings. */
+#define ND_NAP_TYPE_APP   "app"
+#define ND_NAP_TYPE_THEME "theme"
+
 typedef struct {
     char name[ND_APP_NAME_MAX]; /* manifest "name", as the menu shows it   */
     char dir[ND_NAP_DIR_MAX];   /* the directory under apps/               */
@@ -197,7 +223,24 @@ typedef struct {
      * card and will not be in the menu until the phone restarts; the caller
      * has to say so, because nothing else will. See nd_appgen_bump(). */
     bool needs_restart_to_appear;
+
+    /* App or theme. See the note above nd_nap_kind: absent means app. */
+    nd_nap_kind kind;
+
+    /* A theme's "id" -- what the setting stores and the picker matches on,
+     * read from the package's theme.json rather than its manifest so that the
+     * one file naming a theme's identity is the theme's own. Empty for an
+     * app. */
+    char theme_id[ND_THEME_ID_MAX];
 } nd_nap_info;
+
+/* Where a package of this kind is installed: the card's apps/ or its themes/.
+ * One function so that a caller does not choose, and so that the two callers
+ * that must agree -- Settings and nd-nap -- cannot drift. */
+const char *nd_nap_dest_dir(nd_nap_kind kind);
+
+/* "App"/"Theme", for a screen that has to name what it is about to install. */
+const char *nd_nap_kind_label(nd_nap_kind kind);
 
 /* ---- what phone is this ---------------------------------------------- */
 

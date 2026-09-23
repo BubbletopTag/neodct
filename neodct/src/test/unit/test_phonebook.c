@@ -54,6 +54,7 @@
 #include <linux/input.h>
 
 #include "nd_app.h"
+#include "uifont_test.h"
 #include "nd_capture.h"
 #include "nd_contacts.h"
 #include "nd_db.h"
@@ -67,13 +68,14 @@
 #include "nd_paths.h"
 #include "nd_text.h"
 #include "nd_types.h"
+#include "nd_theme.h"
 #include "nd_ui.h"
 #include "nd_widgets.h"
 
 #include "../../apps/PhoneBook/phonebook.h"
 #include "platform_test.h"
 
-#define FONT_REL "overlay/NeoDCT/System/ui/resources/fonts/font.ttf"
+#define FONT_REL ND_TEST_UI_FONT_REL
 
 /* ------------------------------------------------------------------ *
  * Finding the font, the reference set and the built app.so
@@ -255,6 +257,8 @@ typedef struct {
     nd_font *font_md;
     nd_font *font_n;
     nd_font *font_xl;
+    nd_font *font_n_b;
+    nd_font *font_xl_b;
     nd_input *input;
     int write_fd;
 } fixture;
@@ -262,7 +266,7 @@ typedef struct {
 /* ============ WHY THE FIXTURE HAS A WALLPAPER ============
  *
  * The reference frames this test compares against come out of nd-shoot, whose
- * app group runs every stock app with Palestine.jpg set. Since the framework
+ * app group runs every stock app with the shipped default wallpaper set. Since the framework
  * started drawing the wallpaper behind app chrome, that is what those frames
  * contain, and a fixture that rendered on black would differ from them in
  * three quarters of its pixels -- in the background, not in anything PhoneBook
@@ -278,7 +282,7 @@ typedef struct {
  * the searching. */
 static void fx_apply_reference_wallpaper(fixture *fx, const char *font_path)
 {
-    static const char *const FONT_TAIL = "/NeoDCT/System/ui/resources/fonts/font.ttf";
+    static const char *const FONT_TAIL = ND_TEST_UI_FONT_ABS;
     char overlay[1024];
     char saved[ND_PATH_MAX];
     size_t flen = strlen(font_path);
@@ -298,7 +302,7 @@ static void fx_apply_reference_wallpaper(fixture *fx, const char *font_path)
     fx->ui.app_use_wallpaper = nd_app_manifest_use_wallpaper("/NeoDCT/System/apps/PhoneBook");
     if (fx->ui.app_use_wallpaper)
         nd_ui_set_wallpaper(&fx->ui,
-                            nd_ui_load_wallpaper("/NeoDCT/System/wallpapers/Palestine.jpg"));
+                            nd_ui_load_wallpaper(ND_TEST_REF_WALLPAPER_PATH));
     (void)nd_path_set_root(saved[0] != '\0' ? saved : NULL);
 }
 
@@ -316,6 +320,19 @@ static bool fx_init(fixture *fx)
     fx->font_md = nd_font_load(path, ND_FONT_PX_MD);
     fx->font_n = nd_font_load(path, ND_FONT_PX_N);
     fx->font_xl = nd_font_load(path, ND_FONT_PX_XL);
+
+    /* The bold pair. Optional -- nd_ui_font_bold() answers the regular
+     * weight for a NULL -- but a fixture that skips it renders every
+     * title a stroke too light and matches no reference frame.
+     * See uifont_test.h. */
+    {
+        char bold[ND_PATH_MAX];
+
+        if (ui_bold_face_path(path, bold, sizeof bold)) {
+            fx->font_n_b = nd_font_load(bold, ND_FONT_PX_N);
+            fx->font_xl_b = nd_font_load(bold, ND_FONT_PX_XL);
+        }
+    }
     if (fx->font_s == NULL || fx->font_md == NULL || fx->font_n == NULL || fx->font_xl == NULL) {
         fprintf(stderr, "test_phonebook: nd_font_load(%s) failed\n", path);
         return false;
@@ -339,6 +356,8 @@ static bool fx_init(fixture *fx)
     fx->ui.font_md = fx->font_md;
     fx->ui.font_n = fx->font_n;
     fx->ui.font_xl = fx->font_xl;
+    fx->ui.font_n_b = fx->font_n_b;
+    fx->ui.font_xl_b = fx->font_xl_b;
     fx->ui.keypad_fd = -1;
     /* Only the core's own bar is transparent, and this context is not it. */
     fx->ui.softkey_exists = true;
@@ -362,6 +381,8 @@ static void fx_free(fixture *fx)
     nd_font_free(fx->font_md);
     nd_font_free(fx->font_n);
     nd_font_free(fx->font_xl);
+    nd_font_free(fx->font_n_b);
+    nd_font_free(fx->font_xl_b);
     memset(fx, 0, sizeof *fx);
 }
 
@@ -629,18 +650,22 @@ static void test_picker_back(void)
  * and not by whether it matched anything. Both are centred with font_n, and
  * both leave rows 146..174 alone. */
 /* What the framework paints where a widget clears rows 0..content_bottom.
- * It used to be a flat black fill; with the wallpaper drawn behind app chrome
- * it is the wallpaper's own rows 0..content_bottom, and a hand-built
- * expectation has to say the same thing or it is testing the old design. */
+ *
+ * It used to be a flat black fill, then the wallpaper's own rows; it is now
+ * the wallpaper OR a sky gradient, plus a graded scrim over both. A hand-built
+ * expectation cannot keep up with that and should not try -- so it CALLS THE
+ * PAINTER, pointed at the scratch surface. Whatever nd_ui_paint_chrome_content
+ * does, the expectation does the same thing by construction. */
 static void expect_content_background(fixture *fx, nd_image *expect, nd_draw *d)
 {
-    const nd_image *bg = nd_ui_chrome_wallpaper(&fx->ui);
+    nd_image *saved_canvas = fx->ui.canvas;
+    nd_draw *saved_draw = fx->ui.draw;
 
-    if (bg != NULL)
-        (void)nd_image_blit_region(expect, bg, ND_RECT(0, 0, ND_UI_W, ND_UI_H - ND_SOFTKEY_H), 0,
-                                   0);
-    else
-        (void)nd_draw_rect_fill(d, ND_RECT(0, 0, ND_UI_W, ND_UI_H - ND_SOFTKEY_H), ND_BLACK);
+    fx->ui.canvas = expect;
+    fx->ui.draw = d;
+    nd_ui_paint_chrome_content(&fx->ui);
+    fx->ui.canvas = saved_canvas;
+    fx->ui.draw = saved_draw;
 }
 
 static void check_empty_screen(fixture *fx, const char *msg)
@@ -660,8 +685,10 @@ static void check_empty_screen(fixture *fx, const char *msg)
     }
     expect_content_background(fx, expect, &d);
     nd_text_size(fx->ui.font_n, msg, &w, &h);
-    (void)nd_draw_text(&d, (ND_UI_W - w) / 2, nd_max32(10, (ND_UI_H - ND_SOFTKEY_H - h) / 2), msg,
-                       fx->ui.font_n, ND_WHITE);
+    /* Through the theme, because that is what draw_empty() draws with: light
+     * ink over its own shadow. */
+    nd_theme_text_light(&d, (ND_UI_W - w) / 2, nd_max32(10, (ND_UI_H - ND_SOFTKEY_H - h) / 2), msg,
+                        fx->ui.font_n);
 
     CHECK_INT(nd_capture_digest(fx->canvas, a, sizeof a), ND_OK);
     CHECK_INT(nd_capture_digest(expect, b, sizeof b), ND_OK);
@@ -962,10 +989,12 @@ static void test_calling_screen_does_not_dial(void)
     g_api.calling_screen(&fx.ui, &c);
     CHECK(fx.ui.modem == NULL);
 
+    /* Through the theme, and the title in the BOLD cut -- which is what
+     * nd_phonebook_calling_screen() draws. */
     expect_content_background(&fx, expect, &d);
-    (void)nd_draw_text(&d, 10, y, "Calling...", fx.ui.font_xl, ND_WHITE);
-    (void)nd_draw_text(&d, 10, y + 35, "Mum", fx.ui.font_n, ND_WHITE);
-    (void)nd_draw_text(&d, 10, y + 60, "0741234567", fx.ui.font_s, ND_WHITE);
+    nd_theme_text_light(&d, 10, y, "Calling...", nd_ui_font_bold(&fx.ui, fx.ui.font_xl));
+    nd_theme_text_light(&d, 10, y + 35, "Mum", fx.ui.font_n);
+    nd_theme_text_light(&d, 10, y + 60, "0741234567", fx.ui.font_s);
 
     CHECK_INT(nd_capture_digest(fx.canvas, a, sizeof a), ND_OK);
     CHECK_INT(nd_capture_digest(expect, b, sizeof b), ND_OK);

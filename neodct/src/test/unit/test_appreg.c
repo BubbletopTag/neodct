@@ -496,6 +496,13 @@ static bool stage_overlay(void)
         if (f == NULL)
             return false;
         (void)fputs("system.ui.engineering_mode=ON\n", f);
+        /* "NONE" EXPLICITLY. Leaving the key out used to mean the same thing,
+         * because the shipped default was "NONE"; the phone boots with a
+         * wallpaper now, so an absent key means THE DEFAULT WALLPAPER. This
+         * test's scrollbar checks compare a track column against the same row
+         * twenty columns left of it, which is only the same colour when the
+         * ground is the sky -- a photograph varies with x as well as y. */
+        (void)fputs("system.ui.wallpaper=NONE\n", f);
         (void)fclose(f);
     }
 
@@ -603,6 +610,14 @@ static void test_icon_geometry(nd_ui *ui)
             CHECK(opaque, "the icon has ink in it");
         }
     }
+    /* Koki's icon is 120x115 and the odd one out. It was briefly square, when
+     * the Frutiger Aero set was what the phone shipped; that set is a theme
+     * now (neodct/contrib/themes/FruitigerAero) and the shipped icons are the
+     * phone's own again, Koki's included.
+     *
+     * Asserted as a count rather than dropped, because "the icons are all one
+     * size except this one" is worth knowing and a second stray would
+     * otherwise be silent. */
     CHECK_INT(non_square, 1, "exactly one shipped icon is not square (Koki, 120x115)");
 }
 
@@ -624,23 +639,70 @@ static void test_icon_geometry(nd_ui *ui)
 #define NOTCH_SCAN_TOP    30
 #define NOTCH_SCAN_BOTTOM 141
 
-static void measure_notch(const nd_image *frame, int32_t bar_x, int32_t *top, int32_t *bottom)
+/* ============ THE NOTCH IS A THUMB NOW ============
+ *
+ * It was a seven-row white rectangle riding a white line, and it is
+ * nd_theme_scrollbar's thumb -- the same object every other scrollbar in the
+ * OS uses, sized to the list so that a long menu reads as long rather than
+ * being a fixed seven rows.
+ *
+ * WHAT ROW IS ITS TOP depends on the theme, and that is the trap this comment
+ * exists for. A glossy theme draws a dark border on the thumb's top row and a
+ * white bevel one row inside it, so the first near-white row is top + 1. A
+ * flat theme draws neither, so the first near-white row IS the top. Measuring
+ * the bevel and subtracting one was right while the phone shipped the glass
+ * look and is off by a pixel now that it ships the plain one.
+ *
+ * So the scan reports the first row carrying the thumb's ink and the caller
+ * adds the bevel back only when the active theme draws one. The thumb stays
+ * pinned to the pixel either way, which is what these tests are about. */
+static bool thumb_bevel_row(const nd_image *frame, int32_t bar_x, int32_t y)
 {
     int32_t x;
+
+    for (x = bar_x - 2; x <= bar_x + 2; x++) {
+        nd_color c = nd_image_get_px(frame, x, y);
+
+        if (c.r > 190u && c.g > 210u && c.b > 220u)
+            return true;
+    }
+    return false;
+}
+
+/* Whether the scrollbar drew anything in this column.
+ *
+ * There is no wallpaper on this screen, so the ground is the sky gradient --
+ * which varies with y and NOT with x. The same row twenty columns to the left
+ * is therefore exactly what the track was drawn over, and comparing against it
+ * needs no separate reference render. Twenty is clear of the track's five
+ * columns and of the centred icon, which is at most 80 px wide. */
+static bool track_drawn(const nd_image *f, int32_t x, int32_t y)
+{
+    nd_color a = nd_image_get_px(f, x, y);
+    nd_color b = nd_image_get_px(f, x - 20, y);
+    int32_t dr = (int32_t)a.r - (int32_t)b.r;
+    int32_t dg = (int32_t)a.g - (int32_t)b.g;
+    int32_t db = (int32_t)a.b - (int32_t)b.b;
+
+    if (dr < 0)
+        dr = -dr;
+    if (dg < 0)
+        dg = -dg;
+    if (db < 0)
+        db = -db;
+    return dr > 8 || dg > 8 || db > 8;
+}
+
+/* The thumb's top edge: one row above its bevel. -1 when there is none. */
+static int32_t measure_thumb_top(const nd_image *frame, int32_t bar_x)
+{
     int32_t y;
 
-    *top = -1;
-    *bottom = -1;
     for (y = NOTCH_SCAN_TOP; y <= NOTCH_SCAN_BOTTOM && y < frame->h; y++) {
-        for (x = bar_x - 4; x < bar_x; x++) {
-            if (nd_image_get_px(frame, x, y).r == 255u) {
-                if (*top < 0)
-                    *top = y;
-                *bottom = y;
-                break;
-            }
-        }
+        if (thumb_bevel_row(frame, bar_x, y))
+            return ND_TH_BEVEL ? y - 1 : y;
     }
+    return -1;
 }
 
 static void test_scrollbar_every_index(nd_capture *cap, nd_ui *ui)
@@ -661,35 +723,44 @@ static void test_scrollbar_every_index(nd_capture *cap, nd_ui *ui)
 
     nd_appsel_init(&s, ui, "Main Menu", nd_ui_app_list(ui, NULL), nd_ui_app_count(ui), NULL);
 
-    for (i = 0u; i < nd_ui_app_count(ui); i++) {
-        const nd_image *frame;
-        long double step;
-        long double notch;
-        int32_t want_top;
-        int32_t want_bottom;
-        int32_t got_top = -1;
-        int32_t got_bottom = -1;
+    /* nd_theme_scrollbar's arithmetic, which is the thing under test: a
+     * thumb of max(10, track_h / n) rows, and a travel of what is left of the
+     * track once its own height is taken out, divided by the stops. The step
+     * TRUNCATES, exactly as the old notch position did. */
+    {
+        const int32_t track_h = track_bottom - track_top + 1;
+        const size_t n = nd_ui_app_count(ui);
+        int32_t thumb_h = (int32_t)((size_t)track_h / n);
 
-        s.selected_index = i;
-        nd_appsel_draw(&s);
-        frame = nd_capture_recent(cap, 0u);
-        if (frame == NULL) {
-            CHECK(false, "a frame per index");
-            return;
+        if (thumb_h < 10)
+            thumb_h = 10;
+        if (thumb_h > track_h)
+            thumb_h = track_h;
+
+        for (i = 0u; i < n; i++) {
+            const nd_image *frame;
+            double step;
+            int32_t want_top;
+            int32_t got_top;
+
+            s.selected_index = i;
+            nd_appsel_draw(&s);
+            frame = nd_capture_recent(cap, 0u);
+            if (frame == NULL) {
+                CHECK(false, "a frame per index");
+                return;
+            }
+
+            step = (double)(track_h - thumb_h) / (double)(n - 1u);
+            want_top = track_top + nd_trunc32((double)i * step);
+
+            got_top = measure_thumb_top(frame, bar_x);
+            CHECK_INT(got_top, want_top, "thumb top row");
+            /* And it never leaves the track, at either end -- which the old
+             * fixed notch DID, by three rows, at both. */
+            CHECK(got_top >= track_top, "the thumb starts inside the track");
+            CHECK(got_top + thumb_h - 1 <= track_bottom, "and ends inside it");
         }
-
-        /* draw.rectangle((bar_x-4, notch-3, bar_x+2, notch+3)) with float
-         * corners: Pillow truncates each toward zero and the rectangle is
-         * inclusive of both. */
-        step = (long double)(track_bottom - track_top) / (long double)(nd_ui_app_count(ui) - 1u);
-        notch = (long double)track_top + ((long double)i * step);
-        want_top = (int32_t)(notch - 3.0L);
-        want_bottom = (int32_t)(notch + 3.0L);
-
-        measure_notch(frame, bar_x, &got_top, &got_bottom);
-        CHECK_INT(got_top, want_top, "notch top row");
-        CHECK_INT(got_bottom, want_bottom, "notch bottom row");
-        CHECK_INT(got_bottom - got_top, 6, "the notch is seven rows tall at every index");
     }
 
     /* The track itself, checked once from an index whose notch is nowhere
@@ -705,10 +776,7 @@ static void test_scrollbar_every_index(nd_capture *cap, nd_ui *ui)
     nd_appsel_draw(&s);
     {
         const nd_image *frame = nd_capture_recent(cap, 0u);
-        int32_t top = -1;
-        int32_t bottom = -1;
-
-        measure_notch(frame, bar_x, &top, &bottom);
+        int32_t top = measure_thumb_top(frame, bar_x);
         /* The notch's step is (track_bottom - track_top) / (n_apps - 1), so
          * every app added or removed moves it. 89 with twenty-two apps, 87
          * with the twenty-three MicTest made, 84 with the twenty-four
@@ -723,40 +791,60 @@ static void test_scrollbar_every_index(nd_capture *cap, nd_ui *ui)
          * Re-cut the menu-* frames whenever this number changes -- they are a
          * regression net for the screens that did NOT move, not a reason to
          * leave the app list alone. */
-        CHECK_INT(top, 117, "index 12 keeps the notch clear of both ends");
-        CHECK(nd_image_get_px(frame, bar_x, track_bottom).r == 255u, "track reaches row 135");
-        CHECK(nd_image_get_px(frame, bar_x + 1, track_bottom).r == 255u, "and column 233");
-        CHECK(nd_image_get_px(frame, bar_x + 2, track_bottom).r == 0u, "but not column 234");
-        CHECK(nd_image_get_px(frame, bar_x - 1, track_bottom).r == 0u, "nor column 231");
-        CHECK(nd_image_get_px(frame, bar_x, track_bottom + 1).r == 0u, "and not row 136");
-        CHECK(nd_image_get_px(frame, bar_x, track_top).r == 255u, "the track starts on row 36");
-        CHECK(nd_image_get_px(frame, bar_x, track_top - 1).r == 0u, "and not row 35");
+        /* Fifteen entries over a 100-row track: the thumb is
+         * max(10, 100/15) = 10 rows and the travel is (100-10)/14 = 6.43 a
+         * step, so index 12 lands at 36 + trunc(77.14) = 113.
+         *
+         * Every app added or removed moves this, which is the point -- the
+         * count is what the track is divided by. Re-cut the menu-* frames
+         * whenever it changes; they are a regression net for the screens that
+         * did NOT move, not a reason to leave the app list alone. */
+        CHECK_INT(top, 113, "index 12 keeps the thumb clear of both ends");
+        /* The track is five columns centred on bar_x, and it stops where it
+         * always did. Its groove is DARKER than the ground rather than white,
+         * so what is checked is that something is drawn in those columns and
+         * nothing in the ones either side. */
+        CHECK(track_drawn(frame, bar_x, track_bottom), "track reaches row 135");
+        CHECK(track_drawn(frame, bar_x + 1, track_bottom), "and column 233");
+        CHECK(!track_drawn(frame, bar_x + 4, track_bottom), "but not column 236");
+        CHECK(!track_drawn(frame, bar_x - 4, track_bottom), "nor column 228");
+        CHECK(!track_drawn(frame, bar_x, track_bottom + 2), "and not row 137");
+        CHECK(track_drawn(frame, bar_x, track_top), "the track starts on row 36");
+        CHECK(!track_drawn(frame, bar_x, track_top - 2), "and not row 34");
     }
 
-    /* Index 0 puts the notch above the track's first row: trunc(36 - 3) is
-     * 33, three rows of white with nothing beneath them. The last index puts
-     * its bottom at 138, three rows past the track's end. Both are the
-     * Python's, both are visible on a real phone, and neither is clipped. */
+    /* ============ AND IT NO LONGER HANGS OFF EITHER END ============
+     *
+     * The old notch was a fixed seven rows centred ON the position, so at
+     * index 0 it started at 33 -- three rows ABOVE the track -- and at the
+     * last index it ended at 138, three rows below it. Both were the Python's
+     * and both were visible on a real phone: a scrollbar whose marker
+     * overhangs its own rail at each extreme.
+     *
+     * nd_theme_scrollbar sizes the thumb and travels it inside the track, so
+     * the first index puts its top ON the first row and the last puts its
+     * bottom ON the last. That is a behaviour change and it is the reason to
+     * assert it rather than merely re-cut the numbers. */
     s.selected_index = 0u;
     nd_appsel_draw(&s);
     {
         const nd_image *frame = nd_capture_recent(cap, 0u);
-        int32_t top = -1;
-        int32_t bottom = -1;
 
-        measure_notch(frame, bar_x, &top, &bottom);
-        CHECK_INT(top, 33, "the first notch starts three rows above the track");
+        CHECK_INT(measure_thumb_top(frame, bar_x), track_top,
+                  "the first thumb starts ON the track's first row");
         (void)nd_capture_save(cap, "appreg-notch-first", frame);
     }
     s.selected_index = nd_ui_app_count(ui) - 1u;
     nd_appsel_draw(&s);
     {
         const nd_image *frame = nd_capture_recent(cap, 0u);
-        int32_t top = -1;
-        int32_t bottom = -1;
+        const int32_t track_h = track_bottom - track_top + 1;
+        int32_t thumb_h = (int32_t)((size_t)track_h / nd_ui_app_count(ui));
 
-        measure_notch(frame, bar_x, &top, &bottom);
-        CHECK_INT(bottom, 138, "the last notch ends three rows below it");
+        if (thumb_h < 10)
+            thumb_h = 10;
+        CHECK_INT(measure_thumb_top(frame, bar_x) + thumb_h - 1, track_bottom,
+                  "the last thumb ends ON the track's last row");
         (void)nd_capture_save(cap, "appreg-notch-last", frame);
     }
 }
@@ -784,23 +872,28 @@ static void test_engineering_off_geometry(nd_capture *cap, nd_ui *ui)
     sort_by_id_stable(stock, n);
 
     nd_appsel_init(&s, ui, "Main Menu", stock, n, NULL);
-    for (i = 0u; i < n; i++) {
-        const nd_image *frame;
-        long double step = 99.0L / (long double)(n - 1u);
-        long double notch = 36.0L + ((long double)i * step);
-        int32_t got_top = -1;
-        int32_t got_bottom = -1;
+    {
+        /* The track is rows 36..135, so 100 of them; nd_theme_scrollbar's
+         * thumb is max(10, 100/n) and its travel is what is left over. */
+        int32_t thumb_h = (int32_t)(100u / n);
 
-        s.selected_index = i;
-        nd_appsel_draw(&s);
-        frame = nd_capture_recent(cap, 0u);
-        if (frame == NULL) {
-            CHECK(false, "a frame per stock index");
-            return;
+        if (thumb_h < 10)
+            thumb_h = 10;
+
+        for (i = 0u; i < n; i++) {
+            const nd_image *frame;
+            double step = (double)(100 - thumb_h) / (double)(n - 1u);
+
+            s.selected_index = i;
+            nd_appsel_draw(&s);
+            frame = nd_capture_recent(cap, 0u);
+            if (frame == NULL) {
+                CHECK(false, "a frame per stock index");
+                return;
+            }
+            CHECK_INT(measure_thumb_top(frame, bar_x), 36 + nd_trunc32((double)i * step),
+                      "stock thumb top");
         }
-        measure_notch(frame, bar_x, &got_top, &got_bottom);
-        CHECK_INT(got_top, (int32_t)(notch - 3.0L), "stock notch top");
-        CHECK_INT(got_bottom, (int32_t)(notch + 3.0L), "stock notch bottom");
     }
     (void)nd_capture_save(cap, "appreg-stock-only", nd_capture_recent(cap, 0u));
 }
@@ -1022,7 +1115,11 @@ static void run_overlay_half(void)
      * thirteen engineering apps are still installed and still launchable, one
      * level down, behind that tile -- see ND_UI_ENG_TILE_ID in nd_ui.h. */
     CHECK_INT(nd_ui_app_count(&ui), 15, "fifteen apps with engineering mode on");
-    CHECK(nd_ui_wallpaper(&ui) == NULL, "no wallpaper configured, so the background is black");
+    /* The settings.prop this test stages names no wallpaper, so there is
+      * none loaded -- the chrome painter falls back to the sky gradient
+      * rather than to black, but that is nd_ui_paint_chrome's business and
+      * not this one's. */
+    CHECK(nd_ui_wallpaper(&ui) == NULL, "no wallpaper configured");
 
     test_icon_geometry(&ui);
     test_scrollbar_every_index(cap, &ui);

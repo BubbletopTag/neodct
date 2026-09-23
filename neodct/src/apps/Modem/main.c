@@ -56,6 +56,7 @@
 #include "nd_keycodes.h"
 #include "nd_modem.h"
 #include "nd_svc.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_ui_sim.h"
@@ -405,17 +406,21 @@ void nd_modemapp_draw_page(nd_ui *ui, const nd_modem_status *st, bool linked, in
     page_name = nd_modemapp_pages[page];
 
     nd_ui_paint_chrome_content(ui);
-    (void)nd_draw_text(ui->draw, 5, 0, "Modem", ui->font_xl, ND_WHITE);
+    /* One plate in place of the 24 px title at (5, 0) and the white rule
+     * at row 30. Same rows, so nothing below it moves. */
+    (void)nd_theme_titlebar(ui->canvas, ui->draw, screen_w, 30, "Modem",
+                            nd_ui_font_bold(ui, ui->font_xl), NULL, NULL);
     nd_ui_text_size(ui, page_name, ui->font_s, &tw, &th);
     /* y = 8, not 0: the page tag is small type sitting on the title's
      * baseline rather than its ascender. */
-    (void)nd_draw_text(ui->draw, screen_w - 5 - tw, 8, page_name, ui->font_s, ND_GRAY);
-    (void)nd_draw_line(ui->draw, 0, 30, screen_w, 30, ND_WHITE, 1);
+    nd_theme_text(ui->draw, screen_w - 5 - tw, 8, page_name, ui->font_s, ND_TH_INK_MUTED,
+                  ND_TH_TEXT_SHADOW);
 
     line_h = nd_modemapp_line_h(bottom, y, n_rows);
     for (i = 0u; i < n_rows; i++) {
-        (void)nd_draw_text(ui->draw, 8, y, rows[i].label, ui->font_s, ND_GRAY);
-        (void)nd_draw_text(ui->draw, 70, y, rows[i].value, ui->font_s, ND_WHITE);
+        nd_theme_text(ui->draw, 8, y, rows[i].label, ui->font_s, ND_TH_INK_MUTED,
+                      ND_TH_TEXT_SHADOW);
+        nd_theme_text_light(ui->draw, 70, y, rows[i].value, ui->font_s);
         y += line_h;
     }
 
@@ -423,14 +428,15 @@ void nd_modemapp_draw_page(nd_ui *ui, const nd_modem_status *st, bool linked, in
      * it when the core never answered says the modem is missing on a phone
      * whose modem is fine, which is exactly the bug this app was reported
      * for. */
-    (void)nd_draw_text(ui->draw, 8, bottom - 14,
-                       !linked        ? ND_MODEMAPP_NO_LINK
-                       : st->hardware ? st->port
-                                      : ND_MODEMAPP_SIMULATION,
-                       ui->font_s, ND_GRAY);
+    nd_theme_text(ui->draw, 8, bottom - 14,
+                  !linked        ? ND_MODEMAPP_NO_LINK
+                  : st->hardware ? st->port
+                                 : ND_MODEMAPP_SIMULATION,
+                  ui->font_s, ND_TH_INK_MUTED, ND_TH_TEXT_SHADOW);
     (void)nd_snprintf(pos, sizeof pos, "%d/%d", page + 1, ND_MODEMAPP_N_PAGES);
     nd_ui_text_size(ui, pos, ui->font_s, &tw, &th);
-    (void)nd_draw_text(ui->draw, screen_w - 5 - tw, bottom - 14, pos, ui->font_s, ND_GRAY);
+    nd_theme_text(ui->draw, screen_w - 5 - tw, bottom - 14, pos, ui->font_s, ND_TH_INK_MUTED,
+                  ND_TH_TEXT_SHADOW);
 }
 
 /* ------------------------------------------------------------------ *

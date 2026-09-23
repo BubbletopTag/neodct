@@ -48,6 +48,7 @@
 #include "nd_predictive_priv.h"
 #include "nd_t9.h"
 #include "nd_text.h"
+#include "nd_theme.h"
 #include "nd_timeset.h"
 #include "nd_types.h"
 #include "nd_ui.h"
@@ -165,12 +166,14 @@ void nd_textinput_draw(nd_textinput *t, bool blink_state)
      * PagedList before it painted. */
     nd_ui_paint_chrome_content(ui);
 
-    /* No fit_text: a long title runs off the right edge. Port the bug. */
-    (void)nd_draw_text(d, 5, 5, nz(t->title), ui->font_xl, ND_WHITE);
-    (void)nd_draw_line(d, 0, header_y, screen_w, header_y, ND_WHITE, 1);
+    /* No fit_text: a long title runs off the right edge. Port the bug -- the
+     * plate has an edge to run off now, which makes it more visible than it
+     * was and no more wrong. */
+    (void)nd_theme_titlebar(ui->canvas, d, screen_w, header_y, nz(t->title),
+                            nd_ui_font_bold(ui, ui->font_xl), NULL, NULL);
 
     prompt_y = header_y + 20;
-    (void)nd_draw_text(d, 10, prompt_y, nz(t->prompt), ui->font_n, ND_WHITE);
+    nd_theme_text_light(d, 10, prompt_y, nz(t->prompt), ui->font_n);
     /* No mode indicator on a masked field: a field where every slot takes one
      * digit has no modes, and a pencil in the corner claiming otherwise is a
      * control the user will look for and not find. */
@@ -180,7 +183,24 @@ void nd_textinput_draw(nd_textinput *t, bool blink_state)
     box_y = prompt_y + 30;
     box_h = nd_max32(24, nd_min32(40, content_bottom - box_y - 10));
     box_right = nd_max32(20, screen_w - 10);
-    (void)nd_draw_rect_outline(d, ND_RECT(10, box_y, box_right, box_y + box_h), ND_WHITE, 1);
+    /* ============ THE FIELD IS A WELL, NOT AN OUTLINE ============
+     *
+     * A one-pixel white rectangle is how a monochrome UI says "type here". The
+     * theme says it the way every glossy interface of this period did: a light
+     * plate recessed into the screen, with the shadow at the TOP -- which is
+     * what inverts a raised control into a sunken one, and is the only place
+     * in this OS where the light appears to come from below.
+     *
+     * The box's geometry is untouched, so text_y below still centres on the
+     * same rows and the underline that marks a T9 word still lands under the
+     * same glyphs. */
+    {
+        nd_rect well = ND_RECT(10, box_y, box_right, box_y + box_h);
+
+        nd_theme_round_gradient(ui->canvas, well, 5, ND_TH_GLASS_BOT, ND_TH_GLASS_TOP, 240u);
+        nd_theme_shadow_band(ui->canvas, well.x0 + 2, well.x1 - 2, well.y0 + 1, 3, 120u);
+        nd_theme_round_outline(ui->canvas, well, 5, ND_TH_BLUE_DEEP, 170u);
+    }
 
     /* display_text = self.text + ("_" if blink_state else "") */
     len = nd_strlcpy(display, t->text, sizeof display);
@@ -195,7 +215,8 @@ void nd_textinput_draw(nd_textinput *t, bool blink_state)
      * does not collapse, but the empty string is what gets drawn. */
     nd_ui_text_size(ui, (display[0] != '\0') ? display : "A", ui->font_n, NULL, &text_h);
     text_y = box_y + nd_max32(0, floordiv2(box_h - text_h));
-    (void)nd_draw_text(d, 15, text_y, display, ui->font_n, ND_WHITE);
+    /* Navy on the light well, letterpressed like every other dark label. */
+    nd_theme_text_dark(d, 15, text_y, display, ui->font_n);
 
     /* The underline is measured against the text WITHOUT the cursor. */
     nd_underline_tail(d, 15, text_y, t->text, t->predict.pending_len, ui->font_n);

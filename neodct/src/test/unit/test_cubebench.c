@@ -51,6 +51,7 @@
 #include <unistd.h>
 
 #include "nd_capture.h"
+#include "uifont_test.h"
 #include "nd_draw.h"
 #include "nd_fb.h"
 #include "nd_font.h"
@@ -63,7 +64,7 @@
 
 #include "../../apps/CubeBench/cubebench.h"
 
-#define FONT_REL "overlay/NeoDCT/System/ui/resources/fonts/font.ttf"
+#define FONT_REL ND_TEST_UI_FONT_REL
 
 /* uistub.StubUI's default idle_budget. The 61st poll raises, so 60 frames
  * reach the framebuffer and frames[-1] is the sixtieth. */
@@ -568,6 +569,8 @@ typedef struct {
     nd_font *font_md;
     nd_font *font_n;
     nd_font *font_xl;
+    nd_font *font_n_b;
+    nd_font *font_xl_b;
     nd_capture *cap;
 } fixture;
 
@@ -579,6 +582,19 @@ static bool fx_init(fixture *fx)
     fx->font_md = nd_font_load(g_font, ND_FONT_PX_MD);
     fx->font_n = nd_font_load(g_font, ND_FONT_PX_N);
     fx->font_xl = nd_font_load(g_font, ND_FONT_PX_XL);
+
+    /* The bold pair. Optional -- nd_ui_font_bold() answers the regular
+     * weight for a NULL -- but a fixture that skips it renders every
+     * title a stroke too light and matches no reference frame.
+     * See uifont_test.h. */
+    {
+        char bold[ND_PATH_MAX];
+
+        if (ui_bold_face_path(g_font, bold, sizeof bold)) {
+            fx->font_n_b = nd_font_load(bold, ND_FONT_PX_N);
+            fx->font_xl_b = nd_font_load(bold, ND_FONT_PX_XL);
+        }
+    }
     if (fx->font_s == NULL || fx->font_md == NULL || fx->font_n == NULL || fx->font_xl == NULL) {
         fprintf(stderr, "test_cubebench: nd_font_load(%s) failed\n", g_font);
         return false;
@@ -610,6 +626,8 @@ static bool fx_init(fixture *fx)
     fx->ui.font_md = fx->font_md;
     fx->ui.font_n = fx->font_n;
     fx->ui.font_xl = fx->font_xl;
+    fx->ui.font_n_b = fx->font_n_b;
+    fx->ui.font_xl_b = fx->font_xl_b;
     fx->ui.keypad_fd = -1;
     fx->ui.input = NULL; /* read_keypress(0) returns ND_KEY_NONE at once */
     /* The core's own bar already exists by the time any app runs, so an
@@ -629,6 +647,8 @@ static void fx_free(fixture *fx)
     nd_font_free(fx->font_md);
     nd_font_free(fx->font_n);
     nd_font_free(fx->font_xl);
+    nd_font_free(fx->font_n_b);
+    nd_font_free(fx->font_xl_b);
     memset(fx, 0, sizeof *fx);
 }
 
@@ -699,9 +719,28 @@ static int32_t diff_pixels(const nd_image *got, const char *name, nd_rect *box)
 
     *box = ND_RECT(0, 0, -1, -1);
     (void)snprintf(path, sizeof path, "%.1000s/%.40s.png", g_golden, name);
-    /* nd_image_load_png() resolves through ND_ROOT; the reference set is not
-     * under it, and this test never sets one. */
-    ref = nd_image_load_png(path);
+
+    /* ============ THE ROOT HAS TO COME OFF FIRST ============
+     *
+     * nd_image_load_png() resolves through ND_ROOT, g_golden is an ABSOLUTE
+     * path outside it, and by the time this runs the fixture has pointed
+     * ND_ROOT at a scratch directory. So the open is attempted at
+     * <scratch>/home/.../golden/eng-cubebench.png and fails.
+     *
+     * The comment that used to be here said this test never sets a root. It
+     * does not set one directly -- sa_fx_init() does, and it is still in force
+     * on this path. The bug was invisible for as long as the frame matched
+     * byte-for-byte, because then this function is never called: it only runs
+     * to EXPLAIN a mismatch, and it was answering "cannot read the reference"
+     * instead of the pixel delta it exists to report. */
+    {
+        char saved[ND_PATH_MAX];
+
+        (void)nd_strlcpy(saved, nd_path_root(), sizeof saved);
+        (void)nd_path_set_root(NULL);
+        ref = nd_image_load_png(path);
+        (void)nd_path_set_root(saved[0] != '\0' ? saved : NULL);
+    }
     if (ref == NULL) {
         fprintf(stderr, "test_cubebench: cannot read %s\n", path);
         return -1;
@@ -797,9 +836,19 @@ static void test_golden_frame(void)
             /* A tolerance is a budget, not an excuse: OPEN-QUESTIONS.md. */
             CHECK(n <= ND_CUBEBENCH_PIXEL_CAP, "eng-cubebench within the libm tolerance budget");
         }
-        /* Leave the frame where a human can look at it. */
-        (void)nd_capture_save(fx.cap, "eng-cubebench", frame);
-        (void)nd_capture_write_manifest(fx.cap);
+        /* Leave the frame where a human can look at it -- with the root off,
+         * for the reason diff_pixels() gives above. g_outdir is absolute and
+         * outside ND_ROOT too, so this was writing nothing and reporting a
+         * directory that came out empty. */
+        {
+            char saved[ND_PATH_MAX];
+
+            (void)nd_strlcpy(saved, nd_path_root(), sizeof saved);
+            (void)nd_path_set_root(NULL);
+            (void)nd_capture_save(fx.cap, "eng-cubebench", frame);
+            (void)nd_capture_write_manifest(fx.cap);
+            (void)nd_path_set_root(saved[0] != '\0' ? saved : NULL);
+        }
         fprintf(stderr, "test_cubebench: rendered frame written to %s\n", g_outdir);
     }
 

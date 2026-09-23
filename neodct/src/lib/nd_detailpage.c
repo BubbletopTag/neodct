@@ -61,6 +61,7 @@
 #include "nd_keycodes.h"
 #include "nd_log.h"
 #include "nd_text.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_widgets.h"
@@ -546,7 +547,7 @@ static void paint_hero(nd_detailpage *p, nd_image *col, nd_draw *cd, int32_t y)
 
     row_y = y + 3 + floordiv2(hero.inner - hero.stack_h);
     for (i = 0u; i < hero.n_rows; i++) {
-        (void)nd_draw_text(cd, hero.text_x, row_y, hero.rows[i].text, hero.rows[i].font, ND_WHITE);
+        nd_theme_text_light(cd, hero.text_x, row_y, hero.rows[i].text, hero.rows[i].font);
         row_y += hero.rows[i].h;
     }
 }
@@ -561,14 +562,29 @@ static void draw_scrollbar(nd_detailpage *p)
     int32_t max_off = nd_detailpage_max_offset(p);
     int32_t position;
 
-    /* width 2 grows in the MINOR AXIS ONLY: columns 235 and 236, not 234-236. */
-    (void)nd_draw_line(d, x, top, x, base, ND_WHITE, 2);
+    /* This is the one scrollbar in the OS that is NOT indexed by item -- it
+     * rides a pixel offset -- so it cannot go through nd_theme_scrollbar(),
+     * which takes a position and a count. The trough and thumb are built here
+     * from the same pieces, at the same x and the same extent as the white
+     * width-2 line they replace, and the thumb keeps its fixed 10 px height
+     * and its truncating position arithmetic. */
+    nd_theme_round_fill(p->ui->canvas, ND_RECT(x - 2, top, x + 2, base), 2, ND_TH_BLUE_DEEP, 90u);
+    nd_theme_round_outline(p->ui->canvas, ND_RECT(x - 2, top, x + 2, base), 2, ND_TH_CHROME_HI,
+                           60u);
 
     /* `max_offset or 1` -- Python's guard for a page that is not scrollable,
      * which cannot reach here anyway. The division is float, then int(). */
     position = top + nd_trunc32((double)travel *
                                 ((double)p->offset / (double)((max_off != 0) ? max_off : 1)));
-    (void)nd_draw_rect_fill(d, ND_RECT(x - 3, position, x + 3, position + 10), ND_WHITE);
+    {
+        nd_theme_plate thumb = nd_theme_plate_blue(2);
+
+        thumb.drop_shadow = false;
+        thumb.top = ND_TH_BLUE_HI;
+        thumb.bot = ND_TH_BLUE_MID;
+        nd_theme_plate_draw(p->ui->canvas, ND_RECT(x - 2, position, x + 2, position + 10), &thumb);
+    }
+    (void)d;
 }
 
 void nd_detailpage_draw(nd_detailpage *p)
@@ -601,9 +617,8 @@ void nd_detailpage_draw(nd_detailpage *p)
 
         nd_text_size(font_small, "Ag", NULL, &small_h);
         divider_y = (4 + small_h) + 5;
-        (void)nd_draw_text(d, ND_DETAIL_MARGIN, 4, p->header, font_small, ND_WHITE);
-        (void)nd_draw_line(d, ND_DETAIL_MARGIN, divider_y, width - ND_DETAIL_MARGIN, divider_y,
-                           ND_WHITE, 1);
+        nd_theme_text_light(d, ND_DETAIL_MARGIN, 4, p->header, nd_ui_font_bold(ui, font_small));
+        nd_theme_divider(ui->canvas, ND_DETAIL_MARGIN, width - ND_DETAIL_MARGIN, divider_y, 190u);
     }
 
     /* The column is painted into its own surface and pasted, so scrolled text
@@ -623,12 +638,23 @@ void nd_detailpage_draw(nd_detailpage *p)
      * and the seam would be obvious against the header above it. */
     {
         const nd_image *paper = nd_ui_chrome_wallpaper(ui);
+        nd_rect all = ND_RECT(0, 0, col->w - 1, vh - 1);
 
         if (paper != NULL)
             (void)nd_image_blit_region(
                 col, paper, ND_RECT(0, p->viewport.y0, col->w - 1, p->viewport.y0 + vh - 1), 0, 0);
         else
-            (void)nd_draw_rect_fill(&col_draw, ND_RECT(0, 0, col->w, vh - 1), ND_BLACK);
+            nd_theme_gradient_v_ramped(col, all, -p->viewport.y0,
+                                       nd_ui_height(ui) - 1 - p->viewport.y0, ND_TH_SKY_TOP,
+                                       ND_TH_SKY_BOT, 255u);
+
+        /* And the scrim the rest of the OS gets, in the COLUMN'S coordinates:
+         * the column is pasted at viewport.y0, so its row 0 is the panel's row
+         * viewport.y0 and the ramp has to be shifted back by exactly that.
+         * Getting this wrong is not subtle -- the scrim restarts halfway down
+         * the screen and draws a band across it. */
+        nd_theme_scrim(col, all, -p->viewport.y0, nd_ui_content_bottom(ui) - p->viewport.y0,
+                       ND_TH_SCRIM_TOP_A, 0u);
     }
 
     /* A page that fits is centred: a few words pinned to the top of an
@@ -652,11 +678,11 @@ void nd_detailpage_draw(nd_detailpage *p)
                     paste_image(col, p->image, b->x, y);
                 break;
             case ND_BLOCK_RULE:
-                (void)nd_draw_line(&col_draw, ND_DETAIL_MARGIN * 3, y + 4,
-                                   width - ND_DETAIL_MARGIN * 3, y + 4, ND_WHITE, 1);
+                nd_theme_divider(col, ND_DETAIL_MARGIN * 3, width - ND_DETAIL_MARGIN * 3, y + 4,
+                                 170u);
                 break;
             case ND_BLOCK_TEXT:
-                (void)nd_draw_text(&col_draw, b->x, y, b->text, b->font, ND_WHITE);
+                nd_theme_text_light(&col_draw, b->x, y, b->text, b->font);
                 break;
             case ND_BLOCK_GAP:
             default:

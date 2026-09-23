@@ -76,6 +76,23 @@ extern "C" {
 #define ND_PATH_CARD_DIR      "/NeoDCT/User/sdcard"
 #define ND_PATH_USER_APPS_DIR "/NeoDCT/User/sdcard/apps"
 
+/* ============ AND WHERE A THEME LIVES ============
+ *
+ * The same split, for the same reasons. Built-in themes are part of the
+ * signed read-only image; installed ones are on the card beside apps/,
+ * because a theme is removable media by nature too and because the user
+ * partition is eight megabytes it needs for databases.
+ *
+ * The difference from apps/ is that NOTHING HERE IS EXECUTED. A theme is
+ * JSON, PNGs and a TTF -- data the UI reads, never code the phone runs -- so
+ * the confinement argument above simply does not apply to it, and a theme on
+ * a card a stranger wrote can at worst make the phone ugly or, if its font is
+ * corrupt, make text fail to draw. FreeType is the only parser that sees
+ * anything from here that is not a picture, and it sees the same file whether
+ * it came from a card or the image. */
+#define ND_PATH_THEMES_DIR      "/NeoDCT/System/themes"
+#define ND_PATH_USER_THEMES_DIR "/NeoDCT/User/sdcard/themes"
+
 /* ============ THE NOTE THE INSTALLER LEAVES ============
  *
  * A counter, bumped by nd_nap_install(), that says "the set of installed apps
@@ -143,15 +160,30 @@ unsigned long nd_appgen_value(void);
  * nothing in neodct/initramfs/ asks the question -- see the block above the
  * heredoc in post-build-system-metadata.sh for why that is settled rather
  * than pending. */
-#define ND_PATH_PLATFORM      "/NeoDCT/platform"
-#define ND_PATH_DISPLAYD      "/NeoDCT/System/hw/neodct_displayd"
+#define ND_PATH_PLATFORM "/NeoDCT/platform"
+#define ND_PATH_DISPLAYD "/NeoDCT/System/hw/neodct_displayd"
 /* The SD-card helper. Lives here rather than in settings_app.h because the
  * CORE runs it now: formatting a card is a verb on the service socket
  * (nd_svc.h), and the app that used to spawn it can no longer spawn
  * anything. settings_app.h still names it, pointing at this. */
 #define ND_PATH_SDCARD_HELPER "/NeoDCT/System/hw/neodct-sdcard"
 
+/* TWO TYPEFACES, AND THEY ARE NOT INTERCHANGEABLE.
+ *
+ * ND_PATH_FONT is Nokia Cellphone FC, the original pixel face. It is pinned
+ * BY SHA-256 in neodct/tests/golden/font/fontref.json -- that file is the
+ * evidence the C FreeType path renders what Pillow rendered -- and the
+ * initramfs boot bar's 1-bit glyph tables are baked out of it by
+ * gen_bootfont. Changing it invalidates both. It is still what nd_panic and
+ * the boot bar draw with, where a pixel face is the right answer anyway.
+ *
+ * ND_PATH_UI_FONT is what the UI draws with: a Latin subset of Liberation
+ * Sans, renamed per SIL OFL (see the LICENSE beside it and mkuifont.py).
+ * The chrome in nd_theme.c is glass and gradients, and a face with hard
+ * 90-degree corners fights a surface that is trying to look wet. */
 #define ND_PATH_FONT             "/NeoDCT/System/ui/resources/fonts/font.ttf"
+#define ND_PATH_UI_FONT          "/NeoDCT/System/ui/resources/fonts/aero.ttf"
+#define ND_PATH_UI_FONT_BOLD     "/NeoDCT/System/ui/resources/fonts/aero-bold.ttf"
 #define ND_PATH_HOME_LAYOUT      "/NeoDCT/System/ui/resources/ui_home.json"
 #define ND_PATH_ENVELOPE         "/NeoDCT/System/ui/resources/img/envelope.png"
 #define ND_PATH_CRASH_IMAGE      "/NeoDCT/System/ui/resources/CRASH.jpg"

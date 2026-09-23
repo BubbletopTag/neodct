@@ -78,6 +78,7 @@
 #include "nd_storage.h"
 #include "nd_svc.h"
 #include "nd_text.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_ui_sim.h"
@@ -419,11 +420,30 @@ static const char *clean_image_path(const char *path, char *buf, size_t buf_sz)
 static const nd_image *ui_get_image(nd_ui *ui, const char *path, int32_t max_size, double scale)
 {
     char clean[ND_PATH_MAX];
+    char themed[ND_PATH_MAX];
     const char *use;
 
     if (ui == NULL || ui->image_cache == NULL || path == NULL)
         return NULL;
     use = clean_image_path(path, clean, sizeof clean);
+
+    /* ============ THE ONE PLACE A THEME REPLACES A PICTURE ============
+     *
+     * Every image the interface draws arrives here: app icons, the status
+     * sprites named in ui_home.json, the envelope, the placeholder, the
+     * engineering tile. So the theme override is one call in one function
+     * rather than a resolve at each of the twenty call sites -- and, more to
+     * the point, an app icon that did not exist when the theme was written
+     * gets themed anyway, because the lookup happens when the icon is opened
+     * rather than when the theme is installed.
+     *
+     * Below the cache deliberately: the themed path is what gets cached, so a
+     * hit costs nothing extra and switching theme changes the key rather than
+     * needing the cache flushed. nd_theme_resource() leaves `themed` usable
+     * whatever happens, so the false branch is not an error path. */
+    if (nd_theme_resource(use, themed, sizeof themed))
+        use = themed;
+
     return nd_imgcache_get(ui->image_cache, use, max_size, scale);
 }
 
@@ -446,10 +466,39 @@ const nd_image *nd_ui_get_image_scaled(nd_ui *ui, const char *path, double scale
  * Wallpaper
  * ------------------------------------------------------------------ */
 
+/* ============ WHY THE WALLPAPER IS NO LONGER DIMMED TO 30% ============
+ *
+ * The Python dimmed every wallpaper to 30% brightness, and it had to: the
+ * whole UI was white type drawn straight onto the picture with nothing behind
+ * it, so the only way to keep "Memory card" legible over a photograph was to
+ * throw away two thirds of the photograph.
+ *
+ * The theme pays for legibility a different way. Type carries a shadow
+ * (nd_theme.h, idea 4), content sits on glass plates, and the chrome painter
+ * lays a graded scrim under the rows that hold text. All three are local: they
+ * darken what is behind the letters and leave the rest of the picture alone.
+ * So the global dim can come most of the way back up, and a Frutiger Aero
+ * wallpaper -- which is a bright sky with a lot of light in it -- can actually
+ * look like one.
+ *
+ * 0.88 rather than 1.0 because a picture at full brightness still competes
+ * with the icons in front of it; this is the value at which the shipped
+ * wallpapers stop pulling the eye off the menu. Compared at 0.78, 0.88 and
+ * 0.95 against the shipped default: at 0.78 the sky reads as overcast, at
+ * 0.95 the bright bloom on its left swallows a list row. It is applied
+ * identically to a still and to every frame of an animation, which is what
+ * these two functions exist to guarantee. */
+/* The dim is the ACTIVE THEME's, not a constant -- see nd_theme_style's
+ * wallpaper_dim for why one number cannot serve both a scrimmed and an
+ * unscrimmed look. The macro name stays so the two call sites below read as
+ * they always did. */
+#define ND_UI_WALLPAPER_BRIGHTNESS ((double)ND_TH_WALLPAPER_DIM / 100.0)
+
 /* Everything that turns a decoded picture into a wallpaper: to RGB888, to the
- * panel's size with LANCZOS, then down to 30% brightness. Takes ownership of
- * `img` either way, so the two callers -- a still file and one frame of an
- * animation -- cannot disagree about what a wallpaper looks like. */
+ * panel's size with LANCZOS, then to ND_UI_WALLPAPER_BRIGHTNESS. Takes
+ * ownership of `img` either way, so the two callers -- a still file and one
+ * frame of an animation -- cannot disagree about what a wallpaper looks
+ * like. */
 static nd_image *wallpaper_from_image(nd_image *img)
 {
     nd_image *rgb;
@@ -472,9 +521,9 @@ static nd_image *wallpaper_from_image(nd_image *img)
         scaled = rgb;
     }
 
-    /* ImageEnhance.Brightness(img).enhance(0.3) -- TRUNCATING, per
+    /* ImageEnhance.Brightness(img).enhance(f) -- TRUNCATING, per
      * nd_image.h's formula (b). Rounding mismatches 128 of 256 values. */
-    if (nd_image_brightness(scaled, 0.3) != ND_OK) {
+    if (nd_image_brightness(scaled, ND_UI_WALLPAPER_BRIGHTNESS) != ND_OK) {
         nd_image_free(scaled);
         return NULL;
     }
@@ -535,7 +584,7 @@ static bool wallpaper_paint_frame(nd_image *dst, const nd_image *frame)
             return false;
     }
 
-    return nd_image_brightness(dst, 0.3) == ND_OK;
+    return nd_image_brightness(dst, ND_UI_WALLPAPER_BRIGHTNESS) == ND_OK;
 }
 
 /* owned by the caller; free with nd_image_free() */
@@ -1285,11 +1334,20 @@ static void chrome_settings_load(nd_ui *ui)
                           : nd_settings_get(ND_SET_UI_WP_EVERYWHERE, ND_SET_UI_WP_EVERYWHERE_DFLT),
         true);
 
-    raw = getenv(ND_ENV_UI_WP_DIM);
-    if (raw == NULL)
-        raw = nd_settings_get(ND_SET_UI_WP_APP_DIM, ND_SET_UI_WP_APP_DIM_DFLT);
-    if (raw == NULL)
-        raw = ND_SET_UI_WP_APP_DIM_DFLT;
+    /* The THEME supplies the default and the setting overrides it, so an
+     * owner who has never touched this gets what their theme intends and one
+     * who has tuned it keeps their number across a theme change. */
+    {
+        char dflt[16];
+
+        (void)nd_snprintf(dflt, sizeof dflt, "%u.%02u", ND_TH_APP_WALLPAPER_DIM / 100u,
+                          ND_TH_APP_WALLPAPER_DIM % 100u);
+        raw = getenv(ND_ENV_UI_WP_DIM);
+        if (raw == NULL)
+            raw = nd_settings_get(ND_SET_UI_WP_APP_DIM, dflt);
+        if (raw == NULL)
+            raw = ND_SET_UI_WP_APP_DIM_DFLT;
+    }
     v = strtod(raw, &end);
     /* strtod says "nothing consumed" by leaving end where it started. A value
      * outside [0,1] is a typo rather than a preference -- 0 is a black screen
@@ -1373,26 +1431,57 @@ const nd_image *nd_ui_chrome_wallpaper(nd_ui *ui)
     return ui->home_.chrome;
 }
 
+/* THE BACKGROUND OF EVERY SCREEN IN THE OS, and therefore the one place
+ * worth spending the theme's budget.
+ *
+ * Three layers, in order:
+ *
+ *  1. THE GROUND. The wallpaper's own rows, or -- when there is none -- an
+ *     aero sky, a pale-blue-to-deep-blue vertical gradient across the whole
+ *     panel. It used to be a black fill, and black is the one colour this
+ *     theme has nothing to say in: a glass plate over black reads as a grey
+ *     box. The gradient is computed against the FULL PANEL rather than the
+ *     rectangle being painted, so a widget clearing rows 0..144 gets the top
+ *     five sixths of the same sky the softkey strip below it is standing on,
+ *     and there is no seam where the two meet.
+ *
+ *  2. THE SCRIM. A graded darkening under the rows that hold text. This is
+ *     what replaced dimming the whole wallpaper to 30% (see
+ *     ND_UI_WALLPAPER_BRIGHTNESS): it is strongest at the top, where a
+ *     title's descenders land, and fades out entirely by the bottom of the
+ *     content area, so a bright picture stays bright everywhere the UI is not
+ *     actually writing on it.
+ *
+ *  3. NOTHING ELSE. Plates, panels and lozenges are the widgets' business.
+ *     This function's contract has not changed: it paints a background into
+ *     the given rectangle and draws no furniture, which is what lets a
+ *     partial clear stay partial (nd_widgets.h rule 1). */
 void nd_ui_paint_chrome(nd_ui *ui, nd_rect r)
 {
     const nd_image *paper;
+    int32_t h;
 
-    /* Both, because the two branches below use different ones: the black
-     * fill goes through the draw context and the wallpaper goes straight at
-     * the canvas the draw context is bound to. */
     if (ui == NULL || ui->draw == NULL || ui->canvas == NULL)
         return;
 
+    h = nd_ui_height(ui);
     paper = nd_ui_chrome_wallpaper(ui);
-    if (paper == NULL) {
-        (void)nd_draw_rect_fill(ui->draw, r, ND_BLACK);
-        return;
+
+    if (paper != NULL) {
+        /* The REGION, not the whole picture. A widget clearing rows 0..144
+         * gets the wallpaper's rows 0..144, so the softkey strip below it
+         * still lines up with the photograph above it. */
+        (void)nd_image_blit_region(ui->canvas, paper, r, r.x0, r.y0);
+    } else {
+        /* Painted into r, ramped over the panel. Both halves matter: the
+         * first keeps a partial clear partial, the second keeps row 144 the
+         * same colour whether the caller cleared to 145 or to 175. */
+        nd_theme_gradient_v_ramped(ui->canvas, r, 0, h - 1, ND_TH_SKY_TOP, ND_TH_SKY_BOT, 255u);
     }
 
-    /* The REGION, not the whole picture. A widget clearing rows 0..144 gets
-     * the wallpaper's rows 0..144, so the softkey strip below it still lines
-     * up with the photograph above it. */
-    (void)nd_image_blit_region(ui->canvas, paper, r, r.x0, r.y0);
+    /* And the scrim, on the same terms and for the same reason. */
+    nd_theme_scrim(ui->canvas, r, 0, nd_ui_content_bottom(ui), ND_TH_SCRIM_TOP_A,
+                   ND_TH_SCRIM_BOT_A);
 }
 
 /* The two rectangles the call sites actually pass, spelled the way they spell
@@ -1853,20 +1942,96 @@ static nd_err ui_build_surfaces(nd_ui *ui, nd_fb *fb)
     return ND_OK;
 }
 
+/* The UI face, falling back to the pixel face.
+ *
+ * The fallback is not defensive padding: an image built before aero.ttf
+ * existed, or one whose overlay was assembled by hand, still has font.ttf and
+ * a phone that boots to a readable menu in the old typeface is enormously
+ * better than one whose every text draw is a no-op. The log line says which
+ * of the two happened, because "the theme looks wrong" and "the font is
+ * missing" are otherwise the same bug report. */
+static void ui_font_paths(char *ui_face, size_t ui_sz, char *bold, size_t bold_sz)
+{
+    /* nd_font_load() takes a REAL filesystem path -- the same split
+     * nd_t9_dict_open() uses, so the ND_ROOT hook is applied by the caller
+     * that owns the constant. See I-8 in OPEN-QUESTIONS.md.
+     *
+     * The existence test takes the VIRTUAL path, because nd_path_is_file()
+     * resolves ND_ROOT itself (nd_paths.h: "cheap existence tests,
+     * ND_ROOT-resolved"). Handing it the already-resolved buffer applies the
+     * root twice and every probe answers no -- which presents as the theme
+     * silently rendering in the old pixel face, since the fallback below is
+     * doing exactly what it was asked to. */
+    /* THE THEME GETS FIRST REFUSAL, and it is asked here rather than at
+     * nd_font_load() because this function already owns the "which file is
+     * the UI face" question -- the fallback to font.ttf below is the same
+     * decision. A theme that ships no face resolves to the system one and
+     * nothing downstream can tell the difference.
+     *
+     * nd_theme_resource() answers a VIRTUAL path, which is what the existence
+     * test wants; the resolve to a real path happens after, as before. */
+    char want[ND_PATH_MAX];
+
+    /* THE PIXEL FACE IS A THEME'S CHOICE TOO.
+     *
+     * The classic look is not the glass look recoloured -- it is Nokia
+     * Cellphone FC, and drawing it in a rounded sans is the single thing that
+     * would stop it reading as the phone it imitates. So a theme with
+     * style.pixel_font gets font.ttf, which is the face the boot bar and
+     * nd_panic already use.
+     *
+     * A theme that ships its own fonts/ui.ttf still wins: nd_theme_resource()
+     * is asked first and answers with the theme's file when there is one, so
+     * "pixel font unless I brought my own" falls out without a third case. */
+    if (ND_TH_PIXEL_FONT && !nd_theme_active()->has_font) {
+        if (nd_path_resolve(ui_face, ui_sz, ND_PATH_FONT) != ND_OK)
+            ui_face[0] = '\0';
+        if (!nd_theme_active()->has_font_bold) {
+            /* The pixel face has one weight. nd_ui_font_bold() answers the
+             * regular for a NULL, so emphasis simply stops existing -- which
+             * is what the classic look does. */
+            bold[0] = '\0';
+            return;
+        }
+        (void)nd_theme_resource(ND_PATH_UI_FONT_BOLD, want, sizeof want);
+        if (!nd_path_is_file(want) || nd_path_resolve(bold, bold_sz, want) != ND_OK)
+            bold[0] = '\0';
+        return;
+    }
+
+    (void)nd_theme_resource(ND_PATH_UI_FONT, want, sizeof want);
+    if (!nd_path_is_file(want) || nd_path_resolve(ui_face, ui_sz, want) != ND_OK) {
+        if (nd_path_resolve(ui_face, ui_sz, ND_PATH_FONT) != ND_OK)
+            ui_face[0] = '\0';
+        else
+            nd_log(ND_LOG_UI, "No UI face; falling back to font.ttf.");
+    }
+    (void)nd_theme_resource(ND_PATH_UI_FONT_BOLD, want, sizeof want);
+    if (!nd_path_is_file(want) || nd_path_resolve(bold, bold_sz, want) != ND_OK)
+        bold[0] = '\0';
+}
+
 static void ui_load_fonts(nd_ui *ui)
 {
     char font[ND_PATH_MAX];
+    char bold[ND_PATH_MAX];
 
-    /* nd_font_load() takes a REAL filesystem path -- the same split
-     * nd_t9_dict_open() uses, so the ND_ROOT hook is applied by the caller
-     * that owns the constant. See I-8 in OPEN-QUESTIONS.md. */
-    if (nd_path_resolve(font, sizeof font, ND_PATH_FONT) != ND_OK)
-        font[0] = '\0';
+    ui_font_paths(font, sizeof font, bold, sizeof bold);
 
     ui->font_s = nd_font_load(font, ND_FONT_PX_S);
     ui->font_md = nd_font_load(font, ND_FONT_PX_MD);
     ui->font_n = nd_font_load(font, ND_FONT_PX_N);
     ui->font_xl = nd_font_load(font, ND_FONT_PX_XL);
+
+    /* The bold pair is OPTIONAL and its failure is not the regular faces'
+     * failure -- nd_ui_font_bold() answers the regular weight for a NULL, so
+     * a phone without it loses emphasis and nothing else. Loading it inside
+     * the all-four success test below would throw away four working faces
+     * because a fifth file was absent. */
+    if (bold[0] != '\0') {
+        ui->font_n_b = nd_font_load(bold, ND_FONT_PX_N);
+        ui->font_xl_b = nd_font_load(bold, ND_FONT_PX_XL);
+    }
 
     if (ui->font_s != NULL && ui->font_md != NULL && ui->font_n != NULL && ui->font_xl != NULL) {
         nd_log(ND_LOG_UI, "Custom font loaded.");
@@ -1881,10 +2046,28 @@ static void ui_load_fonts(nd_ui *ui)
     nd_font_free(ui->font_md);
     nd_font_free(ui->font_n);
     nd_font_free(ui->font_xl);
+    nd_font_free(ui->font_n_b);
+    nd_font_free(ui->font_xl_b);
     ui->font_s = NULL;
     ui->font_md = NULL;
     ui->font_n = NULL;
     ui->font_xl = NULL;
+    ui->font_n_b = NULL;
+    ui->font_xl_b = NULL;
+}
+
+const nd_font *nd_ui_font_bold(const nd_ui *ui, const nd_font *f)
+{
+    if (ui == NULL || f == NULL)
+        return f;
+    /* By identity, not by size: an app may hold a face the core did not load,
+     * and answering "the 24 px bold" for it would silently change the
+     * typeface under the caller. */
+    if (f == ui->font_xl && ui->font_xl_b != NULL)
+        return ui->font_xl_b;
+    if (f == ui->font_n && ui->font_n_b != NULL)
+        return ui->font_n_b;
+    return f;
 }
 
 /* Steps 5, 9, 10, 11, 12, 14, 15, 16, 17, 18 -- everything both the core and
@@ -1956,7 +2139,18 @@ static nd_err ui_common_init(nd_ui *ui, nd_fb *fb)
     /* --- step 11 --- */
     ui->state = ND_UI_STATE_HOME;
 
-    /* --- step 12 --- */
+    /* --- step 12 --- *
+     *
+     * THE THEME IS LOADED BEFORE THE FONTS, and the order is load-bearing:
+     * ui_load_fonts() asks nd_theme_resource() which face to open, and a
+     * theme applied after this point would leave the phone drawing a pink
+     * interface in the stock typeface until something restarted it.
+     *
+     * Every process does this, the core and each app alike -- see the note in
+     * nd_theme.h about why the active theme is process-local rather than
+     * shared. It costs one settings read and, when a theme is set, one JSON
+     * parse of a file measured in hundreds of bytes. */
+    nd_theme_load_active();
     ui_load_fonts(ui);
     nd_bench_mark("ui_common: 4 faces");
 
@@ -2192,10 +2386,14 @@ void nd_ui_teardown(nd_ui *ui)
     nd_font_free(ui->font_md);
     nd_font_free(ui->font_n);
     nd_font_free(ui->font_xl);
+    nd_font_free(ui->font_n_b);
+    nd_font_free(ui->font_xl_b);
     ui->font_s = NULL;
     ui->font_md = NULL;
     ui->font_n = NULL;
     ui->font_xl = NULL;
+    ui->font_n_b = NULL;
+    ui->font_xl_b = NULL;
 
     nd_image_free(ui->scratch);
     ui->scratch = NULL;
@@ -2952,11 +3150,43 @@ void nd_ui_render_home(nd_ui *ui)
 
         lines[0] = l1;
         lines[1] = l2;
+
+        /* The banner gets a plate for the same reason the carrier line does,
+         * and more so: it is the most urgent thing the home screen ever says,
+         * it appears over whatever picture the owner chose, and it is the one
+         * message that must be readable at a glance from across a room.
+         *
+         * Sized to the WIDER of the two lines and to however many there
+         * actually are, so a one-line reminder does not get a two-line
+         * capsule. max_w still bounds the text, so the plate cannot reach the
+         * signal meter either. */
+        {
+            int32_t widest = 0;
+            size_t k;
+
+            for (k = 0u; k < n && k < 2u; k++) {
+                char fitted[ND_TEXT_LINE_MAX];
+                int32_t lw = 0;
+
+                (void)nd_text_ellipsize(fitted, sizeof fitted, lines[k], ui->font_n, max_w);
+                nd_ui_text_size(ui, fitted, ui->font_n, &lw, NULL);
+                widest = nd_max32(widest, lw);
+            }
+            if (widest > 0) {
+                nd_theme_plate p = nd_theme_plate_glass(8);
+                int32_t rows = (int32_t)nd_min32(2, (int32_t)n);
+
+                nd_theme_plate_draw(ui->canvas,
+                                    ND_RECT(30 - 8, y - 4, 30 + widest + 7, y + rows * 24 + 1), &p);
+            }
+        }
+
         for (i = 0u; i < n && i < 2u; i++) {
             char fitted[ND_TEXT_LINE_MAX];
 
             (void)nd_text_ellipsize(fitted, sizeof fitted, lines[i], ui->font_n, max_w);
-            (void)nd_draw_text(ui->draw, 30, y, fitted, ui->font_n, ND_WHITE);
+            nd_theme_text_dark(ui->draw, 30, y, fitted,
+                               i == 0u ? nd_ui_font_bold(ui, ui->font_n) : ui->font_n);
             y += 24;
         }
     }

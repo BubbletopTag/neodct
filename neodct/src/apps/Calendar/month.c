@@ -49,6 +49,7 @@
 #include "nd_font.h"
 #include "nd_keycodes.h"
 #include "nd_text.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
@@ -194,7 +195,10 @@ static void draw_centred(nd_draw *d, const nd_font *f, const char *text, int32_t
     int32_t tw = 0;
 
     nd_text_size(f, text, &tw, NULL);
-    (void)nd_draw_text(d, x0 + nd_max32(0, (box_w - tw) / 2), y, text, f, c);
+    /* Through the theme, so a digit in the grid carries the same shadow as
+     * every other label in the OS -- without it the numbers sit flat on the
+     * wallpaper and the grid reads as a screenshot pasted over a photograph. */
+    nd_theme_text(d, x0 + nd_max32(0, (box_w - tw) / 2), y, text, f, c, ND_TH_TEXT_SHADOW);
 }
 
 void nd_cal_month_draw(nd_ui *ui, int32_t year, int32_t month, int32_t day, uint32_t mask)
@@ -267,21 +271,23 @@ void nd_cal_month_draw(nd_ui *ui, int32_t year, int32_t month, int32_t day, uint
         if (n_ladder == 0u)
             ladder[n_ladder++] = small;
 
-        (void)nd_draw_text(d, 5, 0, title,
-                           nd_fit_font(title, g.screen_w - 5 - reserved - 6, ladder, n_ladder),
-                           ND_WHITE);
+        /* The plate takes the fitted face, not font_xl: twelve month names of
+         * which four do not fit is exactly the case nd_fit_font exists for,
+         * and handing nd_theme_titlebar the unfitted face would put
+         * "September 2..." back. */
+        const nd_font *tf = nd_fit_font(title, g.screen_w - 5 - reserved - 6, ladder, n_ladder);
+
+        (void)nd_theme_titlebar(ui->canvas, d, g.screen_w, g.header_y, title,
+                                nd_ui_font_bold(ui, tf), NULL, NULL);
     }
-    nd_header_draw(&header, -1);
+    (void)header;
 
-    /* 3. Divider. */
-    (void)nd_draw_line(d, 0, g.header_y, g.screen_w, g.header_y, ND_WHITE, 1);
-
-    /* 4. M T W T F S S, in grey, because they are a label for the grid and
-     *    not part of it -- the same grey the one scrollbar track in the
-     *    framework is drawn in. */
+    /* 4. M T W T F S S. They are a label for the grid and not part of it, and
+     *    they used to say so in the framework's one grey; pale sky blue is
+     *    the same demotion in a palette that has one. */
     for (i = 0; i < ND_CAL_GRID_COLS; i++) {
         draw_centred(d, small, nd_cal_weekday_initials[i], g.grid_x + i * g.cell_w, g.cell_w,
-                     g.weekday_y, ND_GRAY);
+                     g.weekday_y, ND_TH_SKY_TOP);
     }
 
     /* 5. The cells.
@@ -318,17 +324,22 @@ void nd_cal_month_draw(nd_ui *ui, int32_t year, int32_t month, int32_t day, uint
         (void)nd_snprintf(label, sizeof label, "%d", (int)cell->day);
 
         if (is_selected) {
-            /* White with black text, which is what a selected row looks like
-             * everywhere else in this OS. */
-            (void)nd_draw_rect_fill(d, box, ND_WHITE);
-            ink = ND_BLACK;
+            /* The glossy lozenge a selected row is everywhere else in this OS,
+             * at cell size. The box is unchanged, so the digit still centres
+             * on the same rows and the event marker below it still has its
+             * own clear row. */
+            nd_theme_plate p = nd_theme_plate_blue(3);
+
+            p.drop_shadow = false;
+            nd_theme_plate_draw(ui->canvas, box, &p);
+            ink = ND_TH_INK_LIGHT;
         } else {
             if (is_today)
-                (void)nd_draw_rect_outline(d, box, ND_WHITE, 1);
-            /* A neighbouring month's days are context, not choices. Grey says
-             * that without leaving a hole in the grid, which is what blanking
-             * them would do. */
-            ink = cell->in_month ? ND_WHITE : ND_GRAY;
+                nd_theme_round_outline(ui->canvas, box, 3, ND_TH_CHROME_HI, 220u);
+            /* A neighbouring month's days are context, not choices. The muted
+             * ink says that without leaving a hole in the grid, which is what
+             * blanking them would do. */
+            ink = cell->in_month ? ND_TH_INK_LIGHT : ND_TH_INK_MUTED;
         }
 
         nd_text_size(small, label, NULL, &text_h);
@@ -338,8 +349,13 @@ void nd_cal_month_draw(nd_ui *ui, int32_t year, int32_t month, int32_t day, uint
             int32_t bar_w = nd_min32(14, g.cell_w - 8);
             int32_t bx = x0 + (g.cell_w - bar_w) / 2;
 
-            (void)nd_draw_rect_fill(
-                d, ND_RECT(bx, y0 + g.cell_h - 1, bx + bar_w - 1, y0 + g.cell_h - 1), ND_WHITE);
+            /* Green: this is the "something is on" marker, and it stays green
+             * under the selection lozenge as well as beside it -- it is not
+             * part of the selection, which is the whole reason it lives
+             * outside the box. */
+            nd_theme_fill(ui->canvas,
+                          ND_RECT(bx, y0 + g.cell_h - 1, bx + bar_w - 1, y0 + g.cell_h - 1),
+                          ND_TH_GREEN_TOP, 255u);
         }
     }
 

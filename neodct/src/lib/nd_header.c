@@ -24,6 +24,7 @@
 
 #include "nd_draw.h"
 #include "nd_font.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_widgets.h"
@@ -85,6 +86,28 @@ void nd_header_draw(const nd_header *h, int32_t sub_index)
 
     nd_header_text_for(h, sub_index, text, sizeof text);
     nd_text_size(h->ui->font_n, text, &w, NULL);
-    /* y = 5, unlike the list title beside it, which sits at y = 0. */
-    (void)nd_draw_text(h->ui->draw, nd_ui_width(h->ui) - 5 - w, 5, text, h->ui->font_n, ND_WHITE);
+    /* y = 5, unlike the list title beside it, which sits at y = 0.
+     *
+     * VerticalList, PagedList and the AppSelector all pass their breadcrumb to
+     * nd_theme_titlebar() as a badge now, so this draws for nobody in the
+     * stock OS -- it is kept because it is public API in nd_widgets.h and an
+     * app may still construct a header of its own. It carries the theme's
+     * shadow so that if one does, it does not come out flat beside chrome
+     * that is not. */
+    nd_theme_text_light(h->ui->draw, nd_ui_width(h->ui) - 5 - w, 5, text, h->ui->font_n);
+}
+
+int32_t nd_header_bar(const nd_header *h, const char *title, int32_t sub_index)
+{
+    char badge[32];
+    int32_t bar_h;
+
+    if (h == NULL || h->ui == NULL || h->ui->draw == NULL || h->ui->canvas == NULL)
+        return 0;
+
+    bar_h = nd_ui_header_divider_y(h->ui);
+    nd_header_text_for(h, sub_index, badge, sizeof badge);
+    return nd_theme_titlebar(h->ui->canvas, h->ui->draw, nd_ui_width(h->ui), bar_h,
+                             (title != NULL) ? title : "", nd_ui_font_bold(h->ui, h->ui->font_xl),
+                             badge, h->ui->font_n);
 }

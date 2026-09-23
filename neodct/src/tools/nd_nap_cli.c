@@ -95,20 +95,39 @@ static void print_info(const char *verb, const nd_nap_info *info, const char *ar
                      (unsigned long long)info->bytes);
         (void)printf(",\"phone_arch\":");
         put_json_str(arch);
+        (void)printf(",\"kind\":");
+        put_json_str(nd_nap_kind_label(info->kind));
+        if (info->kind == ND_NAP_KIND_THEME) {
+            (void)printf(",\"theme_id\":");
+            put_json_str(info->theme_id);
+        }
         (void)printf(",\"arch_ok\":%s",
-                     nd_nap_info_has_arch(info, arch) ? "true" : "false");
+                     (info->kind == ND_NAP_KIND_THEME || nd_nap_info_has_arch(info, arch))
+                         ? "true"
+                         : "false");
         (void)printf(",\"needs_restart\":%s", info->needs_restart_to_appear ? "true" : "false");
         (void)printf("}\n");
     } else {
         (void)printf("name        %s\n", info->name);
+        (void)printf("kind        %s\n", nd_nap_kind_label(info->kind));
         (void)printf("directory   %s\n", info->dir);
         (void)printf("version     %s\n", info->version[0] != '\0' ? info->version : "(none)");
         (void)printf("author      %s\n", info->author[0] != '\0' ? info->author : "(none)");
-        (void)printf("menu id     %ld\n", (long)info->id);
+        if (info->kind == ND_NAP_KIND_THEME) {
+            (void)printf("theme id    %s\n", info->theme_id);
+        } else {
+            (void)printf("menu id     %ld\n", (long)info->id);
+        }
         (void)printf("files       %zu (%llu bytes)\n", info->n_files,
                      (unsigned long long)info->bytes);
         (void)printf("this phone  %s\n", arch);
-        (void)printf("runs here   %s\n", nd_nap_info_has_arch(info, arch) ? "yes" : "NO");
+        /* A theme carries no code, so "which phone is this for" has no answer
+         * and printing NO against a package that installs everywhere would be
+         * the most misleading line on the screen. */
+        if (info->kind == ND_NAP_KIND_THEME)
+            (void)printf("runs here   yes (a theme runs on every phone)\n");
+        else
+            (void)printf("runs here   %s\n", nd_nap_info_has_arch(info, arch) ? "yes" : "NO");
         if (info->needs_restart_to_appear)
             (void)printf("note        installed, but the menu shows it after a restart\n");
     }
@@ -278,13 +297,22 @@ int main(int argc, char **argv)
         print_info("inspect", &info, arch);
         /* Refusing to run here is not a failure to inspect: the package is
          * fine, it is for another phone. Say so and exit 1 so a script can
-         * tell "bad package" from "wrong phone". */
+         * tell "bad package" from "wrong phone". A theme is for every phone,
+         * so it never earns that 1. */
+        if (info.kind == ND_NAP_KIND_THEME)
+            return 0;
         return nd_nap_info_has_arch(&info, arch) ? 0 : 1;
     }
     if (strcmp(verb, "install") == 0) {
         if (arg == NULL)
             fail_out("install", "install needs a package", 5);
-        rc = nd_nap_install(arg, apps_dir, arch, &info, why, sizeof why);
+        /* Where it goes depends on what it is, and only the package knows --
+         * so it is inspected first and the destination comes from
+         * nd_nap_dest_dir() rather than from this tool's idea of a card. */
+        rc = nd_nap_inspect(arg, &info, why, sizeof why);
+        if (rc != ND_OK)
+            fail_out("install", why[0] != '\0' ? why : "the package was refused", 6);
+        rc = nd_nap_install(arg, nd_nap_dest_dir(info.kind), arch, &info, why, sizeof why);
         if (rc != ND_OK)
             fail_out("install", why[0] != '\0' ? why : "the install was refused", 6);
         print_info("install", &info, arch);

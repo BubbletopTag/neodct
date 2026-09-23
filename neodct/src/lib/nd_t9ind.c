@@ -41,6 +41,7 @@
 #include "nd_font.h"
 #include "nd_t9.h"
 #include "nd_types.h"
+#include "nd_theme.h"
 #include "nd_ui.h"
 #include "nd_widgets.h"
 
@@ -148,6 +149,6 @@ int32_t nd_t9ind_draw(nd_ui *ui, int32_t right, int32_t y, const nd_t9_engine *t
         nd_draw_pencil(ui->draw, x, y + nd_max32(0, text_h - pencil), pencil, ND_WHITE);
         x += pencil + ND_T9_PENCIL_GAP;
     }
-    (void)nd_draw_text(ui->draw, x, y, label, ui->font_n, ND_WHITE);
+    nd_theme_text_light(ui->draw, x, y, label, ui->font_n);
     return width;
 }

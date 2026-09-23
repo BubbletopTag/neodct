@@ -67,6 +67,7 @@
 #include "nd_draw.h"
 #include "nd_font.h"
 #include "nd_keycodes.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_widgets.h"
@@ -403,6 +404,12 @@ typedef struct {
     nd_calc st;
 } calc_app;
 
+/* The glass display's height, measured rather than chosen: the number is
+ * drawn at y=12 in font_xl, whose ink runs to roughly y+27 on this face, and
+ * the well needs a few rows of margin under that so the digits are inside a
+ * bezel rather than touching it. */
+#define ND_CALC_DISPLAY_H 36
+
 static void calc_draw(calc_app *a)
 {
     nd_ui *ui = a->ui;
@@ -422,7 +429,24 @@ static void calc_draw(calc_app *a)
     x = a->screen_w - 10 - w;
     if (x < 5)
         x = 5;
-    (void)nd_draw_text(ui->draw, x, 12, text, ui->font_xl, ND_WHITE);
+    /* ============ THE DISPLAY IS A DISPLAY ============
+     *
+     * A right-aligned number floating on the wallpaper is what this was, and
+     * on a calculator it is the one element that should look like hardware.
+     * It gets the recessed glass well the text field uses, running the full
+     * width, with the number letterpressed into it -- which is exactly what
+     * the LCD of the thing this app is imitating looks like.
+     *
+     * `x` is untouched, so the number is right-aligned on the same column and
+     * still pins to a 5 px left margin once it outgrows the screen. */
+    {
+        nd_rect well = ND_RECT(4, 6, a->screen_w - 5, 6 + ND_CALC_DISPLAY_H);
+
+        nd_theme_round_gradient(ui->canvas, well, 6, ND_TH_GLASS_BOT, ND_TH_GLASS_TOP, 235u);
+        nd_theme_shadow_band(ui->canvas, well.x0 + 3, well.x1 - 3, well.y0 + 1, 3, 120u);
+        nd_theme_round_outline(ui->canvas, well, 6, ND_TH_BLUE_DEEP, 180u);
+    }
+    nd_theme_text_dark(ui->draw, x, 12, text, ui->font_xl);
 
     /* Small pending-operation hint at the left edge. */
     if (a->st.pending_op != '\0') {
@@ -430,7 +454,9 @@ static void calc_draw(calc_app *a)
 
         op[0] = a->st.pending_op;
         op[1] = '\0';
-        (void)nd_draw_text(ui->draw, 8, 16, op, ui->font_n, ND_WHITE);
+        /* Inside the well now, so it takes the well's ink. It was white on
+         * black, and white on glass would be gone. */
+        nd_theme_text_dark(ui->draw, 10, 16, op, ui->font_n);
     }
 
     nd_softkey_update(&a->softkey, "Options", true);

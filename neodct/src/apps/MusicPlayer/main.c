@@ -94,6 +94,7 @@
 #include "nd_image.h"
 #include "nd_keycodes.h"
 #include "nd_log.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
@@ -103,9 +104,21 @@
 
 /* The three hex colours the Python names, and nothing else on this screen
  * uses a colour that is not black or white. */
-#define MUSIC_ARTIST_GREY ND_RGB(0xCC, 0xCC, 0xCC) /* "#cccccc" */
-#define MUSIC_ALBUM_GREY  ND_RGB(0x99, 0x99, 0x99) /* "#999999" */
-#define MUSIC_BAR_GREY    ND_RGB(0x33, 0x33, 0x33) /* "#333333" */
+/* Artist and album are quieter than the title above them. They were two greys
+ * off a black screen ("#cccccc" and "#999999"); over the theme's blue they are
+ * two steps into the palette instead, which keeps the hierarchy and stops the
+ * one screen in the OS with three type sizes on it from being the one screen
+ * with neutral grey on it.
+ *
+ * MUSIC_BAR_GREY is gone: the progress trough is drawn now rather than
+ * filled. */
+/* Was ND_TH_SKY_TOP -- the BACKGROUND colour, used as a quiet ink because the
+ * glass theme's background happens to be a pale sky. It is the colour behind
+ * the type under any theme whose background is dark, and the shipped one is
+ * black. ink_muted is the role that was actually wanted. */
+#define MUSIC_ARTIST_GREY ND_TH_INK_MUTED
+#define MUSIC_ALBUM_GREY  ND_TH_INK_MUTED
+#define MUSIC_INK_SHADOW  ND_TH_TEXT_SHADOW
 
 /* One row of the track list, as VerticalList wants it: an array of pointers
  * into a block of basenames. 256 * 256 = 65,536 bytes for the paths plus
@@ -173,10 +186,11 @@ static void show_no_music(nd_ui *ui, nd_softkey *bar)
      * is painted black and the softkey update below then repaints 145..175
      * over it. Pillow clips column 240 away; so does nd_draw. */
     nd_ui_paint_chrome_content(ui);
-    (void)nd_draw_text(ui->draw, 10, y, "No Music Found", ui->font_n, ND_WHITE);
-    (void)nd_draw_text(ui->draw, 10, y + 30, "Add mp3s to:", ui->font_s, ND_GRAY);
+    nd_theme_text_light(ui->draw, 10, y, "No Music Found", nd_ui_font_bold(ui, ui->font_n));
+    nd_theme_text(ui->draw, 10, y + 30, "Add mp3s to:", ui->font_s, ND_TH_INK_MUTED,
+                  MUSIC_INK_SHADOW);
     /* Stale, and on screen. See note 3 in the file header. */
-    (void)nd_draw_text(ui->draw, 10, y + 50, "/User/music", ui->font_s, ND_GRAY);
+    nd_theme_text(ui->draw, 10, y + 50, "/User/music", ui->font_s, ND_TH_INK_MUTED, MUSIC_INK_SHADOW);
     nd_softkey_update(bar, "Exit", true);
 
     for (;;) {
@@ -398,11 +412,12 @@ static void draw_now_playing(nd_ui *ui, nd_softkey *bar, const now_layout *L,
 
     nd_ui_paint_chrome_content(ui);
 
-    /* -- Header -- */
-    (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, L->screen_w, L->header_h), ND_WHITE);
+    /* -- Header -- a glossy plate where there used to be a white band with
+     *    black text inverted into it. Same rows, same centred string. */
+    (void)nd_theme_titlebar(ui->canvas, ui->draw, L->screen_w, L->header_h, NULL, NULL, NULL, NULL);
     nd_text_size(ui->font_s, "Now Playing", &w, &h);
-    (void)nd_draw_text(ui->draw, (L->screen_w - w) / 2, nd_max32(2, (L->header_h - h) / 2),
-                       "Now Playing", ui->font_s, ND_BLACK);
+    nd_theme_text_light(ui->draw, (L->screen_w - w) / 2, nd_max32(2, (L->header_h - h) / 2),
+                        "Now Playing", nd_ui_font_bold(ui, ui->font_s));
 
     /* -- Album art (left) -- */
     if (art != NULL) {
@@ -410,41 +425,52 @@ static void draw_now_playing(nd_ui *ui, nd_softkey *bar, const now_layout *L,
          * converts to the destination mode and DROPS alpha rather than
          * compositing it, which is what nd_image_blit does. */
         (void)nd_image_blit(ui->canvas, art, L->art_x, L->art_y);
-        (void)nd_draw_rect_outline(
-            ui->draw,
-            ND_RECT(L->art_x - 1, L->art_y - 1, L->art_x + L->art_size, L->art_y + L->art_size),
-            ND_WHITE, 1);
+        /* A chrome frame around the sleeve rather than a hairline: album art
+         * is a photograph and a white 1 px rule around a photograph reads as
+         * a JPEG artefact. */
+        nd_theme_round_outline(
+            ui->canvas,
+            ND_RECT(L->art_x - 1, L->art_y - 1, L->art_x + L->art_size, L->art_y + L->art_size), 2,
+            ND_TH_CHROME_HI, 210u);
     } else {
         int32_t cx = L->art_x + (L->art_size / 2);
         int32_t cy = L->art_y + (L->art_size / 2);
 
-        (void)nd_draw_rect_outline(
-            ui->draw, ND_RECT(L->art_x, L->art_y, L->art_x + L->art_size, L->art_y + L->art_size),
-            ND_WHITE, 1);
-        /* The note: a filled head, a stem and a flag. A wide line grows in
-         * the MINOR AXIS ONLY, so width 2 on the vertical stem lights columns
-         * cx+1 and cx+2 -- nd_draw.h rule 2. */
-        (void)nd_draw_ellipse_fill(ui->draw, ND_RECT(cx - 8, cy + 8, cx + 1, cy + 17), ND_WHITE);
-        (void)nd_draw_line(ui->draw, cx + 1, cy + 12, cx + 1, cy - 12, ND_WHITE, 2);
-        (void)nd_draw_line(ui->draw, cx + 1, cy - 12, cx + 14, cy - 8, ND_WHITE, 2);
+        /* No sleeve: a glass tile with the drawn note on it, rather than an
+         * empty wire square. The note itself is unchanged -- a filled head, a
+         * stem and a flag, and a wide line grows in the MINOR AXIS ONLY, so
+         * width 2 on the vertical stem lights columns cx+1 and cx+2
+         * (nd_draw.h rule 2). */
+        nd_theme_panel(ui->canvas,
+                       ND_RECT(L->art_x, L->art_y, L->art_x + L->art_size, L->art_y + L->art_size),
+                       5);
+        (void)nd_draw_ellipse_fill(ui->draw, ND_RECT(cx - 8, cy + 8, cx + 1, cy + 17),
+                                   ND_TH_INK_DARK);
+        (void)nd_draw_line(ui->draw, cx + 1, cy + 12, cx + 1, cy - 12, ND_TH_INK_DARK, 2);
+        (void)nd_draw_line(ui->draw, cx + 1, cy - 12, cx + 14, cy - 8, ND_TH_INK_DARK, 2);
     }
 
     /* -- Info (right) -- */
     (void)nd_music_truncate(line, sizeof line, meta->title, ui->font_n, L->text_width);
-    (void)nd_draw_text(ui->draw, L->text_x, L->art_y, line, ui->font_n, ND_WHITE);
+    nd_theme_text_light(ui->draw, L->text_x, L->art_y, line, nd_ui_font_bold(ui, ui->font_n));
 
     (void)nd_music_truncate(line, sizeof line, meta->artist, ui->font_s, L->text_width);
-    (void)nd_draw_text(ui->draw, L->text_x, L->art_y + 25, line, ui->font_s, MUSIC_ARTIST_GREY);
+    nd_theme_text(ui->draw, L->text_x, L->art_y + 25, line, ui->font_s, MUSIC_ARTIST_GREY,
+                  MUSIC_INK_SHADOW);
 
     if (meta->album[0] != '\0') {
         (void)nd_music_truncate(line, sizeof line, meta->album, ui->font_s, L->text_width);
-        (void)nd_draw_text(ui->draw, L->text_x, L->art_y + 45, line, ui->font_s, MUSIC_ALBUM_GREY);
+        nd_theme_text(ui->draw, L->text_x, L->art_y + 45, line, ui->font_s, MUSIC_ALBUM_GREY,
+                      MUSIC_INK_SHADOW);
     }
 
-    /* -- Progress bar -- */
-    (void)nd_draw_rect_fill(ui->draw,
-                            ND_RECT(L->bar_x, L->bar_y, L->bar_x + L->bar_width, L->bar_y + 4),
-                            MUSIC_BAR_GREY);
+    /* -- Progress bar: a recessed trough, same rows and same width. -- */
+    nd_theme_round_fill(ui->canvas,
+                        ND_RECT(L->bar_x, L->bar_y, L->bar_x + L->bar_width, L->bar_y + 4), 2,
+                        ND_TH_BLUE_DEEP, 150u);
+    nd_theme_round_outline(ui->canvas,
+                           ND_RECT(L->bar_x, L->bar_y, L->bar_x + L->bar_width, L->bar_y + 4), 2,
+                           ND_TH_CHROME_HI, 70u);
 
     if (meta->length > 0.0) {
         pct = current_elapsed / meta->length;
@@ -455,12 +481,19 @@ static void draw_now_playing(nd_ui *ui, nd_softkey *bar, const now_layout *L,
     }
     /* int(bar_width * pct): Pillow and Python both truncate toward zero. */
     fill_width = nd_trunc32((double)L->bar_width * pct);
-    (void)nd_draw_rect_fill(
-        ui->draw, ND_RECT(L->bar_x, L->bar_y, L->bar_x + fill_width, L->bar_y + 4), ND_WHITE);
+    if (fill_width > 0) {
+        nd_theme_plate p = nd_theme_plate_blue(2);
+
+        p.top = ND_TH_BLUE_HI;
+        p.bot = ND_TH_BLUE_MID;
+        p.drop_shadow = false;
+        nd_theme_plate_draw(ui->canvas,
+                            ND_RECT(L->bar_x, L->bar_y, L->bar_x + fill_width, L->bar_y + 4), &p);
+    }
 
     /* -- Timestamps -- */
     nd_music_format_time(nd_trunc32(current_elapsed), stamp, sizeof stamp);
-    (void)nd_draw_text(ui->draw, L->bar_x, L->bar_y - 15, stamp, ui->font_s, ND_WHITE);
+    nd_theme_text_light(ui->draw, L->bar_x, L->bar_y - 15, stamp, ui->font_s);
 
     if (meta->length > 0.0) {
         char total[40];
@@ -471,8 +504,8 @@ static void draw_now_playing(nd_ui *ui, nd_softkey *bar, const now_layout *L,
         nd_music_format_time(nd_trunc32(left), stamp, sizeof stamp);
         (void)nd_snprintf(total, sizeof total, "-%s", stamp);
         nd_text_size(ui->font_s, total, &w, &h);
-        (void)nd_draw_text(ui->draw, L->bar_x + L->bar_width - w, L->bar_y - 15, total, ui->font_s,
-                           ND_WHITE);
+        nd_theme_text_light(ui->draw, L->bar_x + L->bar_width - w, L->bar_y - 15, total,
+                            ui->font_s);
     }
 
     nd_softkey_update(bar, nd_music_is_paused() ? "Play" : "Pause", true);
@@ -541,7 +574,7 @@ static np_result run_now_playing(nd_ui *ui, nd_softkey *bar, const char *filepat
     nd_ui_paint_chrome_full(ui);
     nd_text_size(ui->font_n, "Loading...", &lw, &lh);
     (void)nd_draw_text(ui->draw, (screen_w - lw) / 2, nd_max32(10, (content_bottom - lh) / 2),
-                       "Loading...", ui->font_n, ND_WHITE);
+                       "Loading...", ui->font_n, ND_TH_INK_LIGHT);
     (void)nd_ui_present(ui);
 
     /* The FULL metadata -- duration and artwork included -- for one track,
@@ -1036,22 +1069,29 @@ static void volume_screen(nd_ui *ui)
         nd_ui_paint_chrome_content(ui);
 
         nd_text_size(ui->font_n, "Volume", &w, NULL);
-        (void)nd_draw_text(ui->draw, (screen_w - w) / 2, 14, "Volume", ui->font_n, ND_WHITE);
+        nd_theme_text_light(ui->draw, (screen_w - w) / 2, 14, "Volume", ui->font_n);
 
         (void)nd_snprintf(value, sizeof value, "%d", (int)nd_music_volume());
         nd_text_size(ui->font_xl, value, &w, NULL);
-        (void)nd_draw_text(ui->draw, (screen_w - w) / 2, 40, value, ui->font_xl, ND_WHITE);
+        nd_theme_text_light(ui->draw, (screen_w - w) / 2, 40, value,
+                            nd_ui_font_bold(ui, ui->font_xl));
 
-        /* The same scale as the header bar, drawn large. White on black
-         * here, because this screen has no white band to sit on. */
+        /* The same scale as the header bar, drawn large: lit segments are
+         * the glossy blue plate, unlit ones are empty sockets -- which is
+         * what the signal meter's sprites do, and for the same reason. An
+         * unlit segment has to still look like a segment. */
         for (i = 0; i < ND_MUSIC_VOLUME_MAX; i++) {
             int32_t sx = x0 + i * (seg_w + gap);
             nd_rect seg = ND_RECT(sx, y0, sx + seg_w - 1, y0 + seg_h - 1);
 
-            if (i < nd_music_volume())
-                (void)nd_draw_rect_fill(ui->draw, seg, ND_WHITE);
-            else
-                (void)nd_draw_rect_outline(ui->draw, seg, ND_GRAY, 1);
+            if (i < nd_music_volume()) {
+                nd_theme_plate p = nd_theme_plate_blue(3);
+
+                nd_theme_plate_draw(ui->canvas, seg, &p);
+            } else {
+                nd_theme_round_fill(ui->canvas, seg, 3, ND_TH_BLUE_DEEP, 60u);
+                nd_theme_round_outline(ui->canvas, seg, 3, ND_TH_CHROME_HI, 70u);
+            }
         }
 
         nd_softkey_update(&bar, "OK", true);

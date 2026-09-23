@@ -36,6 +36,7 @@
 #include "nd_font.h"
 #include "nd_keycodes.h"
 #include "nd_text.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_widgets.h"
@@ -183,7 +184,7 @@ bool nd_scroller_draw(nd_scroller *s)
     y = s->top;
     for (i = g_page_start[s->page]; i < g_page_start[s->page + 1u]; i++) {
         if (g_line_store[i][0] != '\0')
-            (void)nd_draw_text(ui->draw, s->margin, y, g_line_store[i], s->font, ND_WHITE);
+            nd_theme_text_light(ui->draw, s->margin, y, g_line_store[i], s->font);
         y += g_heights[i];
     }
 

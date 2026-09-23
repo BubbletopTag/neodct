@@ -68,6 +68,7 @@
 #include "nd_keycodes.h"
 #include "nd_log.h"
 #include "nd_settings.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
@@ -83,7 +84,7 @@ const char *const nd_sleepy_root_items[SLEEPY_ROOT_ITEMS] = {"CPU", "Display"};
  * -- and BLANK! stays because a fixed ten seconds is the measurement, and an
  * instrument you can walk away from is not the same instrument. */
 const char *const nd_sleepy_display_items[SLEEPY_DISPLAY_ITEMS] = {"BLANK!", "Brightness",
-                                                                  "Screen off"};
+                                                                   "Screen off"};
 
 /* Short on purpose. The dialog gives a title line and three at 14 px, and it
  * TRUNCATES rather than scrolling -- a longer and more precise sentence
@@ -114,9 +115,11 @@ static void draw_wake_screen(nd_ui *ui, nd_bl_mode mode, double seconds)
 {
     char headline[32];
 
-    (void)nd_draw_rect_fill(ui->draw, ND_RECT(0, 0, nd_ui_width(ui), nd_ui_content_bottom(ui)),
-                            ND_BLACK);
-    (void)nd_draw_text(ui->draw, 8, 4, nd_sleepy_title, ui->font_xl, ND_WHITE);
+    /* The chrome background, not a black fill: AGENTS.md's Conventions reserve
+     * a literal fill for a surface that is not chrome, and this is a status
+     * screen over the phone's own wallpaper. */
+    nd_ui_paint_chrome_content(ui);
+    nd_theme_text_light(ui->draw, 8, 4, nd_sleepy_title, ui->font_xl);
     /* font_md, not font_n. At 20 px this line runs off the right edge of a
      * 240 px panel and loses its full stop, which was found by looking at the
      * screen and could not have been found any other way. "Screen off." is
@@ -126,17 +129,15 @@ static void draw_wake_screen(nd_ui *ui, nd_bl_mode mode, double seconds)
         (void)nd_strlcpy(headline, "Screen off.", sizeof headline);
     else
         (void)nd_snprintf(headline, sizeof headline, "Screen off for %.0f s.", seconds);
-    (void)nd_draw_text(ui->draw, 8, 42, headline, ui->font_md, ND_WHITE);
-    (void)nd_draw_text(ui->draw, 8, 74,
-                       mode == ND_BL_PWM ? "Tier: PWM backlight" : "Tier: gpio53 (BL)", ui->font_s,
-                       ND_GRAY);
+    nd_theme_text_light(ui->draw, 8, 42, headline, ui->font_md);
+    nd_theme_text(ui->draw, 8, 74, mode == ND_BL_PWM ? "Tier: PWM backlight" : "Tier: gpio53 (BL)",
+                  ui->font_s, ND_TH_INK_MUTED, ND_TH_TEXT_SHADOW);
     /* Stated because the timed measurement depends on nobody pressing
      * anything, and somebody who does not know the escape exists will press
      * everything. On the untimed row a key is not an escape, it is the only
      * way out, so the line is not optional there. */
-    (void)nd_draw_text(ui->draw, 8, 96,
-                       seconds < 0.0 ? "Any key wakes it." : "Any key wakes it early.", ui->font_s,
-                       ND_GRAY);
+    nd_theme_text(ui->draw, 8, 96, seconds < 0.0 ? "Any key wakes it." : "Any key wakes it early.",
+                  ui->font_s, ND_TH_INK_MUTED, ND_TH_TEXT_SHADOW);
 }
 
 static void show_dialog(nd_ui *ui, const char *message)
@@ -335,8 +336,7 @@ static void show_brightness(nd_ui *ui)
          * remembers a level the hardware refused would be re-applied at every
          * boot by nd_main.c and fail there too, silently, forever. */
         store_level(picked);
-        nd_log(ND_LOG_SLEEPY, "Sleepy: brightness level %d/%d", picked,
-               SLEEPY_BRIGHTNESS_LEVELS);
+        nd_log(ND_LOG_SLEEPY, "Sleepy: brightness level %d/%d", picked, SLEEPY_BRIGHTNESS_LEVELS);
     }
 }
 

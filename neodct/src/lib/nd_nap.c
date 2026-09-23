@@ -554,6 +554,8 @@ typedef struct {
     size_t manifest_len;
     bool saw_manifest;
     bool saw_top_so;
+    bool saw_theme_json;                 /* theme.json at the package root */
+    char theme_id[ND_THEME_ID_MAX];      /* its "id", read during the walk */
     char icon[ND_PATH_MAX]; /* the manifest's icon name, once parsed        */
 } inspect_ctx;
 
@@ -620,6 +622,37 @@ static nd_err inspect_entry(FILE *f, const tar_entry *e, void *ctx, char *why, s
         }
         return ND_OK;
     case ENT_FILE:
+        /* theme.json is an ordinary file to the tar layer -- deliberately, so
+         * that the archive format stays "manifest, code, and the app's own
+         * files" and gains no third special name. It is read here, during the
+         * walk that is already open, rather than after the install: a package
+         * whose theme is unusable should be refused while it is still a file
+         * on the card, not unpacked and then found wanting.
+         *
+         * Only the id is taken. The palette is not parsed until the theme is
+         * actually applied, because a colour this build does not understand
+         * is not a reason to refuse the install -- see nd_theme_read(). */
+        if (strcmp(e->name, ND_THEME_MANIFEST) == 0) {
+            c->saw_theme_json = true;
+            if (e->size > 0u && e->size <= ND_NAP_MANIFEST_MAX) {
+                uint8_t *buf = malloc((size_t)e->size);
+
+                if (buf != NULL) {
+                    if (fread(buf, 1u, (size_t)e->size, f) == (size_t)e->size) {
+                        nd_json_doc *doc = NULL;
+
+                        if (nd_json_parse(buf, (size_t)e->size, &doc, NULL, 0u) == ND_OK) {
+                            (void)nd_strlcpy(c->theme_id,
+                                             nd_json_get_str(nd_json_root(doc), "id", ""),
+                                             sizeof c->theme_id);
+                            nd_json_free(doc);
+                        }
+                    }
+                    free(buf);
+                }
+            }
+        }
+        return ND_OK;
     case ENT_DIR:
     default:
         return ND_OK;
@@ -680,6 +713,51 @@ static nd_err inspect_manifest(inspect_ctx *c, char *why, size_t why_sz)
                      sizeof c->info.author);
     (void)nd_strlcpy(c->info.description, nd_json_get_str(root, "description", ""),
                      sizeof c->info.description);
+
+    /* ============ APP OR THEME ============
+     *
+     * Absent is an app, which is what every package built before this field
+     * existed says by saying nothing. An unrecognised value is refused rather
+     * than treated as an app -- see nd_nap_kind in the header. */
+    {
+        const char *type = nd_json_get_str(root, "type", ND_NAP_TYPE_APP);
+
+        if (strcmp(type, ND_NAP_TYPE_APP) == 0) {
+            c->info.kind = ND_NAP_KIND_APP;
+        } else if (strcmp(type, ND_NAP_TYPE_THEME) == 0) {
+            c->info.kind = ND_NAP_KIND_THEME;
+        } else {
+            say(why, why_sz, "Package is a kind this\nphone does not know.");
+            rc = ND_ERR_INVAL;
+            goto done;
+        }
+    }
+
+    /* A theme carries no code, so every check below this point is about an
+     * app.so it is not supposed to have -- and one that DOES have one is
+     * refused, because a package claiming to be inert while shipping a
+     * shared object is the one shape worth being suspicious of. The theme's
+     * own validity is theme.json's business and is checked when the walk
+     * finds it, not here. */
+    if (c->info.kind == ND_NAP_KIND_THEME) {
+        if (c->saw_top_so || c->info.n_arches > 0u) {
+            say(why, why_sz, "Theme package carries\nprogram code.");
+            rc = ND_ERR_INVAL;
+            goto done;
+        }
+        if (!c->saw_theme_json) {
+            say(why, why_sz, "Theme package has no\ntheme.json.");
+            rc = ND_ERR_INVAL;
+            goto done;
+        }
+        if (c->theme_id[0] == '\0') {
+            say(why, why_sz, "Theme does not say what\nit is called.");
+            rc = ND_ERR_INVAL;
+            goto done;
+        }
+        (void)nd_strlcpy(c->info.theme_id, c->theme_id, sizeof c->info.theme_id);
+        goto done;
+    }
 
     /* The one-phone shape: app.so at the root is meaningless without a tag
      * saying which phone it is for, and a tag without the file is a lie. */
@@ -1078,6 +1156,16 @@ bool nd_nap_id_conflict(const char *apps_dir, int32_t id, const char *skip_dir, 
     return clash;
 }
 
+const char *nd_nap_dest_dir(nd_nap_kind kind)
+{
+    return (kind == ND_NAP_KIND_THEME) ? ND_PATH_USER_THEMES_DIR : ND_PATH_USER_APPS_DIR;
+}
+
+const char *nd_nap_kind_label(nd_nap_kind kind)
+{
+    return (kind == ND_NAP_KIND_THEME) ? "Theme" : "App";
+}
+
 nd_err nd_nap_install(const char *path, const char *apps_dir, const char *arch, nd_nap_info *out,
                       char *why, size_t why_sz)
 {
@@ -1101,7 +1189,15 @@ nd_err nd_nap_install(const char *path, const char *apps_dir, const char *arch, 
     if (rc != ND_OK)
         goto done;
 
-    if (!nd_nap_info_has_arch(&c.info, arch)) {
+    /* A THEME HAS NO ARCH AND CANNOT FAIL THIS TEST.
+     *
+     * The check below asks "was this built for this phone?", and the answer
+     * for a theme is that the question does not apply: it carries no native
+     * code, so the same package installs on the Luckfox, on QEMU and on a
+     * host build. Skipping the test is therefore not a relaxation of a safety
+     * property -- the property is about loading an app.so, and there is none.
+     * inspect_manifest() has already refused a theme that ships one. */
+    if (c.info.kind == ND_NAP_KIND_APP && !nd_nap_info_has_arch(&c.info, arch)) {
         say(why, why_sz, "This package is not for\nthis phone.");
         rc = ND_ERR_UNSUPPORTED;
         goto done;
@@ -1115,7 +1211,20 @@ nd_err nd_nap_install(const char *path, const char *apps_dir, const char *arch, 
         rc = ND_ERR_TOOLONG;
         goto done;
     }
-    if (!nd_path_is_dir(apps_dir)) {
+    /* The themes folder is created on demand and the apps folder is not, and
+     * the asymmetry is deliberate: apps/ is made by nd_storage_setup_folders()
+     * with an owner and a mode the confinement depends on, so its absence
+     * means the card was never prepared and installing into a directory this
+     * code invented would put an app somewhere the core does not confine.
+     * themes/ carries no such rule -- nothing there is executed -- so a card
+     * that has never held a theme can still take one. */
+    if (c.info.kind == ND_NAP_KIND_THEME) {
+        if (!nd_path_is_dir(apps_dir) && nd_mkdir_p(apps_dir, 0755u) != ND_OK) {
+            say(why, why_sz, "Could not write to the card.");
+            rc = ND_ERR_IO;
+            goto done;
+        }
+    } else if (!nd_path_is_dir(apps_dir)) {
         say(why, why_sz, "The card has no apps folder.");
         rc = ND_ERR_NOTFOUND;
         goto done;
@@ -1125,14 +1234,18 @@ nd_err nd_nap_install(const char *path, const char *apps_dir, const char *arch, 
      * sorts in a surprising place is still an app, and an owner who wanted it
      * has already said so. They exist because the alternative -- what
      * happened -- is that the order is decided by readdir and nothing
-     * anywhere says a word about it. See ND_NAP_ID_MIN in nd_nap.h. */
-    if (c.info.id < ND_NAP_ID_MIN || c.info.id > ND_NAP_ID_MAX) {
+     * anywhere says a word about it. See ND_NAP_ID_MIN in nd_nap.h.
+     *
+     * A theme has no row in the menu, so neither warning means anything about
+     * it and both would be noise in the log of a perfectly good install. */
+    if (c.info.kind == ND_NAP_KIND_APP &&
+        (c.info.id < ND_NAP_ID_MIN || c.info.id > ND_NAP_ID_MAX)) {
         nd_log_err(ND_LOG_OS,
                    "nap: %s claims menu id %ld, outside the %d-%d band reserved for installed "
                    "apps; it will sort among the stock apps",
                    c.info.name, (long)c.info.id, ND_NAP_ID_MIN, ND_NAP_ID_MAX);
     }
-    {
+    if (c.info.kind == ND_NAP_KIND_APP) {
         char clash[ND_APP_NAME_MAX];
 
         if (nd_nap_id_conflict(apps_dir, c.info.id, c.info.dir, clash, sizeof clash)) {
@@ -1171,10 +1284,14 @@ nd_err nd_nap_install(const char *path, const char *apps_dir, const char *arch, 
     rc = walk(path, install_entry, &ic, why, why_sz);
     if (rc != ND_OK)
         goto fail;
-    if (!ic.wrote_so) {
-        /* Cannot happen after the has_arch check above, but a package
-         * without a program is the one thing that must never be installed,
-         * so it is checked on the writing side too. */
+    if (c.info.kind == ND_NAP_KIND_APP && !ic.wrote_so) {
+        /* Cannot happen after the has_arch check above, but an APP without a
+         * program is the one thing that must never be installed, so it is
+         * checked on the writing side too.
+         *
+         * A theme is the other way round: it must never have written one, and
+         * inspect_manifest() has already refused a theme package that carries
+         * an app.so at all -- so there is nothing left to check here. */
         say(why, why_sz, "Package has no app.so.");
         rc = ND_ERR_INVAL;
         goto fail;
@@ -1270,8 +1387,15 @@ nd_err nd_nap_install(const char *path, const char *apps_dir, const char *arch, 
     if (moved_old)
         rm_rf(old_dir);
 
-    nd_log(ND_LOG_OS, "nap: installed %s (id %d, %s) from %s%s", c.info.name, (int)c.info.id, arch,
-           path, have_old ? ", replacing the earlier version" : "");
+    /* A theme has neither a menu id nor an arch, so naming them would print
+     * two numbers that mean nothing about what was just installed. */
+    if (c.info.kind == ND_NAP_KIND_THEME)
+        nd_log(ND_LOG_OS, "nap: installed the theme %s (%s) from %s%s", c.info.name,
+               c.info.theme_id, path, have_old ? ", replacing the earlier version" : "");
+    else
+        nd_log(ND_LOG_OS, "nap: installed %s (id %d, %s) from %s%s", c.info.name,
+               (int)c.info.id, arch, path,
+               have_old ? ", replacing the earlier version" : "");
     /* After the rename, so the note is only left once the app really is there.
      * This is the one place in the tree that changes which directories carry a
      * manifest.json -- Fetch writes into apps/PSX/ and into untrusted/, and a
@@ -1285,12 +1409,18 @@ nd_err nd_nap_install(const char *path, const char *apps_dir, const char *arch, 
      * an ordinary success, which is exactly what the first version of this did
      * -- its comment claimed a failed write merely "costs a menu open its
      * cached app list", which is the opposite of what happens. */
-    c.info.needs_restart_to_appear = !nd_appgen_bump();
-    if (c.info.needs_restart_to_appear)
-        nd_log_err(ND_LOG_OS,
-                   "nap: installed %s but could not write %s -- it will not appear in the menu "
-                   "until the phone restarts",
-                   c.info.name, ND_PATH_APPGEN);
+    /* The note is about the MENU, and a theme has no row in it: the picker
+     * that installed it lists themes by walking themes/ itself and applies
+     * the new one immediately. Bumping the counter would make the core
+     * re-scan the card for apps that did not change. */
+    if (c.info.kind == ND_NAP_KIND_APP) {
+        c.info.needs_restart_to_appear = !nd_appgen_bump();
+        if (c.info.needs_restart_to_appear)
+            nd_log_err(ND_LOG_OS,
+                       "nap: installed %s but could not write %s -- it will not appear in the menu "
+                       "until the phone restarts",
+                       c.info.name, ND_PATH_APPGEN);
+    }
     if (out != NULL)
         *out = c.info;
     rc = ND_OK;

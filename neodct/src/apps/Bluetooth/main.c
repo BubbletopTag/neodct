@@ -64,6 +64,7 @@
 #include "nd_draw.h"
 #include "nd_keycodes.h"
 #include "nd_log.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
@@ -76,6 +77,8 @@
 
 /* The two column origins. The adapter and self-test pages are FuelGauge's
  * 8/70 split; the scan list is 8/168 -- see bluetooth.h. */
+#define BT_INK_SHADOW ND_TH_TEXT_SHADOW
+
 #define BT_COL_LABEL 8
 #define BT_COL_VALUE 70
 #define BT_COL_CLASS 168
@@ -368,19 +371,25 @@ static void draw_page(nd_ui *ui, const char *title, const nd_btapp_row *rows, si
     size_t i;
 
     nd_ui_paint_chrome_content(ui);
-    (void)nd_draw_text(ui->draw, 5, 0, title, ui->font_xl, ND_WHITE);
-    (void)nd_draw_line(ui->draw, 0, 30, screen_w, 30, ND_WHITE, 1);
+    /* One plate in place of the 24 px title at (5, 0) and the white rule
+     * at row 30. Same rows, so nothing below it moves. */
+    (void)nd_theme_titlebar(ui->canvas, ui->draw, screen_w, 30, title,
+                            nd_ui_font_bold(ui, ui->font_xl), NULL, NULL);
 
     pitch = line_h(bottom, y, n_rows);
     for (i = 0u; i < n_rows; i++) {
-        (void)nd_draw_text(ui->draw, BT_COL_LABEL, y, rows[i].left, ui->font_s,
-                           right_col == BT_COL_VALUE ? ND_GRAY : ND_WHITE);
-        (void)nd_draw_text(ui->draw, right_col, y, rows[i].right, ui->font_s,
-                           right_col == BT_COL_VALUE ? ND_WHITE : ND_GRAY);
+        /* One column is the label and the other the value, and which is which
+         * depends on the page. The emphasis stays exactly where it was; only
+         * the two inks change, from white-and-grey to white-and-sky. */
+        nd_theme_text(ui->draw, BT_COL_LABEL, y, rows[i].left, ui->font_s,
+                      right_col == BT_COL_VALUE ? ND_TH_SKY_TOP : ND_TH_INK_LIGHT, BT_INK_SHADOW);
+        nd_theme_text(ui->draw, right_col, y, rows[i].right, ui->font_s,
+                      right_col == BT_COL_VALUE ? ND_TH_INK_LIGHT : ND_TH_INK_MUTED, BT_INK_SHADOW);
         y += pitch;
     }
     if (footer != NULL && footer[0] != '\0')
-        (void)nd_draw_text(ui->draw, BT_COL_LABEL, bottom - 14, footer, ui->font_s, ND_GRAY);
+        nd_theme_text(ui->draw, BT_COL_LABEL, bottom - 14, footer, ui->font_s, ND_TH_INK_MUTED,
+                      BT_INK_SHADOW);
 }
 
 /* ------------------------------------------------------------------ *

@@ -145,7 +145,7 @@ extern const char *const nd_setapp_format_warning;
  * just been told the card is ready is looking for the next thing to do with
  * it. That moves the third row of the first screen, so golden/app-settings
  * was re-cut. */
-#define ND_SETAPP_MENU_ITEMS 7
+#define ND_SETAPP_MENU_ITEMS 8
 extern const char *const nd_setapp_menu[ND_SETAPP_MENU_ITEMS];
 
 /* ------------------------------------------------------------------ *

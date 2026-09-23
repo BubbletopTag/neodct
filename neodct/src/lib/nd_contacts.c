@@ -34,6 +34,7 @@
 #include "nd_log.h"
 #include "nd_text.h"
 #include "nd_types.h"
+#include "nd_theme.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
 #include "nd_widgets.h"
@@ -81,7 +82,7 @@ static void draw_empty(nd_ui *ui, const char *search_query)
     nd_ui_paint_chrome_content(ui);
     nd_ui_text_size(ui, msg, ui->font_n, &w, &h);
     y = nd_max32(10, floordiv(content_bottom - h, 2));
-    (void)nd_draw_text(ui->draw, floordiv(screen_w - w, 2), y, msg, ui->font_n, ND_WHITE);
+    nd_theme_text_light(ui->draw, floordiv(screen_w - w, 2), y, msg, ui->font_n);
     (void)nd_ui_present(ui);
     dwell(1.5);
 }

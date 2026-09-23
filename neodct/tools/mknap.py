@@ -4,6 +4,7 @@ from its memory card.
 
     mknap.py --app-dir Bible/ --so luckfox-armv7=build/luckfox/app.so -o Bible.nap
     mknap.py --app-dir Bible/ --so luckfox-armv7=a.so --so qemu-aarch64=b.so -o Bible.nap
+    mknap.py --app-dir HelloKitty/ -o HelloKitty.nap        # a theme: no --so
     mknap.py --list Bible.nap
 
 A .nap is a plain, uncompressed POSIX ustar archive. The phone's reader is
@@ -164,11 +165,78 @@ def add_file(tar, name, path, mode=0o644):
         add_bytes(tar, name, f.read(), mode)
 
 
+def build_theme(app_dir, doc, sos, out):
+    """A theme package: theme.json, pictures and a font, and no code at all.
+
+    The phone refuses a theme that carries an app.so (nd_nap.c), so the check
+    here is not belt and braces -- it is the same rule, said where the mistake
+    is cheap to fix."""
+    if sos:
+        die("a theme package carries no code; drop --so")
+
+    theme_json = os.path.join(app_dir, "theme.json")
+    if not os.path.isfile(theme_json):
+        die("%s says \"type\": \"theme\" but has no theme.json" % app_dir)
+    with open(theme_json, "r", encoding="utf-8") as f:
+        try:
+            theme = json.load(f)
+        except ValueError as exc:
+            die("%s is not valid JSON: %s" % (theme_json, exc))
+    if not theme.get("id"):
+        die("%s has no \"id\"; that is what the phone stores when it is chosen"
+            % theme_json)
+
+    doc = dict(doc)
+    doc.pop("arch", None)          # meaningless without code
+    doc["type"] = "theme"
+    manifest_bytes = (json.dumps(doc, indent=1) + "\n").encode("utf-8")
+
+    dirs, files = walk_app_dir(app_dir)
+    for rel in dirs + files:
+        check_path(rel)
+    if "theme.json" not in files:
+        die("theme.json is not a plain file in %s" % app_dir)
+
+    icon = doc.get("icon", "icon.png")
+    if icon not in files:
+        warn("the manifest's icon %r is not in the theme directory; the installer "
+             "screen will show a placeholder" % icon)
+    if "preview.png" not in files:
+        warn("no preview.png; the picker will have nothing to show while the owner "
+             "moves over this theme")
+
+    tmp = out + ".tmp"
+    with tarfile.open(tmp, "w", format=tarfile.USTAR_FORMAT) as tar:
+        add_bytes(tar, "manifest.json", manifest_bytes)
+        for rel in dirs:
+            add_dir(tar, rel)
+        for rel in files:
+            add_file(tar, rel, os.path.join(app_dir, rel))
+    os.replace(tmp, out)
+
+    parts = []
+    for label, rel in (("icons", "icons"), ("a font", "fonts/ui.ttf"),
+                       ("a wallpaper", "wallpaper.jpg")):
+        if any(f == rel or f.startswith(rel + "/") for f in files):
+            parts.append(label)
+    print("%s: %s theme \"%s\", %s, %d files, %d bytes" % (
+        out, doc.get("name", theme["id"]), theme["id"],
+        ", ".join(parts) if parts else "colours only",
+        len(files) + 1, os.path.getsize(out)))
+    return 0
+
+
 def build(app_dir, sos, out):
     manifest_path = os.path.join(app_dir, "manifest.json")
     if not os.path.isfile(manifest_path):
         die("%s has no manifest.json" % app_dir)
     doc = load_manifest(manifest_path)
+
+    if doc.get("type", "app") == "theme":
+        return build_theme(app_dir, doc, sos, out)
+    if not sos:
+        die("an app package needs at least one --so; a theme says \"type\": "
+            "\"theme\" in its manifest")
 
     for tag, path in sos:
         if not TAG_RE.match(tag):
@@ -231,6 +299,7 @@ def list_package(path):
     with tarfile.open(path, "r:", format=tarfile.USTAR_FORMAT) as tar:
         members = tar.getmembers()
         manifest = None
+        theme = None
         arches = []
         top_so = False
         for m in members:
@@ -252,11 +321,31 @@ def list_package(path):
                     problems.append("%s: lib/ may only hold lib/<tag>/app.so" % name)
             if name == "manifest.json":
                 manifest = json.loads(tar.extractfile(m).read().decode("utf-8"))
+            if name == "theme.json":
+                theme = json.loads(tar.extractfile(m).read().decode("utf-8"))
             if name == "app.so":
                 top_so = True
             print("  %s  %9d  %s" % (kind, m.size, name))
     if manifest is None:
         problems.append("no manifest.json")
+    elif manifest.get("type", "app") not in ("app", "theme"):
+        problems.append("\"type\": %r is not a kind this phone knows; absent means \"app\""
+                        % manifest.get("type"))
+    elif manifest.get("type", "app") == "theme":
+        # A theme's rules are the app's rules turned round: no code, and a
+        # theme.json that says what it is called. The phone applies exactly
+        # these (nd_nap.c inspect_manifest), so a package that passes here
+        # passes there.
+        if top_so or arches:
+            problems.append("a theme package carries program code")
+        if theme is None:
+            problems.append("no theme.json")
+        elif not theme.get("id"):
+            problems.append("theme.json has no \"id\"")
+        if manifest.get("arch"):
+            problems.append("\"arch\" in a theme's manifest; a theme runs on every phone")
+        print("%s: %s -- theme \"%s\", for every phone" % (
+            path, manifest.get("name"), (theme or {}).get("id", "?")))
     else:
         arch = manifest.get("arch")
         if top_so and not arch:
@@ -293,8 +382,8 @@ def main(argv):
 
     if args.list:
         return list_package(args.list)
-    if not args.app_dir or not args.so or not args.output:
-        parser.error("--app-dir, at least one --so and -o are required")
+    if not args.app_dir or not args.output:
+        parser.error("--app-dir and -o are required")
     if not args.output.endswith(".nap"):
         parser.error("the output should end in .nap; the phone looks for that")
     sos = []

@@ -58,6 +58,7 @@
 #include "nd_svc.h"
 #include "nd_t9.h"
 #include "nd_text.h"
+#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_vclock.h"
@@ -312,15 +313,12 @@ void nd_msg_show_empty_state(nd_ui *ui, const char *title, const char *root_id, 
     /* The FULL screen, rows 0..175 -- not the 0..145 most widgets clear. The
      * softkey below is what puts "Back" back. */
     nd_ui_paint_chrome_full(ui);
-    (void)nd_draw_text(ui->draw, 5, 5, nz(title), ui->font_xl, ND_WHITE);
-    (void)nd_draw_line(ui->draw, 0, header_y, screen_w, header_y, ND_WHITE, 1);
-
     nd_header_init(&header, ui, nz(root_id));
-    nd_header_draw(&header, sub_index);
+    (void)nd_header_bar(&header, nz(title), sub_index);
 
     nd_ui_text_size(ui, nz(message), ui->font_n, &w, &h);
     y = header_y + nd_max32(0, floordiv((content_bottom - header_y) - h, 2));
-    (void)nd_draw_text(ui->draw, floordiv(screen_w - w, 2), y, nz(message), ui->font_n, ND_WHITE);
+    nd_theme_text_light(ui->draw, floordiv(screen_w - w, 2), y, nz(message), ui->font_n);
 
     nd_softkey_init(&softkey, ui, false);
     nd_softkey_update(&softkey, "Back", false);
@@ -360,7 +358,7 @@ void nd_msg_draw_sending(nd_ui *ui, const char *number)
     nd_ui_paint_chrome_content(ui);
     nd_ui_text_size(ui, "Sending...", ui->font_n, &w, &h);
     y = nd_max32(10, floordiv(content_bottom - h, 2) - 12);
-    (void)nd_draw_text(ui->draw, floordiv(screen_w - w, 2), y, "Sending...", ui->font_n, ND_WHITE);
+    nd_theme_text_light(ui->draw, floordiv(screen_w - w, 2), y, "Sending...", ui->font_n);
 
     nd_ui_text_size(ui, nz(number), ui->font_s, &w2, NULL);
     (void)nd_draw_text(ui->draw, floordiv(screen_w - w2, 2), y + h + 8, nz(number), ui->font_s,
@@ -639,15 +637,17 @@ nd_msg_detail_result nd_msg_show_detail(nd_ui *ui, const char *title, const char
         size_t i;
 
         nd_ui_paint_chrome_full(ui);
-        (void)nd_draw_text(ui->draw, 5, 5, nz(title), ui->font_xl, ND_WHITE);
-        (void)nd_draw_line(ui->draw, 0, header_y, screen_w, header_y, ND_WHITE, 1);
-        nd_header_draw(&header, sub_index);
+        (void)nd_header_bar(&header, nz(title), sub_index);
 
         y = header_y + 10;
         for (i = 0u; i < n_meta; i++) {
             if (y > content_bottom - 18)
                 break;
-            (void)nd_draw_text(ui->draw, 10, y, meta[i], ui->font_s, ND_GRAY);
+            /* "From:" and "Time:" are the envelope, not the letter. They were
+             * ND_GRAY to say so, and grey over a colour wallpaper is mud; a
+             * pale sky blue is the same demotion inside the palette. */
+            nd_theme_text(ui->draw, 10, y, meta[i], ui->font_s, ND_TH_INK_MUTED,
+                          ND_TH_TEXT_SHADOW);
             y += 18;
         }
 
@@ -655,7 +655,7 @@ nd_msg_detail_result nd_msg_show_detail(nd_ui *ui, const char *title, const char
         for (i = 0u; i < body_lines.n; i++) {
             if (y > content_bottom - 22)
                 break;
-            (void)nd_draw_text(ui->draw, 10, y, nd_lines_at(&body_lines, i), ui->font_n, ND_WHITE);
+            nd_theme_text_light(ui->draw, 10, y, nd_lines_at(&body_lines, i), ui->font_n);
             y += 22;
         }
 

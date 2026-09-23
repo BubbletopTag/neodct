@@ -271,6 +271,15 @@ static bool try_font(char *out, size_t sz, const char *path)
     return true;
 }
 
+/* ============ THIS ONE STAYS ON font.ttf ============
+ *
+ * Unlike the fixtures that render a screen, this file is a REFERENCE TABLE:
+ * seventeen exact truncations captured from the Python build against a known
+ * face. It is testing nd_text_fit and nd_text_ellipsize, not the UI, and the
+ * table is only meaningful beside the font it was measured on -- the same
+ * argument fontref.json makes for the renderer.
+ *
+ * So it does NOT include uifont_test.h and does not follow the UI face. */
 #define FONT_REL "overlay/NeoDCT/System/ui/resources/fonts/font.ttf"
 
 /* The TTF, found the way test_font finds it: NEODCT_FONT, then two levels

@@ -1,5 +1,40 @@
 # NeoDCT OS Changelog
 
+0.6.0a-dev
+Themes. The phone's look is now something you install and change, not
+something the software was built with.
+
+There is a new screen at Settings -> Theme. It shows one theme per page --
+press * and # to turn the pages -- and each page is drawn IN the theme it is
+offering, so you are looking at the real thing at full size rather than a
+swatch beside a name. Press NaviKey to keep the one on screen. Press C and
+the phone goes back to the look it had, so trying them all costs nothing.
+
+A theme is a small folder: the colours, and optionally a typeface, the app
+icons, the battery and signal indicators, and a wallpaper. It can also turn
+the decoration itself on and off -- the gloss on a button, the rounded
+corners, the shadow under text -- so a theme is not limited to recolouring
+what is already there. Anything a theme leaves out stays as it was.
+
+Themes are installed the way apps are: copy the .nap onto the memory card and
+open Settings -> Install apps. Unlike an app, a theme is usable the moment it
+is installed -- there is nothing to restart. Changing a theme changes the
+screen you are on straight away; the rest of the phone follows as you leave
+Settings.
+
+The phone itself looks the way it always did: white text on black in the
+pixel typeface, which is now the built-in "Classic" theme rather than
+something baked into the software. The glossy Frutiger Aero look from the
+0.5.16a preview is available as a theme you install.
+
+Snake is black and white again on the stock phone, exactly as it was. It had
+gained a green snake and a red apple; those now come with a theme, and the
+phone's own game is the one it always was.
+
+Fixed: on the engineering Modem and Fuel Gauge screens, and in a few other
+places, the smaller grey labels were drawn in the same colour as the
+background and could not be seen at all. Twenty of them.
+
 0.5.20a
 The carrier name appears the moment the phone has service.
 
