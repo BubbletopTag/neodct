@@ -6,7 +6,7 @@ CC ?= cc
 CFLAGS += -std=c99 -Wall -Wextra -Werror -g -I..
 
 TESTS := test_url test_menu test_cursor test_ui test_status test_mem test_wrap \
-	test_media
+	test_media test_history
 
 .PHONY: run clean
 run: $(TESTS)
@@ -24,9 +24,13 @@ test_cursor: test_cursor.c ../neodct_cursor.c ../neodct_cursor.h test_util.h
 	$(CC) $(CFLAGS) -o $@ test_cursor.c ../neodct_cursor.c
 
 test_ui: test_ui.c ../neodct_ui.c ../neodct_ui.h ../neodct_url.c \
-		../neodct_menu.c ../neodct_cursor.c
+		../neodct_menu.c ../neodct_cursor.c ../neodct_history.c
 	$(CC) $(CFLAGS) -o $@ test_ui.c ../neodct_ui.c ../neodct_url.c \
-		../neodct_menu.c ../neodct_cursor.c
+		../neodct_menu.c ../neodct_cursor.c ../neodct_history.c
+
+test_history: test_history.c ../neodct_history.c ../neodct_history.h \
+		test_util.h
+	$(CC) $(CFLAGS) -o $@ test_history.c ../neodct_history.c
 
 test_status: test_status.c ../neodct_status.c ../neodct_status.h \
 		../neodct_url.c test_util.h

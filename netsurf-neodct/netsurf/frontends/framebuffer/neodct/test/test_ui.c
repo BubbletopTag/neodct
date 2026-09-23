@@ -64,10 +64,11 @@ int main(void)
 	CHECK_INT(ui.mode, NEODCT_MODE_BROWSE);
 	CHECK_INT(a.type, NEODCT_ACT_NONE);
 
-	/* menu order: Exit, Go to URL, Back, Forward, Home, Reload */
+	/* menu order: Exit, Go to URL, History, Back, Forward, Home,
+	 * Reload */
 	neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);   /* reopen */
-	neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
-	neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
+	for (int i = 0; i < 3; i++)
+		neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
 	CHECK_STR(neodct_menu_selected(&ui.menu), "Back");
 	neodct_ui_key(&ui, NEODCT_KEY_SELECT, 0, &a);
 	CHECK_INT(a.type, NEODCT_ACT_NAV_BACK);
@@ -80,24 +81,21 @@ int main(void)
 
 	/* Forward, Home, Reload */
 	neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);
-	neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
-	neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
-	neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
+	for (int i = 0; i < 4; i++)
+		neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
 	CHECK_STR(neodct_menu_selected(&ui.menu), "Forward");
 	neodct_ui_key(&ui, NEODCT_KEY_SELECT, 0, &a);
 	CHECK_INT(a.type, NEODCT_ACT_NAV_FORWARD);
 
 	neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);
-	neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
-	neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
-	neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
-	neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
+	for (int i = 0; i < 5; i++)
+		neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
 	CHECK_STR(neodct_menu_selected(&ui.menu), "Home");
 	neodct_ui_key(&ui, NEODCT_KEY_SELECT, 0, &a);
 	CHECK_INT(a.type, NEODCT_ACT_NAV_HOME);
 
 	neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);
-	for (int i = 0; i < 5; i++)
+	for (int i = 0; i < 6; i++)
 		neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
 	CHECK_STR(neodct_menu_selected(&ui.menu), "Reload");
 	neodct_ui_key(&ui, NEODCT_KEY_SELECT, 0, &a);
@@ -105,7 +103,8 @@ int main(void)
 
 	/* --- URLBAR ------------------------------------------------ */
 
-	/* menu "Go to URL" enters urlbar mode with an empty buffer */
+	/* menu "Go to URL" enters urlbar mode with an empty buffer when
+	 * the shell has no page url to offer (the home page) */
 	neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);
 	neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
 	CHECK_STR(neodct_menu_selected(&ui.menu), "Go to URL");
@@ -185,16 +184,129 @@ int main(void)
 	CHECK_INT(ui.cursor.x, 120);
 	neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);
 
-	/* clicking the url bar opens it prefilled with the current url */
+	/* clicking the url bar opens it prefilled with the current url,
+	 * selected: BACK clears all of it, a second BACK leaves */
 	neodct_ui_open_urlbar(&ui, "https://foo.org");
 	CHECK_INT(ui.mode, NEODCT_MODE_URLBAR);
 	CHECK_STR(ui.textbuf, "https://foo.org");
+	CHECK_INT(ui.text_selected, 1);
+	neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);
+	CHECK_STR(ui.textbuf, "");
+	CHECK_INT(ui.text_selected, 0);
+	CHECK_INT(ui.mode, NEODCT_MODE_URLBAR);
+	neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);
+	CHECK_INT(ui.mode, NEODCT_MODE_BROWSE);
+
+	/* typing over a selected url replaces it */
+	neodct_ui_open_urlbar(&ui, "https://foo.org");
+	neodct_ui_key(&ui, NEODCT_KEY_CHAR, 'b', &a);
+	CHECK_STR(ui.textbuf, "b");
+	CHECK_INT(ui.text_selected, 0);
+	/* ...and a multi-tap cycle (backspace + next letter) then edits
+	 * the new text, not the old url */
+	neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);
+	neodct_ui_key(&ui, NEODCT_KEY_CHAR, 'c', &a);
+	CHECK_STR(ui.textbuf, "c");
+	neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);
+	neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);
+	CHECK_INT(ui.mode, NEODCT_MODE_BROWSE);
+
+	/* an arrow keeps the url and edits its end */
+	neodct_ui_open_urlbar(&ui, "https://foo.org");
+	neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
+	CHECK_INT(ui.text_selected, 0);
 	neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);
 	CHECK_STR(ui.textbuf, "https://foo.or");
+	neodct_ui_key(&ui, NEODCT_KEY_CHAR, 'g', &a);
+	neodct_ui_key(&ui, NEODCT_KEY_SELECT, 0, &a);
+	CHECK_INT(a.type, NEODCT_ACT_NAVIGATE);
+	CHECK_STR(a.text, "https://foo.org");
 
-	/* NULL prefill opens it empty */
+	/* SELECT on a selected url goes there as it is */
+	neodct_ui_open_urlbar(&ui, "https://foo.org/x");
+	neodct_ui_key(&ui, NEODCT_KEY_SELECT, 0, &a);
+	CHECK_INT(a.type, NEODCT_ACT_NAVIGATE);
+	CHECK_STR(a.text, "https://foo.org/x");
+
+	/* NULL prefill opens it empty and unselected */
 	neodct_ui_open_urlbar(&ui, NULL);
 	CHECK_STR(ui.textbuf, "");
+	CHECK_INT(ui.text_selected, 0);
+	neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);
+
+	/* menu "Go to URL" offers the page url the shell reported */
+	neodct_ui_set_page_url(&ui, "https://bar.net/page");
+	neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);
+	neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
+	neodct_ui_key(&ui, NEODCT_KEY_SELECT, 0, &a);
+	CHECK_INT(ui.mode, NEODCT_MODE_URLBAR);
+	CHECK_STR(ui.textbuf, "https://bar.net/page");
+	CHECK_INT(ui.text_selected, 1);
+	neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);
+	neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);
+	CHECK_INT(ui.mode, NEODCT_MODE_BROWSE);
+
+	/* ...and nothing once the shell says it is on the home page */
+	neodct_ui_set_page_url(&ui, "");
+	neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);
+	neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
+	neodct_ui_key(&ui, NEODCT_KEY_SELECT, 0, &a);
+	CHECK_STR(ui.textbuf, "");
+	neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);
+	CHECK_INT(ui.mode, NEODCT_MODE_BROWSE);
+
+	/* --- HISTORY ----------------------------------------------- */
+
+	/* with no history, History opens an empty list and SELECT or
+	 * BACK go back up to the menu */
+	neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);
+	neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
+	neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
+	CHECK_STR(neodct_menu_selected(&ui.menu), "History");
+	neodct_ui_key(&ui, NEODCT_KEY_SELECT, 0, &a);
+	CHECK_INT(ui.mode, NEODCT_MODE_HISTORY);
+	CHECK_INT(ui.history_menu.count, 0);
+	neodct_ui_key(&ui, NEODCT_KEY_SELECT, 0, &a);
+	CHECK_INT(a.type, NEODCT_ACT_NONE);
+	CHECK_INT(ui.mode, NEODCT_MODE_MENU);
+	neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);
+	CHECK_INT(ui.mode, NEODCT_MODE_BROWSE);
+
+	{
+		struct neodct_history h;
+
+		neodct_history_init(&h);
+		neodct_history_add(&h, "https://one.org/", "One");
+		neodct_history_add(&h, "https://two.org/", NULL);
+		neodct_ui_set_history(&ui, &h);
+
+		neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);
+		neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
+		neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
+		neodct_ui_key(&ui, NEODCT_KEY_SELECT, 0, &a);
+		CHECK_INT(ui.mode, NEODCT_MODE_HISTORY);
+		CHECK_INT(ui.history_menu.count, 2);
+		/* most recent first; untitled pages show their url */
+		CHECK_STR(neodct_menu_selected(&ui.history_menu),
+			  "https://two.org/");
+
+		/* BACK returns to the menu, still on History */
+		neodct_ui_key(&ui, NEODCT_KEY_BACK, 0, &a);
+		CHECK_INT(ui.mode, NEODCT_MODE_MENU);
+		CHECK_STR(neodct_menu_selected(&ui.menu), "History");
+
+		/* reopening starts at the top again; SELECT navigates */
+		neodct_ui_key(&ui, NEODCT_KEY_SELECT, 0, &a);
+		neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
+		CHECK_STR(neodct_menu_selected(&ui.history_menu), "One");
+		neodct_ui_key(&ui, NEODCT_KEY_DOWN, 0, &a);
+		CHECK_STR(neodct_menu_selected(&ui.history_menu), "One");
+		neodct_ui_key(&ui, NEODCT_KEY_SELECT, 0, &a);
+		CHECK_INT(a.type, NEODCT_ACT_NAVIGATE);
+		CHECK_STR(a.text, "https://one.org/");
+		CHECK_INT(ui.mode, NEODCT_MODE_BROWSE);
+		neodct_ui_set_history(&ui, NULL);
+	}
 
 	TEST_EXIT();
 }

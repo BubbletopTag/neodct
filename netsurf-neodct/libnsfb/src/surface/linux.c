@@ -288,22 +288,31 @@ static bool linux_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
     }
 }
 
+/* Take the pointer sprite off the screen before something draws or
+ * copies where it is.
+ *
+ * NeoDCT: two fixes to the stock version, both of which left pieces of
+ * the pointer behind in the page as it scrolled.
+ *
+ * The saved pixels are put back with the clip OFF. The stock code
+ * restored them through whatever clip the caller had set -- usually the
+ * widget being redrawn -- so when the pointer straddled two widgets (at
+ * the top of the screen it hangs from the url bar down into the page),
+ * redrawing the url bar restored only the url-bar rows, marked the
+ * pointer as gone anyway, and left its bottom rows on the page. The next
+ * scroll up copied them down with the page, once per step: a trail.
+ *
+ * The overlap test uses savloc, where the sprite was actually drawn,
+ * rather than loc, which is the hotspot position and misses the part of
+ * the sprite above and left of the hotspot. */
 static int linux_claim(nsfb_t *nsfb, nsfb_bbox_t *box)
 {
     struct nsfb_cursor_s *cursor = nsfb->cursor;
 
-    if ((cursor != NULL) && 
-        (cursor->plotted == true) && 
-        (nsfb_plot_bbox_intersect(box, &cursor->loc))) {
-
-        nsfb->plotter_fns->bitmap(nsfb, 
-                                  &cursor->savloc,  
-                                  cursor->sav, 
-                                  cursor->sav_width, 
-                                  cursor->sav_height, 
-                                  cursor->sav_width, 
-                                  false);
-        cursor->plotted = false;
+    if ((cursor != NULL) &&
+        (cursor->plotted == true) &&
+        (nsfb_plot_bbox_intersect(box, &cursor->savloc))) {
+        nsfb_cursor_clear(nsfb, cursor);
     }
     return 0;
 }

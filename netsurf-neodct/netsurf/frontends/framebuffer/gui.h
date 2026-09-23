@@ -82,6 +82,17 @@ const char *fb_browser_link_at(struct gui_window *gw, int sx, int sy);
 /** send synthetic pointer movement to the page at screen coordinates */
 void fb_browser_track_at(struct gui_window *gw, int sx, int sy);
 
+/**
+ * NeoDCT: how many rows at the bottom of the browser widget are covered
+ * by chrome drawn over the page (the status bar), 0 for none.
+ *
+ * A scroll moves what is already on screen with a copy and repaints only
+ * the strip it exposes. Anything drawn on top of the page is copied along
+ * with it, so without this a scroll down leaves a trail of status-bar text
+ * behind in the page.
+ */
+void fb_browser_set_obscured_bottom(struct gui_window *gw, int rows);
+
 #endif /* NETSURF_FB_GUI_H */
 
 /*

@@ -33,6 +33,9 @@ int neodct_shell_input(struct gui_window *gw,
 /** core reports the current url (also shown in the url bar) */
 void neodct_shell_set_url(struct gui_window *gw, const char *url);
 
+/** core reports the page title (recorded in history) */
+void neodct_shell_set_title(struct gui_window *gw, const char *title);
+
 /** core reports pointer shape; caret means an editable field */
 void neodct_shell_set_hover(struct gui_window *gw, bool editable);
 

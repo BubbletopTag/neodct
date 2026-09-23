@@ -69,6 +69,24 @@ Fixed: on the engineering Modem and Fuel Gauge screens, and in a few other
 places, the smaller grey labels were drawn in the same colour as the
 background and could not be seen at all. Twenty of them.
 
+Browser:
+
+- History. Options -> History lists the last twenty pages you visited, most
+  recent first, by their titles. Pick one to go back to it. The list is kept
+  when the browser closes. The home page is not added to it, and neither is a
+  page that never finished loading.
+- Go to URL starts from the page you are on, highlighted. Type and it
+  replaces the whole address; press C once to clear it; press an arrow to
+  keep it and edit the end instead. On the home page it opens empty as
+  before.
+- The X at the right of the address bar is gone. Exit is in Options, and the
+  whole bar now opens Go to URL.
+- Scrolling up no longer leaves a trail of pointer-coloured dots down the
+  page, and scrolling down while "Waiting for..." or "Done." is showing no
+  longer smears copies of it up the page.
+- Go to URL shows its "OK" softkey again. The bar was never drawn, and the
+  page showed through where it should be.
+
 0.5.20a
 The carrier name appears the moment the phone has service.
 

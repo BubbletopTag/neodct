@@ -41,6 +41,7 @@
 #include "framebuffer/fbtk/widget.h"
 
 #include "framebuffer/neodct/neodct_ui.h"
+#include "framebuffer/neodct/neodct_history.h"
 #include "framebuffer/neodct/neodct_status.h"
 #include "framebuffer/neodct/neodct_wrap.h"
 #include "framebuffer/neodct/neodct_mem.h"
@@ -62,9 +63,14 @@
 #define FONT_N_PX 20
 #define FONT_XL_PX 24
 
-#define URL_CLOSE_W 16
 #define MEM_LOG_INTERVAL_MS 5000
 #define BLINK_INTERVAL_MS 500
+
+/* In $HOME, which the Browser app points at /NeoDCT/User/browser: the
+ * one directory the untrusted browser user may write. A dot file so
+ * that a developer running netsurf on a desktop does not find it
+ * littering their home directory. */
+#define HISTORY_FILE ".neodct_history"
 
 /* pixels to points at the toolkit's 90 DPI */
 #define px_to_pt(x) (((x) * 72) / FBTK_DPI)
@@ -75,11 +81,16 @@ struct neodct_shell {
 	struct neodct_status status;
 
 	char cur_url[NEODCT_TEXT_MAX + 1];
+	char cur_title[NEODCT_HISTORY_TITLE_MAX + 1];
 	char homepage[NEODCT_TEXT_MAX + 1];
+	/** homepage as the core spells it, for recognising it in set_url */
+	char homepage_norm[NEODCT_TEXT_MAX + 1];
+
+	struct neodct_history history;
+	char history_path[NEODCT_TEXT_MAX + 1]; /**< "" when not persisted */
 
 	/* browse-mode chrome */
 	fbtk_widget_t *url_text;
-	fbtk_widget_t *close_text;
 	fbtk_widget_t *status_text;
 
 	/* full-screen NeoDCT overlay (menu / url / input screens) */
@@ -188,11 +199,39 @@ static void render_softkey(struct neodct_shell *sh, nsfb_t *nsfb,
 		  y + (FRAME_SOFTKEY_H - FONT_N_PX) / 2, label);
 }
 
-/* VerticalList.draw(): title, breadcrumb, divider, 3 rows, scrollbar */
-static void render_menu(struct neodct_shell *sh, nsfb_t *nsfb,
-			struct redraw_context *ctx)
+/* Cut s to fit max_w pixels, ending in "..." when anything was cut.
+ * Page titles and urls in the history list are routinely wider than
+ * the screen, and a row that runs under the scrollbar reads as a
+ * rendering fault. */
+static void fit_text(const plot_font_style_t *fs, const char *s,
+		     int max_w, char *out, size_t out_sz)
 {
-	struct neodct_menu *m = &sh->ui.menu;
+	size_t len = strlen(s);
+
+	if (len >= out_sz)
+		len = out_sz - 1;
+	memcpy(out, s, len);
+	out[len] = '\0';
+	if (text_width(fs, out, len) <= max_w)
+		return;
+
+	while (len > 0) {
+		len--;
+		if (len + 4 > out_sz)
+			continue;
+		memcpy(out + len, "...", 4);
+		if (text_width(fs, out, len + 3) <= max_w)
+			return;
+	}
+	out[0] = '\0';
+}
+
+/* VerticalList.draw(): title, breadcrumb, divider, 3 rows, scrollbar */
+static void render_list(struct neodct_shell *sh, nsfb_t *nsfb,
+			struct redraw_context *ctx, const struct neodct_menu *m,
+			const char *title, const char *crumb_prefix,
+			const char *empty_text)
+{
 	int w = fbtk_get_width(sh->gw->window);
 	int h = fbtk_get_height(sh->gw->window);
 	int content_bottom = h - FRAME_SOFTKEY_H;
@@ -204,7 +243,8 @@ static void render_menu(struct neodct_shell *sh, nsfb_t *nsfb,
 	int selected_right = bar_x - 10;
 	int track_top, track_bottom, notch_y;
 	plot_font_style_t fs;
-	char crumb[16];
+	char crumb[24];
+	char label[NEODCT_TEXT_MAX + 1];
 	int i, tw;
 
 	if (line_height < 28)
@@ -217,10 +257,13 @@ static void render_menu(struct neodct_shell *sh, nsfb_t *nsfb,
 
 	/* title and breadcrumb header */
 	mkstyle(&fs, FONT_XL_PX, NEODCT_WHITE, NEODCT_BLACK);
-	draw_text(ctx, &fs, FONT_XL_PX, 5, 0, "Options");
+	draw_text(ctx, &fs, FONT_XL_PX, 5, 0, title);
 
-	snprintf(crumb, sizeof(crumb), "%s-%d", BROWSER_APP_ID,
-		 m->selected + 1);
+	if (m->count > 0)
+		snprintf(crumb, sizeof(crumb), "%s-%d", crumb_prefix,
+			 m->selected + 1);
+	else
+		snprintf(crumb, sizeof(crumb), "%s", crumb_prefix);
 	mkstyle(&fs, FONT_N_PX, NEODCT_WHITE, NEODCT_BLACK);
 	tw = text_width(&fs, crumb, strlen(crumb));
 	draw_text(ctx, &fs, FONT_N_PX, w - 5 - tw, 5, crumb);
@@ -244,7 +287,17 @@ static void render_menu(struct neodct_shell *sh, nsfb_t *nsfb,
 		} else {
 			mkstyle(&fs, FONT_MD_PX, NEODCT_WHITE, NEODCT_BLACK);
 		}
-		draw_text(ctx, &fs, FONT_MD_PX, 10, text_y, m->items[item]);
+		fit_text(&fs, m->items[item], selected_right - 10 - 4,
+			 label, sizeof(label));
+		draw_text(ctx, &fs, FONT_MD_PX, 10, text_y, label);
+	}
+
+	if (m->count == 0) {
+		mkstyle(&fs, FONT_MD_PX, NEODCT_WHITE, NEODCT_BLACK);
+		draw_text(ctx, &fs, FONT_MD_PX, 10,
+			  y_start + (item_height - FONT_MD_PX) / 2, empty_text);
+		render_softkey(sh, nsfb, ctx, "Back");
+		return;
 	}
 
 	/* scrollbar track and notch */
@@ -262,6 +315,21 @@ static void render_menu(struct neodct_shell *sh, nsfb_t *nsfb,
 		  NEODCT_WHITE);
 
 	render_softkey(sh, nsfb, ctx, "Select");
+}
+
+static void render_menu(struct neodct_shell *sh, nsfb_t *nsfb,
+			struct redraw_context *ctx)
+{
+	render_list(sh, nsfb, ctx, &sh->ui.menu, "Options", BROWSER_APP_ID,
+		    "");
+}
+
+/* History sits third in Options, so its breadcrumb is 11-3-n */
+static void render_history(struct neodct_shell *sh, nsfb_t *nsfb,
+			   struct redraw_context *ctx)
+{
+	render_list(sh, nsfb, ctx, &sh->ui.history_menu, "History",
+		    BROWSER_APP_ID "-3", "No history yet");
 }
 
 /* TextInput.draw(): title, divider, prompt, outlined box, blink text */
@@ -297,24 +365,47 @@ static void render_urlbar(struct neodct_shell *sh, nsfb_t *nsfb,
 	outline_rect(nsfb, 10, box_y, box_right, box_y + box_h,
 		     NEODCT_WHITE);
 
-	snprintf(buf, sizeof(buf), "%s%s", sh->ui.textbuf,
-		 sh->blink ? "_" : "");
+	/* A selected url is drawn highlighted, like a selected list row,
+	 * with no cursor: what happens next replaces it, not extends it. */
+	if (sh->ui.text_selected)
+		snprintf(buf, sizeof(buf), "%s", sh->ui.textbuf);
+	else
+		snprintf(buf, sizeof(buf), "%s%s", sh->ui.textbuf,
+			 sh->blink ? "_" : "");
 
 	/* keep the tail visible when the text outgrows the box */
 	tw = text_width(&fs, buf, strlen(buf));
 	{
 		int text_x = 15;
 		int max_w = box_right - 15 - 5;
+		int text_y = box_y + (box_h - FONT_N_PX) / 2;
 		struct rect clip = { 12, box_y + 1,
 				     box_right - 2, box_y + box_h - 1 };
 
 		if (tw > max_w)
 			text_x = 15 - (tw - max_w);
 		ctx->plot->clip(ctx, &clip);
-		draw_text(ctx, &fs, FONT_N_PX, text_x,
-			  box_y + (box_h - FONT_N_PX) / 2, buf);
+		if (sh->ui.text_selected) {
+			int x0 = text_x - 2 < 12 ? 12 : text_x - 2;
+			int x1 = text_x + tw + 2;
+
+			if (x1 > box_right - 2)
+				x1 = box_right - 2;
+			fill_rect(nsfb, x0, text_y - 1, x1,
+				  text_y + FONT_N_PX + 2, NEODCT_WHITE);
+			mkstyle(&fs, FONT_N_PX, NEODCT_BLACK, NEODCT_WHITE);
+		}
+		draw_text(ctx, &fs, FONT_N_PX, text_x, text_y, buf);
 	}
 
+	/* Unclip before the softkey. Left clipped to the text box, the
+	 * bar was never drawn on this screen and the page showed through
+	 * where "OK" belongs. */
+	{
+		struct rect full = { 0, 0, w, h };
+
+		ctx->plot->clip(ctx, &full);
+	}
 	render_softkey(sh, nsfb, ctx, "OK");
 }
 
@@ -415,6 +506,9 @@ static int screen_redraw(fbtk_widget_t *widget, fbtk_callback_info *cbi)
 	case NEODCT_MODE_INPUT:
 		render_input(sh, nsfb, &ctx);
 		break;
+	case NEODCT_MODE_HISTORY:
+		render_history(sh, nsfb, &ctx);
+		break;
 	default:
 		break;
 	}
@@ -456,8 +550,12 @@ static void shell_sync(struct neodct_shell *sh)
 			sh->tick_scheduled = true;
 			framebuffer_schedule(250, status_tick_cb, sh);
 		}
+		/* the bar is drawn over the page, so a scroll that copies
+		 * the page up copies the bar with it: tell the pan */
+		fb_browser_set_obscured_bottom(sh->gw, NEODCT_STATUS_H);
 	} else {
 		fbtk_set_mapping(sh->status_text, false);
+		fb_browser_set_obscured_bottom(sh->gw, 0);
 	}
 
 	fbtk_request_redraw(sh->gw->window);
@@ -565,6 +663,74 @@ static void install_crash_handler(void)
 
 	for (i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++)
 		sigaction(sigs[i], &sa, NULL);
+}
+
+/* ------------------------------------------------------------------
+ * home page and history
+ */
+
+static bool shell_is_home(const struct neodct_shell *sh, const char *url)
+{
+	return sh->homepage_norm[0] != '\0' &&
+		strcmp(url, sh->homepage_norm) == 0;
+}
+
+/* The core spells urls its own way (a trailing slash on a bare host,
+ * a lower-case scheme), so compare against the homepage as it will
+ * come back through set_url rather than as it was typed. */
+static void shell_init_homepage(struct neodct_shell *sh, const char *homepage)
+{
+	nsurl *url;
+
+	strncpy(sh->homepage, homepage, NEODCT_TEXT_MAX);
+	sh->homepage[NEODCT_TEXT_MAX] = '\0';
+
+	if (nsurl_create(homepage, &url) == NSERROR_OK) {
+		strncpy(sh->homepage_norm, nsurl_access(url),
+			NEODCT_TEXT_MAX);
+		sh->homepage_norm[NEODCT_TEXT_MAX] = '\0';
+		nsurl_unref(url);
+	} else {
+		strncpy(sh->homepage_norm, homepage, NEODCT_TEXT_MAX);
+		sh->homepage_norm[NEODCT_TEXT_MAX] = '\0';
+	}
+}
+
+static void shell_init_history(struct neodct_shell *sh)
+{
+	const char *home = getenv("HOME");
+	int n;
+
+	neodct_history_init(&sh->history);
+	neodct_ui_set_history(&sh->ui, &sh->history);
+
+	sh->history_path[0] = '\0';
+	if (home == NULL || home[0] == '\0')
+		return; /* kept for this session only */
+	n = snprintf(sh->history_path, sizeof(sh->history_path), "%s/%s",
+		     home, HISTORY_FILE);
+	if (n < 0 || (size_t)n >= sizeof(sh->history_path)) {
+		sh->history_path[0] = '\0';
+		return;
+	}
+	neodct_history_load(&sh->history, sh->history_path);
+}
+
+/* Recorded when a page finishes rather than when it starts, so that a
+ * mistyped address that never loaded does not sit at the top of the
+ * list. The home page and netsurf's own about: pages (error pages
+ * among them) are not places anyone goes back to. */
+static void shell_record_visit(struct neodct_shell *sh)
+{
+	if (sh->cur_url[0] == '\0' || shell_is_home(sh, sh->cur_url) ||
+	    strncmp(sh->cur_url, "about:", 6) == 0)
+		return;
+	if (!neodct_history_add(&sh->history, sh->cur_url, sh->cur_title))
+		return;
+	if (sh->history_path[0] != '\0' &&
+	    !neodct_history_save(&sh->history, sh->history_path))
+		NSLOG(netsurf, INFO, "neodct: cannot save history to %s",
+		      sh->history_path);
 }
 
 /* ------------------------------------------------------------------
@@ -724,11 +890,8 @@ static void shell_play(struct neodct_shell *sh, const char *url)
 static void shell_click(struct neodct_shell *sh, int x, int y)
 {
 	if (y < NEODCT_URLBAR_H) {
-		if (x >= sh->ui.cursor.width - URL_CLOSE_W) {
-			fb_complete = true;
-		} else {
-			neodct_ui_open_urlbar(&sh->ui, sh->cur_url);
-		}
+		/* Exit lives in Options, so the whole bar is the url */
+		neodct_ui_open_urlbar(&sh->ui, sh->ui.page_url);
 		return;
 	}
 
@@ -902,9 +1065,26 @@ void neodct_shell_set_url(struct gui_window *gw, const char *url)
 
 	if (url == NULL)
 		return;
+	if (strcmp(sh->cur_url, url) != 0)
+		sh->cur_title[0] = '\0'; /* the title belonged to the last page */
 	strncpy(sh->cur_url, url, NEODCT_TEXT_MAX);
 	sh->cur_url[NEODCT_TEXT_MAX] = '\0';
+
+	/* "Go to URL" starts from the page you are on, except on the home
+	 * page, whose file:// address is nowhere anyone wants to type
+	 * from */
+	neodct_ui_set_page_url(&sh->ui, shell_is_home(sh, url) ? NULL : url);
 	shell_sync(sh);
+}
+
+void neodct_shell_set_title(struct gui_window *gw, const char *title)
+{
+	struct neodct_shell *sh = shell_of(gw);
+
+	if (title == NULL)
+		return;
+	strncpy(sh->cur_title, title, NEODCT_HISTORY_TITLE_MAX);
+	sh->cur_title[NEODCT_HISTORY_TITLE_MAX] = '\0';
 }
 
 void neodct_shell_set_hover(struct gui_window *gw, bool editable)
@@ -932,6 +1112,7 @@ void neodct_shell_load_stop(struct gui_window *gw)
 	struct neodct_shell *sh = shell_of(gw);
 
 	neodct_status_done(&sh->status, now_ms());
+	shell_record_visit(sh);
 	shell_sync(sh);
 }
 
@@ -1087,20 +1268,18 @@ void neodct_shell_create(struct gui_window *gw, const char *homepage)
 
 	neodct_ui_init(&sh->ui, width, height);
 	neodct_status_init(&sh->status);
-	strncpy(sh->homepage, homepage, NEODCT_TEXT_MAX);
+	shell_init_homepage(sh, homepage);
+	shell_init_history(sh);
 
-	/* browse chrome: url bar with 1px white underline, close X */
+	/* browse chrome: url bar with 1px white underline. No close box:
+	 * Exit is the first entry in Options, so the whole bar is the url
+	 * and a click anywhere on it opens Go to URL. */
 	fbtk_create_fill(win, 0, 0, width, NEODCT_URLBAR_H, NEODCT_BLACK);
 	fbtk_create_fill(win, 0, NEODCT_URLBAR_H - 1, width, 1,
 			 NEODCT_WHITE);
-	sh->url_text = fbtk_create_text(win, 1, 1,
-					width - URL_CLOSE_W - 4,
+	sh->url_text = fbtk_create_text(win, 1, 1, width - 2,
 					NEODCT_URLBAR_H - 3,
 					NEODCT_BLACK, NEODCT_WHITE, false);
-	sh->close_text = fbtk_create_text(win, width - URL_CLOSE_W - 1, 1,
-					  URL_CLOSE_W, NEODCT_URLBAR_H - 3,
-					  NEODCT_BLACK, NEODCT_WHITE, true);
-	fbtk_set_text(sh->close_text, "X");
 
 	/* status bar overlay */
 	sh->status_text = fbtk_create_text(win, 0, height - NEODCT_STATUS_H,
