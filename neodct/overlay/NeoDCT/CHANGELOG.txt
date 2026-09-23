@@ -1,6 +1,6 @@
 # NeoDCT OS Changelog
 
-0.6.0a-dev
+0.6.0b-dev
 Themes. The phone's look is now something you install and change, not
 something the software was built with.
 

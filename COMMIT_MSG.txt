@@ -5400,3 +5400,25 @@ ships.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
+
+----
+Revert "revert: back out the themeable UI (PR #19) and return to 0.5.19a"
+
+Theming comes back on top of 0.5.20a so PR #21, which was built on the
+pre-revert tip, can merge. The 0.6.0a-dev changelog section returns above
+0.5.20a; os-release and this log keep main's side.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
+
+----
+Merge PR #21: move themes to system image and fix theme loading for confined apps
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
+
+----
+version: 0.6.0b-dev
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
