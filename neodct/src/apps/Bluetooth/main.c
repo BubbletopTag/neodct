@@ -379,10 +379,12 @@ static void draw_page(nd_ui *ui, const char *title, const nd_btapp_row *rows, si
     pitch = line_h(bottom, y, n_rows);
     for (i = 0u; i < n_rows; i++) {
         /* One column is the label and the other the value, and which is which
-         * depends on the page. The emphasis stays exactly where it was; only
-         * the two inks change, from white-and-grey to white-and-sky. */
+         * depends on the page. The emphasis stays exactly where it was: the
+         * quiet column is ink_muted. It was sky_top -- the background colour,
+         * which is black under the classic look and made every label on the
+         * device page black on black. */
         nd_theme_text(ui->draw, BT_COL_LABEL, y, rows[i].left, ui->font_s,
-                      right_col == BT_COL_VALUE ? ND_TH_SKY_TOP : ND_TH_INK_LIGHT, BT_INK_SHADOW);
+                      right_col == BT_COL_VALUE ? ND_TH_INK_MUTED : ND_TH_INK_LIGHT, BT_INK_SHADOW);
         nd_theme_text(ui->draw, right_col, y, rows[i].right, ui->font_s,
                       right_col == BT_COL_VALUE ? ND_TH_INK_LIGHT : ND_TH_INK_MUTED, BT_INK_SHADOW);
         y += pitch;

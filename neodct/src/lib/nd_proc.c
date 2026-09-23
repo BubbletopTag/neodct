@@ -910,22 +910,23 @@ typedef struct {
     char root[ND_PATH_MAX + 32];
     char evdev[ND_PATH_MAX + 32];
     /* The presentation subset -- nd_proc.h has the whole argument for why
-     * these three cross the boundary and settings.prop does not. */
+     * these four cross the boundary and settings.prop does not. */
     char wallpaper[ND_PATH_MAX + 32];
     char wp_everywhere[64];
     char wp_dim[64];
+    char theme[64];
 } app_env_vars;
 
 /* One setting, VERBATIM, as "NAME=value".
  *
  * nd_settings_get_copy() and not nd_settings_get(): the latter hands back a
  * pointer into one shared static buffer that the next call overwrites, and
- * three of these are composed in a row. Unparsed on purpose -- see
+ * four of these are composed in a row. Unparsed on purpose -- see
  * ND_ENV_UI_WALLPAPER in nd_proc.h.
  *
  * BEST EFFORT, AND NEVER A REASON NOT TO OPEN THE APP. Every other variable
  * here is a descriptor number or a path the core just built, so a failure to
- * compose one is a bug and ND_ERR_TOOLONG is the right answer. These three
+ * compose one is a bug and ND_ERR_TOOLONG is the right answer. These four
  * are values out of a file on the writable partition, so a value long enough
  * not to fit is somebody's junk -- and refusing to launch every app on the
  * phone because settings.prop has a 4 KB wallpaper name in it would be a
@@ -999,7 +1000,7 @@ static nd_err app_env(app_env_vars *v, int keypad_fd, int crash_fd, int fb_fd, i
         v->evdev[0] = '\0';
     }
 
-    /* THE PRESENTATION SUBSET. All three unconditionally, including the
+    /* THE PRESENTATION SUBSET. All four unconditionally, including the
      * "NONE" wallpaper, because an app that sees none of them has to be able
      * to conclude "no core told me" and read the file itself -- which is
      * exactly what a hand-run nd-apprun and nd-shoot do. See nd_proc.h.
@@ -1012,11 +1013,13 @@ static nd_err app_env(app_env_vars *v, int keypad_fd, int crash_fd, int fb_fd, i
                 ND_SET_UI_WP_EVERYWHERE, ND_SET_UI_WP_EVERYWHERE_DFLT);
     put_setting(v->wp_dim, sizeof v->wp_dim, ND_ENV_UI_WP_DIM, ND_SET_UI_WP_APP_DIM,
                 ND_SET_UI_WP_APP_DIM_DFLT);
+    put_setting(v->theme, sizeof v->theme, ND_ENV_UI_THEME, ND_SET_UI_THEME,
+                ND_SET_UI_THEME_DFLT);
     return ND_OK;
 }
 
 /* How many of our own entries build_envp() may append, plus the NULL. */
-#define APP_ENVP_OURS 11
+#define APP_ENVP_OURS 12
 
 /* environ plus ours, with any inherited copy of ours removed so the child
  * cannot pick up a stale descriptor number -- or a stale keypad claim -- from
@@ -1053,7 +1056,8 @@ static const char **build_envp(const app_env_vars *v)
                                         * it, which is worse than none at all. */
                                        ND_ENV_UI_WALLPAPER "=",
                                        ND_ENV_UI_WP_EVERYWHERE "=",
-                                       ND_ENV_UI_WP_DIM "="};
+                                       ND_ENV_UI_WP_DIM "=",
+                                       ND_ENV_UI_THEME "="};
     const char **envp;
     size_t have = 0u;
     size_t n = 0u;
@@ -1095,6 +1099,8 @@ static const char **build_envp(const app_env_vars *v)
         envp[n++] = v->wp_everywhere;
     if (v->wp_dim[0] != '\0')
         envp[n++] = v->wp_dim;
+    if (v->theme[0] != '\0')
+        envp[n++] = v->theme;
     envp[n] = NULL;
     return envp;
 }

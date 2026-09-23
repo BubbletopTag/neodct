@@ -442,8 +442,13 @@ static void calc_draw(calc_app *a)
     {
         nd_rect well = ND_RECT(4, 6, a->screen_w - 5, 6 + ND_CALC_DISPLAY_H);
 
-        nd_theme_round_gradient(ui->canvas, well, 6, ND_TH_GLASS_BOT, ND_TH_GLASS_TOP, 235u);
-        nd_theme_shadow_band(ui->canvas, well.x0 + 3, well.x1 - 3, well.y0 + 1, 3, 120u);
+        /* The same well nd_textinput draws, on the same terms: a hollow rule
+         * where panels are the ground, and no inner shadow where plates cast
+         * none. */
+        nd_theme_round_gradient(ui->canvas, well, 6, ND_TH_GLASS_BOT, ND_TH_GLASS_TOP,
+                                nd_theme_panel_a(235u));
+        if (ND_TH_PLATE_SHADOW)
+            nd_theme_shadow_band(ui->canvas, well.x0 + 3, well.x1 - 3, well.y0 + 1, 3, 120u);
         nd_theme_round_outline(ui->canvas, well, 6, ND_TH_BLUE_DEEP, 180u);
     }
     nd_theme_text_dark(ui->draw, x, 12, text, ui->font_xl);

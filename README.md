@@ -64,8 +64,9 @@ The case is a hand-built prototype, everything was wired by hand, no drop in PCB
   downclocking
 - Web browsing, music playback, calendar/reminders, calculator, clock, tones,
   games, a Linux shell, and installable app packages
-- Experimental: installable UI themes. The framework is in place and two
-  example themes ship, but the stock look is what is verified on hardware
+- UI themes: the stock Classic look plus two built-in themes (Frutiger Aero
+  and Blossom), and more installable from the memory card. The stock look is
+  what is verified on hardware
 - Read-only squashfs under dm-verity, separated user data, app confinement,
   signed updates, crash recovery, QEMU, and automated regression tests
 

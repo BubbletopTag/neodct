@@ -327,6 +327,14 @@ typedef struct nd_ui {
     char dial_buffer[ND_DIAL_BUFFER_MAX];
     bool handling_call;
     bool shutting_down;
+
+    /* The four faces above were loaded by nd_ui_init()/nd_ui_init_app() and
+     * are this context's to free and replace. False in a context somebody
+     * built by hand -- the unit-test fixtures own their fonts -- which is what
+     * lets nd_ui_wear_theme() reload faces without freeing another owner's.
+     * LAST in the struct on purpose: an installed app.so compiled against an
+     * older header still finds every field before it where it expects. */
+    bool owns_fonts;
 } nd_ui;
 
 /* ------------------------------------------------------------------ *
@@ -343,6 +351,25 @@ void nd_ui_teardown(nd_ui *ui);
  * notify handle -- those live in the core and an app that needs them asks
  * across the boundary. */
 nd_err nd_ui_init_app(nd_ui *ui, nd_fb *fb, int keypad_fd);
+
+/* The active theme of THIS process has just changed -- nd_theme_apply() --
+ * and everything the context derived from the old one has to follow: the four
+ * faces (a theme may bring its own, or want the pixel one), the wallpaper
+ * (dimmed by the theme at load) and the chrome background made from it.
+ *
+ * nd_theme_apply() cannot do this itself, because fonts and the wallpaper are
+ * the UI's to own and nd_theme knows nothing about a context. So the two
+ * places a process changes theme while it runs call both: the theme picker,
+ * which wears each theme it previews, and the core after an app exit, when
+ * nd_theme_is_stale() says Settings chose another one. Before this existed a
+ * preview was the new palette in the OLD typeface, and Settings went on
+ * drawing in it after Apply -- Classic's colours in the pink theme's rounded
+ * face, until the owner left the app.
+ *
+ * Faces are only replaced when the context owns them (owns_fonts). Any face
+ * pointer a caller copied out of the context is invalid afterwards; widgets
+ * read ui->font_* when they draw, which is why none of them does. */
+void nd_ui_wear_theme(nd_ui *ui);
 
 /* ------------------------------------------------------------------ *
  * The calls widgets and apps actually make
@@ -562,9 +589,10 @@ bool nd_ui_show_security_notice_once(nd_ui *ui);
 void nd_ui_handle_incoming_call(nd_ui *ui, const char *number);
 
 /* Re-read what an app may have changed. Called after EVERY app exit:
- * system.ui.wallpaper, system.ui.engineering_mode, the app directory scan and
- * the unread-SMS count. This is the mechanism that replaces Settings writing
- * into the core's live memory. */
+ * system.ui.wallpaper, system.ui.engineering_mode, system.ui.theme (and with
+ * it the fonts -- see nd_ui_wear_theme()), the app directory scan and the
+ * unread-SMS count. This is the mechanism that replaces Settings writing into
+ * the core's live memory. */
 void nd_ui_refresh_after_app(nd_ui *ui);
 
 /* The scan itself, exposed because Settings' host unit tests drive it. */

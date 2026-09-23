@@ -195,6 +195,43 @@ static void test_the_palette_is_restored_when_nothing_is_chosen(void)
     sa_fx_free(&fx);
 }
 
+/* The picker wears each theme through nd_ui_wear_theme(), which replaces a
+ * context's faces -- but only a context that loaded them. This fixture owns
+ * its own, like every hand-built context, and they must come through a
+ * preview untouched: freeing them would leave the fixture (and, on a phone,
+ * whoever built the context) holding dangling faces. */
+static void test_wearing_a_theme_leaves_borrowed_faces_alone(void)
+{
+    sa_fixture fx;
+    const nd_font *n;
+    const nd_font *xl;
+
+    if (!sa_fx_init(&fx)) {
+        CHECK(false, "fixture");
+        sa_fx_free(&fx);
+        return;
+    }
+    reset_themes();
+    mk("Loud", "{\"id\":\"loud\",\"palette\":{\"blue_top\":\"#FF0000\"}}");
+
+    CHECK(!fx.ui.owns_fonts, "a hand-built context does not own its faces");
+    n = fx.ui.font_n;
+    xl = fx.ui.font_xl;
+    {
+        nd_theme_info t;
+
+        CHECK(nd_theme_find("loud", &t), "the theme is there");
+        nd_theme_apply(&t);
+    }
+    nd_ui_wear_theme(&fx.ui);
+    CHECK(fx.ui.font_n == n && fx.ui.font_xl == xl, "and it keeps them");
+    CHECK_INT(ND_TH_BLUE_TOP.r, 0xFF, "while the palette is the theme's");
+
+    nd_theme_apply(NULL);
+    nd_ui_wear_theme(&fx.ui);
+    sa_fx_free(&fx);
+}
+
 int main(void)
 {
     void *h = sa_begin("Settings", "ndthemepick");
@@ -206,6 +243,7 @@ int main(void)
     RUN(test_it_opens_on_the_active_theme);
     RUN(test_every_theme_lays_a_page_out);
     RUN(test_the_palette_is_restored_when_nothing_is_chosen);
+    RUN(test_wearing_a_theme_leaves_borrowed_faces_alone);
 
     nd_theme_apply(NULL);
     rc = sa_end(h, "test_themepicker");

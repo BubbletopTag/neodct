@@ -552,6 +552,18 @@ bool nd_uinput_wait_readable(const char *node, double timeout_s);
 #define ND_ENV_UI_WP_EVERYWHERE "NEODCT_UI_WPEVERYWHERE"
 #define ND_ENV_UI_WP_DIM        "NEODCT_UI_WPDIM"
 
+/* And the theme, which is the same kind of fact and was missing from the set.
+ *
+ * Without it every confined app -- the browser, and everything installed from
+ * the card -- read settings.prop, was refused, and drew the built-in look
+ * while the core around it wore the owner's theme: a pink home screen that
+ * opened into a black-and-white app over a pink wallpaper. The value is the
+ * theme's id, verbatim, like the three above. A confined app can still only
+ * WEAR a theme it can read, which is every theme shipped in the image and
+ * none of the card's; nd_theme_load_active() falls back to the built-in for
+ * the rest, exactly as it does when a card is pulled. */
+#define ND_ENV_UI_THEME "NEODCT_UI_THEME"
+
 /* How long the core waits for the node before giving up on it. Two seconds:
  * long enough to cover a coldplug still running on a loaded single core,
  * short enough that a phone whose udev is genuinely broken still opens the

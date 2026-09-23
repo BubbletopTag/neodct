@@ -283,11 +283,17 @@ void nd_cal_month_draw(nd_ui *ui, int32_t year, int32_t month, int32_t day, uint
     (void)header;
 
     /* 4. M T W T F S S. They are a label for the grid and not part of it, and
-     *    they used to say so in the framework's one grey; pale sky blue is
-     *    the same demotion in a palette that has one. */
+     *    they used to say so in the framework's one grey.
+     *
+     *    In ink_muted, the palette's word for "secondary type over the
+     *    background". They were in sky_top, the BACKGROUND colour, which read
+     *    as pale blue while the glass look was compiled in and has read as
+     *    nothing since: black initials on the classic look's black ground, and
+     *    pink on pink under a pink theme. Settings and MusicPlayer made the
+     *    same move for the same reason. */
     for (i = 0; i < ND_CAL_GRID_COLS; i++) {
         draw_centred(d, small, nd_cal_weekday_initials[i], g.grid_x + i * g.cell_w, g.cell_w,
-                     g.weekday_y, ND_TH_SKY_TOP);
+                     g.weekday_y, ND_TH_INK_MUTED);
     }
 
     /* 5. The cells.
@@ -332,10 +338,19 @@ void nd_cal_month_draw(nd_ui *ui, int32_t year, int32_t month, int32_t day, uint
 
             p.drop_shadow = false;
             nd_theme_plate_draw(ui->canvas, box, &p);
-            ink = ND_TH_INK_LIGHT;
+            /* ON the plate, so sel_ink -- the same rule every list row
+             * follows. It was ink_light, which is white in the glass look and
+             * therefore right by accident; the classic plate is a WHITE
+             * lozenge, and the selected day was white on white: the cursor
+             * was there and the date under it was not. */
+            ink = ND_TH_SEL_INK;
         } else {
+            /* The ring stands on the background, like the digits beside it,
+             * so it takes their ink rather than chrome_hi -- the colour of a
+             * bevel's highlight, which a theme is free to make pale enough
+             * to vanish against a pale ground. */
             if (is_today)
-                nd_theme_round_outline(ui->canvas, box, 3, ND_TH_CHROME_HI, 220u);
+                nd_theme_round_outline(ui->canvas, box, 3, ND_TH_INK_LIGHT, 220u);
             /* A neighbouring month's days are context, not choices. The muted
              * ink says that without leaving a hole in the grid, which is what
              * blanking them would do. */

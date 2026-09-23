@@ -57,6 +57,7 @@
 
 #include "nd_theme.h"
 #include "smallapp_test.h"
+#include "themeprobe_test.h"
 
 #include "../../apps/Settings/settings_app.h"
 
@@ -658,9 +659,16 @@ static void test_about(void)
      * should find it. It simply no longer decides a pixel.
      *
      * What is asserted instead is that the bar is THERE and spans the whole
-     * width -- at both edges, which the inset rule never reached. */
-    CHECK(px_differs_from_row(fx.canvas, 0, 8, 40), "the bar reaches the left edge");
-    CHECK(px_differs_from_row(fx.canvas, 239, 8, 40), "and the right edge");
+     * width -- at both edges, which the inset rule never reached.
+     *
+     * Where the theme PAINTS a bar. A theme whose bar is the background
+     * leaves the strip alone, so over a wallpaper its edges are the picture
+     * and match the rows below them -- which is the fix for the classic
+     * look's black band, not a missing bar. themeprobe_test.h has the rule. */
+    if (nd_tp_bars_painted()) {
+        CHECK(px_differs_from_row(fx.canvas, 0, 8, 40), "the bar reaches the left edge");
+        CHECK(px_differs_from_row(fx.canvas, 239, 8, 40), "and the right edge");
+    }
     CHECK(px_differs_from_row(fx.canvas, 120, 8, 40), "and the middle");
     CHECK(!px_differs_from_row(fx.canvas, 0, 40, 44), "and stops well above row 44");
 

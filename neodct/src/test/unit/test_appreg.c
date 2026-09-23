@@ -612,7 +612,7 @@ static void test_icon_geometry(nd_ui *ui)
     }
     /* Koki's icon is 120x115 and the odd one out. It was briefly square, when
      * the Frutiger Aero set was what the phone shipped; that set is a theme
-     * now (neodct/contrib/themes/FruitigerAero) and the shipped icons are the
+     * now (System/themes/FrutigerAero) and the app directories' icons are the
      * phone's own again, Koki's included.
      *
      * Asserted as a count rather than dropped, because "the icons are all one

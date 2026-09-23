@@ -6,12 +6,26 @@ compiled in, so a look is something an owner installs from the memory card in
 the same way they install an app -- and something a person can write in an
 afternoon with a text editor and a folder of PNGs.
 
-The phone ships one look, **Classic**: white type on black in the pixel
-typeface, flat and square-cornered. It is the built-in, it needs no files, and
-it is what an owner gets with nothing installed. The glossy **Frutiger Aero**
-look is a theme (`neodct/contrib/themes/FruitigerAero`) -- which is the proof
-that the system is worth having, because those two share no colour, no
-typeface, no icon and no drawing style, and the same widgets draw both.
+The phone ships three looks. **Classic** is the built-in: white type on black
+in the pixel typeface, flat and square-cornered. It needs no files, and it is
+what an owner gets on first boot and whenever a chosen theme cannot be found.
+Beside it the image carries two themes in `/NeoDCT/System/themes/`
+(`neodct/overlay/NeoDCT/System/themes/` in the tree):
+
+- **Frutiger Aero** (`FrutigerAero/`) -- glass and gradients in deep sky blue,
+  the look the phone briefly had compiled in. It is the proof that the system
+  is worth having: it and Classic share no colour, no typeface, no icon and no
+  drawing style, and the same widgets draw both.
+- **Blossom** (`Blossom/`) -- the same glossy construction in rose pink, with
+  a rounded typeface, a pink icon set derived from Aero's, and a polka dot
+  wallpaper. It replaces the Hello Kitty theme that used to be an optional
+  package, without the character art.
+
+They used to live in `neodct/contrib/themes/` and reach a phone only as `.nap`
+packages. They are part of the image now: they are there from the first boot,
+an update keeps them current, and -- the reason that matters most -- an app
+confined as `ndusr_ut` can read them, which it cannot do for a theme on the
+card (see "How it works" below).
 
 The owner's side of it is one screen: **Settings → Theme**. `*` and `#` turn
 the pages, each page is drawn *in the theme it is offering*, and NaviKey
@@ -20,7 +34,7 @@ applies the one on screen. Backing out puts the previous look back.
 ## A theme is a directory
 
 ```
-HelloKitty/
+Blossom/
   theme.json          the palette, and the theme's name -- the only required file
   fonts/ui.ttf        optional, replaces the UI typeface
   fonts/ui-bold.ttf   optional
@@ -83,12 +97,30 @@ signature colour even in a theme with no blue in it.
 
 `text_shadow` and `scrim_ink` are worth setting even in a small theme.
 
-**`ink_light` is "type over the background", not "white type".** A theme with
-a light background should make it dark and set `text_shadow` to a pale halo --
-white type on a pale ground is the one mistake that makes a pretty palette
-unreadable, and it is what the Hello Kitty theme does the other way round from
-Frutiger Aero. The bars and the selection have their own ink, so they keep
-white type either way.
+**`ink_light` is "type over the background", not "white type".** It stands on
+whatever the background is -- the theme's own sky, the theme's wallpaper, or a
+photograph the owner picked afterwards -- so it has to survive all three. Keep
+it LIGHT and give it a dark `text_shadow` and a `scrim`: every wallpaper dim
+in the framework darkens the picture, so light type gets more legible as the
+background gets busier, and dark type gets less. The first pink theme made
+`ink_light` charcoal to suit its pale polka dots and was unreadable the moment
+the owner chose a dark photograph; Blossom keeps white type with a plum
+shadow, deepens its own wallpaper to suit, and puts its dark ink where the
+ground is known -- on its light glass panels (`ink_dark`). The bars and the
+selection have their own inks (`bar_ink`, `sel_ink`), so they keep white type
+either way.
+
+### Bars and panels that are the background
+
+A flat theme says "the title strip is just the background with type on it" by
+giving `bar_top`/`bar_bot` the same colours as `sky_top`/`sky_bot`, and "a text
+field is a hollow rule" by doing the same with `glass_*`. When the two match
+(to within a few levels per channel) the framework does not paint that surface
+at all -- it leaves whatever is behind it, which over a wallpaper is the
+picture. Classic relies on this: its title, softkey, dialogs and fields are
+type and rules standing on the wallpaper, not black boxes pasted over it. Give
+the bars a colour of their own and they are painted as plates, as in Aero and
+Blossom.
 
 ### Structure
 
@@ -158,12 +190,12 @@ stopped. `sheen` is the white gloss filling the top half of every plate --
 
 ## Packaging one
 
-A theme ships as a `.nap`, the same package format as an app. The manifest
-says which it is:
+A theme that is not in the image ships as a `.nap`, the same package format
+as an app. The manifest says which it is:
 
 ```json
 {
- "name": "Hello Kitty",
+ "name": "Blossom",
  "type": "theme",
  "icon": "icon.png",
  "version": "1.0",
@@ -178,34 +210,50 @@ no `arch` -- it is the same file on every phone -- and one that *does* carry
 program code is refused.
 
 ```sh
-neodct/tools/mknap.py --app-dir HelloKitty/ -o HelloKitty.nap   # no --so
-neodct/tools/mknap.py --list HelloKitty.nap
+neodct/tools/mknap.py --app-dir Blossom/ -o Blossom.nap   # no --so
+neodct/tools/mknap.py --list Blossom.nap
 ```
 
 Copy the `.nap` onto the card and install it from **Settings → Install apps**,
 which is also where themes arrive. It unpacks into
 `/NeoDCT/User/sdcard/themes/<Name>/` and appears in the picker immediately --
-no restart, unlike an app.
+no restart, unlike an app. A theme on the card with the same `id` as one in
+the image is ignored: the image's copy wins.
 
 ### The pictures
 
 `preview.png` and `icon.png` are generated, not drawn by hand:
 
 ```sh
-neodct/tools/mkthemeart.py neodct/contrib/themes/HelloKitty
+neodct/tools/mkthemeart.py neodct/overlay/NeoDCT/System/themes/Blossom
 ```
 
 That tool stages the theme, runs `nd-shoot` with it selected, and keeps a real
 frame. The preview is therefore a genuine rendering of the theme by the real
 framework rather than a mock-up that can drift from it.
 
+Two more tools produce parts of a theme rather than drawing them by hand:
+
+```sh
+# the typeface: subset to Latin, rename (OFL), and for a face that reserves
+# room for other scripts, fit the vertical metrics to what is left
+neodct/tools/mkuifont.py --family "NeoDCT Blossom Rounded" --fit-metrics \
+    --out neodct/overlay/NeoDCT/System/themes/Blossom/fonts Regular.ttf Bold.ttf
+
+# the icons: Aero's set recoloured by hue band, so both sets stay the same
+# objects in two colours
+neodct/tools/tinticons.py neodct/overlay/NeoDCT/System/themes/FrutigerAero/icons \
+    neodct/overlay/NeoDCT/System/themes/Blossom/icons
+```
+
 ## Worked example
 
-`neodct/contrib/themes/FruitigerAero/` is the whole glass look as a theme
-file: palette, structure, icons, status sprites, typeface and wallpaper. It is
-both the reference for the format and a regression test -- installed, it
-renders the frames the phone rendered when that look was compiled in, and the
-suite checks it. Copy it and change colours.
+`neodct/overlay/NeoDCT/System/themes/FrutigerAero/` is the whole glass look as
+a theme file: palette, structure, icons, status sprites, typeface and
+wallpaper. It is both the reference for the format and a regression test --
+it renders the frames the phone rendered when that look was compiled in, and
+the suite checks it. `Blossom/` is the same construction recoloured, and the
+shorter path to a theme of your own: copy it and change colours.
 
 ## For the curious: how it works
 
@@ -217,9 +265,26 @@ active palette instead of a folded-in literal. Nothing had to be touched to
 make the whole interface themeable.
 
 Applying a theme replaces the palette of the running process, which is why
-the picker can preview a look by simply wearing it and repainting. Other
-processes pick the change up when they next start; the setting
-(`system.ui.theme`) is the single source of truth.
+the picker can preview a look by simply wearing it and repainting. The setting
+(`system.ui.theme`) is the single source of truth, and every other process
+follows it:
+
+- **The core** -- the home screen and the menu -- never restarts, so it asks
+  after every app exit whether the setting has moved (`nd_theme_is_stale()`)
+  and, if so, puts the new theme on and reloads its fonts before it draws
+  again. Choosing a theme in Settings therefore changes the home screen the
+  moment you leave Settings.
+- **An app** reads the theme when it starts. It gets the id from the core in
+  `NEODCT_UI_THEME`, next to the wallpaper settings, because an app confined as
+  `ndusr_ut` -- the browser and everything installed from the card -- cannot
+  open `settings.prop`. Such an app can only wear a theme it can read, which is
+  every theme in the image and none on the card; for a card theme it falls
+  back to Classic.
+
+Choosing a theme that ships a wallpaper sets it; choosing one that does not
+puts the wallpaper back to the default **if the current one belongs to a
+theme** (it lives under a `themes/` directory). A picture the owner chose
+themselves is never touched.
 
 `docs/NAP-PACKAGES.md` covers the package format, `nd_theme.h` the C contract,
 and `nd_themeload.c` the loader.

@@ -76,10 +76,12 @@ static inline int32_t nd_tp_dist(nd_color a, nd_color b)
  * full-width plate over the same rows. An assertion that the bar reaches
  * both edges of the screen is real for the first kind and a false alarm for
  * the second, so it is guarded on this. */
+/* The renderer asks exactly this question now -- nd_theme_bars_painted()
+ * decides whether a bar's body is drawn at all -- so the probe asks the
+ * renderer rather than restating the rule and hoping the two stay in step. */
 static inline bool nd_tp_bars_painted(void)
 {
-    return nd_tp_dist(ND_TH_BAR_TOP, ND_TH_SKY_TOP) > ND_TP_SAME ||
-           nd_tp_dist(ND_TH_BAR_BOT, ND_TH_SKY_BOT) > ND_TP_SAME;
+    return nd_theme_bars_painted();
 }
 
 /* Does a panel -- a text field's well, a dialog's body, a readout -- have an
@@ -91,8 +93,7 @@ static inline bool nd_tp_bars_painted(void)
  * field is. */
 static inline bool nd_tp_panels_painted(void)
 {
-    return nd_tp_dist(ND_TH_GLASS_TOP, ND_TH_SKY_TOP) > ND_TP_SAME ||
-           nd_tp_dist(ND_TH_GLASS_BOT, ND_TH_SKY_BOT) > ND_TP_SAME;
+    return nd_theme_panels_painted();
 }
 
 /* How many rows a plate spends before its FILL begins.

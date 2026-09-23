@@ -143,7 +143,11 @@ static nd_err build_page(nd_themepicker *p, size_t i, nd_detailpage *page, char 
     char preview[ND_PATH_MAX];
     bool active = strcmp(t->id, p->entry_id) == 0;
 
+    /* The palette AND what the context made from the last one -- its faces
+     * and its wallpaper. Applying alone previewed every theme in the typeface
+     * of the one being worn when the picker opened. */
     nd_theme_apply(t->builtin ? NULL : t);
+    nd_ui_wear_theme(p->ui);
     page_body(t, active, body, body_sz);
     page_badge(i, p->n, badge, badge_sz);
     if (!nd_theme_preview_path(t, preview, sizeof preview))
@@ -219,6 +223,7 @@ restore:
             nd_theme_apply(NULL);
         else
             nd_theme_apply(&back);
+        nd_ui_wear_theme(p->ui);
     }
     return ND_WIDGET_BACK;
 }

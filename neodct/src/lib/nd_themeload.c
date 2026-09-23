@@ -29,6 +29,7 @@
 #include "nd_json.h"
 #include "nd_log.h"
 #include "nd_paths.h"
+#include "nd_proc.h"
 #include "nd_settings.h"
 
 /* ------------------------------------------------------------------ *
@@ -115,6 +116,13 @@ static const nd_theme_style builtin_style = {
  * which is what nd-shoot and every unit test do. */
 static nd_theme_info active;
 static bool active_ready;
+
+/* The id nd_theme_load_active() was last ASKED for, which is not always the
+ * id it applied: a theme on a card that has since been pulled is asked for and
+ * the built-in is worn. nd_theme_is_stale() compares against this rather than
+ * against `active`, or a missing theme would read as "changed" after every
+ * app exit and the core would reload its fonts each time for nothing. */
+static char requested[ND_THEME_ID_MAX];
 
 const nd_theme_palette *nd_theme_pal = &builtin_palette;
 const nd_theme_style *nd_theme_style_of = &builtin_style;
@@ -590,16 +598,47 @@ const nd_theme_info *nd_theme_active(void)
     return &active;
 }
 
+/* Which theme this process should be wearing.
+ *
+ * THE CORE'S WORD FIRST, for the reason ND_ENV_UI_THEME gives: a confined app
+ * cannot read settings.prop, and before the core said which theme was on, every
+ * one of them quietly drew the built-in look inside a themed phone. Absent
+ * means no core started us -- the core itself, nd-shoot, a hand-run
+ * nd-apprun -- and the setting is then the right answer, as it always was. */
+static bool wanted_id(char *out, size_t out_sz)
+{
+    const char *from_core = getenv(ND_ENV_UI_THEME);
+
+    if (from_core != NULL) {
+        if (nd_strlcpy(out, from_core, out_sz) >= out_sz)
+            return false;
+    } else if (nd_settings_get_copy(ND_SET_UI_THEME, ND_SET_UI_THEME_DFLT, out, out_sz) !=
+               ND_OK) {
+        return false;
+    }
+    return out[0] != '\0';
+}
+
+bool nd_theme_is_stale(void)
+{
+    char id[ND_THEME_ID_MAX];
+
+    if (!wanted_id(id, sizeof id))
+        (void)nd_strlcpy(id, ND_THEME_ID_BUILTIN, sizeof id);
+    return strcmp(id, requested[0] != '\0' ? requested : ND_THEME_ID_BUILTIN) != 0;
+}
+
 void nd_theme_load_active(void)
 {
     char id[ND_THEME_ID_MAX];
     nd_theme_info t;
 
-    if (nd_settings_get_copy(ND_SET_UI_THEME, ND_SET_UI_THEME_DFLT, id, sizeof id) != ND_OK ||
-        id[0] == '\0') {
+    if (!wanted_id(id, sizeof id)) {
+        (void)nd_strlcpy(requested, ND_THEME_ID_BUILTIN, sizeof requested);
         nd_theme_apply(NULL);
         return;
     }
+    (void)nd_strlcpy(requested, id, sizeof requested);
     if (strcmp(id, ND_THEME_ID_BUILTIN) == 0) {
         nd_theme_apply(NULL);
         return;
@@ -635,6 +674,7 @@ nd_err nd_theme_select(const char *id)
         nd_theme_apply(NULL);
     else
         nd_theme_apply(&t);
+    (void)nd_strlcpy(requested, id, sizeof requested);
 
     /* ============ AND THE WALLPAPER GOES WITH IT ============
      *
@@ -654,15 +694,48 @@ nd_err nd_theme_select(const char *id)
      * would mean a second setting whose only job is to be stale as soon as
      * the owner picks a wallpaper by hand, and the picker already tells them
      * what applying a theme does. */
+    /* ============ AND IT LEAVES WITH IT ============
+     *
+     * The other half, which was missing: a theme that ships no picture used
+     * to leave the PREVIOUS theme's picture in place. Going from the pink
+     * theme back to Classic kept the polka dots, so the stock phone was
+     * wearing part of a theme the owner had just taken off -- and the theme
+     * picker's promise that Classic is "white type on black" was simply
+     * untrue until they found Settings -> Wallpaper.
+     *
+     * So a wallpaper that belongs to a theme -- one under either themes
+     * directory -- goes back to the default when the new theme has none of
+     * its own. A photograph the owner chose is outside both and is still
+     * left exactly where it was. */
     {
         char wp[ND_PATH_MAX];
 
         if (nd_theme_wallpaper(wp, sizeof wp)) {
             if (nd_settings_set(ND_SET_UI_WALLPAPER, wp) != ND_OK)
                 nd_log_err(ND_LOG_UI, "theme: %s applied, but its wallpaper could not be set", id);
+        } else if (nd_settings_get_copy(ND_SET_UI_WALLPAPER, ND_SET_UI_WALLPAPER_DFLT, wp,
+                                        sizeof wp) == ND_OK &&
+                   nd_theme_owns_path(wp)) {
+            if (nd_settings_set(ND_SET_UI_WALLPAPER, ND_SET_UI_WALLPAPER_DFLT) != ND_OK)
+                nd_log_err(ND_LOG_UI, "theme: %s applied, but the last theme's wallpaper stayed",
+                           id);
         }
     }
     return ND_OK;
+}
+
+bool nd_theme_owns_path(const char *path)
+{
+    static const char *const ROOTS[] = {ND_PATH_THEMES_DIR "/", ND_PATH_USER_THEMES_DIR "/"};
+    size_t i;
+
+    if (path == NULL)
+        return false;
+    for (i = 0u; i < ND_ARRAY_LEN(ROOTS); i++) {
+        if (strncmp(path, ROOTS[i], strlen(ROOTS[i])) == 0)
+            return true;
+    }
+    return false;
 }
 
 /* ------------------------------------------------------------------ *

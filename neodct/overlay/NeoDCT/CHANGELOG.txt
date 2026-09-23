@@ -24,8 +24,35 @@ Settings.
 
 The phone itself looks the way it always did: white text on black in the
 pixel typeface, which is now the built-in "Classic" theme rather than
-something baked into the software. The glossy Frutiger Aero look from the
-0.5.16a preview is available as a theme you install.
+something baked into the software. Two more themes come with the phone and
+are in Settings -> Theme from the first boot, with nothing to install: the
+glossy blue Frutiger Aero look from the 0.5.16a preview, and Blossom, the
+same glossy style in pink with a rounded typeface, pink icons and a polka dot
+wallpaper. Blossom replaces the Hello Kitty theme; if you installed that one
+from the card, it still works, and you can remove it.
+
+Themes hold together now:
+
+- Choosing a theme changes the home screen and the menu as soon as you leave
+  Settings. Before, they kept the old look until the phone restarted, while
+  apps opened in the new one.
+- Apps installed from the memory card, and the browser, wear the theme too.
+  They used to draw the Classic look inside a themed phone.
+- Going back to Classic, or to any theme without a wallpaper, takes the last
+  theme's wallpaper away with it. A wallpaper you picked yourself is left
+  alone.
+- With a wallpaper set, Classic no longer draws black bars across it: the
+  title, the softkey strip, dialogs, text boxes and the calculator's display
+  are text and outlines standing on the picture, the way the phone always
+  looked. The home screen's "Menu" had also picked up a grey glossy band from
+  the Aero look; it is gone.
+- Calendar: in Classic the selected day was white on white and the weekday
+  letters were black on black. Both can be read now, in every theme.
+- The same kind of fix on the Bluetooth device page, and on Memory, which
+  played on a dark blue board in every theme; Classic gets its black board
+  back.
+- In Classic, the message editor's title no longer runs into the character
+  count.
 
 Snake is black and white again on the stock phone, exactly as it was. It had
 gained a green snake and a red apple; those now come with a theme, and the
