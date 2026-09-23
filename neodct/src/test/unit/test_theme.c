@@ -163,6 +163,24 @@ static void test_an_alpha_is_clamped(void)
     CHECK_INT(t.palette.sheen_a, 0);
 }
 
+/* The launch transition is decoration like gloss: off unless a theme turns
+ * it on, so the stock phone and any theme that predates the key launch
+ * instantly. */
+static void test_the_launch_transition_is_opt_in(void)
+{
+    nd_theme_info t;
+
+    CHECK(!nd_theme_style_builtin()->launch_anim);
+    /* One at a time: make_theme() hands back the same static buffer. */
+    CHECK_INT(nd_theme_read(make_theme("Quiet", "{\"id\":\"quiet\"}"), &t), ND_OK);
+    CHECK(!t.style.launch_anim);
+    CHECK_INT(nd_theme_read(make_theme("Glass", "{\"id\":\"glass\","
+                                                "\"style\":{\"launch_anim\":true}}"),
+                            &t),
+              ND_OK);
+    CHECK(t.style.launch_anim);
+}
+
 /* What a theme ships is recorded when it is read, so the picker can say so
  * without stat()ing seven paths per keypress. */
 static void test_the_optional_parts_are_noticed(void)
@@ -489,6 +507,7 @@ int main(void)
     RUN(test_a_bad_colour_keeps_the_default_and_the_theme_still_loads);
     RUN(test_an_alpha_is_clamped);
     RUN(test_the_optional_parts_are_noticed);
+    RUN(test_the_launch_transition_is_opt_in);
     RUN(test_the_list_always_offers_the_built_in_first);
     RUN(test_a_theme_cannot_steal_the_built_in_id);
     RUN(test_one_broken_theme_does_not_cost_the_list);

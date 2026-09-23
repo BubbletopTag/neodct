@@ -288,6 +288,12 @@ typedef struct {
      * they change theme. What a theme sets is what an owner who has never
      * touched it gets. */
     uint8_t app_wallpaper_dim;
+
+    /* An app arrives by blurring into focus and popping up to size over the
+     * screen it replaces, rather than simply appearing. Glass moves; a 3310
+     * does not, so this is off in the built-in. nd_launchfx.h is the effect,
+     * nd_ui_present() is where it runs. */
+    bool launch_anim;
 } nd_theme_style;
 
 /* The active structure, alongside the active palette and swapped with it. */
@@ -307,6 +313,7 @@ extern const nd_theme_style *nd_theme_style_of;
 #define ND_TH_GAME_COLOUR   (nd_theme_style_of->game_colour)
 #define ND_TH_WALLPAPER_DIM (nd_theme_style_of->wallpaper_dim)
 #define ND_TH_APP_WALLPAPER_DIM (nd_theme_style_of->app_wallpaper_dim)
+#define ND_TH_LAUNCH_ANIM   (nd_theme_style_of->launch_anim)
 
 /* The active palette. Never NULL -- it points at the built-in Frutiger Aero
  * values until nd_theme_load() replaces it, and back at them when a theme is

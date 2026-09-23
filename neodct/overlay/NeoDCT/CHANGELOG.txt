@@ -61,6 +61,11 @@ Themes hold together now:
 - A long app name in the menu is set a size smaller instead of being cut
   off, in every theme: "Koki Mobile", not "Koki Mob...".
 
+In Frutiger Aero and Blossom, opening an app is animated: the app blurs into
+focus and pops up to size over the menu, which softens and dims behind it.
+It takes a fifth of a second. Classic opens apps instantly, as before, and so
+does any theme that does not ask for the effect.
+
 Snake is black and white again on the stock phone, exactly as it was. It had
 gained a green snake and a red apple; those now come with a theme, and the
 phone's own game is the one it always was.

@@ -68,6 +68,7 @@
 #include "nd_input.h"
 #include "nd_json.h"
 #include "nd_keycodes.h"
+#include "nd_launchfx.h"
 #include "nd_layout.h"
 #include "nd_log.h"
 #include "nd_modem.h"
@@ -2193,6 +2194,7 @@ nd_err nd_ui_init(nd_ui *ui, nd_fb *fb)
      * the only process that runs the frame loop the animation needs. */
     ui->app_use_wallpaper = true;
     ui->drives_wallpaper = true;
+    ui->launch_pending = true;
     g_ring_seen_at = 0.0;
 
     /* BEFORE the eighteen steps and not after them. Everything below this line
@@ -2301,6 +2303,7 @@ nd_err nd_ui_init_app(nd_ui *ui, nd_fb *fb, int keypad_fd)
      * nd_ui_set_repaint(). An app that opted out never loads a wallpaper at
      * all, so it still opens no decoder and this costs it nothing. */
     ui->drives_wallpaper = true;
+    ui->launch_pending = true;
     g_ring_seen_at = 0.0;
 
     /* The beat but not the thread -- nd_ui.h says why an app gets no thread.
@@ -2406,6 +2409,65 @@ void nd_ui_teardown(nd_ui *ui)
  * Input
  * ------------------------------------------------------------------ */
 
+static double launch_now_ms(void)
+{
+    struct timespec ts;
+
+    (void)clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+}
+
+/* The glass themes' launch: the app's first frame blurs into focus and pops
+ * up to size over whatever the core left on the panel. See nd_launchfx.h.
+ *
+ * Every failure is silent and harmless -- no readback, no memory, a sink with
+ * no mapping -- because the caller presents the real frame straight after
+ * regardless, and a launch without its flourish is still a launch. It also
+ * yields to SIGTERM between frames: an incoming call must not wait for an
+ * animation to finish before it gets the sound card back. */
+static void launch_transition(nd_ui *ui)
+{
+    nd_image *before;
+    nd_image *frame = NULL;
+    nd_launchfx *fx = NULL;
+    int32_t step;
+
+    before = nd_image_new(ui->canvas->w, ui->canvas->h, ND_PIXFMT_RGB888);
+    if (before == NULL || nd_fb_read(ui->fb, before) != ND_OK) {
+        nd_image_free(before);
+        return;
+    }
+    fx = nd_launchfx_new(before, ui->canvas);
+    nd_image_free(before);
+    frame = nd_image_new(ui->canvas->w, ui->canvas->h, ND_PIXFMT_RGB888);
+    if (fx == NULL || frame == NULL)
+        goto out;
+
+    for (step = 1; step < ND_LAUNCHFX_STEPS; step++) {
+        double started = launch_now_ms();
+        double left;
+
+        if (nd_app_should_exit())
+            break;
+        if (nd_launchfx_frame(fx, frame, step, ND_LAUNCHFX_STEPS) != ND_OK ||
+            nd_fb_update(ui->fb, frame) != ND_OK)
+            break;
+        nd_ui_watch_beat();
+        left = (double)ND_LAUNCHFX_FRAME_MS - (launch_now_ms() - started);
+        if (left > 0.0) {
+            struct timespec ts;
+
+            ts.tv_sec = 0;
+            ts.tv_nsec = (long)(left * 1e6);
+            /* EINTR is the SIGTERM this loop checks for; just go round. */
+            (void)nanosleep(&ts, NULL);
+        }
+    }
+out:
+    nd_launchfx_free(fx);
+    nd_image_free(frame);
+}
+
 nd_err nd_ui_present(nd_ui *ui)
 {
     /* One of the three beats. A screen that is still being painted is a UI
@@ -2416,6 +2478,11 @@ nd_err nd_ui_present(nd_ui *ui)
     nd_ui_watch_beat();
     if (ui == NULL || ui->fb == NULL || ui->canvas == NULL)
         return ND_ERR_INVAL;
+    if (ui->launch_pending) {
+        ui->launch_pending = false;
+        if (ND_TH_LAUNCH_ANIM)
+            launch_transition(ui);
+    }
     return nd_fb_update(ui->fb, ui->canvas);
 }
 
