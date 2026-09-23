@@ -683,3 +683,69 @@ nd_err nd_fb_update(nd_fb *fb, const nd_image *src)
 
     return write_composed(fb, src, copy_w, copy_h, src_x, src_y, dst_x, dst_y);
 }
+
+nd_err nd_fb_read(const nd_fb *fb, nd_image *dst)
+{
+    size_t out_bpp;
+    size_t src_off;
+    int32_t dst_x;
+    int32_t dst_y;
+    int32_t y;
+
+    if (fb == NULL || dst == NULL || dst->pixels == NULL || dst->bpp < 3u)
+        return ND_ERR_INVAL;
+    if (fb->sink != NULL || fb->mem == NULL)
+        return ND_ERR_UNSUPPORTED;
+    /* Exactly the geometry write_center_band() handles; anything else was
+     * composed on the way in and is not worth unpicking for a transition. */
+    if (dst->w > fb->xres || dst->h > fb->yres || (fb->bpp != 16 && fb->bpp != 32))
+        return ND_ERR_UNSUPPORTED;
+
+    out_bpp = out_bytes(fb->path);
+    dst_x = (fb->xres - dst->w) / 2;
+    dst_y = (fb->yres - dst->h) / 2;
+    src_off = (size_t)dst_y * fb->line_length + (size_t)dst_x * (size_t)fb->bytes_per_pixel;
+
+    for (y = 0; y < dst->h; y++) {
+        const uint8_t *s = fb->mem + src_off;
+        uint8_t *d = dst->pixels + (size_t)y * dst->stride;
+        int32_t x;
+
+        if (src_off > fb->size || (size_t)dst->w * out_bpp > fb->size - src_off)
+            return ND_ERR_HARDWARE;
+        for (x = 0; x < dst->w; x++, s += out_bpp, d += dst->bpp) {
+            uint32_t v;
+
+            switch (fb->path) {
+            case ND_FB_PATH_BGRA32:
+                d[0] = s[2];
+                d[1] = s[1];
+                d[2] = s[0];
+                break;
+            case ND_FB_PATH_RGBA32:
+                d[0] = s[0];
+                d[1] = s[1];
+                d[2] = s[2];
+                break;
+            case ND_FB_PATH_RGB565:
+            case ND_FB_PATH_BGR565:
+                v = (uint32_t)s[0] | ((uint32_t)s[1] << 8);
+                d[0] = (uint8_t)((v >> 8) & 0xF8u);
+                d[1] = (uint8_t)((v >> 3) & 0xFCu);
+                d[2] = (uint8_t)((v << 3) & 0xF8u);
+                if (fb->path == ND_FB_PATH_BGR565) {
+                    uint8_t t = d[0];
+                    d[0] = d[2];
+                    d[2] = t;
+                }
+                break;
+            case ND_FB_PATH_RGB888:
+                return ND_ERR_UNSUPPORTED;
+            }
+            if (dst->bpp == 4u)
+                d[3] = 255u;
+        }
+        src_off += fb->line_length;
+    }
+    return ND_OK;
+}

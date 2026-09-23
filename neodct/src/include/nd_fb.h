@@ -110,6 +110,19 @@ nd_fb_path nd_fb_pixel_path(const nd_fb *fb);
  * mmap, which is 168 KB the Python spent on a staging buffer and we do not. */
 nd_err nd_fb_update(nd_fb *fb, const nd_image *src);
 
+/* The inverse of nd_fb_update(), for the live case only: read the band an
+ * image of dst's size would occupy back out of the mapping into dst (RGB888
+ * or RGBA8888). An app process uses it to see the frame the core left on the
+ * panel -- the app selector -- so its launch transition can dissolve out of
+ * the real thing rather than out of black.
+ *
+ * ND_ERR_UNSUPPORTED on a sink, which has no mapping to read, and on any
+ * geometry nd_fb_update() would compose rather than write straight through:
+ * a readback that only works for some panels is honest about the others. The
+ * 16bpp paths come back with their low bits zero, which is what is on the
+ * glass anyway. */
+nd_err nd_fb_read(const nd_fb *fb, nd_image *dst);
+
 /* The packers, exposed for the unit tests and for nd-shoot.
  *
  * BGRA: memory order B, G, R, A with alpha always 255. Red is 00 00 ff ff --

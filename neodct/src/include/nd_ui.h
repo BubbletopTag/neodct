@@ -323,6 +323,14 @@ typedef struct nd_ui {
      * that process and for nothing else. See nd_app.h. */
     bool app_use_wallpaper;
 
+    /* --- has this app process shown anything yet? --- *
+     *
+     * Set by nd_ui_init_app() and cleared by the first nd_ui_present(), which
+     * is the moment the app's screen replaces the core's -- the one place a
+     * launch transition can run without any app knowing it exists. False in
+     * the core and in a hand-built test context, so neither ever animates. */
+    bool launch_pending;
+
     /* --- transient core state --- */
     char dial_buffer[ND_DIAL_BUFFER_MAX];
     bool handling_call;

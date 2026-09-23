@@ -106,6 +106,7 @@ static const nd_theme_style builtin_style = {
     false, /* game_colour   */
     30u,   /* wallpaper_dim     -- no scrim, so the picture itself gives way */
     75u,   /* app_wallpaper_dim -- and further still inside an app */
+    false, /* launch_anim   */
 };
 
 /* The active theme, and the pointer everything draws through.
@@ -336,6 +337,7 @@ static void read_style(const nd_json_val *st, nd_theme_style *y)
     read_flag(st, "scrim", &y->scrim);
     read_flag(st, "pixel_font", &y->pixel_font);
     read_flag(st, "game_colour", &y->game_colour);
+    read_flag(st, "launch_anim", &y->launch_anim);
     {
         static const struct {
             const char *key;

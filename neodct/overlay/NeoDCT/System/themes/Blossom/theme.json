@@ -19,7 +19,8 @@
     "pixel_font":        false,
     "game_colour":       true,
     "wallpaper_dim":     92,
-    "app_wallpaper_dim": 72
+    "app_wallpaper_dim": 72,
+    "launch_anim":       true
   },
 
   "palette": {
