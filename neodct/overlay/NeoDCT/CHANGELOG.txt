@@ -53,6 +53,13 @@ Themes hold together now:
   back.
 - In Classic, the message editor's title no longer runs into the character
   count.
+- In Classic, the menu is laid out exactly as it was in 0.5.x again: the
+  app's name and icon had moved up the screen, and the scrollbar had turned
+  into a grey groove. Notices and questions no longer have a grey box drawn
+  round them, and "Select", "OK" and the other softkey words sit where they
+  always did.
+- A long app name in the menu is set a size smaller instead of being cut
+  off, in every theme: "Koki Mobile", not "Koki Mob...".
 
 Snake is black and white again on the stock phone, exactly as it was. It had
 gained a green snake and a red apple; those now come with a theme, and the

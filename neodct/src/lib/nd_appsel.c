@@ -16,11 +16,14 @@
  *   track_top     = header_y + 6                         = 36
  *   track_bottom  = max(track_top, 145 - 10)             = 135
  *
- * The icon numbers are the ones the theme changed and the reason is in the
- * body of nd_appsel_draw(): the Python's 82 px icon at y=55 ran to row 137
+ * Those are the numbers for a theme with a reflection, and the reason is in
+ * the body of nd_appsel_draw(): the Python's 82 px icon at y=55 ran to row 137
  * and left eight rows under it, which is fine for an icon that simply stops
- * and impossible for one standing on a reflection. The scrollbar's extent did
- * not move.
+ * and impossible for one standing on a reflection. A theme WITHOUT one --
+ * Classic -- keeps the Python's own: title_y = header_y - 16 = 14,
+ * icon_y = header_y + max(24, trunc(115 * 0.22)) = 55, icon_cap = 82, and the
+ * width-2 white track with a seven-row notch. The scrollbar's extent is the
+ * same in both.
  *
  * ============ THREE THINGS THAT DECIDE THE PIXELS ============
  *
@@ -105,9 +108,17 @@ void nd_appsel_draw(nd_appsel *s)
     const nd_app_entry *current;
     const char *icon_path;
     char page_num[16];
+    bool flat;
 
     if (s == NULL || s->ui == NULL || s->ui->draw == NULL)
         return;
+
+    /* Everything under "WHAT MOVED" below exists for the icon's reflection.
+     * A theme without one -- Classic, the phone's own look -- gets the 0.5.x
+     * menu back exactly: the name floating at y=14, the icon at y=55, the
+     * page number at (W-5-w, 10) and the thin white track. Moving them for
+     * every theme is what made the stock phone's menu ride high. */
+    flat = !ND_TH_REFLECTION;
 
     ui = s->ui;
     d = ui->draw;
@@ -171,6 +182,9 @@ void nd_appsel_draw(nd_appsel *s)
      * The page number is the title bar's badge now, for the same reason the
      * VerticalList's breadcrumb is: two right-aligned strings on the same row
      * drawn by two different pieces of code eventually stop agreeing.
+     *
+     * None of that applies to a theme without a reflection, which keeps the
+     * Python's layout; see `flat` above.
      */
 
     /* 2. The title bar, with the name centred rather than left-aligned --
@@ -184,41 +198,83 @@ void nd_appsel_draw(nd_appsel *s)
      * for the same reason. */
     (void)snprintf(page_num, sizeof page_num, "%d",
                    (int)nd_clamp32((int32_t)(s->selected_index + 1u), 1, ND_APP_MAX));
-    (void)nd_theme_titlebar(ui->canvas, d, screen_w, header_y, NULL, NULL, page_num, ui->font_n);
+    if (flat) {
+        /* The 0.5.x page number: font_n, 5 px in from the edge, at y=10,
+         * with no bar under it. */
+        nd_ui_text_size(ui, page_num, ui->font_n, &w, NULL);
+        nd_theme_text_light(d, screen_w - 5 - w, 10, page_num, ui->font_n);
+    } else {
+        (void)nd_theme_titlebar(ui->canvas, d, screen_w, header_y, NULL, NULL, page_num,
+                                ui->font_n);
+    }
     {
-        const nd_font *tf = nd_ui_font_bold(ui, ui->font_xl);
+        const nd_font *xl = flat ? ui->font_xl : nd_ui_font_bold(ui, ui->font_xl);
+        const nd_font *ladder[3];
+        size_t n_ladder = 0u;
+        const nd_font *tf;
         char fitted[ND_TEXT_LINE_MAX];
         int32_t badge_w = 0;
+        int32_t room;
 
         nd_ui_text_size(ui, page_num, ui->font_n, &badge_w, NULL);
-        /* Trimmed against the badge on BOTH sides, because the name is
+        /* Kept clear of the badge on BOTH sides, because the name is
          * centred: a name that just fits on the left would otherwise reach
          * under the page number on the right. "Remote Shell" at 24 px bold is
-         * the string that found this. */
-        (void)nd_text_fit(fitted, sizeof fitted, current->name, tf, screen_w - 2 * (badge_w + 12));
+         * the string that found this. Classic's badge sits 5 px from the edge
+         * and 0.5.x let the name come within a few pixels of it, which is how
+         * "Koki Mobile" fitted at 24 px there. */
+        room = screen_w - 2 * (badge_w + (flat ? 7 : 12));
+        /* A long name steps down a size before it loses letters: "Koki
+         * Mob..." and "PlayStat..." say less than the whole words set
+         * smaller. nd_text_fit stays as the last resort for a name too long
+         * even at 14 px. */
+        ladder[n_ladder++] = xl;
+        if (ui->font_n != NULL)
+            ladder[n_ladder++] = flat ? ui->font_n : nd_ui_font_bold(ui, ui->font_n);
+        if (ui->font_s != NULL)
+            ladder[n_ladder++] = flat ? ui->font_s : nd_ui_font_bold(ui, ui->font_s);
+        tf = nd_fit_font(current->name, room, ladder, n_ladder);
+        (void)nd_text_fit(fitted, sizeof fitted, current->name, tf, room);
         nd_ui_text_size(ui, fitted, tf, &w, NULL);
-        /* Centred in the title band by the INK BOX, bearing included -- this
-         * band has an edge to clip against and a face with a large bearing
-         * pushes the name off it. See nd_theme_ink_centre_y(). */
-        /* BAR ink, not content ink. The selector draws this title itself
-         * rather than handing it to nd_theme_titlebar (only the caller knows
-         * how to trim it against the badge), and in doing so it was reaching
-         * for ink_light -- "type over the background" -- while the badge
-         * beside it, drawn by the title bar, used bar_ink.
-         *
-         * The two are the same colour in a theme whose type is white
-         * everywhere, so it never showed. Under a theme with a pale ground
-         * and dark content type it is a charcoal app name sitting next to a
-         * white page number on the same pink plate. */
-        nd_theme_text_bar(d, floordiv2(screen_w - w),
-                          nd_theme_ink_centre_y(tf, fitted, header_y), fitted, tf);
+        if (flat) {
+            /* The 0.5.x position: font_xl drawn at header_y - 16, straight on
+             * the background. A name set smaller is centred on the ink band a
+             * 24 px name occupies there, so it does not jump up the screen. */
+            int32_t band_h = 0;
+            nd_rect bb;
+
+            nd_text_size(xl, current->name, NULL, &band_h);
+            nd_text_bbox(xl, current->name, &bb);
+            nd_theme_text_light(d, floordiv2(screen_w - w),
+                                header_y - 16 + bb.y0 + nd_theme_ink_centre_y(tf, fitted, band_h),
+                                fitted, tf);
+        } else {
+            /* Centred in the title band by the INK BOX, bearing included --
+             * this band has an edge to clip against and a face with a large
+             * bearing pushes the name off it. See nd_theme_ink_centre_y().
+             *
+             * BAR ink, not content ink: the badge beside it is drawn by the
+             * title bar in bar_ink, and under a theme with a pale ground and
+             * dark content type ink_light would put a charcoal app name next
+             * to a white page number on the same plate. */
+            nd_theme_text_bar(d, floordiv2(screen_w - w),
+                              nd_theme_ink_centre_y(tf, fitted, header_y), fitted, tf);
+        }
     }
 
     /* 3. The icon: a glow, the picture, then its reflection. */
-    icon_y = header_y + 8;
     icon_path = current->icon;
-    icon_cap =
-        nd_min32(ND_APP_SELECTOR_ICON_MAX, nd_max32(24, ((content_bottom - icon_y) * 3) / 4));
+    if (flat) {
+        /* 0.22 * 115 is 25.299999999999997 in IEEE754 and the truncation
+         * takes 25 -- the double is what the Python evaluated, so it is what
+         * is evaluated here. */
+        icon_y = header_y + nd_max32(24, nd_trunc32((double)(content_bottom - header_y) * 0.22));
+        icon_cap = nd_min32(ND_APP_SELECTOR_ICON_MAX, nd_max32(24, content_bottom - icon_y - 8));
+    } else {
+        icon_y = header_y + 8;
+        icon_cap = nd_min32(ND_APP_SELECTOR_ICON_MAX,
+                            nd_max32(24, ((content_bottom - icon_y) * 3) / 4));
+    }
     if (icon_path != NULL && icon_path[0] != '\0') {
         const nd_image *img = nd_ui_get_image_max(ui, icon_path, icon_cap);
 
@@ -272,10 +328,18 @@ void nd_appsel_draw(nd_appsel *s)
          * ink box, bearing subtracted. The two bars are side by side every
          * time the menu is opened from the home screen, and this one drifting
          * by a couple of rows is the seam the comment above is about. */
-        nd_ui_text_size(ui, "Select", f, &w, NULL);
-        nd_theme_text_bar(d, floordiv2(screen_w - w),
-                          plate.y0 + nd_theme_ink_centre_y(f, "Select", nd_rect_h(plate)),
-                          "Select", f);
+        if (nd_theme_bars_painted()) {
+            nd_ui_text_size(ui, "Select", f, &w, NULL);
+            nd_theme_text_bar(d, floordiv2(screen_w - w),
+                              plate.y0 + nd_theme_ink_centre_y(f, "Select", nd_rect_h(plate)),
+                              "Select", f);
+        } else {
+            /* Unplated, as nd_softkey_update() does it: the 0.5.x ink-height
+             * centring in the whole strip. */
+            nd_ui_text_size(ui, "Select", f, &w, &h);
+            nd_theme_text_bar(d, floordiv2(screen_w - w),
+                              content_bottom + nd_max32(0, (softkey_h - h) / 2), "Select", f);
+        }
     }
 
     /* 5. The scrollbar. Same centre column and same extent as before; see
@@ -283,10 +347,26 @@ void nd_appsel_draw(nd_appsel *s)
     bar_x = screen_w - 8;
     track_top = header_y + 6;
     track_bottom = nd_max32(track_top, content_bottom - 10);
-    nd_theme_scrollbar(ui->canvas, bar_x, track_top, track_bottom, s->selected_index, s->n_items);
+    if (flat) {
+        /* The 0.5.x bar: a width-2 white line, which nd_draw.h RULE 2 grows in
+         * the minor axis only, so it lights columns bar_x and bar_x+1 and
+         * stops at track_bottom exactly. The notch is a FLOAT that truncates;
+         * rounding moves it a pixel on most indices. */
+        double notch_y = (double)track_top;
+
+        if (s->n_items > 1u)
+            notch_y += (double)s->selected_index *
+                       ((double)(track_bottom - track_top) / (double)(s->n_items - 1u));
+        (void)nd_draw_line(d, bar_x, track_top, bar_x, track_bottom, ND_WHITE, 2);
+        (void)nd_draw_rect_fill(
+            d, ND_RECT(bar_x - 4, nd_trunc32(notch_y - 3.0), bar_x + 2, nd_trunc32(notch_y + 3.0)),
+            ND_WHITE);
+    } else {
+        nd_theme_scrollbar(ui->canvas, bar_x, track_top, track_bottom, s->selected_index,
+                           s->n_items);
+    }
 
     (void)nd_ui_present(ui);
-    (void)softkey_h;
 }
 
 /* See nd_ui_set_repaint(): the menu is the screen an animated wallpaper is

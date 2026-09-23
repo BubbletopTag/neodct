@@ -199,8 +199,18 @@ void nd_softkey_update(nd_softkey *bar, const char *text, bool present)
          * one. */
         nd_ui_text_size(ui, text, f, &w, &h);
         nd_text_bbox(f, text, &ink);
-        nd_theme_text_bar(ui->draw, floordiv2(screen_w - w) - ink.x0,
-                            plate.y0 + floordiv2(nd_rect_h(plate) - h) - ink.y0, text, f);
+        if (nd_theme_bars_painted()) {
+            nd_theme_text_bar(ui->draw, floordiv2(screen_w - w) - ink.x0,
+                              plate.y0 + floordiv2(nd_rect_h(plate) - h) - ink.y0, text, f);
+        } else {
+            /* No plate is drawn, so there is no edge to be off-centre within
+             * and the 0.5.x position stands: ink height centred in the whole
+             * strip, bearing not subtracted. Moving it made every "OK" and
+             * "Select" on the classic phone sit two rows higher than it
+             * always had. */
+            nd_theme_text_bar(ui->draw, floordiv2(screen_w - w),
+                              bar->y_start + floordiv2(bar->height - h), text, f);
+        }
     }
 
     if (text != NULL) {

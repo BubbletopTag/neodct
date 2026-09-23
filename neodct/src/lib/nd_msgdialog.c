@@ -377,7 +377,10 @@ static void dialog_draw(nd_msgdialog *d)
      * the grey. */
     nd_theme_fill(ui->canvas, ND_RECT(0, 0, screen_w - 1, nd_ui_height(ui) - 1), ND_TH_SCRIM_INK,
                   ND_MSGDIALOG_BACKDROP_A);
-    {
+    /* Only where the glass is a real panel. In the classic look the glass IS
+     * the ground, and nd_theme_panel() would reduce to its hairline border:
+     * a grey box round every notice that no 0.5.x dialog ever had. */
+    if (nd_theme_panels_painted()) {
         int32_t inset = nd_max32(1, d->margin / 2);
 
         nd_theme_panel(ui->canvas,

@@ -5422,3 +5422,43 @@ version: 0.6.0b-dev
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
+
+----
+ui: give Classic its 0.5.x menu, dialogs and softkey labels back
+
+Three regressions from the theme work, reported on the phone after
+0.6.0b-dev was flashed. They were in Classic, the look that is meant to be
+the phone's own.
+
+The menu. nd_appsel moved the icon from y=55 to y=38 and the title into a
+title-bar band, for every theme, so that Aero's icon could stand on a
+reflection. Classic has no reflection, so its menu just rode high. A theme
+without one (!ND_TH_REFLECTION) now keeps the Python's layout: font_xl name at
+header_y - 16, page number at (W-5-w, 10), icon at 55 capped at 82, and the
+width-2 white track with its seven-row truncating notch. test_appreg's notch
+checks go back to the 0.5.20a assertions, which that layout satisfies again.
+
+Long names. The title was trimmed to keep clear of the badge on both sides,
+leaving about 176 px, so "Koki Mobile" and "PlayStation" came out as
+"Koki Mob..." and the like. The name now steps down the font_xl/font_n/font_s
+ladder (nd_fit_font) before nd_text_fit trims it, in every theme. Classic's
+margin is 5 px from the edge plus 2 px, which is how "Koki Mobile" fitted at
+24 px in 0.5.x.
+
+Dialogs. nd_msgdialog drew nd_theme_panel() unconditionally. In Classic the
+glass is the ground, so all that was left was its hairline border: a grey box
+round every notice. It is now drawn only when nd_theme_panels_painted().
+
+Softkey labels. nd_softkey and the menu's "Select" centred the label inside a
+plate inset two rows and subtracted the bearing, which is right when a plate
+is drawn. Classic draws none (!nd_theme_bars_painted()), so every label sat
+two rows high. Unplated bars use the 0.5.x position again.
+
+Golden frames re-cut: every frame with a softkey label moved, plus the
+menu-* frames and the dialogs. Checked against 0.5.20a's goldens, the menu,
+dialog, infoscreen and softkey strips now match 0.5.20a apart from the
+default wallpaper. The list title rule and the list scrollbars still differ
+from 0.5.x in Classic. That is left for a separate change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
