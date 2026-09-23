@@ -1,5 +1,19 @@
 # NeoDCT OS Changelog
 
+0.5.20a
+The carrier name appears the moment the phone has service.
+
+When the phone found the network, the signal bars appeared straight away but
+the carrier line kept saying "No Service" for up to a minute -- about thirty
+seconds on average -- because the name was only ever looked up on a
+sixty-second timer. It is now looked up the moment the phone registers, so
+the name and the bars arrive together. Coming back into coverage, moving
+between home and roaming networks, and the first registration after power-on
+all fill the line in at once.
+
+- The phone's log records the carrier name whenever it changes, next to the
+  registration line that made it possible.
+
 0.5.19a
 Detect charging from a rapid fuel-gauge VCELL rise.
 

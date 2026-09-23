@@ -5389,3 +5389,14 @@ the bench is out of coverage.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
+
+----
+version: 0.5.20a
+
+os-release's three fields and the CHANGELOG heading agree, which is what
+release.sh checks before it tags. The release is 0.5.19a plus the carrier
+line fix; the themeable UI stays on the `theming` branch for after this
+ships.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
