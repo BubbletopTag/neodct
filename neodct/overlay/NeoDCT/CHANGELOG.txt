@@ -97,6 +97,13 @@ Browser:
 - Go to URL shows its "OK" softkey again. The bar was never drawn, and the
   page showed through where it should be.
 
+The screen is fast again. It had been slowed to about a third of its
+original speed because anything quicker came out black or scrambled; it
+now runs at 25 MHz, up from 14, and a full-screen change draws in about
+two thirds of the time. The cause was the chip's pins to the display being
+left at a weak setting, and the phone now raises it at start-up. Before
+this, a phone could start with a black screen at the old setting.
+
 Calls, for finding out why they drop:
 
 - Every call now ends with one line in the log saying how it ended: the

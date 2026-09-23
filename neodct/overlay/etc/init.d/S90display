@@ -93,6 +93,42 @@ backlight_gpio_grant() {
     done
 }
 
+# ============ THE PANEL PINS' DRIVE STRENGTH ============
+#
+# The SPI pads come up at the chip's reset drive, level 2 of 7 (0x07 per
+# pin), because the device tree's spi0m0 pinctrl names only pull-none and
+# the Rockchip SPI driver's "high speed" pin state exists only in a DT that
+# declares one. Level 2 into the panel's wiring gave edges soft enough that
+# the link stopped holding at the clock it used to run: 49.5 MHz in July,
+# then 14 MHz working only some of the time, 7.6 MHz the only safe setting
+# by 2026-09-23. Level 5 (0x3F) at 24.75 MHz was clean on the phone the
+# same day. (debugfs pinconf-pins labels the reset value "12 mA"; the
+# register says otherwise.)
+#
+# Written here with devmem because a DT change lives in the boot partition,
+# which an .ndsw never touches, and would need every phone reflashed over
+# maskrom. The registers are GPIO1_IOC drive fields, per
+# rv1106_calc_drv_reg_and_bit() in the SDK's pinctrl-rockchip.c: pins 16/17
+# (CS, CLK) at 0xA0, pin 18 (MOSI) at 0xA4, 8 bits each, value
+# (1 << (level + 1)) - 1. The top half of each write is Rockchip's
+# write-enable mask, so only those three fields can change -- 0xA4's
+# upper field is pin 19 and is masked off.
+#
+# Gated on the SoC, not only on nd-platform: a raw /dev/mem write is right
+# for exactly one chip and quietly wrong for any other.
+#
+# Spelled as hex text, not $(( )): 0xFFFF0000 is negative in a 32-bit
+# shell's arithmetic, and devmem would be handed a garbage value.
+PANEL_DRIVE=3F      # level 5; 07 is the reset value
+panel_pin_drive() {
+    command -v devmem >/dev/null 2>&1 || return 0
+    tr '\0' '\n' < /proc/device-tree/compatible 2>/dev/null |
+        grep -qx 'rockchip,rv1103' || return 0
+    devmem 0xff5380A0 32 "0xFFFF${PANEL_DRIVE}${PANEL_DRIVE}" &&
+        devmem 0xff5380A4 32 "0x00FF00${PANEL_DRIVE}" ||
+        echo "[FB] could not raise the panel pins' drive; high SPI speeds may fail" >&2
+}
+
 case "$1" in
   start)
     # Before the daemon, not after: neodct_displayd exports pins on the same
@@ -109,10 +145,18 @@ case "$1" in
     # win a race and put us back on the slow 16bpp Python path.
     #
     # Tunables (all optional):
-    #   --speed 60     SPI clock in MHz (default 20; you validated 60)
+    #   --speed 25     SPI clock in MHz (default 20)
     #   --yoff 65      panel row where the UI band starts (default 65)
     #   --stats        5s perf reports in the log
-    /NeoDCT/System/hw/neodct_displayd --speed 16 \
+    #
+    # The speed is a request, not a clock. clk_spi0 is 198 MHz and the
+    # driver programs an even divider, 2 * DIV_ROUND_UP(198, 2 * speed),
+    # so 15 and 16 are both 14.14 MHz, 25 is 24.75, 33 is 33.0 and
+    # anything from 50 to 98 is 49.5. Measured on the phone, one full frame
+    # takes 73 ms at 14.14 MHz and 46 ms at 24.75. 25 is what was seen to
+    # be clean with the drive raised; 33 and 60 are untried.
+    panel_pin_drive
+    /NeoDCT/System/hw/neodct_displayd --speed 25 \
         > /var/log/neodct_displayd.log 2>&1 &
     ;;
   stop)

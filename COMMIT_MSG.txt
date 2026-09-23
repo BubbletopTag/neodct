@@ -5557,3 +5557,29 @@ Checked against the phone: reads, --modem, --json, and -f showing
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
+
+----
+display: raise the SPI panel pins' drive, run the panel at 25 MHz
+
+The panel had fallen from 49.5 MHz (July) to 14.14 MHz, which by today
+worked only some of the time; only 7.6 MHz was reliable. The image booted
+at "--speed 16", so a phone could come up with a black screen.
+
+The SPI0 pads were at the chip's reset drive, level 2 of 7 (0x07 in
+GPIO1_IOC 0xA0/0xA4, which debugfs mislabels "12 mA"): the DT's spi0m0
+pinctrl names only pull-none and declares no high-speed state. Raising
+CS/CLK/MOSI to level 5 (0x3F) with devmem gave a clean panel at 24.75 MHz
+on the phone. S90display now does that write before starting the daemon,
+gated on rockchip,rv1103 in the DT compatible and masked to those three
+fields. It is done there rather than in the DT because the DTB is in the
+boot partition, which an .ndsw never reaches.
+
+--speed 25 is 24.75 MHz: the driver programs
+2 * DIV_ROUND_UP(198 MHz, 2 * speed), so 15 and 16 were both 14.14 MHz.
+Measured with --full --stats: a full frame took 73 ms at 14.14 MHz and
+takes 46 ms at 24.75. 33 and 60 are untried with the new drive.
+CONFIG_DEVMEM=y is stated in the busybox fragment so the boot script
+cannot lose it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk

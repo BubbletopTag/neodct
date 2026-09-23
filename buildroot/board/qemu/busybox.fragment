@@ -76,3 +76,10 @@ CONFIG_FEATURE_FTPD_WRITE=y
 CONFIG_FEATURE_FTPD_ACCEPT_BROKEN_LIST=y
 CONFIG_FEATURE_FTPD_AUTHENTICATION=y
 CONFIG_TCPSVD=y
+
+# devmem: /etc/init.d/S90display raises the SPI panel pins' drive strength
+# with it at boot, because the device tree that could say so is in the boot
+# partition and an update never reaches that. Already on in the stock
+# config; stated here so trimming the stock config cannot take the panel's
+# speed with it.
+CONFIG_DEVMEM=y
