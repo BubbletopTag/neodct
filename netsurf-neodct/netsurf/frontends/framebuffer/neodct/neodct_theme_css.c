@@ -8,6 +8,9 @@
 
 #include "neodct_theme_css.h"
 
+/* the internal pages' heading in the pixel face; see below */
+#define NEODCT_CSS_HEADING_PIXEL_PX 12
+
 struct sink {
 	char *buf;
 	size_t sz;
@@ -54,6 +57,8 @@ size_t neodct_theme_css(const struct neodct_theme *t, char *out,
 	unsigned panel_edge = panels ? t->blue_deep : t->chrome_hi;
 	unsigned sel = mid(t, t->blue_top, t->blue_bot);
 	unsigned rule = t->bevel_divider ? t->blue_deep : t->chrome_hi;
+	int heading_px = (t->pixel_font && !t->has_font) ?
+		NEODCT_CSS_HEADING_PIXEL_PX : 16;
 
 	if (out == NULL || out_sz == 0)
 		return 0;
@@ -106,13 +111,18 @@ size_t neodct_theme_css(const struct neodct_theme *t, char *out,
 	    " background-color: #%06x !important; color: #%06x !important;"
 	    " font-family: fantasy !important; font-size: 12px !important; }\n",
 	    ground, ground, ink);
+	/* The heading is one line of the phone's title strip. The pixel
+	 * face runs far wider than a theme's UI face, and at 16 px
+	 * "Error occurred fetching page" broke over two lines in the
+	 * classic look, so it steps down a size there -- nd_fit_font's
+	 * answer to a title that does not fit, rather than wrapping it. */
 	put(&s,
-	    "body.ns-border h1 { font-size: 16px !important;"
+	    "body.ns-border h1 { font-size: %dpx !important;"
 	    " font-weight: normal !important; margin: 0 !important;"
 	    " padding: 4px 6px !important;"
 	    " background-color: #%06x !important; color: #%06x !important;"
 	    " border-bottom: 2px solid #%06x !important; }\n",
-	    bar, t->bar_ink, bar_rule);
+	    heading_px, bar, t->bar_ink, bar_rule);
 	put(&s,
 	    "body.ns-border form { padding: 4px 0 !important; }\n"
 	    "body.ns-border p { margin: 4px 6px !important; }\n"
