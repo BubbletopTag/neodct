@@ -5462,3 +5462,9 @@ from 0.5.x in Classic. That is left for a separate change.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
+
+----
+Merge PR #22: add theme support and history to NeoDCT browser chrome
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
