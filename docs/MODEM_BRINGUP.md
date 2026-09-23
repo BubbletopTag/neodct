@@ -288,3 +288,4 @@ modem — unplug eth0 (or boot the modem-only QEMU command) to be sure.
 | `ping -6` says invalid option | Image older than the busybox `PING6` fragment — use `curl -g 'http://[2606:4700:4700::1111]/'` instead. |
 | `atcmd: modem port busy` | S45modem mid-registration or UI polling — it clears in seconds. |
 | everything vanished mid-test | Modem rebooted (power) or host re-grabbed it (ModemManager). |
+| calls drop | `ndlink logs --clear -f --modem`, then reproduce. The `Call ended:` line names who ended it. "ended by the network or the other party" is the only cause that did not come from the phone. Then read `Call end cause (AT+CEER)`: "Normal call clearing" is someone hanging up, while a radio-link failure is RF. Compare the `Radio in call` lines before the drop with `Radio at call end`. `Modem says: +SIMCARD: NOT AVAILABLE` or `RDY` near the drop means the SIM or the modem went away, not the network. |

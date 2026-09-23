@@ -86,6 +86,14 @@
  * table, so one is not enough. */
 #define ND_CLCC_EMPTY_TO_END 2
 
+/* How often a call that is up has its serving cell and signal written to the
+ * log (AT+CPSI?). A dropped call is a question about the minute BEFORE it
+ * dropped, and without samples the only radio fact in the log is the one
+ * taken after the call was already gone. Fifteen seconds is four lines a
+ * minute on a phone that makes few calls, and one short query beside the
+ * CLCC poll that is already running. */
+#define ND_CALL_RADIO_S 15.0
+
 /* R-7. The Python's _rxbuf is a bytes object that only ever loses COMPLETE
  * lines, so a port that emits binary with no '\n' -- the Qualcomm DIAG port is
  * exactly that -- grows it without bound. 8 KB is far more than any real AT
@@ -425,6 +433,27 @@ struct nd_modem {
     /* Consecutive AT+CLCC replies listing no call; see nd_modem__poll_clcc. */
     int32_t clcc_empty;
 
+    /* ---- the call record, for the log line every call ends with ----
+     *
+     * call_started_at is 0.0 whenever no call is being tracked, and it is
+     * what makes nd_modem__call_ended() fire once per call however many of
+     * the five ways a call can end report it. call_dir is 'O', 'I' or '?'
+     * (a call first seen as CLCC or VOICE CALL: BEGIN). call_csq_min and
+     * call_csq_logged are written by the CSQ parser, which can run wherever
+     * a transaction does, so they sit under st_mu with csq itself.
+     *
+     * call_report_pending asks the next tick for AT+CEER and AT+CPSI?: the
+     * end is noticed inside the URC handler, usually inside somebody else's
+     * transaction, where another command cannot be sent. call_end_why is
+     * what the summary line said, kept so a test can read it. */
+    double call_started_at;
+    char call_dir;
+    int32_t call_csq_min;
+    int32_t call_csq_logged;
+    double next_call_radio;
+    bool call_report_pending;
+    char call_end_why[96];
+
     int32_t pcm_rate;
     char configured_port[ND_MODEM_PORT_MAX];
     bool allow_calls;
@@ -529,6 +558,7 @@ void nd_modem__parse_reg(nd_modem *m, const char *line);
 void nd_modem__parse_csq(nd_modem *m, const nd_lines *lines);
 void nd_modem__parse_cops(nd_modem *m, const nd_lines *lines);
 void nd_modem__poll_clcc(nd_modem *m);
+void nd_modem__call_ended(nd_modem *m, const char *why);
 int32_t nd_modem__bars(int32_t csq);
 void nd_modem__queue(nd_modem *m, const nd_mev *e);
 void nd_modem__queue_front(nd_modem *m, const nd_mev *e);

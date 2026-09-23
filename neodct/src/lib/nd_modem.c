@@ -384,6 +384,190 @@ static void no_modem_reason(nd_modem *m, char *out, size_t out_sz)
     unlock_state(m);
 }
 
+/* ============ THE CALL RECORD ============
+ *
+ * "My calls drop" is not something the log could answer. It said NO CARRIER
+ * or VOICE CALL: END and nothing else: not who ended the call, not how long
+ * it had been up, not what the radio looked like before it went. And the
+ * phone ends calls ITSELF in three places -- the End key, two empty CLCC
+ * lists, a modem that stopped answering -- which read exactly like the
+ * network dropping one unless the line says which.
+ *
+ * So every call gets one record, opened by begin_call() when it starts and
+ * closed by nd_modem__call_ended() at whichever end site reports first. The
+ * closing line names the cause in words, and the next tick adds the modem's
+ * own account of it (AT+CEER) and the serving cell (AT+CPSI?). While the call
+ * is up, the cell is sampled every ND_CALL_RADIO_S and every signal change is
+ * written down, so the minute before a drop is in the log too. */
+
+static const char *call_dir_name(char dir)
+{
+    switch (dir) {
+    case 'O':
+        return "outgoing";
+    case 'I':
+        return "incoming";
+    default:
+        return "direction unknown";
+    }
+}
+
+/* Minutes and seconds past a minute, because "133.4 s" is a sum to do and
+ * "2m13s" is a length of call. */
+static void fmt_secs(double s, char *out, size_t out_sz)
+{
+    if (s < 0.0)
+        s = 0.0;
+    if (s < 60.0)
+        (void)nd_snprintf(out, out_sz, "%.1fs", s);
+    else
+        (void)nd_snprintf(out, out_sz, "%dm%02ds", (int)(s / 60.0), (int)s % 60);
+}
+
+static void fmt_csq(int32_t csq, char *out, size_t out_sz)
+{
+    if (csq < 0)
+        (void)nd_strlcpy(out, "unknown", out_sz);
+    else if (csq == 99)
+        (void)nd_strlcpy(out, "99 (no signal)", out_sz);
+    else
+        (void)nd_snprintf(out, out_sz, "%d", (int)csq);
+}
+
+static const char *reg_stat_name(int32_t stat);
+static bool starts_with(const char *s, const char *pfx);
+
+/* The serving cell -- RAT, band, and on LTE the RSRP/RSRQ/SINR a bar count
+ * hides -- one line in the log. Port lock held, modem thread. */
+static void log_radio(nd_modem *m, const char *when)
+{
+    char final[64];
+    nd_lines *lines = &m->collected;
+    char csq[24];
+    size_t i;
+
+    lock_state(m);
+    fmt_csq(m->csq, csq, sizeof csq);
+    unlock_state(m);
+    if (!nd_modem__transact(m, "AT+CPSI?", 2.0, final, sizeof final, lines) ||
+        strcmp(final, "OK") != 0) {
+        nd_log(ND_LOG_MODEM, "Radio %s: CSQ %s; AT+CPSI? gave %s", when, csq,
+               final[0] != '\0' ? final : "no reply");
+        return;
+    }
+    for (i = 0u; i < lines->n; i++) {
+        const char *line = nd_modem__lines_get(lines, i);
+
+        if (starts_with(line, "+CPSI:")) {
+            nd_log(ND_LOG_MODEM, "Radio %s: CSQ %s; %s", when, csq, line);
+            return;
+        }
+    }
+    nd_log(ND_LOG_MODEM, "Radio %s: CSQ %s; no +CPSI line", when, csq);
+}
+
+static void begin_call(nd_modem *m, char dir)
+{
+    lock_state(m);
+    m->call_started_at = nd_modem__now();
+    m->call_dir = dir;
+    m->call_csq_min = m->csq;
+    m->call_csq_logged = m->csq;
+    unlock_state(m);
+    /* The first sample goes out on the next tick: the cell a call STARTED
+     * on is half of the comparison with the cell it ended on. */
+    m->next_call_radio = 0.0;
+    m->call_report_pending = false;
+}
+
+/* Close the record. Must run BEFORE nd_modem__stop_call_audio(), which
+ * clears call_connected. A second report of the same end -- the modem's
+ * VOICE CALL: END arriving after the End key already closed it -- finds no
+ * record and says nothing. */
+void nd_modem__call_ended(nd_modem *m, const char *why)
+{
+    double now = nd_modem__now();
+    double started;
+    double connected_at;
+    bool connected;
+    char dir;
+    int32_t csq;
+    int32_t csq_min;
+    int32_t reg;
+    char total[16];
+    char talk[16];
+    char at_end[24];
+    char worst[24];
+
+    lock_state(m);
+    started = m->call_started_at;
+    if (started <= 0.0) {
+        unlock_state(m);
+        return;
+    }
+    m->call_started_at = 0.0;
+    connected = m->call_connected;
+    connected_at = m->call_connected_at;
+    dir = m->call_dir;
+    csq = m->csq;
+    csq_min = m->call_csq_min;
+    reg = m->reg_stat;
+    unlock_state(m);
+
+    (void)nd_strlcpy(m->call_end_why, why != NULL ? why : "", sizeof m->call_end_why);
+    fmt_secs(now - started, total, sizeof total);
+    fmt_csq(csq, at_end, sizeof at_end);
+    fmt_csq(csq_min, worst, sizeof worst);
+    if (connected && connected_at > 0.0) {
+        fmt_secs(now - connected_at, talk, sizeof talk);
+        nd_log(ND_LOG_MODEM,
+               "Call ended: %s. %s, %s connected (%s in all); CSQ %s at the end, worst %s; "
+               "network %s.",
+               m->call_end_why, call_dir_name(dir), talk, total, at_end, worst,
+               reg_stat_name(reg));
+    } else {
+        nd_log(ND_LOG_MODEM,
+               "Call ended before connecting: %s. %s, after %s; CSQ %s at the end; network %s.",
+               m->call_end_why, call_dir_name(dir), total, at_end, reg_stat_name(reg));
+    }
+    /* A modem that has gone away cannot be asked why. */
+    m->call_report_pending = m->hardware && m->fd >= 0;
+}
+
+/* The modem's account of the call that just ended, on the tick after it,
+ * with the port lock held. AT+CEER is the release cause the network gave --
+ * "Normal call clearing" is somebody hanging up, a radio-link failure is not
+ * -- and it is the one line here that tells a drop from a hang-up on its own. */
+static void call_end_report(nd_modem *m)
+{
+    char final[64];
+    nd_lines *lines = &m->collected;
+    bool said = false;
+    size_t i;
+
+    if (nd_modem__transact(m, "AT+CEER", 2.0, final, sizeof final, lines) &&
+        strcmp(final, "OK") == 0) {
+        for (i = 0u; i < lines->n; i++) {
+            const char *line = nd_modem__lines_get(lines, i);
+            const char *rest;
+
+            if (!starts_with(line, "+CEER:"))
+                continue;
+            rest = after_colon(line);
+            if (rest == NULL)
+                rest = line;
+            while (*rest == ' ')
+                rest++;
+            nd_log(ND_LOG_MODEM, "Call end cause (AT+CEER): %s", rest);
+            said = true;
+        }
+    }
+    if (!said)
+        nd_log(ND_LOG_MODEM, "Call end cause (AT+CEER): none given (%s)",
+               final[0] != '\0' ? final : "no reply");
+    log_radio(m, "at call end");
+}
+
 /* The call coming up, from whichever of VOICE CALL: BEGIN, CLCC <stat> 0,
  * ATA or the simulated dial reports it first. The timer starts on the first
  * report and the audio work is armed on the first report, and a second report
@@ -393,14 +577,30 @@ static bool mark_connected(nd_modem *m)
 {
     bool edge = false;
 
+    double setup = -1.0;
+    char dir;
+
     lock_state(m);
     m->state = ND_CALL_CONNECTED;
     if (!m->call_connected) {
         m->call_connected = true;
         m->call_connected_at = nd_modem__now();
         edge = true;
+        /* A call nobody saw start -- placed by atcmd, or picked up from the
+         * modem's own table -- still gets a record, so it still gets the
+         * line it ends with. */
+        if (m->call_started_at <= 0.0) {
+            m->call_started_at = m->call_connected_at;
+            m->call_dir = '?';
+            m->call_csq_min = m->csq;
+            m->call_csq_logged = m->csq;
+        }
+        setup = m->call_connected_at - m->call_started_at;
     }
+    dir = m->call_dir;
     unlock_state(m);
+    if (edge)
+        nd_log(ND_LOG_MODEM, "Call connected (%s) after %.1f s.", call_dir_name(dir), setup);
     /* hardware and allow_calls are written by this thread only. A pretend
      * call, with or without a modem present, has no pipes to bring up. */
     if (edge && m->hardware && m->allow_calls) {
@@ -571,12 +771,16 @@ void nd_modem__handle_urc(nd_modem *m, const char *line)
     if (line == NULL)
         return;
 
+    bool logged = false;
+
     /* Call-flow URCs go to the console: bring-up needs eyes. Note
      * "MISSED_CALL" has no colon here where the prefix tuple has one. */
     if (starts_with(line, "RING") || starts_with(line, "VOICE CALL:") ||
         starts_with(line, "NO CARRIER") || starts_with(line, "MISSED_CALL") ||
-        starts_with(line, "+CLIP:") || starts_with(line, "BUSY") || starts_with(line, "NO ANSWER"))
+        starts_with(line, "+CLIP:") || starts_with(line, "BUSY") || starts_with(line, "NO ANSWER")) {
         nd_log(ND_LOG_MODEM, "%s", line);
+        logged = true;
+    }
 
     if (strcmp(line, "RING") == 0) {
         nd_call_state st = get_state(m);
@@ -588,6 +792,7 @@ void nd_modem__handle_urc(nd_modem *m, const char *line)
             return;
         }
         if (st != ND_CALL_RINGING) {
+            begin_call(m, 'I');
             lock_state(m);
             m->state = ND_CALL_RINGING;
             m->caller_id[0] = '\0';
@@ -641,6 +846,14 @@ void nd_modem__handle_urc(nd_modem *m, const char *line)
     }
     if (starts_with(line, "VOICE CALL: END") || strcmp(line, "NO CARRIER") == 0) {
         if (get_state(m) != ND_CALL_IDLE) {
+            char why[80];
+
+            /* The phone did not ask for this -- do_hangup() closes the
+             * record before its CHUP, so an END that finds one open is the
+             * other end or the network. */
+            (void)nd_snprintf(why, sizeof why, "ended by the network or the other party (%s)",
+                              line);
+            nd_modem__call_ended(m, why);
             set_state(m, ND_CALL_IDLE);
             nd_modem__stop_call_audio(m);
             queue_simple(m, ND_MEV_ENDED, line);
@@ -660,6 +873,7 @@ void nd_modem__handle_urc(nd_modem *m, const char *line)
             return;
         }
         /* No `state != IDLE` guard here, unlike VOICE CALL: END. */
+        nd_modem__call_ended(m, "missed -- the caller gave up or it went to voicemail");
         set_state(m, ND_CALL_IDLE);
         nd_modem__stop_call_audio(m);
         (void)nd_strlcpy(text, rest != NULL ? rest : "", sizeof text);
@@ -688,7 +902,32 @@ void nd_modem__handle_urc(nd_modem *m, const char *line)
     /* AT+AUTOCSQ=1,1 pushes these whenever the bars move, so the signal is
      * known within a tick of it changing instead of at the next
      * ND_POLL_SIGNAL_S. Same parser the polled reply goes through. */
-    (void)parse_csq_line(m, line);
+    if (parse_csq_line(m, line) || logged)
+        return;
+
+    /* ============ WHAT USED TO FALL ON THE FLOOR ============
+     *
+     * Everything else reaching this point was dropped without a word, and
+     * some of it is exactly what ends a call: the SIM losing contact
+     * (+SIMCARD: NOT AVAILABLE, +CPIN: NOT READY), or the module restarting
+     * underneath us (RDY, PB DONE, +CFUN:). Those are written down whenever
+     * they arrive. While a call is up, so is anything else unsolicited --
+     * a line the phone does not understand is still a clue when it lands
+     * the second before a drop. */
+    if (starts_with(line, "+CPIN:") || starts_with(line, "+SIMCARD:") || strcmp(line, "RDY") == 0 ||
+        starts_with(line, "PB DONE") || starts_with(line, "+CFUN:")) {
+        nd_log(ND_LOG_MODEM, "Modem says: %s", line);
+        return;
+    }
+    {
+        bool in_call;
+
+        lock_state(m);
+        in_call = m->call_started_at > 0.0;
+        unlock_state(m);
+        if (in_call)
+            nd_log(ND_LOG_MODEM, "Modem says (in call): %s", line);
+    }
 }
 
 /* ------------------------------------------------------------------ *
@@ -727,9 +966,33 @@ static bool parse_csq_line(nd_modem *m, const char *line)
         return false;
     if (!nd_modem__parse_int(field, &v))
         return false; /* parse failure leaves _csq unchanged */
-    lock_state(m);
-    m->csq = v;
-    unlock_state(m);
+    {
+        bool log_it = false;
+
+        lock_state(m);
+        m->csq = v;
+        /* During a call every change is written down, and the worst is kept
+         * for the line the call ends with. 99 is "no signal at all", so it
+         * ranks below 0 rather than above 31. */
+        if (m->call_started_at > 0.0) {
+            int32_t rank = (v == 99) ? -1 : v;
+            int32_t worst = m->call_csq_min;
+
+            if (worst < 0 || rank < (worst == 99 ? -1 : worst))
+                m->call_csq_min = v;
+            if (v != m->call_csq_logged) {
+                m->call_csq_logged = v;
+                log_it = true;
+            }
+        }
+        unlock_state(m);
+        if (log_it) {
+            char txt[24];
+
+            fmt_csq(v, txt, sizeof txt);
+            nd_log(ND_LOG_MODEM, "Signal in call: CSQ %s", txt);
+        }
+    }
     return true;
 }
 
@@ -841,6 +1104,7 @@ void nd_modem__poll_clcc(nd_modem *m)
                 return;
             }
             nd_log(ND_LOG_MODEM, "CLCC: no call in the list; ending call state.");
+            nd_modem__call_ended(m, "the modem stopped listing the call (CLCC empty, no END seen)");
             set_state(m, ND_CALL_IDLE);
             nd_modem__stop_call_audio(m);
             queue_simple(m, ND_MEV_ENDED, "CLCC empty");
@@ -851,14 +1115,23 @@ void nd_modem__poll_clcc(nd_modem *m)
 
     if (stat != m->call_stat) {
         const char *name = clcc_name(stat);
+        const char *line = nd_modem__lines_get(lines, i);
+        char dir_field[8];
+        int32_t dir;
 
         lock_state(m);
         m->call_stat = stat;
+        /* <dir> is field 1: 0 mobile-originated, 1 mobile-terminated. */
+        if (m->call_dir == '?' && comma_field(after_colon(line), 1u, dir_field, sizeof dir_field) &&
+            nd_modem__parse_int(dir_field, &dir))
+            m->call_dir = dir == 0 ? 'O' : 'I';
         unlock_state(m);
+        /* The whole line, not just <stat>: <mode> says whether this is a
+         * voice call at all, and <mpty> whether a conference is involved. */
         if (name != NULL)
-            nd_log(ND_LOG_MODEM, "Call progress: %s", name);
+            nd_log(ND_LOG_MODEM, "Call progress: %s (%s)", name, line);
         else
-            nd_log(ND_LOG_MODEM, "Call progress: %d", (int)stat);
+            nd_log(ND_LOG_MODEM, "Call progress: %d (%s)", (int)stat, line);
     }
     if (stat == ND_CLCC_CONNECTED)
         (void)mark_connected(m);
@@ -1417,6 +1690,13 @@ void nd_modem__drop_hardware(nd_modem *m, const char *why)
     if (m->fd >= 0)
         (void)close(m->fd);
     m->fd = -1;
+    {
+        char call_why[96];
+
+        (void)nd_snprintf(call_why, sizeof call_why, "the modem went away (%s)",
+                          why != NULL ? why : "");
+        nd_modem__call_ended(m, call_why);
+    }
     m->rx_len = 0u;
     m->rx_overflow_logged = false;
 
@@ -1826,6 +2106,10 @@ void nd_modem_poll(nd_modem *m)
         m->pcm_cleanup = false;
         (void)nd_modem__transact(m, "AT+CPCMREG=0", 2.0, NULL, 0u, NULL);
     }
+    if (m->call_report_pending) {
+        m->call_report_pending = false;
+        call_end_report(m);
+    }
 
     if (get_state(m) != ND_CALL_IDLE) {
         /* The work dial() and answer() left for this thread. Both flags are
@@ -1843,6 +2127,20 @@ void nd_modem_poll(nd_modem *m)
         if (now >= m->next_clcc) {
             m->next_clcc = now + ND_CLCC_POLL_S;
             nd_modem__poll_clcc(m);
+        }
+        /* After CLCC, which may just have ended the call. */
+        if (now >= m->next_call_radio && get_state(m) != ND_CALL_IDLE) {
+            double started;
+            char when[40];
+            char up[16];
+
+            m->next_call_radio = now + ND_CALL_RADIO_S;
+            lock_state(m);
+            started = m->call_started_at;
+            unlock_state(m);
+            fmt_secs(started > 0.0 ? now - started : 0.0, up, sizeof up);
+            (void)nd_snprintf(when, sizeof when, "in call, %s", up);
+            log_radio(m, when);
         }
         nd_modem__watch_audio_proc(m, now);
     }
@@ -1955,6 +2253,7 @@ static bool do_dial(nd_modem *m, const char *raw)
             nd_log_err(ND_LOG_MODEM, "Dial refused: no usable modem (%s).", reason);
             return false;
         }
+        begin_call(m, 'O');
         set_state(m, ND_CALL_CALLING);
         m->sim_connect_at = nd_modem__now() + 2.0;
         m->sim_connect_armed = true;
@@ -1968,6 +2267,7 @@ static bool do_dial(nd_modem *m, const char *raw)
      * is a collision to ignore rather than a call to take. A NO CARRIER
      * final is routed through the URC handler and puts this back to IDLE;
      * a plain ERROR is put back below. */
+    begin_call(m, 'O');
     set_state(m, ND_CALL_CALLING);
     lock_state(m);
     m->call_stat = -1;
@@ -1981,6 +2281,13 @@ static bool do_dial(nd_modem *m, const char *raw)
     got = nd_modem__command(m, cmd, 8.0, final, sizeof final, NULL);
     if (!got || strcmp(final, "OK") != 0) {
         nd_log(ND_LOG_MODEM, "Dial failed (final=%s)", got ? final : "None");
+        {
+            char why[96];
+
+            (void)nd_snprintf(why, sizeof why, "the dial failed (ATD answered %s)",
+                              got ? final : "nothing");
+            nd_modem__call_ended(m, why);
+        }
         if (get_state(m) == ND_CALL_CALLING)
             set_state(m, ND_CALL_IDLE);
         return false;
@@ -2006,11 +2313,15 @@ static bool do_answer(nd_modem *m)
         return true;
     }
     if (nd_modem__command(m, "ATA", 8.0, final, sizeof final, NULL) && strcmp(final, "OK") == 0) {
+        nd_log(ND_LOG_MODEM, "Answered (ATA -> OK)");
         /* ATA is all of it; the PCM and the pipes are the tick's, at once. */
         (void)mark_connected(m);
         m->next_urc = 0.0;
         return true;
     }
+    /* An answer that fails leaves a ringing phone the owner believes they
+     * picked up. That wants to be in the log beside whatever came next. */
+    nd_log(ND_LOG_MODEM, "Answer failed (ATA -> %s)", final[0] != '\0' ? final : "no reply");
     return false; /* state is deliberately left alone */
 }
 
@@ -2020,6 +2331,8 @@ static bool do_hangup(nd_modem *m)
     bool got;
 
     nd_log(ND_LOG_MODEM, "Requesting Hangup");
+    nd_modem__call_ended(m, get_state(m) == ND_CALL_RINGING ? "rejected on this phone"
+                                                            : "hung up on this phone");
     m->sim_connect_armed = false;
     nd_modem__stop_call_audio(m);
     if (!m->hardware) {
@@ -2029,8 +2342,13 @@ static bool do_hangup(nd_modem *m)
     /* AT+CHUP is safe with no call up, and it also rejects a live incoming
      * RING even while allow_calls is OFF. */
     got = nd_modem__command(m, "AT+CHUP", 5.0, final, sizeof final, NULL);
-    if (!got || strcmp(final, "OK") != 0)
+    if (!got || strcmp(final, "OK") != 0) {
+        nd_log(ND_LOG_MODEM, "AT+CHUP -> %s; trying ATH", got ? final : "no reply");
         got = nd_modem__command(m, "ATH", 5.0, final, sizeof final, NULL);
+        if (!got || strcmp(final, "OK") != 0)
+            nd_log(ND_LOG_MODEM, "ATH -> %s; the modem may still have the call up",
+                   got ? final : "no reply");
+    }
     set_state(m, ND_CALL_IDLE);
     return got && strcmp(final, "OK") == 0;
 }

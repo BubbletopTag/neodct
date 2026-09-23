@@ -1425,6 +1425,9 @@ static const fake_rule SIM7600[] = {
     {"AT+COPS=0", "\r\nOK\r\n"},
     {"AT+CFUN=4", "\r\nOK\r\n"},
     {"AT+CFUN=1", "\r\nOK\r\n"},
+    {"AT+CEER", "\r\n+CEER: Normal call clearing\r\n\r\nOK\r\n"},
+    {"AT+CPSI?", "\r\n+CPSI: LTE,Online,310-260,0x6A1F,27447297,112,EUTRAN-BAND66,66786,5,5,"
+                 "-94,-1097,-777,13\r\n\r\nOK\r\n"},
     {"AT+SILENT", NULL}, /* says nothing: the timeout path */
 };
 
@@ -2035,6 +2038,9 @@ static void test_clcc_ends_a_call_the_modem_forgot(void)
         CHECK(nd_modem__take(m, &e));
         CHECK_INT(e.kind, ND_MEV_ENDED);
         CHECK_STR(e.text, "CLCC empty");
+        /* The phone ended this one itself, and the log has to say so or it
+         * reads exactly like the network dropping it. */
+        CHECK(strstr(m->call_end_why, "CLCC") != NULL);
     }
 
     nd_modem__destroy(m);
@@ -3908,6 +3914,165 @@ static void test_no_rescan_during_a_call(void)
     fake_stop(&fm);
 }
 
+/* ------------------------------------------------------------------ *
+ * The call record -- one line for every call's end, naming the cause
+ * ------------------------------------------------------------------ */
+
+static void test_a_network_end_is_logged_and_asks_the_modem_why(void)
+{
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+
+    CHECK(nd_modem_dial(m, "555-1234"));
+    CHECK(m->call_started_at > 0.0);
+    CHECK_INT(m->call_dir, 'O');
+
+    /* The cell the call started on is sampled on the first tick. */
+    fake_log_clear(&fm);
+    poll_now(m);
+    CHECK(fake_sent(&fm, "AT+CPSI?"));
+
+    nd_modem__handle_urc(m, "VOICE CALL: END: 000045");
+    CHECK_INT(nd_modem_state(m), ND_CALL_IDLE);
+    CHECK(strstr(m->call_end_why, "network") != NULL);
+    CHECK(strstr(m->call_end_why, "VOICE CALL: END") != NULL);
+    CHECK(m->call_started_at == 0.0);
+    /* Not asked from inside the URC handler, which may be inside somebody
+     * else's transaction: owed to the next tick. */
+    CHECK(m->call_report_pending);
+
+    fake_log_clear(&fm);
+    poll_now(m);
+    CHECK(!m->call_report_pending);
+    CHECK(fake_sent(&fm, "AT+CEER"));
+    CHECK(fake_sent(&fm, "AT+CPSI?"));
+
+    /* A second report of the same end finds no record to close. */
+    nd_modem__handle_urc(m, "NO CARRIER");
+    CHECK(!m->call_report_pending);
+
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
+static void test_hanging_up_here_is_not_reported_as_a_drop(void)
+{
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+
+    CHECK(nd_modem_dial(m, "555-1234"));
+    CHECK(nd_modem_hangup(m));
+    CHECK_STR(m->call_end_why, "hung up on this phone");
+
+    /* The modem's own END for the call we just hung up arrives after; it
+     * must not rewrite the cause. */
+    nd_modem__handle_urc(m, "VOICE CALL: END: 000003");
+    CHECK_STR(m->call_end_why, "hung up on this phone");
+
+    /* An incoming call turned away is a rejection, not a hang-up. */
+    nd_modem__handle_urc(m, "RING");
+    CHECK_INT(m->call_dir, 'I');
+    CHECK(nd_modem_hangup(m));
+    CHECK_STR(m->call_end_why, "rejected on this phone");
+
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
+static void test_losing_the_modem_mid_call_closes_the_record_without_asking(void)
+{
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+
+    CHECK(nd_modem_dial(m, "555-1234"));
+    nd_modem__drop_hardware(m, "read: EIO");
+    CHECK(strstr(m->call_end_why, "went away") != NULL);
+    CHECK(strstr(m->call_end_why, "EIO") != NULL);
+    CHECK(!m->call_report_pending); /* nobody left to ask */
+
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
+static void test_the_radio_is_sampled_on_a_cadence_during_a_call(void)
+{
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+
+    CHECK(nd_modem_dial(m, "555-1234"));
+    m->next_clcc = nd_modem__now() + 1000.0;
+    poll_now(m);
+    CHECK(m->next_call_radio > nd_modem__now());
+
+    fake_log_clear(&fm);
+    poll_now(m);
+    CHECK(!fake_sent(&fm, "AT+CPSI?")); /* inside ND_CALL_RADIO_S */
+
+    m->next_call_radio = 0.0;
+    poll_now(m);
+    CHECK(fake_sent(&fm, "AT+CPSI?"));
+
+    CHECK(nd_modem_hangup(m));
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
+static void test_the_worst_signal_of_a_call_is_kept(void)
+{
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+
+    CHECK(nd_modem_dial(m, "555-1234"));
+    nd_modem__handle_urc(m, "+CSQ: 20,99");
+    nd_modem__handle_urc(m, "+CSQ: 7,99");
+    CHECK_INT(m->call_csq_min, 7);
+    CHECK_INT(m->call_csq_logged, 7);
+    /* 99 is no signal at all: worse than 0, not better than 31. */
+    nd_modem__handle_urc(m, "+CSQ: 99,99");
+    nd_modem__handle_urc(m, "+CSQ: 15,99");
+    CHECK_INT(m->call_csq_min, 99);
+    CHECK_INT(m->call_csq_logged, 15);
+
+    CHECK(nd_modem_hangup(m));
+    /* Out of a call the signal moves without being tracked. */
+    nd_modem__handle_urc(m, "+CSQ: 3,99");
+    CHECK_INT(m->call_csq_min, 99);
+    CHECK_INT(m->csq, 3);
+
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
 int main(void)
 {
     (void)nd_settings_init();
@@ -4009,6 +4174,12 @@ int main(void)
     RUN(test_the_cfun_rung_cycles_the_radio_without_resetting_it);
     RUN(test_the_ladder_relaxes_once_the_urgency_window_passes);
     RUN(test_no_rescan_during_a_call);
+
+    RUN(test_a_network_end_is_logged_and_asks_the_modem_why);
+    RUN(test_hanging_up_here_is_not_reported_as_a_drop);
+    RUN(test_losing_the_modem_mid_call_closes_the_record_without_asking);
+    RUN(test_the_radio_is_sampled_on_a_cadence_during_a_call);
+    RUN(test_the_worst_signal_of_a_call_is_kept);
 
     RUN(test_the_thread_runs_and_stops_cleanly);
     RUN(test_requeue_puts_an_event_back_at_the_front);

@@ -97,6 +97,24 @@ Browser:
 - Go to URL shows its "OK" softkey again. The bar was never drawn, and the
   page showed through where it should be.
 
+Calls, for finding out why they drop:
+
+- Every call now ends with one line in the log saying how it ended: the
+  network or the other person hung up, you pressed End, you turned an
+  incoming call away, it was missed, the dial failed, the modem stopped
+  listing it, or the modem went away altogether. Before, a dropped call and
+  a call you hung up yourself looked the same. The line also gives how long
+  the call was connected and the worst signal it had.
+- Straight after, the phone asks the modem why the call ended (the release
+  cause the network gave) and which cell it was on, and logs both.
+- While a call is up, the cell and signal are logged every 15 seconds and
+  every change of signal is logged as it happens, so the minute before a
+  drop is on record, not just the moment after.
+- A SIM that stops answering, or a modem that restarts, is now logged
+  whenever it happens. Those messages used to be thrown away unread.
+- Answering a call, and hanging up when the modem refuses the first way of
+  doing it, are logged too.
+
 0.5.20a
 The carrier name appears the moment the phone has service.
 
