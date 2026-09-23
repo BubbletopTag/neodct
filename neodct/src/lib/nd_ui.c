@@ -2480,10 +2480,36 @@ nd_err nd_ui_present(nd_ui *ui)
         return ND_ERR_INVAL;
     if (ui->launch_pending) {
         ui->launch_pending = false;
+        ui->launch_held = false;
         if (ND_TH_LAUNCH_ANIM)
             launch_transition(ui);
     }
     return nd_fb_update(ui->fb, ui->canvas);
+}
+
+/* ============ WHY THE SOFTKEY BAR WAITS FOR THE REST OF THE SCREEN ============
+ *
+ * Thirty-odd places open a screen with nd_softkey_update(bar, "Select", true)
+ * and only THEN draw the list, so an app's first present was a black canvas
+ * with a softkey bar on it -- and on the phone the launch transition popped
+ * exactly that in over the menu, a black square blurring into focus, before
+ * the real screen replaced it a moment later. Captured from /dev/fb0 on the
+ * phone, 2026-09-23.
+ *
+ * So until the app's first full present, a partial one is held rather than
+ * shown. Nothing is lost: the bar is on the canvas, and the next present --
+ * the list's -- carries it. If no full present comes before the app waits
+ * for a key (an info screen draws its body and then flushes the bar as its
+ * LAST step), nd_ui_read_keypress() presents what is held first, and that is
+ * the whole screen. A theme with no launch animation is unaffected. */
+nd_err nd_ui_present_partial(nd_ui *ui)
+{
+    if (ui != NULL && ui->launch_pending && ND_TH_LAUNCH_ANIM) {
+        nd_ui_watch_beat();
+        ui->launch_held = true;
+        return ND_OK;
+    }
+    return nd_ui_present(ui);
 }
 
 void nd_ui_show_charging(nd_ui *ui)
@@ -2835,6 +2861,10 @@ int32_t nd_ui_read_keypress(nd_ui *ui, double timeout_s)
     nd_ui_watch_beat();
     if (ui == NULL)
         return ND_KEY_NONE;
+
+    /* A screen about to wait for a key is a finished screen. */
+    if (ui->launch_held)
+        (void)nd_ui_present(ui);
 
     repaint_if_wallpaper_moved(ui);
 

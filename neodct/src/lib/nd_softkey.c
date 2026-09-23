@@ -222,5 +222,5 @@ void nd_softkey_update(nd_softkey *bar, const char *text, bool present)
     }
 
     if (present)
-        (void)nd_ui_present(ui);
+        (void)nd_ui_present_partial(ui);
 }

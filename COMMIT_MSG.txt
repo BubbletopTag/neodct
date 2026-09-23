@@ -5602,3 +5602,30 @@ Merge PR #23: add app launch animation with blur and pop effect
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
+
+----
+ui: launch animation waits for the app's whole first screen
+
+On the phone the Aero/Blossom launch popped a black square in over the
+menu. Captured from /dev/fb0 at 20-40 ms a frame: the menu blurs and dims
+as designed, but the arriving frame is black except for the softkey bar.
+About 34 call sites do nd_softkey_update(bar, "Select", true) and only
+then draw the list, so the bar's own flush was every app's first present,
+and launch_transition() took that half-drawn canvas as the app's frame.
+
+nd_softkey_update now flushes through nd_ui_present_partial(). That holds
+the present (launch_held) while an app's launch is still pending in an
+animating theme. The next full present runs the transition on the real
+screen, and nd_ui_read_keypress() releases anything still held before it
+waits: an info screen's bar flush is its last draw. Themes without the
+animation flush at once, as before. Every widget that flushes its bar
+waits through read_keypress, and the four apps that read input directly
+(Koki, Tones, LinuxShell, Browser) do no bar flush.
+
+test_launchfx: 48 -> 66 checks (held, then released by a full present
+and by a key wait; no hold without the animation), and it fails with the
+hold disabled. make test (golden frames included) and make ASAN=1 test
+pass.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk

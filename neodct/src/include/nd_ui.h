@@ -330,6 +330,10 @@ typedef struct nd_ui {
      * launch transition can run without any app knowing it exists. False in
      * the core and in a hand-built test context, so neither ever animates. */
     bool launch_pending;
+    /* A partial present was held back while launch_pending: the canvas has
+     * something the panel does not, and nd_ui_read_keypress() must show it
+     * before it waits. See nd_ui_present_partial(). */
+    bool launch_held;
 
     /* --- transient core state --- */
     char dial_buffer[ND_DIAL_BUFFER_MAX];
@@ -419,6 +423,11 @@ int32_t nd_ui_read_keypress(nd_ui *ui, double timeout_s);
 /* Present the canvas. Equivalent to nd_fb_update(ui->fb, ui->canvas), spelled
  * the way every widget spells it. */
 nd_err nd_ui_present(nd_ui *ui);
+/* nd_ui_present() for a flush of PART of a screen -- the softkey bar's own.
+ * Identical to it, except before an app's first full present in a theme
+ * that animates the launch: then it is held, because the launch transition
+ * would take that half-drawn canvas as the app's arrival frame. */
+nd_err nd_ui_present_partial(nd_ui *ui);
 
 /* Replace the physical framebuffer with the charging artwork for one second,
  * then restore its exact bytes. A caller with an app child must stop that

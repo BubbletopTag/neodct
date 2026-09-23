@@ -19,7 +19,9 @@
 #include "nd_fb.h"
 #include "nd_image.h"
 #include "nd_launchfx.h"
+#include "nd_theme.h"
 #include "nd_types.h"
+#include "nd_ui.h"
 
 /* nd_fb_open_sink() is libneodct-internal; see test_nd_fb.c. */
 #include "../../lib/nd_fb_priv.h"
@@ -227,6 +229,75 @@ static void test_a_sink_has_nothing_to_read(void)
     nd_image_free(back);
 }
 
+/* The softkey bar flushes itself before the rest of a screen is drawn --
+ * thirty-odd call sites do that -- so an app's first present on the phone was
+ * a black canvas with a bar on it, and the launch transition popped that in
+ * over the menu. A partial present is now held until the first full one, or
+ * until the app waits for a key, whichever comes first. */
+static void test_a_half_drawn_screen_is_not_the_arrival_frame(void)
+{
+    nd_theme_style anim = *nd_theme_style_of;
+    const nd_theme_style *saved = nd_theme_style_of;
+    nd_fb *fb = NULL;
+    nd_image *menu = nd_image_new_filled(240, 175, ND_PIXFMT_RGB888, ND_RGB(40, 80, 160));
+    nd_image *canvas = nd_image_new_filled(240, 175, ND_PIXFMT_RGB888, ND_RGB(0, 0, 0));
+    nd_image *shown = nd_image_new(240, 175, ND_PIXFMT_RGB888);
+    nd_ui ui;
+    int32_t pass;
+
+    CHECK(menu != NULL && canvas != NULL && shown != NULL, "images");
+    CHECK(nd_fb_open_mem(&fb, 240, 175, 32, 0u) == ND_OK, "framebuffer");
+    if (fb == NULL || menu == NULL || canvas == NULL || shown == NULL)
+        goto done;
+
+    anim.launch_anim = true;
+    nd_theme_style_of = &anim;
+
+    /* Pass 0: a full present comes next. Pass 1: the app goes straight to
+     * waiting for a key, as an info screen does after its bar. */
+    for (pass = 0; pass < 2; pass++) {
+        CHECK(nd_fb_update(fb, menu) == ND_OK, "the menu is on the panel");
+        memset(&ui, 0, sizeof ui);
+        ui.fb = fb;
+        ui.canvas = canvas;
+        ui.launch_pending = true;
+
+        CHECK(nd_ui_present_partial(&ui) == ND_OK, "partial present");
+        CHECK(nd_fb_read(fb, shown) == ND_OK && memcmp(shown->pixels, menu->pixels,
+                                                       (size_t)menu->stride * 175u) == 0,
+              "pass %d: the half-drawn canvas did not reach the panel", pass);
+        CHECK(ui.launch_held && ui.launch_pending, "pass %d: held, launch still owed", pass);
+
+        if (pass == 0)
+            CHECK(nd_ui_present(&ui) == ND_OK, "full present");
+        else
+            (void)nd_ui_read_keypress(&ui, 0.0);
+        CHECK(!ui.launch_held && !ui.launch_pending, "pass %d: released once", pass);
+        CHECK(nd_fb_read(fb, shown) == ND_OK && memcmp(shown->pixels, canvas->pixels,
+                                                       (size_t)canvas->stride * 175u) == 0,
+              "pass %d: the app's real frame is what is left on the panel", pass);
+    }
+
+    /* A theme without the animation flushes the bar at once, as it always did. */
+    anim.launch_anim = false;
+    CHECK(nd_fb_update(fb, menu) == ND_OK, "the menu again");
+    memset(&ui, 0, sizeof ui);
+    ui.fb = fb;
+    ui.canvas = canvas;
+    ui.launch_pending = true;
+    CHECK(nd_ui_present_partial(&ui) == ND_OK && !ui.launch_held, "no animation, no hold");
+    CHECK(nd_fb_read(fb, shown) == ND_OK &&
+              memcmp(shown->pixels, canvas->pixels, (size_t)canvas->stride * 175u) == 0,
+          "no animation: the bar's flush is shown straight away");
+
+done:
+    nd_theme_style_of = saved;
+    nd_image_free(menu);
+    nd_image_free(canvas);
+    nd_image_free(shown);
+    nd_fb_close(fb);
+}
+
 int main(void)
 {
     test_the_ends_are_exact();
@@ -235,6 +306,7 @@ int main(void)
     test_the_scale_pops();
     test_readback();
     test_a_sink_has_nothing_to_read();
+    test_a_half_drawn_screen_is_not_the_arrival_frame();
 
     printf("test_launchfx: %d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
