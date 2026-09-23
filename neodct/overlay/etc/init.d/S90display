@@ -101,9 +101,11 @@ backlight_gpio_grant() {
 # declares one. Level 2 into the panel's wiring gave edges soft enough that
 # the link stopped holding at the clock it used to run: 49.5 MHz in July,
 # then 14 MHz working only some of the time, 7.6 MHz the only safe setting
-# by 2026-09-23. Level 5 (0x3F) at 24.75 MHz was clean on the phone the
-# same day. (debugfs pinconf-pins labels the reset value "12 mA"; the
-# register says otherwise.)
+# by 2026-09-23. Tried on the phone the same day: level 5 (0x3F) holds at
+# 16.5 MHz; at 24.75 it shows slight glitches on busy full-screen redraws
+# (Koki, the call-failed notice); level 7 looked worse, as sharper edges
+# ring on the panel's wires. (debugfs pinconf-pins labels the reset value
+# "12 mA"; the register says otherwise.)
 #
 # Written here with devmem because a DT change lives in the boot partition,
 # which an .ndsw never touches, and would need every phone reflashed over
@@ -145,18 +147,18 @@ case "$1" in
     # win a race and put us back on the slow 16bpp Python path.
     #
     # Tunables (all optional):
-    #   --speed 25     SPI clock in MHz (default 20)
+    #   --speed 19     SPI clock in MHz (default 20)
     #   --yoff 65      panel row where the UI band starts (default 65)
     #   --stats        5s perf reports in the log
     #
     # The speed is a request, not a clock. clk_spi0 is 198 MHz and the
     # driver programs an even divider, 2 * DIV_ROUND_UP(198, 2 * speed),
-    # so 15 and 16 are both 14.14 MHz, 25 is 24.75, 33 is 33.0 and
-    # anything from 50 to 98 is 49.5. Measured on the phone, one full frame
-    # takes 73 ms at 14.14 MHz and 46 ms at 24.75. 25 is what was seen to
-    # be clean with the drive raised; 33 and 60 are untried.
+    # so 15-16 are 14.14 MHz, 17-19 are 16.5, 20-24 are 19.8, 25-32 are
+    # 24.75, 33 is 33.0 and 50-98 are 49.5. Measured on the phone, one full
+    # frame takes 73 ms at 14.14 MHz and 46 ms at 24.75. 19 (16.5 MHz) is
+    # the owner's pick at level 5: the fastest step with no glitches seen.
     panel_pin_drive
-    /NeoDCT/System/hw/neodct_displayd --speed 25 \
+    /NeoDCT/System/hw/neodct_displayd --speed 19 \
         > /var/log/neodct_displayd.log 2>&1 &
     ;;
   stop)

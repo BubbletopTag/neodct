@@ -5583,3 +5583,16 @@ cannot lose it.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
+
+----
+display: settle the panel at --speed 19 (16.5 MHz), drive level 5
+
+24.75 MHz at level 5 showed slight glitches on busy full-screen redraws
+(Koki, the call-failed notice) and level 7 looked worse: sharper edges
+ring on the panel's wires. The owner's pick is level 5 at --speed 19,
+which the driver's even divider makes 16.5 MHz. The comment now lists
+every speed band from 14.14 to 49.5 MHz, so the next person does not
+compare two requests that are the same clock.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
