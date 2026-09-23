@@ -1519,6 +1519,137 @@ static void test_poll_staggers_csq_then_cereg_then_cops(void)
     fake_stop(&fm);
 }
 
+/* ============ THE CARRIER NAME FOLLOWS REGISTRATION, NOT A TIMER ============
+ *
+ * The bars come from a URC within a tick of the network appearing. The name
+ * came from AT+COPS? on a sixty-second timer and from nothing else, so the
+ * owner stood outside looking at three bars beside "No Service" for up to a
+ * minute. A CHANGE of registration now asks at once, ahead of the read chain,
+ * and the timers being an hour away must not matter. */
+static void test_registration_asks_for_the_operator_at_once(void)
+{
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+    double far;
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+    far = nd_modem__now() + 3600.0;
+    m->reg_stat = 0;
+    m->operator_known = false;
+    m->operator_refresh_due = false;
+    m->next_csq = far;
+    m->next_net = far;
+    m->next_cops = far;
+    fake_log_clear(&fm);
+
+    /* The network appears: a pushed "+CEREG: 1", the form AT+CEREG=1 makes
+     * the modem send. The name is still unknown, so the line still reads
+     * "No Service" -- for exactly one more tick. */
+    nd_modem__handle_urc(m, "+CEREG: 1");
+    CHECK(nd_modem_registered(m));
+    CHECK(m->operator_refresh_due);
+    CHECK(nd_modem_operator_display(m) == NULL);
+
+    poll_now(m);
+    CHECK(fake_sent(&fm, "AT+COPS?"));
+    CHECK(!m->operator_refresh_due);
+    CHECK_STR(nd_modem_operator_display(m), "Tello");
+
+    /* Answered: the ordinary timer takes over and the next tick sends
+     * nothing. */
+    fake_log_clear(&fm);
+    poll_now(m);
+    CHECK(!fake_sent(&fm, "AT+COPS?"));
+    CHECK(m->next_cops > nd_modem__now() + ND_POLL_OPERATOR_S - 5.0);
+
+    /* The same state read again -- the 20 s AT+CEREG? poll does this for
+     * ever -- is not a change and asks for nothing. */
+    nd_modem__handle_urc(m, "+CEREG: 0,1");
+    CHECK(!m->operator_refresh_due);
+    poll_now(m);
+    CHECK(!fake_sent(&fm, "AT+COPS?"));
+
+    /* Home to roaming IS a change: a different network, a different name. */
+    nd_modem__handle_urc(m, "+CEREG: 5");
+    CHECK(m->operator_refresh_due);
+    poll_now(m);
+    CHECK(fake_sent(&fm, "AT+COPS?"));
+
+    /* Losing service asks for nothing: there is no name to be had. */
+    fake_log_clear(&fm);
+    nd_modem__handle_urc(m, "+CEREG: 2");
+    CHECK(!m->operator_refresh_due);
+    poll_now(m);
+    CHECK(!fake_sent(&fm, "AT+COPS?"));
+
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
+/* A modem can register and still answer AT+COPS? with a bare "+COPS: 0" for a
+ * moment -- attached, name not yet looked up. That is asked again in
+ * ND_POLL_OPERATOR_RETRY_S, not in a minute. A modem with no service at all is
+ * NOT hurried: no name can exist for it, and the port is shared. */
+static void test_a_nameless_registration_is_asked_again_soon(void)
+{
+    static const fake_rule NAMELESS[] = {
+        {"AT+COPS?", "\r\n+COPS: 0\r\n\r\nOK\r\n"},
+    };
+    fake_modem fm;
+    nd_modem *m = attach(&fm);
+    double far;
+    double now;
+
+    CHECK(m != NULL);
+    if (m == NULL) {
+        fake_stop(&fm);
+        return;
+    }
+    far = nd_modem__now() + 3600.0;
+    m->next_csq = far;
+    m->next_net = far;
+    fm.rules = NAMELESS;
+    fm.n_rules = ND_ARRAY_LEN(NAMELESS);
+
+    /* Registered, and the modem has no name for it yet. */
+    m->reg_stat = 1;
+    m->operator_known = false;
+    m->next_cops = 0.0;
+    fake_log_clear(&fm);
+    now = nd_modem__now();
+    poll_now(m);
+    CHECK(fake_sent(&fm, "AT+COPS?"));
+    CHECK(!m->operator_known);
+    CHECK(nd_modem_operator_display(m) == NULL);
+    CHECK(m->next_cops - now <= ND_POLL_OPERATOR_RETRY_S + 1.0);
+    CHECK(m->next_cops - now < ND_POLL_OPERATOR_S / 2.0);
+
+    /* Out of service: the same empty answer, and the full minute. */
+    m->reg_stat = 0;
+    m->next_cops = 0.0;
+    fake_log_clear(&fm);
+    now = nd_modem__now();
+    poll_now(m);
+    CHECK(fake_sent(&fm, "AT+COPS?"));
+    CHECK(m->next_cops - now > ND_POLL_OPERATOR_S - 5.0);
+
+    /* The name arrives on the retry and the line fills in. */
+    fm.rules = SIM7600;
+    fm.n_rules = ND_ARRAY_LEN(SIM7600);
+    m->reg_stat = 1;
+    m->next_cops = 0.0;
+    poll_now(m);
+    CHECK_STR(nd_modem_operator_display(m), "Tello");
+    CHECK(m->next_cops - nd_modem__now() > ND_POLL_OPERATOR_S - 5.0);
+
+    nd_modem__destroy(m);
+    fake_stop(&fm);
+}
+
 static void test_poll_routes_an_unsolicited_ring(void)
 {
     fake_modem fm;
@@ -3813,6 +3944,8 @@ int main(void)
 
     RUN(test_probe_adopts_the_port_and_runs_the_init_sequence);
     RUN(test_poll_staggers_csq_then_cereg_then_cops);
+    RUN(test_registration_asks_for_the_operator_at_once);
+    RUN(test_a_nameless_registration_is_asked_again_soon);
     RUN(test_poll_routes_an_unsolicited_ring);
     RUN(test_transact_times_out_on_a_silent_modem);
     RUN(test_a_mid_command_urc_is_handled_and_still_collected);

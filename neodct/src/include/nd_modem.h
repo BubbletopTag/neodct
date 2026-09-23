@@ -56,7 +56,24 @@ extern "C" {
 #define ND_POLL_SIGNAL_S        5.0
 #define ND_POLL_NET_S           20.0
 #define ND_POLL_OPERATOR_S      60.0
-#define ND_PROBE_RETRY_S        10.0
+/* ============ THE CARRIER NAME FOLLOWS REGISTRATION, NOT A TIMER ============
+ *
+ * AT+COPS? is the only thing that fills the carrier line, and it was asked
+ * every ND_POLL_OPERATOR_S and for no other reason. Registration arrives as a
+ * URC the moment it happens and the meter follows within a tick, so a phone
+ * carried into coverage showed three bars beside "No Service" for anything up
+ * to a minute -- thirty seconds on average -- while the answer sat in the
+ * modem waiting to be asked for. Measured by the owner, standing outside.
+ *
+ * Now a CHANGE of registration (nd_modem__parse_reg) marks the operator for
+ * re-reading, and the next poll asks before anything else on its list. A
+ * modem that is registered but answered without a name -- a quote-less
+ * "+COPS: 0", which a SIM7600 gives for a moment after attaching -- is asked
+ * again every ND_POLL_OPERATOR_RETRY_S rather than after the full minute. The
+ * minute stays as the steady-state refresh for a name that changes with no
+ * registration event, which is rare enough to be slow about. */
+#define ND_POLL_OPERATOR_RETRY_S 5.0
+#define ND_PROBE_RETRY_S         10.0
 
 /* ============ THE OUT-OF-SERVICE RE-SCAN LADDER ============
  *

@@ -529,6 +529,14 @@ void nd_modem__parse_reg(nd_modem *m, const char *line)
         return;
     }
     lock_state(m);
+    /* A change INTO service -- from anything, including home to roaming and
+     * back, which is a different network with a different name -- is what
+     * leaves the carrier line stale, and nd_modem_poll() reads this before
+     * its timers. The same state read again, which the AT+CEREG? poll does
+     * every twenty seconds for ever, is not a change and asks for nothing.
+     * See ND_POLL_OPERATOR_RETRY_S. */
+    if ((v == 1 || v == 5) && v != m->reg_stat)
+        m->operator_refresh_due = true;
     m->reg_stat = v;
     unlock_state(m);
 
@@ -737,6 +745,8 @@ void nd_modem__parse_csq(nd_modem *m, const nd_lines *lines)
 void nd_modem__parse_cops(nd_modem *m, const nd_lines *lines)
 {
     size_t i;
+    char now_named[32];
+    bool known;
 
     for (i = 0u; i < lines->n; i++) {
         const char *line = nd_modem__lines_get(lines, i);
@@ -754,6 +764,18 @@ void nd_modem__parse_cops(nd_modem *m, const nd_lines *lines)
             m->operator_known = false;
         }
         unlock_state(m);
+    }
+
+    /* Logged once per CHANGE, like registration, so `ndlink logs --os` shows
+     * the carrier line filling in as one line beside the "Network:" line that
+     * made it possible -- and says nothing while nothing moves. */
+    lock_state(m);
+    known = m->operator_known;
+    (void)nd_strlcpy(now_named, known ? m->operator_name : "", sizeof now_named);
+    unlock_state(m);
+    if (strcmp(now_named, m->logged_operator) != 0) {
+        nd_log(ND_LOG_MODEM, "Operator: %s", known ? now_named : "none reported");
+        (void)nd_strlcpy(m->logged_operator, now_named, sizeof m->logged_operator);
     }
 }
 
@@ -1406,6 +1428,8 @@ void nd_modem__drop_hardware(nd_modem *m, const char *why)
     m->reg_stat = -1;
     m->operator_name[0] = '\0';
     m->operator_known = false;
+    m->operator_refresh_due = false;
+    m->logged_operator[0] = '\0';
     /* The latch is armed only on the EDGE into fault. A modem that fails, is
      * re-probed, fails again and again would otherwise put a modal in front
      * of the user every ten seconds for ever, which is not a diagnosis, it is
@@ -1604,10 +1628,44 @@ static void nd_modem__rescan_tick(nd_modem *m, double now)
     }
 }
 
+/* AT+COPS?, and when it is next owed. One body for the timer and for the
+ * registration path, so the two cannot drift apart. Inside the held AT-port
+ * lock, on the modem thread. */
+static void poll_cops(nd_modem *m, double now)
+{
+    char final[64];
+    bool known;
+
+    /* Cleared BEFORE the transaction, not after. A +CEREG that lands while
+     * the COPS? is in flight is routed through _handle_urc from inside
+     * nd_modem__transact and sets the flag again -- a change this reply
+     * predates -- and clearing afterwards would eat it. */
+    lock_state(m);
+    m->operator_refresh_due = false;
+    unlock_state(m);
+
+    m->next_cops = now + ND_POLL_OPERATOR_S;
+    if (nd_modem__transact(m, "AT+COPS?", 3.0, final, sizeof final, &m->collected) &&
+        strcmp(final, "OK") == 0)
+        nd_modem__parse_cops(m, &m->collected);
+
+    /* Registered and still nameless -- a quote-less "+COPS: 0" from a modem
+     * that has attached but not yet looked its network up, or a reply that
+     * timed out on a busy port -- is asked again soon, not in a minute. A
+     * modem with NO service is not hurried: there is no name to be had, and
+     * the port is shared with S45modem. */
+    lock_state(m);
+    known = m->operator_known;
+    unlock_state(m);
+    if (!known && nd_modem_registered(m))
+        m->next_cops = now + ND_POLL_OPERATOR_RETRY_S;
+}
+
 void nd_modem_poll(nd_modem *m)
 {
     double now;
     size_t i;
+    bool op_due;
 
     if (m == NULL)
         return;
@@ -1791,8 +1849,18 @@ void nd_modem_poll(nd_modem *m)
 
     /* if / elif / elif: at most ONE query per tick, deliberately staggered.
      * All three timers start at 0.0, so the first three ticks fire CSQ, then
-     * CEREG?, then COPS?. */
-    if (now >= m->next_csq) {
+     * CEREG?, then COPS?.
+     *
+     * With one exception, and it goes FIRST: a registration that has just
+     * changed. The bars follow a +CEREG URC within a tick, and the carrier
+     * line used to follow the sixty-second COPS? timer -- three bars beside
+     * "No Service" for up to a minute. See ND_POLL_OPERATOR_RETRY_S. */
+    lock_state(m);
+    op_due = m->operator_refresh_due;
+    unlock_state(m);
+    if (op_due) {
+        poll_cops(m, now);
+    } else if (now >= m->next_csq) {
         char final[64];
 
         m->next_csq = now + ND_POLL_SIGNAL_S;
@@ -1805,12 +1873,7 @@ void nd_modem_poll(nd_modem *m)
          * back here. */
         (void)nd_modem__transact(m, "AT+CEREG?", 1.5, NULL, 0u, NULL);
     } else if (now >= m->next_cops) {
-        char final[64];
-
-        m->next_cops = now + ND_POLL_OPERATOR_S;
-        if (nd_modem__transact(m, "AT+COPS?", 3.0, final, sizeof final, &m->collected) &&
-            strcmp(final, "OK") == 0)
-            nd_modem__parse_cops(m, &m->collected);
+        poll_cops(m, now);
     }
 
     /* AFTER the read chain and inside the same held lock, so a re-scan costs

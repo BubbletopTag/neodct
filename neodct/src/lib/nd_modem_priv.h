@@ -224,6 +224,14 @@ struct nd_modem {
     bool imei_known;
     char operator_name[32];
     bool operator_known; /* Python's self.operator is None until COPS answers */
+    /* Set by nd_modem__parse_reg() when <stat> CHANGES into registered --
+     * from anything, including home to roaming -- and consumed by the poll,
+     * which then asks AT+COPS? ahead of its read chain. A flag under st_mu
+     * rather than a rewind of next_cops because parse_reg is reached from
+     * nd_modem__transact()'s URC routing, and transact runs on the UI thread
+     * for dial(), hangup() and send_sms(); next_cops is the modem thread's
+     * own unlocked field. See ND_POLL_OPERATOR_RETRY_S. */
+    bool operator_refresh_due;
     char caller_id[ND_MODEM_NUMBER_MAX];
     bool caller_id_known;
     int32_t csq;      /* -1 is Python's None, 99 is the modem's "unknown" */
@@ -345,6 +353,10 @@ struct nd_modem {
      * number. -2 rather than -1 because -1 is a real value here (Python's
      * None) and would suppress the first "not registered" line. */
     int32_t logged_reg_stat;
+    /* Likewise the last operator name written to the log, so the carrier
+     * line filling in is one line next to the "Network:" line that made it
+     * possible, not a line per sixty-second poll. Modem thread only. */
+    char logged_operator[32];
     /* When the boot grace runs out (nd_modem.h). Set at creation and then
      * PUSHED OUT by a probe that had nothing to probe -- see
      * ND_MODEM_LATE_GRACE_MAX_S. Written by the modem thread under st_mu

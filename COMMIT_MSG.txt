@@ -5348,3 +5348,44 @@ merge once 0.5.20a has shipped.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
+
+----
+modem: fill the carrier line the moment the phone registers
+
+Outside, with service, the meter showed two or three bars beside the words
+"No Service" for something like thirty seconds. Registration has arrived as
+a +CEREG URC since 0.5.17a and the bars follow it within a tick, but the
+carrier name only ever came from AT+COPS? on a sixty-second timer and from
+nothing else -- so the line filled in whenever the timer next happened to
+fire, anywhere from at once to a minute later, thirty seconds on average.
+
+nd_modem__parse_reg now marks the operator for re-reading whenever <stat>
+CHANGES into registered -- from anything, home to roaming included -- and
+nd_modem_poll asks AT+COPS? on its next tick ahead of the CSQ/CEREG/COPS
+read chain. It is a flag under st_mu rather than a rewind of next_cops
+because parse_reg is reached from nd_modem__transact's URC routing, which
+runs on the UI thread for dial(), hangup() and send_sms(). The flag is
+cleared before the transaction, not after, so a +CEREG that lands while the
+COPS? is in flight is not eaten. The same state read again by the 20 s
+CEREG? poll is not a change and asks for nothing.
+
+A registered modem that answers with a bare "+COPS: 0" -- attached, name not
+yet looked up, which a SIM7600 does for a moment -- is asked again in
+ND_POLL_OPERATOR_RETRY_S = 5 s instead of the full minute; a modem with no
+service is not hurried, since no name can exist for it. The minute stays as
+the steady-state refresh. One poll_cops() body serves the timer and the
+registration path so the two cannot drift.
+
+The operator name is logged once per change ("Operator: T-Mobile"), beside
+the existing "Network: registered, after N s" line, so `ndlink logs --os`
+shows the two arriving together from a phone carried outside untethered.
+
+Tests: registration asks at once with every timer an hour away; the same
+state again does not; home->roaming does; losing service does not; a
+nameless registration is retried in ND_POLL_OPERATOR_RETRY_S and an
+unregistered one is not. test_modem: 777 checks. Ran as 0.5.20a-dev on the
+phone from 2026-09-14; the registered path is not yet seen on air because
+the bench is out of coverage.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
