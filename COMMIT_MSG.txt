@@ -5329,3 +5329,22 @@ Both suites pass, ASan included.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01AGkCgPaiaVZmUUQsRDQ7kL
+
+----
+revert: back out the themeable UI (PR #19) and return to 0.5.19a
+
+The tree is 0.5.19a again: nd_ui/nd_draw/nd_widgets, Settings, the home
+screen, the golden frames, the theme tools (mkthemeart/mkuifont/
+mkstatusicons), docs/THEMES.md and neodct/contrib/themes all go back to
+the tagged release, and os-release drops the 0.6.0a-dev marker. This
+reverts 1538bcaf, 632a20e7 and merge 32d0a92f (-m 1). The README rewrite
+in 3a9bd3a6 and its docs/img/readme photos are kept, with the one
+feature-list mention of themes removed. 1538bcaf needs no port: 0.5.19a's
+Settings already delegates Bluetooth through nd_svc_bt_start().
+
+The theming work is not lost. Branch `theming` (and origin/pr-19) point at
+the pre-revert tip, so it comes back with a revert of this commit or a
+merge once 0.5.20a has shipped.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk

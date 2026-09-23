@@ -67,7 +67,6 @@
 #include "nd_draw.h"
 #include "nd_keycodes.h"
 #include "nd_svc.h"
-#include "nd_theme.h"
 #include "nd_types.h"
 #include "nd_ui.h"
 #include "nd_ui_sim.h"
@@ -209,16 +208,13 @@ static void draw_readout(nd_ui *ui, const nd_fg_row *rows, size_t n_rows, bool h
     size_t i;
 
     nd_ui_paint_chrome_content(ui);
-    /* One plate in place of the 24 px title at (5, 0) and the white rule
-     * at row 30. Same rows, so nothing below it moves. */
-    (void)nd_theme_titlebar(ui->canvas, ui->draw, screen_w, 30, "FuelGauge",
-                            nd_ui_font_bold(ui, ui->font_xl), NULL, NULL);
+    (void)nd_draw_text(ui->draw, 5, 0, "FuelGauge", ui->font_xl, ND_WHITE);
+    (void)nd_draw_line(ui->draw, 0, 30, screen_w, 30, ND_WHITE, 1);
 
     line_h = nd_fg_line_h(bottom, y, n_rows);
     for (i = 0u; i < n_rows; i++) {
-        nd_theme_text(ui->draw, 8, y, rows[i].label, ui->font_s, ND_TH_INK_MUTED,
-                      ND_TH_TEXT_SHADOW);
-        nd_theme_text_light(ui->draw, 70, y, rows[i].value, ui->font_s);
+        (void)nd_draw_text(ui->draw, 8, y, rows[i].label, ui->font_s, ND_GRAY);
+        (void)nd_draw_text(ui->draw, 70, y, rows[i].value, ui->font_s, ND_WHITE);
         y += line_h;
     }
 
@@ -231,12 +227,10 @@ static void draw_readout(nd_ui *ui, const nd_fg_row *rows, size_t n_rows, bool h
         (void)snprintf(bus_text, sizeof bus_text, "i2c-%d @ 0x%02X", snap->bus,
                        (unsigned)snap->addr);
         nd_ui_text_size(ui, bus_text, ui->font_s, &bw, &bh);
-        nd_theme_text(ui->draw, screen_w - 5 - bw, bottom - 14, bus_text, ui->font_s, ND_TH_INK_MUTED,
-                      ND_TH_TEXT_SHADOW);
+        (void)nd_draw_text(ui->draw, screen_w - 5 - bw, bottom - 14, bus_text, ui->font_s, ND_GRAY);
     }
     if (flash != NULL && flash[0] != '\0')
-        nd_theme_text(ui->draw, 8, bottom - 14, flash, ui->font_s, ND_TH_INK_MUTED,
-                      ND_TH_TEXT_SHADOW);
+        (void)nd_draw_text(ui->draw, 8, bottom - 14, flash, ui->font_s, ND_GRAY);
 }
 
 /* ------------------------------------------------------------------ *

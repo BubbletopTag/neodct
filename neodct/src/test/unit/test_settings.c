@@ -364,10 +364,7 @@ static void test_effective_map_is_layered_lowest_to_highest(void)
 
 static void test_get_copy_and_absent_keys(void)
 {
-    /* Deliberately too small for a path, so the truncation case below is
-     * real. The default-value case takes its own, properly sized buffer. */
     char buf[8];
-    char big[ND_PATH_MAX];
 
     use_scratch_paths();
 
@@ -376,14 +373,8 @@ static void test_get_copy_and_absent_keys(void)
     CHECK(nd_settings_get("no.such.key", NULL) == NULL);
     CHECK_STR(nd_settings_get("no.such.key", "fallback"), "fallback");
 
-    /* The shipped default, whatever it is -- compared against the constant
-     * rather than against a literal, because this key's default changed once
-     * (from "NONE" to the theme's wallpaper) and a test that spells the value
-     * out fails for the right reason but says the wrong thing. What is being
-     * checked here is that get_copy() hands back the DEFAULTS entry for an
-     * unset key, not what that entry happens to be. */
-    CHECK_INT(nd_settings_get_copy(ND_SET_UI_WALLPAPER, "?", big, sizeof big), ND_OK);
-    CHECK_STR(big, ND_SET_UI_WALLPAPER_DFLT);
+    CHECK_INT(nd_settings_get_copy(ND_SET_UI_WALLPAPER, "?", buf, sizeof buf), ND_OK);
+    CHECK_STR(buf, "NONE");
     /* Truncation is reported, not hidden. */
     CHECK_INT(nd_settings_get_copy(ND_SET_OS_VERSIONNAME, "?", buf, sizeof buf), ND_ERR_TOOLONG);
 }
