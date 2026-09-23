@@ -5502,3 +5502,58 @@ address.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
+
+----
+modem: log how every call ends, and the radio before it
+
+"My calls drop" was not something the log could answer. It said NO
+CARRIER or VOICE CALL: END and nothing else, and the phone ends calls
+itself in three places (the End key, two empty CLCC lists, a modem that
+stopped answering), all of which looked like the network dropping one.
+
+Every call now gets a record, opened at ATD or RING and closed at
+whichever end site reports first, with one line naming the cause, the
+direction, the time connected and the worst CSQ seen. The next tick then
+asks AT+CEER for the network's release cause and AT+CPSI? for the serving
+cell. It is deferred because the end is noticed inside the URC handler,
+often inside another transaction. While a call is up, AT+CPSI? is sampled
+every ND_CALL_RADIO_S = 15 s and every CSQ change is logged.
+
+Also logged now: +CPIN/+SIMCARD/RDY/PB DONE/+CFUN, which used to be
+dropped unread, at any time; any other unsolicited line during a call;
+ATA's result; a CHUP that fell back to ATH. The CLCC progress line carries
+the whole +CLCC and supplies the direction for a call nobody saw start.
+
+test_modem: 777 -> 820 checks (network end + CEER/CPSI on the next tick,
+End key not reported as a drop, modem loss asks nothing, radio cadence,
+worst CSQ with 99 ranked lowest). make test and make ASAN=1 test pass.
+Not yet run on the phone: needs an image with this nd-core.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
+
+----
+ndlink: logs -f follows the phone's log live, like adb logcat
+
+logs -f used to refuse ("needs a streaming transport"). It now runs
+tail -F in the same quieted telnet shell ndlink-telnet uses. It counts the
+file's lines first, so the history and the live tail join with nothing
+lost, and -F keeps following across syslogd's rename-rotation. A follow
+drops the target lock like watch, exits 0 on Ctrl-C, and exits 3 when the
+phone goes away (TCP keepalive notices within about 15 s).
+
+New filters, applied host-side so -n counts matching lines: --modem
+(MODEM + AUDIO), --tag T (a [TAG] or a daemon name, repeatable),
+--grep RE (any case), --os as before. --clear empties the log first.
+Output is coloured with nd_log.c's palette on a terminal, and a test pins
+the copy to the C table. Reads now include messages.0, so history reaches
+back one rotation. --json -f writes one object per line.
+
+The work is in a new helper, ndlink-logs, which imports ndlink-telnet's
+handshake. ndlink-telnet's main() is split into open_shell / send_framed
+/ run with unchanged behaviour. 14 pytest cases against a fake telnetd.
+Checked against the phone: reads, --modem, --json, and -f showing
+`logger` lines live while `ndlink shell` ran alongside it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk

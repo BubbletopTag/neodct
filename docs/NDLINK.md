@@ -56,7 +56,7 @@ forever — an overnight run that wedges is a wasted night.
 | `shot OUT.png` | a PNG of the panel | exit 2 | **tested** |
 | `digest` | the panel's frame digest | exit 2 | **tested** |
 | `key KEY...` | press keys | written, unverified | needs devkey |
-| `logs [--os] [-n N]` | recent log lines; `--os` drops the kernel's half | exit 2 | **tested** |
+| `logs [-f] [-n N] [--modem] [--tag T] [--grep RE] [--os] [--clear]` | the phone's log; `-f` follows it live like `adb logcat` | exit 2 | **tested** |
 | `snapshot NAME` | capture a reference digest | exit 2 | **tested** |
 | `expect NAME` | assert the panel matches a reference | exit 2 | **tested** |
 | `state` | version, RAM, card, backlight, battery as JSON | exit 2 | **tested** |
@@ -198,6 +198,46 @@ before the command, and a marker carrying `$?` after it. That is what lets
 The repo already ships python3 host tooling (`mkupdate.py`, `uistub.py`,
 `mknap.py`, `goldenframe.py`), so this adds no dependency that was not
 already required to build an image.
+
+## logs: logcat for the phone
+
+```sh
+ndlink logs                    # the last 200 lines
+ndlink logs -f                 # the last 50, then everything new, live; Ctrl-C ends it
+ndlink logs -f --modem         # just the modem and call audio
+ndlink logs --tag bluetoothd   # a [TAG] or a daemon's name; repeat or comma-separate
+ndlink logs -f --grep 'call (connected|ended)'
+ndlink logs --clear -f         # empty the log, then follow -- "clean slate, now reproduce it"
+```
+
+The log is busybox syslogd's `/var/log/messages` plus the one rotated
+`messages.0`, read oldest first. It lives on tmpfs, so it does not survive a
+reboot. `-n N` counts lines that pass the filters, so `-n 20 --modem` is
+twenty modem lines. Colour follows the serial console's palette when stdout
+is a terminal. `--color never` or `NO_COLOR` turns it off.
+
+`-f` runs `tail -F` in the same quieted telnet shell `shell` uses, after
+counting the file's lines so the history and the live tail join with nothing
+lost between them. It releases the target lock, like `watch`, so other verbs
+still work while a follow is running. It exits 0 on Ctrl-C and 3 if the
+phone goes away. TCP keepalive notices an unplugged or rebooting phone within
+about fifteen seconds. With `--json`, `-f` writes one object per line
+(`{"ok":true,...,"line":"..."}`) rather than the single object every other
+verb writes. That is the one exception to the rule, because a stream has no
+end to put the object at.
+
+The helper is `ndlink-logs`. It imports `ndlink-telnet`'s handshake instead
+of repeating it.
+
+**Chasing a dropped call:** `ndlink logs --clear -f --modem`, make the call,
+and wait for the drop. Every call ends with a `Call ended: <cause>` line, then
+`Call end cause (AT+CEER)` and `Radio at call end` (`+CPSI`). While it was up
+there is a `Radio in call` line every 15 s and a `Signal in call` line on
+every CSQ change. The phone ends calls itself in three places: the End key,
+two empty CLCC lists in a row, and a modem that stopped answering. Each of
+those says so in the `Call ended:` line, so any other cause came from the
+network. In `+CPSI`, field 11 is RSRQ×10 and field 12 is RSRP×10; see the
+troubleshooting table in `docs/MODEM_BRINGUP.md`.
 
 ## watch: the panel on your desk, and you can type into it
 

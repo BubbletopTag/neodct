@@ -1,0 +1,339 @@
+#!/usr/bin/env python3
+"""ndlink-logs -- the phone's log, read once or followed live, like adb logcat.
+
+    ndlink-logs --host H --port P --timeout S [--json TARGET]
+                [-f] [-n N] [--os] [--modem] [--tag T]... [--grep RE]
+                [--clear] [--color auto|always|never]
+
+Run by `ndlink logs`, which passes the first line; the second is the user's.
+Exit codes are ndlink's: 0 ok, 3 unreachable or lost, 5 usage, 6 the phone
+could not produce the log.
+
+============ WHERE THE LOG IS ============
+
+nd-core, the system apps, bluetoothd and the kernel all reach busybox syslogd,
+which writes /var/log/messages on the /tmp tmpfs and rotates it at 200 KB into
+ONE messages.0. Both are read, oldest first, so the history reaches back to the
+previous rotation and not just to the last one -- which on a phone that has
+been making calls all afternoon is the difference between having the dropped
+call in the log and not.
+
+============ FOLLOWING, AND WHY IT IS NOT `tail -f | telnet` ============
+
+-f sends ONE shell line to the same quieted telnet shell ndlink-telnet uses:
+
+    count the lines now; print messages.0, then exactly those lines;
+    print a nonce marker; then `tail -n +<count+1> -F messages`
+
+Counting first is what makes the join exact. `cat; tail -n 0 -F` loses
+whatever syslogd wrote between the two, and a line lost silently from a
+debugging tool is worse than none. -F rather than -f because syslogd rotates
+by renaming: -f would follow the renamed file and go quiet for ever.
+
+The backlog is filtered HOST-side and only the last N MATCHING lines are shown
+before the marker, so `-n 50 --modem` means fifty modem lines, not fifty lines
+of which some were the modem's.
+
+A follow ends with Ctrl-C, which is not an error, or with the phone going away,
+which is: TCP keepalive is on so a phone that is unplugged or reboots is
+noticed within about fifteen seconds instead of never, and that exits 3 with
+a line saying so.
+
+Filtering and colour are host-side too: the phone has busybox grep, a pipe
+between two of its commands block-buffers, and the palette is nd_log.c's --
+which is copied here rather than reinvented, so a tag is the same colour on
+the desk as on the serial console.
+"""
+
+import argparse
+import collections
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import socket
+import sys
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+LOG = "/var/log/messages"
+LOG_OLD = "/var/log/messages.0"
+
+# nd_log.c NAMED[], APP_TAGS[] and nd_log_colour_for(). Keep in step.
+NAMED = {
+    "MODEM": 39, "ndsys": 33, "UPDATE": 33, "CORE": 46, "OS": 46,
+    "Launcher": 82, "BATT": 226, "FUEL": 226, "NOTIFY": 201, "INPUT": 51,
+    "KEYMAP": 87, "SETUP": 214, "UI": 120, "FB": 123, "KERNEL": 244,
+    "sdcard": 180, "CLOCK": 129, "RSHELL": 162, "Browser": 141, "CRASH": 196,
+    "ERROR": 196, "FATAL": 196,
+}
+APP_TAGS = {"Koki", "Music", "CallLog", "Settings", "PB", "Tones", "Games",
+            "Messages", "Clock", "Calculator", "Power", "MicTest", "BtAudio",
+            "Sleepy", "Calendar"}
+
+# What --modem means: the modem service, and the mixer the call path drives.
+MODEM_TAGS = ("MODEM", "AUDIO")
+
+# busybox syslogd with FEATURE_SYSLOG_INFO: "Sep 23 12:34:56 host user.info
+# ident[pid]: message". The pid is optional; nd_log sends none.
+LINE_RE = re.compile(
+    r"^(?P<head>\w{3} [ \d]\d \d\d:\d\d:\d\d \S+ \w+\.(?P<lvl>\w+) "
+    r"(?P<ident>[^\s:\[]+)(?:\[\d+\])?:) ?(?P<msg>.*)$")
+TAG_RE = re.compile(r"^\[([^\]\s]{1,64})\]")
+LOUD = {"err", "crit", "alert", "emerg"}
+
+
+def load_telnet():
+    loader = importlib.machinery.SourceFileLoader(
+        "ndlink_telnet", os.path.join(HERE, "ndlink-telnet"))
+    spec = importlib.util.spec_from_loader("ndlink_telnet", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def colour_for(tag):
+    if tag in NAMED:
+        return NAMED[tag]
+    total = sum(tag.encode("ascii", "replace"))
+    if tag in APP_TAGS:
+        return 141 + total % 36
+    return 22 + total % 180
+
+
+class Filter:
+    def __init__(self, args):
+        self.os_only = args.os
+        tags = []
+        for t in args.tag or []:
+            tags += [x for x in t.split(",") if x]
+        if args.modem:
+            tags += MODEM_TAGS
+        self.tags = {t.lower() for t in tags}
+        self.grep = re.compile(args.grep, re.IGNORECASE) if args.grep else None
+
+    def keep(self, line):
+        m = LINE_RE.match(line)
+        ident = m.group("ident") if m else ""
+        msg = m.group("msg") if m else line
+        if self.os_only and ident == "kernel":
+            return False
+        if self.tags:
+            t = TAG_RE.match(msg)
+            # A tag matches "[MODEM]"; it also matches a daemon's own name,
+            # so --tag bluetoothd and --tag kernel work as a reader expects.
+            if not ((t and t.group(1).lower() in self.tags) or ident.lower() in self.tags):
+                return False
+        if self.grep and not self.grep.search(line):
+            return False
+        return True
+
+
+def paint(line):
+    m = LINE_RE.match(line)
+    if not m:
+        return line
+    head, msg = m.group("head"), m.group("msg")
+    out = "\033[38;5;244m%s\033[0m " % head
+    t = TAG_RE.match(msg)
+    rest = msg
+    if t:
+        out += "\033[1m\033[38;5;%dm[%s]\033[0m" % (colour_for(t.group(1)), t.group(1))
+        rest = msg[t.end():]
+    if m.group("lvl") in LOUD:
+        rest = "\033[38;5;196m%s\033[0m" % rest
+    return out + rest
+
+
+class Out:
+    def __init__(self, args):
+        self.json_target = args.json
+        c = args.color
+        if c == "auto":
+            c = "always" if (sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+                             and args.json is None) else "never"
+        self.colour = c == "always"
+
+    def line(self, line):
+        if self.json_target is not None:
+            sys.stdout.write(json.dumps({"ok": True, "verb": "logs",
+                                         "target": self.json_target, "line": line}) + "\n")
+        else:
+            sys.stdout.write((paint(line) if self.colour else line) + "\n")
+        sys.stdout.flush()
+
+    def fail(self, code, msg):
+        if self.json_target is not None:
+            sys.stdout.write(json.dumps({"ok": False, "verb": "logs", "target": self.json_target,
+                                         "error": msg, "code": code}) + "\n")
+            sys.stdout.flush()
+        else:
+            sys.stderr.write("ndlink: %s\n" % msg)
+        return code
+
+
+def snapshot(tn, args, flt, out):
+    try:
+        rc, body = tn.run(args.host, args.port, args.timeout,
+                          "cat %s %s 2>/dev/null; true" % (LOG_OLD, LOG))
+    except tn.LinkError as e:
+        return out.fail(3, str(e))
+    if rc != 0:
+        return out.fail(6, "cannot read logs")
+    lines = [ln for ln in body.split("\n") if ln and flt.keep(ln)][-args.n:] if args.n else []
+    if out.json_target is not None:
+        # One object, as every non-streaming verb answers.
+        sys.stdout.write(json.dumps({"ok": True, "verb": "logs", "target": out.json_target,
+                                     "lines": "\n".join(lines)}) + "\n")
+    else:
+        for ln in lines:
+            out.line(ln)
+    return 0
+
+
+def keepalive(s):
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    for name, val in (("TCP_KEEPIDLE", 5), ("TCP_KEEPINTVL", 3), ("TCP_KEEPCNT", 3)):
+        if hasattr(socket, name):
+            s.setsockopt(socket.IPPROTO_TCP, getattr(socket, name), val)
+
+
+def follow(tn, args, flt, out):
+    nonce = tn.new_nonce()
+    live = nonce.replace("ND", "NDLIVE", 1)
+    cmd = ("n=$(wc -l 2>/dev/null < %s || echo 0); cat %s 2>/dev/null; "
+           "head -n \"$n\" %s 2>/dev/null; printf '%%s\\n' '%s'; "
+           "tail -n +$((n+1)) -F %s 2>/dev/null"
+           % (LOG, LOG_OLD, LOG, live, LOG))
+    try:
+        s = tn.open_shell(args.host, args.port, args.timeout)
+    except OSError as e:
+        return out.fail(3, "%s:%d unreachable: %s" % (args.host, args.port, e))
+    keepalive(s)
+    backlog = collections.deque(maxlen=max(args.n, 0) or 1)
+    want_backlog = args.n > 0
+    started = False
+    is_live = False
+    pending = b""
+    deadline = time.time() + args.timeout
+    try:
+        # The end marker is never reached: tail -F does not return. It is
+        # there so a shell that refuses the command still frames its answer.
+        tn.send_framed(s, nonce, cmd, "<<NDE")
+        while True:
+            if not started:
+                s.settimeout(max(deadline - time.time(), 0.1))
+            chunk = s.recv(4096)
+            if not chunk:
+                return out.fail(3, "the phone closed the connection")
+            pending += tn.strip_iac(chunk)
+            *whole, pending = pending.split(b"\n")
+            for raw in whole:
+                ln = raw.decode("utf-8", "replace").rstrip("\r")
+                if not started:
+                    if ln == nonce:
+                        started = True
+                        s.settimeout(None)
+                    continue
+                if not is_live:
+                    if ln == live:
+                        is_live = True
+                        if want_backlog:
+                            for b in backlog:
+                                out.line(b)
+                        backlog.clear()
+                    elif ln and flt.keep(ln):
+                        backlog.append(ln)
+                    continue
+                if ln.startswith("<<NDE="):
+                    return out.fail(6, "tail stopped on the phone")
+                if ln and flt.keep(ln):
+                    out.line(ln)
+    except socket.timeout:
+        return out.fail(3, "no answer from the phone's shell")
+    except OSError as e:
+        return out.fail(3, "lost the phone: %s" % e)
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        s.close()
+
+
+def clear(tn, args, out):
+    try:
+        rc, _ = tn.run(args.host, args.port, args.timeout,
+                       ": > %s; rm -f %s" % (LOG, LOG_OLD))
+    except tn.LinkError as e:
+        return out.fail(3, str(e))
+    if rc != 0:
+        return out.fail(6, "could not clear the log")
+    return 0
+
+
+def main():
+    p = argparse.ArgumentParser(prog="ndlink logs", add_help=False)
+    p.add_argument("--host", required=True)
+    p.add_argument("--port", type=int, required=True)
+    p.add_argument("--timeout", type=float, default=20.0)
+    p.add_argument("--json", metavar="TARGET")
+    p.add_argument("-f", "--follow", action="store_true")
+    p.add_argument("-n", type=int, default=None)
+    p.add_argument("--os", action="store_true")
+    p.add_argument("--modem", action="store_true")
+    p.add_argument("--tag", "-s", action="append")
+    p.add_argument("--grep", "-e")
+    p.add_argument("--clear", "-c", action="store_true")
+    p.add_argument("--color", "--colour", choices=("auto", "always", "never"), default="auto")
+
+    class Usage(Exception):
+        pass
+
+    def error(msg):
+        raise Usage(msg)
+
+    p.error = error
+    json_target = None
+    if "--json" in sys.argv:
+        i = sys.argv.index("--json")
+        json_target = sys.argv[i + 1] if i + 1 < len(sys.argv) else "hw"
+    try:
+        args = p.parse_args()
+        if args.n is not None and args.n < 0:
+            raise Usage("-n wants a whole number of lines")
+        if args.grep:
+            re.compile(args.grep)
+    except (Usage, re.error) as e:
+        o = argparse.Namespace(json=json_target, color="never")
+        return Out(o).fail(5, "logs: %s" % e)
+    if args.n is None:
+        args.n = 50 if args.follow else 200
+
+    out = Out(args)
+    tn = load_telnet()
+    try:
+        if args.clear:
+            rc = clear(tn, args, out)
+            if rc != 0 or not args.follow:
+                if rc == 0 and args.json is None:
+                    sys.stderr.write("log cleared\n")
+                elif rc == 0:
+                    sys.stdout.write(json.dumps({"ok": True, "verb": "logs",
+                                                 "target": args.json, "cleared": True}) + "\n")
+                return rc
+        if args.follow:
+            return follow(tn, args, Filter(args), out)
+        return snapshot(tn, args, Filter(args), out)
+    except BrokenPipeError:
+        # `ndlink logs -f | head` -- the reader left, which is not an error.
+        try:
+            sys.stdout = open(os.devnull, "w")
+        except OSError:
+            pass
+        return 0
+    except KeyboardInterrupt:
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

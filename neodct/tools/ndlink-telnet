@@ -61,34 +61,51 @@ def strip_iac(data):
     return bytes(out)
 
 
-def main():
-    if len(sys.argv) < 5:
-        sys.stderr.write("usage: ndlink-telnet HOST PORT TIMEOUT COMMAND\n")
-        return 5
-    host = sys.argv[1]
-    port = int(sys.argv[2])
-    timeout = float(sys.argv[3])
-    cmd = sys.argv[4]
+def new_nonce():
+    return "<<ND%d>>" % (int(time.time() * 1000) % 1000000)
 
-    nonce = "<<ND%d>>" % (int(time.time() * 1000) % 1000000)
-    end = "<<NDE"
 
-    try:
-        s = socket.create_connection((host, port), timeout=timeout)
-    except OSError as e:
-        sys.stderr.write("ndlink-telnet: %s:%d unreachable: %s\n" % (host, port, e))
-        return 3
+def open_shell(host, port, timeout):
+    """Connect and quiet the shell: echo off, prompts blank. Raises OSError.
+
+    Shared with ndlink-logs, which needs the same shell but reads it as a
+    stream rather than as one framed reply."""
+    s = socket.create_connection((host, port), timeout=timeout)
     s.settimeout(timeout)
-
     try:
         time.sleep(0.35)
         s.sendall(b"stty -echo 2>/dev/null; PS1=; PS2=\n")
         time.sleep(0.35)
-        # One line. A newline inside the command would trip the continuation
-        # prompt, so callers pass compound commands with ';' -- documented in
-        # ndlink's hw_shell().
-        s.sendall(("printf '%%s\\n' '%s'; %s; printf '%s=%%d>>\\n' \"$?\"\n"
-                   % (nonce, cmd, end)).encode())
+    except OSError:
+        s.close()
+        raise
+    return s
+
+
+def send_framed(s, nonce, cmd, end):
+    """One line. A newline inside the command would trip the continuation
+    prompt, so callers pass compound commands with ';' -- documented in
+    ndlink's hw_shell()."""
+    s.sendall(("printf '%%s\\n' '%s'; %s; printf '%s=%%d>>\\n' \"$?\"\n"
+               % (nonce, cmd, end)).encode())
+
+
+class LinkError(Exception):
+    """The phone could not be reached, or did not frame its reply."""
+
+
+def run(host, port, timeout, cmd):
+    """Run CMD once. Returns (exit status, output). Raises LinkError."""
+    nonce = new_nonce()
+    end = "<<NDE"
+
+    try:
+        s = open_shell(host, port, timeout)
+    except OSError as e:
+        raise LinkError("%s:%d unreachable: %s" % (host, port, e))
+
+    try:
+        send_framed(s, nonce, cmd, end)
 
         buf = bytearray()
         deadline = time.time() + timeout
@@ -123,9 +140,8 @@ def main():
     text = text.replace("\r\n", "\n").replace("\r", "\n")
 
     if nonce not in text or (end + "=") not in text:
-        sys.stderr.write("ndlink-telnet: no framing in the reply "
-                         "(phone busy, or telnetd not serving a shell)\n")
-        return 3
+        raise LinkError("no framing in the reply "
+                        "(phone busy, or telnetd not serving a shell)")
 
     body = text.split(nonce + "\n", 1)[1].split(end + "=", 1)[0]
     try:
@@ -134,9 +150,21 @@ def main():
         rc = 255
     if body.endswith("\n"):
         body = body[:-1]
+    return (rc if 0 <= rc < 256 else 255), body
+
+
+def main():
+    if len(sys.argv) < 5:
+        sys.stderr.write("usage: ndlink-telnet HOST PORT TIMEOUT COMMAND\n")
+        return 5
+    try:
+        rc, body = run(sys.argv[1], int(sys.argv[2]), float(sys.argv[3]), sys.argv[4])
+    except LinkError as e:
+        sys.stderr.write("ndlink-telnet: %s\n" % e)
+        return 3
     if body:
         sys.stdout.write(body + "\n")
-    return rc if 0 <= rc < 256 else 255
+    return rc
 
 
 if __name__ == "__main__":

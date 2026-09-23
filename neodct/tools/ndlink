@@ -56,6 +56,7 @@ ROOT=$(dirname "$REPO")          # the repo root
 STATE="$ROOT/.ndlink"
 REFS="$STATE/refs"
 TELNET_HELPER="$HERE/ndlink-telnet"
+LOGS_HELPER="$HERE/ndlink-logs"
 
 # The bench LAN address the debug link uses. docs/DEBUG_LAN.md is the whole
 # story; .ndlink/target overrides it, written by `ndlink connect`.
@@ -897,47 +898,32 @@ verb_disconnect() {
     return 0
 }
 
+# The log. Everything but the transport choice is ndlink-logs', which says
+# why it is Python and how -f joins the history to the live tail without
+# dropping a line; this only decides what to hand it.
 verb_logs() {
-    _follow=0
-    _os_only=0
-    _lines=200
-    while [ $# -gt 0 ]; do
-        case "$1" in
-        -f) _follow=1 ;;
-        # The phone's own log, without the kernel's. nd-core and the system
-        # apps send their lines to syslogd under their own names (nd_log.h),
-        # so "everything that is not the kernel" is the whole of the test.
-        --os) _os_only=1 ;;
-        -n) shift; _lines=${1:-200} ;;
-        *) fail 5 "logs takes -f, --os or -n N" ;;
-        esac
-        shift
-    done
-    case "$_lines" in
-    '' | *[!0-9]*) fail 5 "-n wants a whole number of lines" ;;
-    esac
     case "$TARGET" in
-    hw)
-        if [ "$_follow" = 1 ]; then
-            fail 2 "logs -f needs a streaming transport; ndlinkd is where that belongs"
-        fi
-        if [ "$_os_only" = 1 ]; then
-            _out=$(hw_shell "grep -v ' kernel: ' /var/log/messages 2>/dev/null | tail -n $_lines") ||
-                fail 6 "cannot read logs"
-        else
-            _out=$(hw_shell "tail -n $_lines /var/log/messages 2>/dev/null") ||
-                fail 6 "cannot read logs"
-        fi
-        ;;
     qemu) fail 2 "logs on qemu: read the serial console run_qemu.sh is attached to" ;;
     esac
-    if [ "$JSON" = 1 ]; then
-        printf '{"ok":true,"verb":"logs","target":"%s","lines":"%s"}\n' \
-            "$TARGET" "$(json_escape "$_out")"
-    else
-        printf '%s\n' "$_out"
+    [ -x "$LOGS_HELPER" ] || fail 3 "missing $LOGS_HELPER"
+    _l_follow=0
+    for _l_a in "$@"; do
+        case "$_l_a" in
+        -f | --follow) _l_follow=1 ;;
+        esac
+    done
+    # A follow is left running for as long as somebody is reproducing a
+    # fault, and must not be a mutex on the phone meanwhile -- the same
+    # reason watch drops the lock before its exec. A one-shot read keeps it.
+    if [ "$_l_follow" = 1 ]; then
+        eval "exec $LOCK_FD>&-" 2>/dev/null || true
     fi
-    return 0
+    if [ "$JSON" = 1 ]; then
+        exec "$LOGS_HELPER" --host "$(hw_addr)" --port "$HW_TELNET_PORT" \
+            --timeout "$TIMEOUT" --json "$TARGET" "$@"
+    fi
+    exec "$LOGS_HELPER" --host "$(hw_addr)" --port "$HW_TELNET_PORT" \
+        --timeout "$TIMEOUT" "$@"
 }
 
 # WITHOUT resolve_target, and an empty TARGET means "whichever arrives".
@@ -1090,7 +1076,14 @@ Verbs built so far:
   shot OUT.png         a PNG of the panel
   digest               the panel's frame digest
   key KEY...           press keys (MENU, 5, DOWN, NAVIKEY...)
-  logs [--os] [-n N]   the phone's recent log (--os drops the kernel's half)
+  logs [OPTS]          the phone's log; -f follows it live like logcat
+                         -n N  last N lines (200; 50 before a -f)
+                         --modem  only the modem and call audio
+                         --tag T  only [T] lines or daemon T (repeatable)
+                         --grep RE  only lines matching RE (any case)
+                         --os  drop the kernel's lines
+                         --clear  empty the log first (then -f to follow)
+                         --color auto|always|never
   state                version, RAM, card, backlight, battery (JSON)
   bugreport [OUT]      one tarball: state, logs, dmesg, screenshot, selftest
   selftest             run nd-selftest and report
