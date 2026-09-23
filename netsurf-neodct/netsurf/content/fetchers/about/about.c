@@ -53,6 +53,7 @@
 #include "choices.h"
 #include "imagecache.h"
 #include "nscolours.h"
+#include "neodct.h"
 #include "query.h"
 #include "query_auth.h"
 #include "query_fetcherror.h"
@@ -409,6 +410,13 @@ struct about_handlers about_handler_list[] = {
 		SLEN("nscolours.css"),
 		NULL,
 		fetch_about_nscolours_handler,
+		true
+	},
+	{
+		"neodct.css",
+		SLEN("neodct.css"),
+		NULL,
+		fetch_about_neodct_handler,
 		true
 	},
 	{

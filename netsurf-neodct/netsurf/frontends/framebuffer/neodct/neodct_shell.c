@@ -43,6 +43,8 @@
 #include "framebuffer/neodct/neodct_ui.h"
 #include "framebuffer/neodct/neodct_history.h"
 #include "framebuffer/neodct/neodct_theme.h"
+#include "framebuffer/neodct/neodct_theme_css.h"
+#include "content/fetchers/about/neodct.h"
 #include "framebuffer/neodct/neodct_status.h"
 #include "framebuffer/neodct/neodct_wrap.h"
 #include "framebuffer/neodct/neodct_mem.h"
@@ -1067,6 +1069,25 @@ static void install_crash_handler(void)
 }
 
 /* ------------------------------------------------------------------
+ * the theme, for pages
+ */
+
+/* Hand the theme to the core as about:neodct.css, before the first page
+ * is fetched, so that the home page and netsurf's own error pages wear
+ * the phone's theme too. See neodct_theme_css.h. */
+static void shell_publish_theme_css(struct neodct_shell *sh)
+{
+	char *css = malloc(NEODCT_THEME_CSS_MAX);
+
+	if (css == NULL)
+		return;
+	if (neodct_theme_css(sh->theme, css, NEODCT_THEME_CSS_MAX) == 0 ||
+	    fetch_about_neodct_set_stylesheet(css) != NSERROR_OK)
+		NSLOG(netsurf, INFO, "neodct: no theme stylesheet for pages");
+	free(css);
+}
+
+/* ------------------------------------------------------------------
  * home page and history
  */
 
@@ -1668,6 +1689,7 @@ void neodct_shell_create(struct gui_window *gw, const char *homepage)
 	gw->neodct = sh;
 
 	sh->theme = neodct_theme_active();
+	shell_publish_theme_css(sh);
 	neodct_ui_init(&sh->ui, width, height);
 	neodct_status_init(&sh->status);
 	shell_init_homepage(sh, homepage);

@@ -1,4 +1,7 @@
 @import url("about:nscolours.css");
+/* NeoDCT: the phone's theme, which restyles these pages as phone
+ * screens -- see frontends/framebuffer/neodct/neodct_theme_css.h */
+@import url("about:neodct.css");
 
 html, body {
 	margin: 0;
