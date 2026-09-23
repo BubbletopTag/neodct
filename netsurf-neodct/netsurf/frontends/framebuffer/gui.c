@@ -57,6 +57,7 @@
 #include "framebuffer/bitmap.h"
 #include "framebuffer/local_history.h"
 #include "framebuffer/neodct/neodct_shell.h"
+#include "framebuffer/neodct/neodct_theme.h"
 
 
 #define NSFB_TOOLBAR_DEFAULT_LAYOUT "blfsrutc"
@@ -691,10 +692,22 @@ static nserror set_defaults(struct nsoption_s *defaults)
 		const char *sysfont = getenv("NEODCT_FONT");
 		const char *web_sans = NULL, *web_sans_bold = NULL;
 		const char *web_serif = NULL, *web_mono = NULL;
+		static char themefont[NEODCT_THEME_PATH_MAX + 32];
 		int i;
 
-		if (sysfont == NULL)
-			sysfont = "/NeoDCT/System/ui/resources/fonts/font.ttf";
+		/* The chrome wears the phone's theme, face included: the
+		 * theme's own ui.ttf, or the pixel or the UI face as its
+		 * style asks -- the same choice nd_ui.c makes. A face that is
+		 * missing falls back to the pixel face, as it does there. */
+		if (sysfont != NULL && sysfont[0] == '\0')
+			sysfont = NULL; /* exported blank: not an override */
+		if (sysfont == NULL) {
+			neodct_theme_font(neodct_theme_active(), themefont,
+					  sizeof(themefont));
+			sysfont = themefont;
+			if (access(sysfont, R_OK) != 0)
+				sysfont = NEODCT_FONT_PIXEL;
+		}
 		if (access(sysfont, R_OK) != 0)
 			sysfont = NULL;
 

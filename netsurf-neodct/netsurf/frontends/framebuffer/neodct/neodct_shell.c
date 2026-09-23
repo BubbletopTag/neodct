@@ -42,15 +42,12 @@
 
 #include "framebuffer/neodct/neodct_ui.h"
 #include "framebuffer/neodct/neodct_history.h"
+#include "framebuffer/neodct/neodct_theme.h"
 #include "framebuffer/neodct/neodct_status.h"
 #include "framebuffer/neodct/neodct_wrap.h"
 #include "framebuffer/neodct/neodct_mem.h"
 #include "framebuffer/neodct/neodct_media.h"
 #include "framebuffer/neodct/neodct_shell.h"
-
-#define NEODCT_BLACK FB_COLOUR_BLACK
-#define NEODCT_WHITE FB_COLOUR_WHITE
-#define NEODCT_GRAY  0xFF808080
 
 /* framework.py layout constants (240x175) */
 #define FRAME_SOFTKEY_H 30
@@ -62,6 +59,15 @@
 #define FONT_MD_PX 18
 #define FONT_N_PX 20
 #define FONT_XL_PX 24
+
+/* the browse chrome's own type, the sizes fbtk's text widget used to
+ * derive from the bars' heights */
+#define URLBAR_FONT_PX 13
+#define STATUS_FONT_PX 10
+
+/* nd_vlist.c / nd_softkey.c: the corner of a selection lozenge and of
+ * the softkey plate, when the theme rounds corners at all */
+#define PLATE_RADIUS 6
 
 #define MEM_LOG_INTERVAL_MS 5000
 #define BLINK_INTERVAL_MS 500
@@ -79,6 +85,7 @@ struct neodct_shell {
 	struct gui_window *gw;
 	struct neodct_ui ui;
 	struct neodct_status status;
+	const struct neodct_theme *theme;
 
 	char cur_url[NEODCT_TEXT_MAX + 1];
 	char cur_title[NEODCT_HISTORY_TITLE_MAX + 1];
@@ -90,8 +97,8 @@ struct neodct_shell {
 	char history_path[NEODCT_TEXT_MAX + 1]; /**< "" when not persisted */
 
 	/* browse-mode chrome */
-	fbtk_widget_t *url_text;
-	fbtk_widget_t *status_text;
+	fbtk_widget_t *url_bar;
+	fbtk_widget_t *status_bar;
 
 	/* full-screen NeoDCT overlay (menu / url / input screens) */
 	fbtk_widget_t *screen;
@@ -123,9 +130,29 @@ static long now_ms(void)
 
 /* ------------------------------------------------------------------
  * drawing primitives over the raw framebuffer
+ *
+ * The chrome is drawn from the phone's theme (neodct_theme.h), with
+ * the same construction nd_theme.c uses -- a plate is a gradient, a
+ * sheen over its top half, a bevel and a border; type on a light
+ * ground carries a shadow -- cut down to what these few screens need.
+ * Every primitive draws exactly the old flat black and white when the
+ * theme is the classic one, whose switches are all off.
+ *
+ * nd_theme.c blends against the pixels already there. Here the
+ * colour underneath is always known (the ground's ramp, or the plate
+ * being drawn on), so every blend is worked out as a colour first and
+ * painted opaque: no read-back from the framebuffer, and no alpha
+ * support needed from libnsfb's plotters.
  */
 
-static void mkstyle(plot_font_style_t *fs, int px, colour fg, colour bg)
+/* 0xRRGGBB to the toolkit's 0xAABBGGRR */
+static colour fbc(uint32_t rgb)
+{
+	return 0xFF000000u | ((rgb & 0xFFu) << 16) | (rgb & 0xFF00u) |
+		((rgb >> 16) & 0xFFu);
+}
+
+static void mkstyle(plot_font_style_t *fs, int px, uint32_t fg, uint32_t bg)
 {
 	memset(fs, 0, sizeof(*fs));
 	/* the fantasy face carries the NeoDCT system font; sans-serif
@@ -134,8 +161,8 @@ static void mkstyle(plot_font_style_t *fs, int px, colour fg, colour bg)
 	fs->size = px_to_pt(px * PLOT_STYLE_SCALE);
 	fs->weight = 400;
 	fs->flags = FONTF_NONE;
-	fs->foreground = fg;
-	fs->background = bg;
+	fs->foreground = fbc(fg);
+	fs->background = fbc(bg);
 }
 
 static int text_width(const plot_font_style_t *fs, const char *s, size_t len)
@@ -148,9 +175,9 @@ static int text_width(const plot_font_style_t *fs, const char *s, size_t len)
 }
 
 /* draw text with (x, y) as the glyph box top-left, like PIL draw.text */
-static void draw_text(struct redraw_context *ctx,
-		      const plot_font_style_t *fs, int px,
-		      int x, int y, const char *s)
+static void draw_text_plain(struct redraw_context *ctx,
+			    const plot_font_style_t *fs, int px,
+			    int x, int y, const char *s)
 {
 	if (s == NULL || *s == '\0')
 		return;
@@ -159,44 +186,294 @@ static void draw_text(struct redraw_context *ctx,
 			s, strlen(s));
 }
 
+/* nd_theme_text(): the shadow one row below, then the ink. `bg` is
+ * what the type stands on, which the shadow is composited over. */
+static void draw_text(struct neodct_shell *sh, struct redraw_context *ctx,
+		      int px, int x, int y, const char *s,
+		      uint32_t ink, uint32_t shadow, uint32_t bg)
+{
+	const struct neodct_theme *th = sh->theme;
+	plot_font_style_t fs;
+
+	if (th->type_shadow) {
+		mkstyle(&fs, px, neodct_theme_blend(bg, shadow, th->shadow_a),
+			bg);
+		draw_text_plain(ctx, &fs, px, x, y + 1, s);
+	}
+	mkstyle(&fs, px, ink, bg);
+	draw_text_plain(ctx, &fs, px, x, y, s);
+}
+
+/* the half-open rectangle [x0,x1) x [y0,y1) */
 static void fill_rect(nsfb_t *nsfb, int x0, int y0, int x1, int y1,
-		      colour c)
+		      uint32_t rgb)
 {
 	nsfb_bbox_t box = { x0, y0, x1, y1 };
 
-	nsfb_plot_rectangle_fill(nsfb, &box, c);
+	if (x1 > x0 && y1 > y0)
+		nsfb_plot_rectangle_fill(nsfb, &box, fbc(rgb));
 }
 
-static void outline_rect(nsfb_t *nsfb, int x0, int y0, int x1, int y1,
-			 colour c)
+/* A gradient's colour at row y of a ramp running ramp_y0..ramp_y1 --
+ * the ramp is defined over the panel and only part of it painted, so
+ * the softkey strip and the content above it agree where they meet
+ * (nd_theme_gradient_v_ramped). Flat themes take the top colour. */
+static uint32_t ramp(const struct neodct_theme *th, uint32_t top, uint32_t bot,
+		     int y, int ramp_y0, int ramp_y1)
 {
-	/* four 1px edges; nsfb_plot_rectangle dashes on some plotters */
-	fill_rect(nsfb, x0, y0, x1, y0 + 1, c);
-	fill_rect(nsfb, x0, y1 - 1, x1, y1, c);
-	fill_rect(nsfb, x0, y0, x0 + 1, y1, c);
-	fill_rect(nsfb, x1 - 1, y0, x1, y1, c);
+	if (!th->gradients)
+		return top;
+	if (y <= ramp_y0)
+		return top;
+	if (y >= ramp_y1)
+		return bot;
+	return neodct_theme_lerp(top, bot, y - ramp_y0, ramp_y1 - ramp_y0);
+}
+
+/* the ground: what a screen with no wallpaper stands on */
+static uint32_t ground(const struct neodct_shell *sh, int y)
+{
+	int h = fbtk_get_height(sh->gw->window);
+
+	return ramp(sh->theme, sh->theme->sky_top, sh->theme->sky_bot,
+		    y, 0, h - 1);
+}
+
+static void fill_ground(struct neodct_shell *sh, nsfb_t *nsfb,
+			int x0, int y0, int x1, int y1)
+{
+	int y;
+
+	if (!sh->theme->gradients) {
+		fill_rect(nsfb, x0, y0, x1, y1, sh->theme->sky_top);
+		return;
+	}
+	for (y = y0; y < y1; y++)
+		fill_rect(nsfb, x0, y, x1, y + 1, ground(sh, y));
+}
+
+/* How far a row `i` rows in from a rounded edge starts in from the
+ * side: the quarter circle of radius r, sampled at the row's centre.
+ * Integer so the chrome does not pull in libm for a corner. */
+static int corner_inset(int r, int i)
+{
+	int k = 0;
+	int d = 2 * r - 2 * i - 1; /* twice the distance to the centre row */
+
+	if (i >= r || r <= 0)
+		return 0;
+	/* largest k with (2k)^2 + d^2 <= (2r)^2 */
+	while (4 * (k + 1) * (k + 1) + d * d <= 4 * r * r)
+		k++;
+	return r - k;
+}
+
+/* nd_theme_plate, the fields this chrome uses */
+struct plate {
+	uint32_t top, bot;  /* body gradient */
+	uint32_t border;
+	int border_a;       /* 0: no border */
+	int sheen_a;        /* 0: no gloss */
+	bool bevel;
+	bool painted;       /* false: the body is the ground, left out */
+	int radius;
+};
+
+/* nd_theme_plate_blue(): the selection, and anything else in the
+ * signature colour */
+static struct plate plate_blue(const struct neodct_theme *th, int radius)
+{
+	struct plate p = { th->blue_top, th->blue_bot, th->blue_deep, 210,
+			   th->gloss ? 90 : 0, th->bevel, true,
+			   th->round ? radius : 0 };
+	return p;
+}
+
+/* nd_theme_plate_bar(): the strips that frame the screen, not painted
+ * when the theme's bar is its ground -- the classic face */
+static struct plate plate_bar(const struct neodct_theme *th, int radius)
+{
+	struct plate p = { th->bar_top, th->bar_bot, th->blue_deep,
+			   th->gradients ? 210 : 0, th->gloss ? 90 : 0,
+			   th->bevel, neodct_theme_bars_painted(th),
+			   th->round ? radius : 0 };
+	return p;
+}
+
+/* nd_theme_plate_glass(): a text field. The phone composites it at
+ * 216 over the ground; that is folded into the colours here. */
+static struct plate plate_glass(struct neodct_shell *sh, int radius, int y0,
+				int y1)
+{
+	const struct neodct_theme *th = sh->theme;
+	struct plate p = { neodct_theme_blend(ground(sh, y0), th->glass_top, 216),
+			   neodct_theme_blend(ground(sh, y1), th->glass_bot, 216),
+			   th->blue_deep, 120, th->gloss ? 70 : 0, th->bevel,
+			   neodct_theme_panels_painted(th),
+			   th->round ? radius : 0 };
+	return p;
+}
+
+/* nd_theme_plate_draw() on [x0,x1) x [y0,y1), over the ground */
+static void plate_draw(struct neodct_shell *sh, nsfb_t *nsfb,
+		       int x0, int y0, int x1, int y1, const struct plate *p)
+{
+	const struct neodct_theme *th = sh->theme;
+	int h = y1 - y0;
+	int mid = y0 + (h - 1) / 2;
+	int r = p->radius;
+	int y;
+
+	if (x1 <= x0 || h <= 0)
+		return;
+	if (r > h / 2)
+		r = h / 2;
+	if (r > (x1 - x0) / 2)
+		r = (x1 - x0) / 2;
+
+	for (y = y0; y < y1; y++) {
+		int from_edge = (y - y0 < y1 - 1 - y) ? y - y0 : y1 - 1 - y;
+		int ins = corner_inset(r, from_edge);
+		int lx = x0 + ins, rx = x1 - ins;
+		uint32_t c;
+
+		if (!p->painted) {
+			if (p->border_a == 0)
+				continue;
+			c = ground(sh, y);
+		} else {
+			c = ramp(th, p->top, p->bot, y, y0, y1 - 1);
+			/* the sheen: the top half only, stopping dead at the
+			 * midpoint, fading to a third of itself on the way */
+			if (p->sheen_a > 0 && y <= mid && mid > y0)
+				c = neodct_theme_blend(c, th->chrome_hi,
+					p->sheen_a - (p->sheen_a * 2 / 3) *
+					(y - y0) / (mid - y0));
+			/* the bevel: a hairline one row inside the top */
+			if (p->bevel && y == y0 + 1)
+				c = neodct_theme_blend(c, th->chrome_hi, 150);
+			fill_rect(nsfb, lx, y, rx, y + 1, c);
+		}
+
+		/* the border last, over everything */
+		if (p->border_a > 0) {
+			uint32_t b = neodct_theme_blend(c, p->border,
+							p->border_a);
+
+			if (y == y0 || y == y1 - 1) {
+				fill_rect(nsfb, lx, y, rx, y + 1, b);
+			} else {
+				fill_rect(nsfb, lx, y, lx + 1, y + 1, b);
+				fill_rect(nsfb, rx - 1, y, rx, y + 1, b);
+			}
+		}
+	}
+}
+
+/* the colour a plate's type stands on, for its shadow */
+static uint32_t plate_mid(const struct neodct_shell *sh, const struct plate *p,
+			  int y0, int y1)
+{
+	if (!p->painted)
+		return ground(sh, (y0 + y1) / 2);
+	return neodct_theme_lerp(p->top, p->bot, 1, 2);
+}
+
+/* The rule under a title on a screen whose bars are the ground: one
+ * white row in the classic face, the cut-and-catch pair in a theme
+ * that asks for it (nd_theme_divider). */
+static void divider(struct neodct_shell *sh, nsfb_t *nsfb, int x0, int x1,
+		    int y)
+{
+	const struct neodct_theme *th = sh->theme;
+
+	if (!th->bevel_divider) {
+		fill_rect(nsfb, x0, y, x1, y + 1, th->chrome_hi);
+		return;
+	}
+	fill_rect(nsfb, x0, y, x1, y + 1, th->blue_deep);
+	fill_rect(nsfb, x0, y + 1, x1, y + 2,
+		  neodct_theme_blend(ground(sh, y + 1), th->chrome_hi, 130));
+}
+
+/* the soft band a plate casts onto the ground under it */
+static void shadow_band(struct neodct_shell *sh, nsfb_t *nsfb, int x0, int x1,
+			int y, int rows, int alpha)
+{
+	int i;
+
+	if (!sh->theme->plate_shadow)
+		return;
+	for (i = 0; i < rows; i++) {
+		int a = alpha * (rows - i) * (rows - i) / (rows * rows);
+
+		fill_rect(nsfb, x0, y + i, x1, y + i + 1,
+			  neodct_theme_blend(ground(sh, y + i),
+					     sh->theme->blue_deep, a));
+	}
 }
 
 /* ------------------------------------------------------------------
  * NeoDCT framework screens
  */
 
-/* SoftKeyBar.update(): black bar, centred font_n label */
+/* The title strip: a bar plate carrying the title and the badge when
+ * the theme paints its bars, and otherwise the classic title on the
+ * ground with a rule under it. title_y is where the classic face puts
+ * the title, which differs between the list and the text screens. */
+static void render_title(struct neodct_shell *sh, nsfb_t *nsfb,
+			 struct redraw_context *ctx, const char *title,
+			 int title_y, const char *badge)
+{
+	const struct neodct_theme *th = sh->theme;
+	int w = fbtk_get_width(sh->gw->window);
+	struct plate p = plate_bar(th, 0);
+	uint32_t under = plate_mid(sh, &p, 0, FRAME_HEADER_Y);
+	plot_font_style_t fs;
+
+	if (p.painted) {
+		/* square and flush, like nd_theme_titlebar(): the top of
+		 * the phone, not a card floating on it */
+		p.border_a = 0;
+		plate_draw(sh, nsfb, 0, 0, w, FRAME_HEADER_Y, &p);
+		shadow_band(sh, nsfb, 0, w, FRAME_HEADER_Y, 3, 130);
+		title_y = (FRAME_HEADER_Y - FONT_XL_PX) / 2;
+	} else {
+		divider(sh, nsfb, 0, w, FRAME_HEADER_Y);
+	}
+
+	draw_text(sh, ctx, FONT_XL_PX, 5, title_y, title, th->bar_ink,
+		  th->text_shadow, under);
+
+	if (badge != NULL && badge[0] != '\0') {
+		mkstyle(&fs, FONT_N_PX, th->bar_ink, under);
+		draw_text(sh, ctx, FONT_N_PX,
+			  w - 5 - text_width(&fs, badge, strlen(badge)), 5,
+			  badge, th->bar_ink, th->text_shadow, under);
+	}
+}
+
+/* SoftKeyBar.update(): the strip, and a centred font_n label on a bar
+ * plate (nd_softkey.c) */
 static void render_softkey(struct neodct_shell *sh, nsfb_t *nsfb,
 			   struct redraw_context *ctx, const char *label)
 {
+	const struct neodct_theme *th = sh->theme;
 	int w = fbtk_get_width(sh->gw->window);
 	int h = fbtk_get_height(sh->gw->window);
 	int y = h - FRAME_SOFTKEY_H;
+	struct plate p = plate_bar(th, PLATE_RADIUS);
 	plot_font_style_t fs;
 	int tw;
 
-	fill_rect(nsfb, 0, y, w, h, NEODCT_BLACK);
+	fill_ground(sh, nsfb, 0, y, w, h);
+	plate_draw(sh, nsfb, 2, y + 2, w - 2, h - 2, &p);
 
-	mkstyle(&fs, FONT_N_PX, NEODCT_WHITE, NEODCT_BLACK);
+	mkstyle(&fs, FONT_N_PX, th->bar_ink, th->bar_top);
 	tw = text_width(&fs, label, strlen(label));
-	draw_text(ctx, &fs, FONT_N_PX, (w - tw) / 2,
-		  y + (FRAME_SOFTKEY_H - FONT_N_PX) / 2, label);
+	draw_text(sh, ctx, FONT_N_PX, (w - tw) / 2,
+		  y + (FRAME_SOFTKEY_H - FONT_N_PX) / 2, label, th->bar_ink,
+		  th->text_shadow, plate_mid(sh, &p, y, h));
 }
 
 /* Cut s to fit max_w pixels, ending in "..." when anything was cut.
@@ -226,12 +503,55 @@ static void fit_text(const plot_font_style_t *fs, const char *s,
 	out[0] = '\0';
 }
 
+/* The scrollbar. The classic face's 1 px grey track with a white notch;
+ * a theme with gradients gets nd_theme_scrollbar()'s recessed groove
+ * with a glossy thumb sized to the list. */
+static void render_scrollbar(struct neodct_shell *sh, nsfb_t *nsfb, int x,
+			     int top, int bottom, int pos, int count)
+{
+	const struct neodct_theme *th = sh->theme;
+	int notch_y, y;
+
+	if (!th->gradients) {
+		fill_rect(nsfb, x, top, x + 1, bottom, th->chrome_bot);
+		if (count > 1)
+			notch_y = top + pos * (bottom - top) / (count - 1);
+		else
+			notch_y = top;
+		fill_rect(nsfb, x - 2, notch_y - 3, x + 2, notch_y + 3,
+			  th->chrome_hi);
+		return;
+	}
+
+	for (y = top; y <= bottom; y++)
+		fill_rect(nsfb, x - 2, y, x + 3, y + 1,
+			  neodct_theme_blend(ground(sh, y), th->blue_deep, 90));
+	{
+		int track_h = bottom - top + 1;
+		int thumb_h = count > 1 ? track_h / count : track_h;
+		struct plate p = plate_blue(th, 2);
+
+		if (thumb_h < 10)
+			thumb_h = 10;
+		if (thumb_h > track_h)
+			thumb_h = track_h;
+		notch_y = top;
+		if (count > 1)
+			notch_y += pos * (track_h - thumb_h) / (count - 1);
+		p.top = th->blue_hi;
+		p.bot = th->blue_mid;
+		plate_draw(sh, nsfb, x - 2, notch_y, x + 3, notch_y + thumb_h,
+			   &p);
+	}
+}
+
 /* VerticalList.draw(): title, breadcrumb, divider, 3 rows, scrollbar */
 static void render_list(struct neodct_shell *sh, nsfb_t *nsfb,
 			struct redraw_context *ctx, const struct neodct_menu *m,
 			const char *title, const char *crumb_prefix,
 			const char *empty_text)
 {
+	const struct neodct_theme *th = sh->theme;
 	int w = fbtk_get_width(sh->gw->window);
 	int h = fbtk_get_height(sh->gw->window);
 	int content_bottom = h - FRAME_SOFTKEY_H;
@@ -241,11 +561,13 @@ static void render_list(struct neodct_shell *sh, nsfb_t *nsfb,
 	int item_height;
 	int bar_x = w - 5;
 	int selected_right = bar_x - 10;
-	int track_top, track_bottom, notch_y;
+	/* a rounded lozenge flush to the edge has nowhere to put its
+	 * corner, so it starts 4 px in (nd_vlist.c) */
+	int sel_left = th->round ? 4 : 0;
 	plot_font_style_t fs;
 	char crumb[24];
 	char label[NEODCT_TEXT_MAX + 1];
-	int i, tw;
+	int i;
 
 	if (line_height < 28)
 		line_height = 28;
@@ -253,23 +575,14 @@ static void render_list(struct neodct_shell *sh, nsfb_t *nsfb,
 	if (item_height < 24)
 		item_height = 24;
 
-	fill_rect(nsfb, 0, 0, w, content_bottom, NEODCT_BLACK);
-
-	/* title and breadcrumb header */
-	mkstyle(&fs, FONT_XL_PX, NEODCT_WHITE, NEODCT_BLACK);
-	draw_text(ctx, &fs, FONT_XL_PX, 5, 0, title);
+	fill_ground(sh, nsfb, 0, 0, w, content_bottom);
 
 	if (m->count > 0)
 		snprintf(crumb, sizeof(crumb), "%s-%d", crumb_prefix,
 			 m->selected + 1);
 	else
 		snprintf(crumb, sizeof(crumb), "%s", crumb_prefix);
-	mkstyle(&fs, FONT_N_PX, NEODCT_WHITE, NEODCT_BLACK);
-	tw = text_width(&fs, crumb, strlen(crumb));
-	draw_text(ctx, &fs, FONT_N_PX, w - 5 - tw, 5, crumb);
-
-	fill_rect(nsfb, 0, FRAME_HEADER_Y, w, FRAME_HEADER_Y + 1,
-		  NEODCT_WHITE);
+	render_title(sh, nsfb, ctx, title, 0, crumb);
 
 	/* list rows */
 	for (i = 0; i < m->max_lines; i++) {
@@ -280,40 +593,35 @@ static void render_list(struct neodct_shell *sh, nsfb_t *nsfb,
 		if (item >= m->count)
 			break;
 
-		if (item == m->selected) {
-			fill_rect(nsfb, 0, y, selected_right,
-				  y + item_height, NEODCT_WHITE);
-			mkstyle(&fs, FONT_MD_PX, NEODCT_BLACK, NEODCT_WHITE);
-		} else {
-			mkstyle(&fs, FONT_MD_PX, NEODCT_WHITE, NEODCT_BLACK);
-		}
+		mkstyle(&fs, FONT_MD_PX, th->ink_light, th->sky_top);
 		fit_text(&fs, m->items[item], selected_right - 10 - 4,
 			 label, sizeof(label));
-		draw_text(ctx, &fs, FONT_MD_PX, 10, text_y, label);
+
+		if (item == m->selected) {
+			struct plate p = plate_blue(th, PLATE_RADIUS);
+
+			plate_draw(sh, nsfb, sel_left, y, selected_right,
+				   y + item_height, &p);
+			draw_text(sh, ctx, FONT_MD_PX, 10, text_y, label,
+				  th->sel_ink, th->text_shadow,
+				  plate_mid(sh, &p, y, y + item_height));
+		} else {
+			draw_text(sh, ctx, FONT_MD_PX, 10, text_y, label,
+				  th->ink_light, th->text_shadow,
+				  ground(sh, text_y));
+		}
 	}
 
 	if (m->count == 0) {
-		mkstyle(&fs, FONT_MD_PX, NEODCT_WHITE, NEODCT_BLACK);
-		draw_text(ctx, &fs, FONT_MD_PX, 10,
-			  y_start + (item_height - FONT_MD_PX) / 2, empty_text);
+		draw_text(sh, ctx, FONT_MD_PX, 10,
+			  y_start + (item_height - FONT_MD_PX) / 2, empty_text,
+			  th->ink_light, th->text_shadow, ground(sh, y_start));
 		render_softkey(sh, nsfb, ctx, "Back");
 		return;
 	}
 
-	/* scrollbar track and notch */
-	track_top = y_start;
-	track_bottom = content_bottom - 5;
-	fill_rect(nsfb, bar_x, track_top, bar_x + 1, track_bottom,
-		  NEODCT_GRAY);
-
-	if (m->count > 1)
-		notch_y = track_top + m->selected *
-			(track_bottom - track_top) / (m->count - 1);
-	else
-		notch_y = track_top;
-	fill_rect(nsfb, bar_x - 2, notch_y - 3, bar_x + 2, notch_y + 3,
-		  NEODCT_WHITE);
-
+	render_scrollbar(sh, nsfb, bar_x, y_start, content_bottom - 5,
+			 m->selected, m->count);
 	render_softkey(sh, nsfb, ctx, "Select");
 }
 
@@ -336,6 +644,7 @@ static void render_history(struct neodct_shell *sh, nsfb_t *nsfb,
 static void render_urlbar(struct neodct_shell *sh, nsfb_t *nsfb,
 			  struct redraw_context *ctx)
 {
+	const struct neodct_theme *th = sh->theme;
 	int w = fbtk_get_width(sh->gw->window);
 	int h = fbtk_get_height(sh->gw->window);
 	int content_bottom = h - FRAME_SOFTKEY_H;
@@ -343,6 +652,8 @@ static void render_urlbar(struct neodct_shell *sh, nsfb_t *nsfb,
 	int box_y = prompt_y + 30;
 	int box_h = content_bottom - box_y - 10;
 	int box_right = w - 10;
+	struct plate field;
+	uint32_t field_ink, field_under;
 	plot_font_style_t fs;
 	char buf[NEODCT_TEXT_MAX + 2];
 	int tw;
@@ -352,18 +663,26 @@ static void render_urlbar(struct neodct_shell *sh, nsfb_t *nsfb,
 	if (box_h < 24)
 		box_h = 24;
 
-	fill_rect(nsfb, 0, 0, w, content_bottom, NEODCT_BLACK);
+	fill_ground(sh, nsfb, 0, 0, w, content_bottom);
+	render_title(sh, nsfb, ctx, "Go to URL", 5, NULL);
 
-	mkstyle(&fs, FONT_XL_PX, NEODCT_WHITE, NEODCT_BLACK);
-	draw_text(ctx, &fs, FONT_XL_PX, 5, 5, "Go to URL");
-	fill_rect(nsfb, 0, FRAME_HEADER_Y, w, FRAME_HEADER_Y + 1,
-		  NEODCT_WHITE);
+	draw_text(sh, ctx, FONT_N_PX, 10, prompt_y, "URL:", th->ink_light,
+		  th->text_shadow, ground(sh, prompt_y));
 
-	mkstyle(&fs, FONT_N_PX, NEODCT_WHITE, NEODCT_BLACK);
-	draw_text(ctx, &fs, FONT_N_PX, 10, prompt_y, "URL:");
-
-	outline_rect(nsfb, 10, box_y, box_right, box_y + box_h,
-		     NEODCT_WHITE);
+	/* The field: a glass well in a theme that paints panels, and the
+	 * classic face's hollow white rule where the glass is the ground. */
+	field = plate_glass(sh, PLATE_RADIUS, box_y, box_y + box_h);
+	if (!field.painted) {
+		field.border = th->chrome_hi;
+		field.border_a = 255;
+		field.radius = 0;
+		field_ink = th->ink_light;
+		field_under = ground(sh, box_y + box_h / 2);
+	} else {
+		field_ink = th->ink_dark;
+		field_under = plate_mid(sh, &field, box_y, box_y + box_h);
+	}
+	plate_draw(sh, nsfb, 10, box_y, box_right, box_y + box_h, &field);
 
 	/* A selected url is drawn highlighted, like a selected list row,
 	 * with no cursor: what happens next replaces it, not extends it. */
@@ -374,6 +693,7 @@ static void render_urlbar(struct neodct_shell *sh, nsfb_t *nsfb,
 			 sh->blink ? "_" : "");
 
 	/* keep the tail visible when the text outgrows the box */
+	mkstyle(&fs, FONT_N_PX, field_ink, field_under);
 	tw = text_width(&fs, buf, strlen(buf));
 	{
 		int text_x = 15;
@@ -381,29 +701,31 @@ static void render_urlbar(struct neodct_shell *sh, nsfb_t *nsfb,
 		int text_y = box_y + (box_h - FONT_N_PX) / 2;
 		struct rect clip = { 12, box_y + 1,
 				     box_right - 2, box_y + box_h - 1 };
+		struct rect full = { 0, 0, w, h };
 
 		if (tw > max_w)
 			text_x = 15 - (tw - max_w);
 		ctx->plot->clip(ctx, &clip);
 		if (sh->ui.text_selected) {
-			int x0 = text_x - 2 < 12 ? 12 : text_x - 2;
-			int x1 = text_x + tw + 2;
+			struct plate sel = plate_blue(th, 2);
 
-			if (x1 > box_right - 2)
-				x1 = box_right - 2;
-			fill_rect(nsfb, x0, text_y - 1, x1,
-				  text_y + FONT_N_PX + 2, NEODCT_WHITE);
-			mkstyle(&fs, FONT_N_PX, NEODCT_BLACK, NEODCT_WHITE);
+			sel.border_a = 0;
+			plate_draw(sh, nsfb, text_x - 2, text_y - 1,
+				   text_x + tw + 2, text_y + FONT_N_PX + 2,
+				   &sel);
+			draw_text(sh, ctx, FONT_N_PX, text_x, text_y, buf,
+				  th->sel_ink, th->text_shadow,
+				  plate_mid(sh, &sel, text_y, text_y + FONT_N_PX));
+		} else {
+			draw_text(sh, ctx, FONT_N_PX, text_x, text_y, buf,
+				  field_ink,
+				  field.painted ? th->text_sheen : th->text_shadow,
+				  field_under);
 		}
-		draw_text(ctx, &fs, FONT_N_PX, text_x, text_y, buf);
-	}
 
-	/* Unclip before the softkey. Left clipped to the text box, the
-	 * bar was never drawn on this screen and the page showed through
-	 * where "OK" belongs. */
-	{
-		struct rect full = { 0, 0, w, h };
-
+		/* Unclip before the softkey. Left clipped to the text box,
+		 * the bar was never drawn on this screen and the page
+		 * showed through where "OK" belongs. */
 		ctx->plot->clip(ctx, &full);
 	}
 	render_softkey(sh, nsfb, ctx, "OK");
@@ -418,6 +740,7 @@ static int measure_cb(void *pw, const char *s, size_t len)
 static void render_input(struct neodct_shell *sh, nsfb_t *nsfb,
 			 struct redraw_context *ctx)
 {
+	const struct neodct_theme *th = sh->theme;
 	int w = fbtk_get_width(sh->gw->window);
 	int h = fbtk_get_height(sh->gw->window);
 	int content_bottom = h - FRAME_SOFTKEY_H;
@@ -426,34 +749,26 @@ static void render_input(struct neodct_shell *sh, nsfb_t *nsfb,
 	int line_h = FONT_S_PX + 3;
 	int max_lines = (area_bottom - area_top) / line_h;
 	struct neodct_wrap_line lines[32];
-	plot_font_style_t fs, fs_small;
+	plot_font_style_t fs_small;
 	char buf[NEODCT_TEXT_MAX + 2];
 	char count[16];
-	int n, start, i, tw;
+	int n, start, i;
 
 	if (max_lines < 1)
 		max_lines = 1;
 	if (max_lines > 32)
 		max_lines = 32;
 
-	fill_rect(nsfb, 0, 0, w, content_bottom, NEODCT_BLACK);
-
-	mkstyle(&fs, FONT_XL_PX, NEODCT_WHITE, NEODCT_BLACK);
-	draw_text(ctx, &fs, FONT_XL_PX, 5, 5, "Input Text");
+	fill_ground(sh, nsfb, 0, 0, w, content_bottom);
 
 	snprintf(count, sizeof(count), "%d",
 		 (int)strlen(sh->ui.textbuf));
-	mkstyle(&fs, FONT_N_PX, NEODCT_WHITE, NEODCT_BLACK);
-	tw = text_width(&fs, count, strlen(count));
-	draw_text(ctx, &fs, FONT_N_PX, w - 5 - tw, 5, count);
-
-	fill_rect(nsfb, 0, FRAME_HEADER_Y, w, FRAME_HEADER_Y + 1,
-		  NEODCT_WHITE);
+	render_title(sh, nsfb, ctx, "Input Text", 5, count);
 
 	snprintf(buf, sizeof(buf), "%s%s", sh->ui.textbuf,
 		 sh->blink ? "_" : "");
 
-	mkstyle(&fs_small, FONT_S_PX, NEODCT_WHITE, NEODCT_BLACK);
+	mkstyle(&fs_small, FONT_S_PX, th->ink_light, th->sky_top);
 	n = neodct_wrap_text(buf, w - 20, measure_cb, &fs_small,
 			     lines, 32);
 
@@ -462,16 +777,34 @@ static void render_input(struct neodct_shell *sh, nsfb_t *nsfb,
 	for (i = start; i < n; i++) {
 		char line[NEODCT_TEXT_MAX + 2];
 		int len = lines[i].len;
+		int y = area_top + (i - start) * line_h;
 
 		if (len > (int)sizeof(line) - 1)
 			len = (int)sizeof(line) - 1;
 		memcpy(line, lines[i].start, len);
 		line[len] = '\0';
-		draw_text(ctx, &fs_small, FONT_S_PX, 10,
-			  area_top + (i - start) * line_h, line);
+		draw_text(sh, ctx, FONT_S_PX, 10, y, line, th->ink_light,
+			  th->text_shadow, ground(sh, y));
 	}
 
 	render_softkey(sh, nsfb, ctx, "OK");
+}
+
+/* claim, clip and flush around a chrome widget's drawing */
+static void begin_widget(fbtk_widget_t *widget, struct redraw_context *ctx,
+			 nsfb_bbox_t *bbox)
+{
+	nsfb_t *nsfb = fbtk_get_nsfb(widget);
+	struct rect clip;
+
+	fbtk_get_bbox(widget, bbox);
+	nsfb_claim(nsfb, bbox);
+
+	clip.x0 = bbox->x0;
+	clip.y0 = bbox->y0;
+	clip.x1 = bbox->x1;
+	clip.y1 = bbox->y1;
+	ctx->plot->clip(ctx, &clip);
 }
 
 /* redraw callback of the full-screen overlay widget */
@@ -480,21 +813,13 @@ static int screen_redraw(fbtk_widget_t *widget, fbtk_callback_info *cbi)
 	struct neodct_shell *sh = cbi->context;
 	nsfb_t *nsfb = fbtk_get_nsfb(widget);
 	nsfb_bbox_t bbox;
-	struct rect fullclip;
 	struct redraw_context ctx = {
 		.interactive = true,
 		.background_images = true,
 		.plot = &fb_plotters
 	};
 
-	fbtk_get_bbox(widget, &bbox);
-	nsfb_claim(nsfb, &bbox);
-
-	fullclip.x0 = bbox.x0;
-	fullclip.y0 = bbox.y0;
-	fullclip.x1 = bbox.x1;
-	fullclip.y1 = bbox.y1;
-	ctx.plot->clip(&ctx, &fullclip);
+	begin_widget(widget, &ctx, &bbox);
 
 	switch (sh->ui.mode) {
 	case NEODCT_MODE_MENU:
@@ -517,6 +842,82 @@ static int screen_redraw(fbtk_widget_t *widget, fbtk_callback_info *cbi)
 	return 0;
 }
 
+/* The address bar across the top of the page: a bar plate in a theme
+ * that paints its bars, and the classic black strip with a white rule
+ * under it otherwise. It was two fbtk fills and a text widget, which
+ * can only be one flat colour each. */
+static int url_bar_redraw(fbtk_widget_t *widget, fbtk_callback_info *cbi)
+{
+	struct neodct_shell *sh = cbi->context;
+	const struct neodct_theme *th = sh->theme;
+	nsfb_t *nsfb = fbtk_get_nsfb(widget);
+	int w = fbtk_get_width(widget);
+	struct plate p = plate_bar(th, 0);
+	nsfb_bbox_t bbox;
+	struct redraw_context ctx = {
+		.interactive = true,
+		.background_images = true,
+		.plot = &fb_plotters
+	};
+
+	begin_widget(widget, &ctx, &bbox);
+
+	fill_ground(sh, nsfb, 0, 0, w, NEODCT_URLBAR_H);
+	p.border_a = 0;
+	plate_draw(sh, nsfb, 0, 0, w, NEODCT_URLBAR_H - 1, &p);
+	if (p.painted)
+		fill_rect(nsfb, 0, NEODCT_URLBAR_H - 1, w, NEODCT_URLBAR_H,
+			  th->blue_deep);
+	else
+		fill_rect(nsfb, 0, NEODCT_URLBAR_H - 1, w, NEODCT_URLBAR_H,
+			  th->chrome_hi);
+
+	/* where fbtk's text widget put it: 2 px padding, 13 px type */
+	{
+		struct rect clip = { 1, 1, w - 1, NEODCT_URLBAR_H - 2 };
+
+		ctx.plot->clip(&ctx, &clip);
+		draw_text(sh, &ctx, URLBAR_FONT_PX, 3, 3, sh->cur_url,
+			  th->bar_ink, th->text_shadow,
+			  plate_mid(sh, &p, 0, NEODCT_URLBAR_H));
+	}
+
+	nsfb_update(nsfb, &bbox);
+	return 0;
+}
+
+/* the status line along the bottom, drawn over the page */
+static int status_bar_redraw(fbtk_widget_t *widget, fbtk_callback_info *cbi)
+{
+	struct neodct_shell *sh = cbi->context;
+	const struct neodct_theme *th = sh->theme;
+	nsfb_t *nsfb = fbtk_get_nsfb(widget);
+	int w = fbtk_get_width(widget);
+	int y0 = fbtk_get_absy(widget);
+	int y1 = y0 + fbtk_get_height(widget);
+	struct plate p = plate_bar(th, 0);
+	nsfb_bbox_t bbox;
+	struct redraw_context ctx = {
+		.interactive = true,
+		.background_images = true,
+		.plot = &fb_plotters
+	};
+
+	begin_widget(widget, &ctx, &bbox);
+
+	fill_ground(sh, nsfb, 0, y0, w, y1);
+	p.border_a = 0;
+	plate_draw(sh, nsfb, 0, y0 + 1, w, y1, &p);
+	fill_rect(nsfb, 0, y0, w, y0 + 1, p.painted ? th->blue_deep :
+		  ground(sh, y0));
+
+	draw_text(sh, &ctx, STATUS_FONT_PX, 3, y0 + 2, sh->status.text,
+		  th->bar_ink, th->text_shadow, plate_mid(sh, &p, y0, y1));
+
+	nsfb_update(nsfb, &bbox);
+	return 0;
+}
+
 /* ------------------------------------------------------------------
  * chrome state -> widgets
  */
@@ -529,7 +930,7 @@ static void shell_sync(struct neodct_shell *sh)
 	struct neodct_ui *ui = &sh->ui;
 	bool overlay = (ui->mode != NEODCT_MODE_BROWSE);
 
-	fbtk_set_text(sh->url_text, sh->cur_url);
+	fbtk_request_redraw(sh->url_bar);
 
 	fbtk_set_mapping(sh->screen, overlay);
 	if (overlay) {
@@ -544,8 +945,8 @@ static void shell_sync(struct neodct_shell *sh)
 	/* status bar, only while browsing */
 	neodct_status_tick(&sh->status, now_ms());
 	if (sh->status.visible && !overlay) {
-		fbtk_set_text(sh->status_text, sh->status.text);
-		fbtk_set_mapping(sh->status_text, true);
+		fbtk_set_mapping(sh->status_bar, true);
+		fbtk_request_redraw(sh->status_bar);
 		if (sh->status.hide_at_ms >= 0 && !sh->tick_scheduled) {
 			sh->tick_scheduled = true;
 			framebuffer_schedule(250, status_tick_cb, sh);
@@ -554,7 +955,7 @@ static void shell_sync(struct neodct_shell *sh)
 		 * the page up copies the bar with it: tell the pan */
 		fb_browser_set_obscured_bottom(sh->gw, NEODCT_STATUS_H);
 	} else {
-		fbtk_set_mapping(sh->status_text, false);
+		fbtk_set_mapping(sh->status_bar, false);
 		fb_browser_set_obscured_bottom(sh->gw, 0);
 	}
 
@@ -1266,26 +1667,25 @@ void neodct_shell_create(struct gui_window *gw, const char *homepage)
 	sh->gw = gw;
 	gw->neodct = sh;
 
+	sh->theme = neodct_theme_active();
 	neodct_ui_init(&sh->ui, width, height);
 	neodct_status_init(&sh->status);
 	shell_init_homepage(sh, homepage);
 	shell_init_history(sh);
 
-	/* browse chrome: url bar with 1px white underline. No close box:
-	 * Exit is the first entry in Options, so the whole bar is the url
-	 * and a click anywhere on it opens Go to URL. */
-	fbtk_create_fill(win, 0, 0, width, NEODCT_URLBAR_H, NEODCT_BLACK);
-	fbtk_create_fill(win, 0, NEODCT_URLBAR_H - 1, width, 1,
-			 NEODCT_WHITE);
-	sh->url_text = fbtk_create_text(win, 1, 1, width - 2,
-					NEODCT_URLBAR_H - 3,
-					NEODCT_BLACK, NEODCT_WHITE, false);
+	/* browse chrome: the address bar, with no close box -- Exit is the
+	 * first entry in Options, so the whole bar is the url and a click
+	 * anywhere on it opens Go to URL */
+	sh->url_bar = fbtk_create_user(win, 0, 0, width, NEODCT_URLBAR_H,
+				       NULL);
+	fbtk_set_handler(sh->url_bar, FBTK_CBT_REDRAW, url_bar_redraw, sh);
 
 	/* status bar overlay */
-	sh->status_text = fbtk_create_text(win, 0, height - NEODCT_STATUS_H,
-					   width, NEODCT_STATUS_H,
-					   NEODCT_BLACK, NEODCT_WHITE, true);
-	fbtk_set_mapping(sh->status_text, false);
+	sh->status_bar = fbtk_create_user(win, 0, height - NEODCT_STATUS_H,
+					  width, NEODCT_STATUS_H, NULL);
+	fbtk_set_handler(sh->status_bar, FBTK_CBT_REDRAW, status_bar_redraw,
+			 sh);
+	fbtk_set_mapping(sh->status_bar, false);
 
 	/* full-screen NeoDCT overlay for menu / url / input screens */
 	sh->screen = fbtk_create_user(win, 0, 0, width, height, NULL);

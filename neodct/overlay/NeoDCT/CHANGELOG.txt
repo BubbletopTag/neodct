@@ -71,6 +71,11 @@ background and could not be seen at all. Twenty of them.
 
 Browser:
 
+- The browser wears the phone's theme. Its address bar, status line,
+  Options, History, Go to URL and text entry screens are drawn in the
+  theme's colours and typeface, with its glossy bars and rounded selection
+  where the theme has them. Web pages themselves are unchanged. With no
+  theme set, it looks exactly as it did.
 - History. Options -> History lists the last twenty pages you visited, most
   recent first, by their titles. Pick one to go back to it. The list is kept
   when the browser closes. The home page is not added to it, and neither is a
