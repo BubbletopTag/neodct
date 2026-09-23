@@ -186,7 +186,7 @@ S_FRONTEND += $(addprefix fbtk/,$(S_FRAMEBUFFER_FBTK))
 # NeoDCT chrome
 S_FRAMEBUFFER_NEODCT := neodct_ui.c neodct_url.c neodct_menu.c \
 	neodct_cursor.c neodct_status.c neodct_wrap.c neodct_mem.c \
-	neodct_media.c neodct_shell.c
+	neodct_media.c neodct_history.c neodct_theme.c neodct_theme_css.c neodct_shell.c
 
 S_FRONTEND += $(addprefix neodct/,$(S_FRAMEBUFFER_NEODCT))
 

@@ -15,6 +15,7 @@
 #include <stdint.h>
 
 #include "neodct_cursor.h"
+#include "neodct_history.h"
 #include "neodct_menu.h"
 
 #define NEODCT_TEXT_MAX 511
@@ -23,7 +24,8 @@ enum neodct_mode {
 	NEODCT_MODE_BROWSE, /**< cursor over the page */
 	NEODCT_MODE_MENU,   /**< Options menu overlay */
 	NEODCT_MODE_INPUT,  /**< text input popup for a form field */
-	NEODCT_MODE_URLBAR  /**< editing the URL bar */
+	NEODCT_MODE_URLBAR, /**< editing the URL bar */
+	NEODCT_MODE_HISTORY /**< list of visited pages, from the menu */
 };
 
 enum neodct_key {
@@ -61,9 +63,16 @@ struct neodct_ui {
 	enum neodct_mode mode;
 	struct neodct_cursor cursor;
 	struct neodct_menu menu;
+	struct neodct_menu history_menu;
+	const struct neodct_history *history; /**< owned by the shell */
 	bool hover_editable; /**< cursor is over an editable field */
 
 	char textbuf[NEODCT_TEXT_MAX + 1]; /**< urlbar/input popup text */
+	/** textbuf is a prefilled url shown selected: the next character
+	 * replaces it and BACK clears it, rather than editing its end */
+	bool text_selected;
+	/** what "Go to URL" opens with; empty on the home page */
+	char page_url[NEODCT_TEXT_MAX + 1];
 	char actionbuf[NEODCT_TEXT_MAX + 16]; /**< action text payload */
 };
 
@@ -79,7 +88,17 @@ void neodct_ui_set_hover_editable(struct neodct_ui *ui, bool hover);
 /** shell opens the input popup preloaded with the field's text */
 void neodct_ui_open_input(struct neodct_ui *ui, const char *existing);
 
-/** shell opens the url bar (clicked or via menu), optionally prefilled */
+/**
+ * open the url bar, optionally prefilled; a non-empty prefill starts
+ * out selected
+ */
 void neodct_ui_open_urlbar(struct neodct_ui *ui, const char *prefill);
+
+/** shell reports the url "Go to URL" should offer; NULL or "" for none */
+void neodct_ui_set_page_url(struct neodct_ui *ui, const char *url);
+
+/** shell hands over the history the History screen lists */
+void neodct_ui_set_history(struct neodct_ui *ui,
+			   const struct neodct_history *history);
 
 #endif

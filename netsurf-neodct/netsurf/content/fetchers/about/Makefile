@@ -8,6 +8,7 @@ S_FETCHER_ABOUT := \
 	choices.c \
 	config.c \
 	imagecache.c \
+	neodct.c \
 	nscolours.c \
 	query.c \
 	query_auth.c \

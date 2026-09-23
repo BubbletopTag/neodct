@@ -57,6 +57,7 @@
 #include "framebuffer/bitmap.h"
 #include "framebuffer/local_history.h"
 #include "framebuffer/neodct/neodct_shell.h"
+#include "framebuffer/neodct/neodct_theme.h"
 
 
 #define NSFB_TOOLBAR_DEFAULT_LAYOUT "blfsrutc"
@@ -83,6 +84,7 @@ struct browser_widget_s {
 			    * needs to pan the window.
 			    */
 	int panx, pany; /**< Panning required. */
+	int obscured_bottom; /**< rows covered by overlaid chrome */
 };
 
 static struct gui_drag {
@@ -264,6 +266,15 @@ fb_browser_link_at(struct gui_window *gw, int sx, int sy)
 	return nsurl_access(features.link);
 }
 
+void
+fb_browser_set_obscured_bottom(struct gui_window *gw, int rows)
+{
+	struct browser_widget_s *bwidget = fbtk_get_userpw(gw->browser);
+
+	if (bwidget != NULL)
+		bwidget->obscured_bottom = rows < 0 ? 0 : rows;
+}
+
 /* send synthetic pointer movement to the page at screen coordinates */
 void
 fb_browser_track_at(struct gui_window *gw, int sx, int sy)
@@ -350,9 +361,12 @@ fb_pan(fbtk_widget_t *widget,
 		/* move part that remains visible down */
 		nsfb_plot_copy(nsfb, &srcbox, nsfb, &dstbox);
 
-		/* redraw newly exposed area */
+		/* redraw newly exposed area, and the strip that the copy
+		 * filled from underneath overlaid chrome: those pixels were
+		 * the chrome, not the page */
 		bwidget->scrolly += bwidget->pany;
-		fb_queue_redraw(widget, 0, height - bwidget->pany,
+		fb_queue_redraw(widget, 0,
+				height - bwidget->pany - bwidget->obscured_bottom,
 				width, height);
 	}
 
@@ -678,10 +692,22 @@ static nserror set_defaults(struct nsoption_s *defaults)
 		const char *sysfont = getenv("NEODCT_FONT");
 		const char *web_sans = NULL, *web_sans_bold = NULL;
 		const char *web_serif = NULL, *web_mono = NULL;
+		static char themefont[NEODCT_THEME_PATH_MAX + 32];
 		int i;
 
-		if (sysfont == NULL)
-			sysfont = "/NeoDCT/System/ui/resources/fonts/font.ttf";
+		/* The chrome wears the phone's theme, face included: the
+		 * theme's own ui.ttf, or the pixel or the UI face as its
+		 * style asks -- the same choice nd_ui.c makes. A face that is
+		 * missing falls back to the pixel face, as it does there. */
+		if (sysfont != NULL && sysfont[0] == '\0')
+			sysfont = NULL; /* exported blank: not an override */
+		if (sysfont == NULL) {
+			neodct_theme_font(neodct_theme_active(), themefont,
+					  sizeof(themefont));
+			sysfont = themefont;
+			if (access(sysfont, R_OK) != 0)
+				sysfont = NEODCT_FONT_PIXEL;
+		}
 		if (access(sysfont, R_OK) != 0)
 			sysfont = NULL;
 
@@ -2208,6 +2234,13 @@ gui_window_set_pointer(struct gui_window *g, gui_pointer_shape shape)
 	}
 }
 
+static void
+gui_window_set_title(struct gui_window *g, const char *title)
+{
+	if (g->neodct != NULL)
+		neodct_shell_set_title(g, title);
+}
+
 static nserror
 gui_window_set_url(struct gui_window *g, nsurl *url)
 {
@@ -2389,6 +2422,7 @@ static struct gui_window_table framebuffer_window_table = {
 	.get_dimensions = gui_window_get_dimensions,
 	.event = gui_window_event,
 
+	.set_title = gui_window_set_title,
 	.set_url = gui_window_set_url,
 	.set_status = gui_window_set_status,
 	.set_pointer = gui_window_set_pointer,

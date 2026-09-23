@@ -3,14 +3,16 @@
 <head>
     <title>NeoDCT Web</title>
     <meta charset="utf-8">
+    <!-- The phone's theme, served by the browser. Colours come from it
+         and nowhere else, so this page wears whatever theme the phone
+         does; see neodct_theme_css.h for the classes. -->
+    <link rel="stylesheet" type="text/css" href="about:neodct.css">
     <style>
         * {
             box-sizing: border-box;
         }
 
         body {
-            background-color: #000000;
-            color: #FFFFFF;
             font-family: fantasy;
             margin: 0;
             padding: 0;
@@ -21,7 +23,6 @@
             text-align: center;
             padding-top: 6px;
             padding-bottom: 4px;
-            border-bottom: 2px solid #FFFFFF;
             margin-bottom: 6px;
         }
 
@@ -35,7 +36,6 @@
 
         .subtitle {
             font-size: 8px;
-            color: #AAAAAA;
             margin-top: 2px;
         }
 
@@ -45,9 +45,6 @@
         }
 
         input[type="text"] {
-            background-color: #000;
-            color: #FFF;
-            border: 2px solid #FFF;
             border-right: none;
             height: 26px;
             width: 190px;
@@ -58,9 +55,8 @@
         }
 
         button[type="submit"] {
-            background-color: #FFF;
-            color: #000;
-            border: 2px solid #FFF;
+            /* not the theme's face: the pixel face has no ">" */
+            font-family: sans-serif;
             height: 26px;
             width: 26px;
             padding: 0;
@@ -78,23 +74,13 @@
         .keys {
             width: 224px;
             margin: 8px auto 0 auto;
-            border-top: 2px solid #FFFFFF;
             padding-top: 4px;
             font-size: 8px;
-            color: #AAAAAA;
             line-height: 1.4;
-        }
-
-        .keys b {
-            color: #FFFFFF;
         }
 
         a.app-icon {
             display: inline-block;
-            background-color: #000;
-            border: 2px solid #FFF;
-            color: #FFF;
-            text-decoration: none;
             width: 70px;
             height: 40px;
             text-align: center;
@@ -106,30 +92,30 @@
 </head>
 <body>
 
-    <header>
+    <header class="nd-bar">
         <h1>NeoDCT Web</h1>
-        <div class="subtitle">powered by netsurf</div>
+        <div class="subtitle nd-muted">powered by netsurf</div>
     </header>
 
     <div class="search-container">
         <form action="https://html.duckduckgo.com/html/" method="GET">
-            <input type="text" name="q">
-            <button type="submit">&gt;</button>
+            <input type="text" name="q" class="nd-field">
+            <button type="submit" class="nd-button">&gt;</button>
         </form>
     </div>
 
     <div class="app-grid">
-        <a href="https://weather.gov" class="app-icon">Weather</a>
-        <a href="https://lite.cnn.com" class="app-icon">News</a>
-        <a href="https://en.m.wikipedia.org" class="app-icon">Wiki</a>
+        <a href="https://weather.gov" class="app-icon nd-tile">Weather</a>
+        <a href="https://lite.cnn.com" class="app-icon nd-tile">News</a>
+        <a href="https://en.m.wikipedia.org" class="app-icon nd-tile">Wiki</a>
     </div>
 
-    <div class="keys">
-        <b>2 4 6 8</b> move &middot; <b>1 3 7 9</b> move diagonally &middot;
-        <b>5</b> or <b>Navi</b> opens<br>
-        <b>C</b> is the menu &middot;
-        <b>#</b> changes what the number keys do: arrows &rarr; abc &rarr; ABC &rarr; 123<br>
-        Hold <b>C</b> for three seconds to close the browser.
+    <div class="keys nd-rule nd-muted">
+        <b class="nd-ink">2 4 6 8</b> move &middot; <b class="nd-ink">1 3 7 9</b> move diagonally &middot;
+        <b class="nd-ink">5</b> or <b class="nd-ink">Navi</b> opens<br>
+        <b class="nd-ink">C</b> is the menu &middot;
+        <b class="nd-ink">#</b> changes what the number keys do: arrows &rarr; abc &rarr; ABC &rarr; 123<br>
+        Hold <b class="nd-ink">C</b> for three seconds to close the browser.
     </div>
 
 </body>
