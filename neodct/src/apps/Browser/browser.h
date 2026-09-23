@@ -37,6 +37,14 @@ extern "C" {
 #define ND_BROWSER_BIN  "/usr/bin/netsurf-fb"
 #define ND_BROWSER_HOME "file:///NeoDCT/System/apps/Browser/home.html"
 
+/* The libnsfb surface, named rather than left to netsurf's default. That
+ * default is whichever surface registered LAST, not the first or the best,
+ * so a build that happens to find libvncserver in staging brings the browser
+ * up as an open VNC server with the panel frozen under it -- 0.6.0b-dev did
+ * exactly that. Named here, such a build fails to find its surface and the
+ * browser exits with an error instead of hiding. */
+#define ND_BROWSER_SURFACE "linux"
+
 /* Where the browser starts, overridable FOR TESTING ONLY.
  *
  * The browser's address bar takes phone-keypad multi-tap, which no automated

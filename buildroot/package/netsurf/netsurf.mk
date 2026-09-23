@@ -109,6 +109,22 @@ define NETSURF_NEODCT_CONFIGURE_CMDS
 	echo "override NETSURF_USE_DUKTAPE := NO"       >> $(@D)/netsurf/Makefile.config
 	echo "CFLAGS += -DWITHOUT_ICONV_FILTER"         >> $(@D)/libparserutils/Makefile.config.override
 endef
+
+# libnsfb compiles in every surface whose library pkg-config can find in
+# staging, and the frontend's default surface is whichever registered
+# LAST -- not linux. libvncserver arrived in staging for nd-vncd, the next
+# rebuild linked libnsfb's vnc surface in, and the browser came up as an
+# unauthenticated VNC server on 0.0.0.0:5900 with the panel left frozen on
+# the menu. Only the linux surface exists on the phone, so the others are
+# switched off here rather than left to whatever staging happens to hold.
+# On the make command line so it beats the Makefile's own detection and
+# reaches the bundle's per-library sub-makes through MAKEFLAGS.
+NETSURF_NSFB_OPTS = \
+	NSFB_LINUX_AVAILABLE=yes \
+	NSFB_VNC_AVAILABLE=no \
+	NSFB_SDL_AVAILABLE=no \
+	NSFB_XCB_AVAILABLE=no \
+	NSFB_WLD_AVAILABLE=no
 endif
 
 define NETSURF_CONFIGURE_CMDS
@@ -136,6 +152,7 @@ NETSURF_MAKE_OPTS = \
 	AR="$(TARGET_AR)" \
 	TMP_PREFIX=$(@D)/tmpusr \
 	NETSURF_CONFIG="$(NETSURF_CONFIG)" \
+	$(NETSURF_NSFB_OPTS) \
 	PREFIX=/usr
 
 define NETSURF_BUILD_CMDS

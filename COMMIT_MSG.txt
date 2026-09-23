@@ -5468,3 +5468,37 @@ Merge PR #22: add theme support and history to NeoDCT browser chrome
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
+
+----
+browser: draw on the panel, never as a VNC server
+
+After PR #22 the browser opened to a frozen menu on the phone. netsurf-fb
+was alive and idle, listening on 0.0.0.0:5900 as ndusr_ut, and had never
+touched the panel.
+
+libnsfb compiles in every surface whose library pkg-config finds in
+staging, and netsurf's framebuffer frontend defaults to whichever surface
+registered LAST. libvncserver has been in staging since nd-vncd arrived on
+2026-09-09, but netsurf had not been rebuilt from scratch since then. The
+netsurf-dirclean that PR #22's sources needed linked the vnc surface in,
+and the browser came up as an unauthenticated VNC server on every
+interface, the modem included.
+
+Two fixes, either of which would have prevented it:
+
+- netsurf.mk passes NSFB_VNC/SDL/XCB/WLD_AVAILABLE=no, and
+  NSFB_LINUX_AVAILABLE=yes, on the make command line. That beats libnsfb's
+  own detection and reaches the bundle's sub-makes, so only the linux
+  surface is built whatever staging holds.
+- apps/Browser starts netsurf-fb with "-f linux" (ND_BROWSER_SURFACE)
+  ahead of the URL. A build that somehow lacks that surface now exits with
+  "Unknown surface" instead of hiding behind a frozen screen.
+  test_browser checks the whole argument list.
+
+Verified on the phone: netsurf-fb no longer links libvncserver, runs as
+"netsurf-fb -f linux file:///...home.html", draws its home page, and holds
+no sockets at idle. The only listener on 5900 is nd-vncd on the debug LAN
+address.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk

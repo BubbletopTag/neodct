@@ -898,7 +898,7 @@ static void t_run_normal_exit(void)
     nd_log_set_colour(false);
     make_devices();
     write_exec(ND_BROWSER_BIN, "#!/bin/sh\n"
-                               "echo \"argv1=$1\" >&2\n"
+                               "echo \"args=$*\" >&2\n"
                                "echo \"home=$HOME\" >&2\n"
                                "echo \"fetch https://example.com/\" >&2\n"
                                "echo \"neodct-mem: rss=20480kB\" >&2\n"
@@ -911,7 +911,9 @@ static void t_run_normal_exit(void)
     check_has(out, "[Browser] neodct-browser: started pid ");
     /* The home page, exactly as spelled in main.py -- a file: URL into the
      * read-only system image. */
-    check_has(out, "[Browser] argv1=" ND_BROWSER_HOME "\r\n");
+    /* The linux surface is named ahead of the URL. Left to netsurf's own
+     * default, a build that found libvncserver came up as a VNC server. */
+    check_has(out, "[Browser] args=-f " ND_BROWSER_SURFACE " " ND_BROWSER_HOME "\r\n");
     /* env.setdefault("HOME", "/NeoDCT/User"): the browser writes its cache
      * and cookies onto the only writable partition. */
     check_has(out, "[Browser] home=" ND_BROWSER_HOME_DIR "\r\n");

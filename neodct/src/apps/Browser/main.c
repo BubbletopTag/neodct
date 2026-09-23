@@ -1057,7 +1057,7 @@ int app_run(nd_ui *ui)
     char bin[ND_PATH_MAX];
     char nsfb_env[ND_PATH_MAX + 32];
     char media_env[ND_PATH_MAX + 32];
-    const char *argv[3];
+    const char *argv[5];
     const char **envp = NULL;
     nd_proc_spec spec;
     nd_proc_status st;
@@ -1128,17 +1128,19 @@ int app_run(nd_ui *ui)
     }
 
     argv[0] = ND_BROWSER_BIN;
+    argv[1] = "-f";
+    argv[2] = ND_BROWSER_SURFACE;
     {
         /* See ND_BROWSER_HOME_ENV. An empty value is treated as unset, so
          * exporting the variable blank cannot leave netsurf with no URL. */
         const char *want = getenv(ND_BROWSER_HOME_ENV);
         bool overridden = want != NULL && want[0] != '\0';
 
-        argv[1] = overridden ? want : ND_BROWSER_HOME;
+        argv[3] = overridden ? want : ND_BROWSER_HOME;
         if (overridden)
-            nd_log(ND_LOG_BROWSER, "start URL overridden by " ND_BROWSER_HOME_ENV ": %s", argv[1]);
+            nd_log(ND_LOG_BROWSER, "start URL overridden by " ND_BROWSER_HOME_ENV ": %s", argv[3]);
     }
-    argv[2] = NULL;
+    argv[4] = NULL;
 
     memset(&spec, 0, sizeof spec);
     spec.argv = argv;
