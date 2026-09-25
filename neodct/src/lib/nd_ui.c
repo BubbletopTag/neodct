@@ -3342,6 +3342,34 @@ static void launch_from_menu(nd_ui *ui, const nd_app_entry *app, int32_t index)
     }
 }
 
+/* The entry the menu should open on: the one at `path`, or the first when it
+ * is gone. By path rather than by index because the list is re-scanned after
+ * every app -- an app installed from Settings, or engineering mode switched
+ * off, moves every index after it, and the menu would come back on the
+ * neighbour of the app that was just closed. */
+static size_t menu_resume_index(const nd_app_entry *apps, size_t n, const char *path)
+{
+    size_t i;
+
+    if (apps == NULL || path == NULL || path[0] == '\0')
+        return 0u;
+    for (i = 0u; i < n; i++) {
+        if (strcmp(apps[i].path, path) == 0)
+            return i;
+    }
+    return 0u;
+}
+
+/* Closing an app returns to the menu it was opened from -- except when the app
+ * was closed BY a call. Then the menu would be drawn for one frame and replaced
+ * by the ringing screen as soon as its loop polled, so unwind to the home
+ * screen, which is where the call is answered. */
+static bool menu_should_unwind(nd_ui *ui)
+{
+    return ui->modem != NULL && nd_modem_state != NULL &&
+           nd_modem_state(ui->modem) == ND_CALL_RINGING;
+}
+
 /* The Engineering tile's selector: the same widget as the main menu, over
  * ND_PATH_ENG_APPS_DIR, one level down and still inside the core.
  *
@@ -3354,54 +3382,66 @@ static void launch_from_menu(nd_ui *ui, const nd_app_entry *app, int32_t index)
  *
  * Heap, not stack: ND_APP_MAX entries is about 31 KB and the core's frame is
  * not the place for it. Freed BEFORE the launch, with the chosen entry copied
- * out, so nothing is held for the lifetime of the app that runs next.
+ * out, so nothing is held for the lifetime of the app that runs next -- which
+ * is also why the list is scanned again each time an app closes and the
+ * selector comes back.
  *
- * Returns true when an app was launched, which is what tells the caller to
- * unwind to the home screen rather than redraw the main menu. */
+ * Returns true when the caller should unwind to the home screen rather than
+ * redraw the main menu: a call is ringing. */
 static bool engineering_menu(nd_ui *ui)
 {
-    nd_app_entry *apps;
-    nd_app_entry chosen;
-    nd_appsel menu;
-    const char *saved;
-    size_t n;
-    int32_t choice;
+    char resume[ND_APP_PATH_MAX] = "";
 
-    apps = malloc(ND_APP_MAX * sizeof *apps);
-    if (apps == NULL) {
-        nd_log_err(ND_LOG_OS, "Engineering menu: out of memory");
-        return false;
-    }
-    /* Named for the same reason rescan_apps() names its walks: a manifest scan
-     * opens and parses a file per app and beats nothing while it does, so a
-     * phone that stops here must say which read it stopped on rather than
-     * blaming whatever label was last in force. */
-    saved = nd_ui_watch_begin("scanning the engineering apps");
-    n = nd_ui_scan_apps(ND_PATH_ENG_APPS_DIR, apps, ND_APP_MAX);
-    sort_apps_by_id(apps, n);
-    nd_ui_watch_end(saved);
+    for (;;) {
+        nd_app_entry *apps;
+        nd_app_entry chosen;
+        nd_appsel menu;
+        const char *saved;
+        size_t n;
+        int32_t choice;
 
-    nd_appsel_init(&menu, ui, ND_UI_ENG_TILE_NAME, apps, n, nd_ui_wallpaper(ui));
-    choice = nd_appsel_show(&menu);
-    if (choice == ND_APPSEL_RINGING) {
-        /* Unwind the whole way, not one level. Redrawing the main menu on a
-         * ringing phone is exactly what this return value exists to stop. */
+        apps = malloc(ND_APP_MAX * sizeof *apps);
+        if (apps == NULL) {
+            nd_log_err(ND_LOG_OS, "Engineering menu: out of memory");
+            return false;
+        }
+        /* Named for the same reason rescan_apps() names its walks: a manifest
+         * scan opens and parses a file per app and beats nothing while it
+         * does, so a phone that stops here must say which read it stopped on
+         * rather than blaming whatever label was last in force. */
+        saved = nd_ui_watch_begin("scanning the engineering apps");
+        n = nd_ui_scan_apps(ND_PATH_ENG_APPS_DIR, apps, ND_APP_MAX);
+        sort_apps_by_id(apps, n);
+        nd_ui_watch_end(saved);
+
+        nd_appsel_init(&menu, ui, ND_UI_ENG_TILE_NAME, apps, n, nd_ui_wallpaper(ui));
+        menu.selected_index = menu_resume_index(apps, n, resume);
+        choice = nd_appsel_show(&menu);
+        if (choice == ND_APPSEL_RINGING) {
+            /* Unwind the whole way, not one level. Redrawing the main menu on
+             * a ringing phone is exactly what this return value exists to
+             * stop. */
+            free(apps);
+            return true;
+        }
+        if (choice == ND_WIDGET_BACK || (size_t)choice >= n) {
+            free(apps);
+            return false;
+        }
+        chosen = apps[choice];
         free(apps);
-        return true;
-    }
-    if (choice == ND_WIDGET_BACK || (size_t)choice >= n) {
-        free(apps);
-        return false;
-    }
-    chosen = apps[choice];
-    free(apps);
 
-    launch_from_menu(ui, &chosen, choice);
-    return true;
+        (void)nd_strlcpy(resume, chosen.path, sizeof resume);
+        launch_from_menu(ui, &chosen, choice);
+        if (menu_should_unwind(ui))
+            return true;
+    }
 }
 
 void nd_ui_render_menu(nd_ui *ui)
 {
+    char resume[ND_APP_PATH_MAX] = "";
+
     if (ui == NULL)
         return;
     if (nd_appsel_init == NULL || nd_appsel_show == NULL) {
@@ -3410,10 +3450,12 @@ void nd_ui_render_menu(nd_ui *ui)
         return;
     }
 
-    /* A loop now, because Back out of the Engineering selector returns to the
-     * main menu rather than to the home screen -- which is what Back means
-     * everywhere else in this OS, and what makes a submenu feel like one.
-     * Launching anything, from either level, still goes home.
+    /* A loop, because closing an app returns to the menu with that app still
+     * selected, and Back out of the Engineering selector returns here with
+     * its tile selected -- which is what Back means everywhere else in this
+     * OS, and what makes the menu feel like the place the app was opened
+     * from rather than a door that shuts behind it. Only Back from here, or
+     * a call, goes home.
      *
      * The list is re-fetched every turn on purpose: nd_ui_refresh_after_app()
      * invalidates it after any app exits, and a menu redrawn from a stale
@@ -3426,10 +3468,12 @@ void nd_ui_render_menu(nd_ui *ui)
 
         apps = nd_ui_app_list(ui, &n_apps);
         nd_appsel_init(&menu, ui, "Main Menu", apps, n_apps, nd_ui_wallpaper(ui));
+        menu.selected_index = menu_resume_index(apps, n_apps, resume);
         choice = nd_appsel_show(&menu);
         if (choice == ND_WIDGET_BACK || (size_t)choice >= n_apps)
             break;
 
+        (void)nd_strlcpy(resume, apps[choice].path, sizeof resume);
         if (apps[choice].is_menu) {
             /* Not launchable, and the reason is structural: there is no
              * app.so behind this entry. See ND_UI_ENG_TILE_ID in nd_ui.h. */
@@ -3439,7 +3483,8 @@ void nd_ui_render_menu(nd_ui *ui)
         }
 
         launch_from_menu(ui, &apps[choice], choice);
-        break;
+        if (menu_should_unwind(ui))
+            break;
     }
     /* Always unwind, so one bad app or menu event cannot trap the core loop. */
     ui->state = ND_UI_STATE_HOME;
@@ -3944,8 +3989,8 @@ void nd_ui_refresh_after_app(nd_ui *ui)
      * Before the wallpaper is next loaded, because the theme decides how far
      * it is dimmed. The fonts follow the theme (it may bring its own face, or
      * ask for the pixel one) and nothing in the core holds a face across an
-     * app launch -- every launch returns to the home screen, which reads
-     * ui->font_* afresh. The image cache is emptied rather than left to age
+     * app launch -- every launch returns to the home screen or the menu,
+     * and both read ui->font_* afresh on every draw. The image cache is emptied rather than left to age
      * out: the old theme's icons and status sprites are keyed by their own
      * paths and would otherwise sit in RAM this phone does not have. */
     if (nd_theme_is_stale()) {

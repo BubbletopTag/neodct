@@ -102,6 +102,13 @@ Browser:
 - Go to URL shows its "OK" softkey again. The bar was never drawn, and the
   page showed through where it should be.
 
+Closing an app now takes you back to the menu with that app still
+selected, instead of all the way out to the home screen. Open Phone Book,
+press C, and Phone Book is what the menu is showing. Leaving the
+Engineering menu does the same, and closing an engineering app returns to
+that menu. Press C in the menu to go home as before. A call that comes in
+while an app is open still goes straight to the ringing screen.
+
 The screen is steady again, and a little quicker. The display link had
 become unreliable: anything much above 8 MHz came out black or scrambled,
 and at the setting the phone started with it sometimes did. The cause was
