@@ -405,6 +405,17 @@ static void render_text_element(nd_ui *ui, const nd_element *el)
     }
 
     f = font_for_size(ui, el->font_size);
+
+    /* The carrier and the engineering notice are authored at 12 against the
+     * pixel face, and the rounded UI face of a glossy theme sets noticeably
+     * smaller at the same pixel size -- in Aero and Blossom the two labels
+     * came out as the smallest type on the phone, over the busiest part of
+     * the wallpaper. One step up is the size they read at in the classic
+     * face. Keyed on the face rather than a theme id so any other theme that
+     * leaves the pixel font behind gets the same correction. */
+    if (el->anchor == ND_ANCHOR_CENTER_H && f == ui->font_s && !ND_TH_PIXEL_FONT &&
+        ui->font_md != NULL)
+        f = ui->font_md;
     if (f == NULL)
         return;
 

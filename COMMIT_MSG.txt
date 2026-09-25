@@ -5629,3 +5629,146 @@ pass.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
+
+----------------------------------------------------------------------
+
+ui: closing an app returns to the menu, on that app
+
+nd_ui_render_menu() broke out to the home screen after every launch, so
+closing Phone Book dropped you on the home screen and the next Menu press
+opened on the first entry. The loop now continues after the app exits and
+reopens the selector on the app that was just closed; only Back from the
+main menu goes home. The Engineering selector loops the same way, and Back
+out of it lands on its own tile rather than on entry 0.
+
+The selection is restored by the app's directory path, not by index.
+nd_ui_refresh_after_app() can invalidate the list (an install from
+Settings, engineering mode toggled), and a re-scan shifts every index
+after the change, so an index would reopen on the neighbour of the app
+that was closed. A path that is gone falls back to the first entry.
+
+A call is the one exception. The core SIGTERMs an app to take the screen
+for a ring, and going back to the menu would draw it for a frame before
+its own key wait noticed the ring and returned ND_APPSEL_RINGING. So after
+an app exits, a modem in ND_CALL_RINGING unwinds to home, where the call
+is answered, from either level.
+
+Deferred battery and modem-fault modals wait for HOME, so they now appear
+when the owner leaves the menu rather than the moment an app closes. That
+is the same deferral the menu already had while it was open.
+
+make test passes. Not yet checked on QEMU or the phone.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
+
+----
+
+ndlink: watch streams the panel at 30 fps with audio, in its own viewer
+
+ndlink watch execs neodct/tools/ndlink-watch, a pygame window talking to a
+new phone daemon, nd-watchd, on :5901. RFB has no audio and nd-vncd was
+pinned to 10 fps for the old 10 Mbit link, so this is its own small
+protocol: dirty rectangles in RGB565 (the panel's depth), PCM, and keys
+back into the devkey channel. The window is resizable and fits the panel
+to it with the aspect kept; "sharp" scaling (integer nearest, then smooth
+the fraction) is the default, F2 cycles. A key held when a viewer vanishes
+is released on the phone. --vnc keeps the old path, and ndlink falls back
+to it without pygame or against an image with nothing on :5901.
+
+The viewer plays audio by piping it to pw-play (else paplay, else aplay),
+not through SDL: pygame 2.6's AudioDevice refuses devicename=None and
+answers '' with "No such device", and a named device would not follow the
+desktop's default output. The first version tried SDL, caught that error
+and played nothing. It also called pygame.init(), whose mixer opened a
+silent stream that looked like the viewer's own. Now it initialises only
+display and font, writes to the player non-blocking (dropping whole frames,
+never half of one), and shows "no audio" in the window if it cannot play.
+Checked by recording the desktop's output monitor: a 440 Hz tone sent
+through the tap comes out at the amplitude it went in.
+
+The phone's speaker is muted while a viewer watches (--no-mute to keep it,
+F4 to toggle): the viewer sends an 'O' option and nd-watchd clears the USB
+card's Playback Switch controls through the ALSA control ioctls, restoring
+the saved values when the viewer goes. They are written to
+/run/nd-watchd.muted before anything is switched off, and restored at the
+next start if the daemon died muted. View-only never mutes. Checked on the
+phone: off while watching, back on after, back on after a kill -9 and
+restart, and the tone still streams bit-exact while the speaker is off.
+
+Audio was choppy for ringtones: aplay's default is 125 ms periods and the
+tap passes on one period at a time, so each burst overflowed the viewer's
+fixed 80 ms pipe. The viewer now sizes its buffer from the gaps it sees
+(1.3x the longest recent gap + 20 ms, at least --latency, now 60), primes
+before playing, re-primes after running dry, and drops whole frames only
+past a burst beyond target. Measured through the desktop monitor with
+125 ms bursts: no gap in any 25 ms window.
+
+--verbose opens a second window (pygame._sdl2 Window + Renderer) showing the
+phone's keys lit while held -- NaviKey, C, up, down and the twelve, nothing
+else -- the last few presses with hold times, and CPU/RAM/swap. The keys
+include the physical keypad: nd_input.c's queue_push(), where every source
+meets, echoes each key as a datagram to /run/neodct/input/keyecho
+(ND_PATH_KEYECHO_SOCK), opened only beside the devkey channel (engineering
+mode, the core's nd_input_open, never an app pipe). nd-watchd binds that
+path as root inside the 0700 ndusr directory: unlink, bind under umask
+0177, lchown to the directory's owner, so a symlink raced in is replaced
+and never written through. It forwards keys as 'k' and sends 'S' stats
+(/proc/stat busy share, MemAvailable) a second after connecting and every
+10 s. test_devkey covers the echo and its gate; test_watchd the forwarding,
+the symlink, the stats and the window.
+
+A connection is now pending until it sends a viewer's message ('O' or 'K');
+it gets the hello at once and is dropped after 5 s of silence. A bare port
+check (ndlink watch probes before launching) used to replace the open
+viewer, which then reconnected and took the phone back, showing
+"reconnecting -- phone closed the connection" each time.
+
+Left and right are gone from nd-watchd's allowed keys and the viewer's
+keymap: the phone has no such keys.
+
+Checked on the phone with a cross-built libneodct bind-mounted over the
+image's (identical exported symbols) and nd-core restarted: a key sent
+through the viewer comes back echoed by nd-core; keyecho is ndusr 0600.
+
+Audio is ALSA's file plugin, not a loopback card, which this kernel lacks.
+With the debug link up, S42debuglan re-runs S17audio with NEODCT_AUDIO_TAP
+and "default" becomes an asym whose playback half is plug -> file -> hw,
+piping a WAV stream in the card's format to `nd-watchd --tap`. Capture is
+not tapped. The tap reads to EOF whatever happens and never blocks, since
+an early exit is a failed write in whatever app is playing.
+
+nd_btaudio: copy_conf() saved the boot route through a 512-byte buffer and
+truncated it silently; the tapped route is 626 bytes, so disconnecting
+earbuds would have restored half an asound.conf. It now copies up to 4 KB
+and refuses rather than truncates. test_btaudio covers it.
+
+Checked on the phone (0.6.0b-dev, with a cross-built nd-watchd in
+/NeoDCT/User/bin): first frame in ~12 ms, 26-29 fps of the animated home
+screen at 11-12 Mbit/s, nd-watchd ~11% CPU; a 440 Hz tone from aplay (as
+root, ndusr and ndusr_ut) and from mpv arrives bit-exact; keys drive the
+menu; --view-only refuses them. Not yet checked from a full image build,
+where S42debuglan starts nd-watchd itself.
+
+New tests: neodct/tests/test_watchd.py (daemon, tap and viewer over the
+real wire), tap cases in test_s17audio.py. pytest: 2015 passed, and
+test_sdcard_helper's absent-card case fails, the same on a clean HEAD
+(it sees this host's /dev/sda).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
+
+----------------------------------------------------------------------
+
+home: set the carrier and Eng. Mode lines one size up in glossy themes
+
+The two centred home labels are authored at 12, which picks the 14 px
+face. That is right for the classic pixel font, but the rounded UI face
+that Aero and Blossom use sets much smaller at the same size, so in those
+themes the labels were the smallest type on the phone. When the theme is
+not using the pixel font, they now use the 18 px face (font_md).
+
+Classic is unchanged: all 48 golden frames match. make test passes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S7PYMhJpBTyAXxmw7f9YXk
