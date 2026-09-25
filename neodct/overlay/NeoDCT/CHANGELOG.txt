@@ -133,6 +133,14 @@ Calls, for finding out why they drop:
 - Answering a call, and hanging up when the modem refuses the first way of
   doing it, are logged too.
 
+For developers, `ndlink watch` now opens its own window instead of a VNC
+viewer. It shows the screen at up to 30 frames a second, scaled to whatever
+size you make the window, plays whatever the phone is playing, and takes
+the keys as before. It needs engineering mode and the ethernet cable, like
+the rest of the debug link; `ndlink watch --vnc` still opens a VNC viewer.
+Disconnecting Bluetooth earbuds could also have left the phone silent when
+the debug link was on; it now goes back to the speaker properly.
+
 0.5.20a
 The carrier name appears the moment the phone has service.
 

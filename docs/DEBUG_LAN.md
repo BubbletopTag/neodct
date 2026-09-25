@@ -73,6 +73,8 @@ firewall rules matching a hardware address.
    - `telnetd -b <addr> -l /bin/sh` on port 23
    - `tcpsvd <addr> 21 ftpd -A -w /` on port 21
    - `nd-vncd --bind <addr> --fps 10` on port 5900 (if the binary is present)
+   - `nd-watchd --bind <addr> --port 5901 --fps 30` (if present), and then
+     `S17audio start` again with the audio tap switched on -- see below
 
 `S41ethernet` stands down when the cmdline pins an address, so DHCP never
 races the static one and no lease can arrive carrying a default route.
@@ -135,6 +137,73 @@ belongs at the core's key source -- a dev-only channel `nd_input` polls
 alongside the i2c matrix. `nd-vncd` is written with that hook as a clearly
 marked, unimplemented seam (`screen->kbdAddEvent`), so wiring it later is a
 dozen lines.
+
+### nd-watchd: `ndlink watch`, with sound
+
+`ndlink watch` opens `neodct/tools/ndlink-watch`, a pygame window talking to
+`nd-watchd` (`neodct/src/watchd/`) on port 5901. It carries three things over
+one TCP connection:
+
+- **the panel** at up to 30 fps, as the dirty rectangle in RGB565 -- the
+  panel's own depth, so the window shows what the glass shows. A full-screen
+  change every frame is about 20 Mbit/s; the animated home screen measured
+  11-12 Mbit/s and ~11% of the phone's CPU. The window is resizable and the
+  picture is fitted to it with the aspect kept (F2: sharp / nearest / smooth).
+- **the speaker**: whatever is played through ALSA's `default`.
+- **the keys**, into the devkey channel exactly as nd-vncd forwards them. A key
+  held when the window closes is released on the phone.
+
+Audio comes from ALSA's `file` plugin, not a loopback card (there is none in
+this kernel, and kernel changes do not ship over the air). With the link up,
+S42debuglan re-runs S17audio with `NEODCT_AUDIO_TAP` set, which puts
+`plug -> file -> hw` in the **playback** half of `default` only; capture is
+untouched, so the microphone is never streamed. alsa-lib runs
+`nd-watchd --tap` per PCM open and pipes it a WAV stream in the card's own
+format; the tap relays it to the daemon over an abstract socket, dropping when
+nobody is watching. The tap reads until EOF whatever happens, because an early
+exit is a failed write in the app playing the sound. Checked on the phone: a
+440 Hz tone from aplay (as root, ndusr and ndusr_ut) and from mpv arrives
+bit-exact.
+
+Limits: audio routed to Bluetooth earbuds is not tapped (their route replaces
+the file), and a stream that was already open before the tap was switched on
+is not heard until the app reopens the device.
+
+While a viewer is open the phone's own speaker is off, so the sound is not
+heard twice, a few hundred milliseconds apart. nd-watchd clears the USB
+card's "Playback Switch" controls and puts them back exactly as they were when
+the viewer goes; the saved values are also written to `/run/nd-watchd.muted`,
+so a daemon killed while muted restores them when it next starts (and a reboot
+clears both). `ndlink watch --no-mute` leaves the speaker on, F4 in the window
+toggles it, and a `--view-only` daemon never mutes. The stream itself is
+untouched, so the viewer still hears everything.
+
+The delay is mostly the app's own choice. The tap can only pass on what an app
+has written, one ALSA period at a time: mpv's periods are 20 ms, aplay's
+default (the ringtones) 125 ms. The viewer measures the bursts and buffers just
+enough to cover them -- ~60 ms for mpv, ~180 ms for a ringtone -- rather than
+one fixed size that was either too big for mpv or, as first shipped, too small
+for aplay and choppy.
+
+`ndlink watch --verbose` opens a second window: every key the phone is taking
+in, lit while held -- its own keypad too, which is the point -- with the last
+few presses and how long each was held, and the phone's CPU, RAM and swap every
+ten seconds. The keys come from nd-core: `nd_input.c`'s `queue_push()`, where
+the matrix, evdev and devkey all meet, echoes each one to
+`/run/neodct/input/keyecho`. That is only in engineering mode, only in the
+core, and only inside the `0700 ndusr` devkey directory, because keys include
+PINs and nothing sandboxed may listen. nd-watchd binds it (unlink, bind under
+umask 0177, lchown to the directory's owner) and forwards what arrives.
+
+A connection only becomes the viewer once it identifies itself (ndlink-watch
+sends its options straight after the hello). A port check -- `ndlink watch`
+does one before launching -- used to take the phone from the open window,
+which then showed "reconnecting" and took it back a second later.
+
+`ndlink watch --vnc` still opens a stock VNC client on :5900, and ndlink falls
+back to that on its own when this machine has no pygame or the phone runs an
+image without nd-watchd. `--view-only` restarts the daemon with keys refused,
+for either server.
 
 ### Why all three are bound, and why that part is not provisional
 

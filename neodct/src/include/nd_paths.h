@@ -278,6 +278,10 @@ unsigned long nd_appgen_value(void);
  * run_neodct.sh and handed to ndusr, 0700. */
 #define ND_PATH_DEVKEY_DIR  "/run/neodct/input"
 #define ND_PATH_DEVKEY_SOCK "/run/neodct/input/devkey"
+/* Every key the core takes in, echoed for nd-watchd's key window. nd-watchd
+ * binds it; the core only sends. In the devkey directory because that is
+ * 0700 ndusr: keys include PINs, and nothing sandboxed may listen. */
+#define ND_PATH_KEYECHO_SOCK "/run/neodct/input/keyecho"
 
 /* ---- devices ------------------------------------------------------ */
 #define ND_PATH_FB         "/dev/fb0"

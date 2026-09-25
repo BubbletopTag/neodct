@@ -143,6 +143,11 @@ struct nd_input {
      * nd_input_which(), nd_input_has_matrix() or nd_input_has_backend(). */
     int devkey_fd;
 
+    /* An unbound SOCK_DGRAM socket that echoes every queued key to
+     * ND_PATH_KEYECHO_SOCK, or -1. Opened beside devkey_fd, behind the same
+     * gate; see key_echo(). */
+    int echo_fd;
+
     /* Why there is no active backend, in words for the screen -- empty when
      * there is one. Set by try_open_matrix() and finalised in nd_input_open();
      * read by nd_input_no_backend_reason() so the core can show a keyless
@@ -179,9 +184,56 @@ static void sleep_us(uint64_t usec)
  * The queue
  * ------------------------------------------------------------------ */
 
+/* Longer than any legitimate "<code> <edge>" -- ten digits, a space, one
+ * digit, a newline -- and short enough that a sender cannot make the core
+ * allocate. Anything bigger is truncated by recv() and then rejected by the
+ * parser, which is the intended outcome. */
+#define DEVKEY_MSG_MAX 32
+
+/* ============ THE KEY ECHO, FOR `ndlink watch` ============
+ *
+ * The viewer's key window shows every key the phone is taking in -- the
+ * physical keypad above all, which is the one thing a developer at the desk
+ * cannot otherwise see. queue_push() is where the matrix, evdev and the devkey
+ * channel all meet, so this is the one place that sees them all, after the
+ * keymap and before any app.
+ *
+ * A datagram to a path, sent MSG_DONTWAIT and never checked: nobody bound
+ * (no viewer, no nd-watchd, a phone not being debugged) is ENOENT or
+ * ECONNREFUSED and costs one failed syscall per key. It can never slow input.
+ *
+ * Keys are the owner's PINs and messages, so the gate matters more than the
+ * mechanism: it opens only where the devkey channel does (engineering mode,
+ * the core's own nd_input_open, never an app's pipe), and the path is inside
+ * the 0700 ndusr devkey directory, where nothing sandboxed can bind a socket
+ * to listen with. nd-watchd, as root, is the one other reader. */
+static void key_echo(const nd_input *in, int32_t code, bool pressed)
+{
+    struct sockaddr_un addr;
+    char path[ND_PATH_MAX];
+    char msg[DEVKEY_MSG_MAX];
+    int n;
+
+    if (in->echo_fd < 0)
+        return;
+    if (nd_path_resolve(path, sizeof path, ND_PATH_KEYECHO_SOCK) != ND_OK ||
+        strlen(path) >= sizeof addr.sun_path)
+        return;
+    n = snprintf(msg, sizeof msg, "%d %d", (int)code, pressed ? 1 : 0);
+    if (n <= 0 || (size_t)n >= sizeof msg)
+        return;
+    memset(&addr, 0, sizeof addr);
+    addr.sun_family = AF_UNIX;
+    (void)nd_strlcpy(addr.sun_path, path, sizeof addr.sun_path);
+    (void)sendto(in->echo_fd, msg, (size_t)n, MSG_DONTWAIT | MSG_NOSIGNAL,
+                 (const struct sockaddr *)&addr, sizeof addr);
+}
+
 static void queue_push(nd_input *in, int32_t code, bool pressed, uint64_t at)
 {
     size_t slot;
+
+    key_echo(in, code, pressed);
 
     if (in->q_len >= QUEUE_MAX)
         return; /* the hardware cannot fill this; dropping beats blocking */
@@ -453,12 +505,6 @@ static bool fd_poll_into_queue(nd_input *in, double wait_s)
  * queue, not a claim about the hardware.
  */
 
-/* Longer than any legitimate "<code> <edge>" -- ten digits, a space, one
- * digit, a newline -- and short enough that a sender cannot make the core
- * allocate. Anything bigger is truncated by recv() and then rejected by the
- * parser, which is the intended outcome. */
-#define DEVKEY_MSG_MAX 32
-
 /* Bind the channel, or leave it closed. Never fatal: a phone that cannot make
  * a debug socket must still boot, so every failure here is one log line and a
  * return. Called only from nd_input_open() -- a wrapped pipe or fd belongs to
@@ -541,6 +587,8 @@ static void devkey_open(nd_input *in)
 
     in->devkey_fd = fd;
     nd_log(ND_LOG_INPUT, "devkey: listening on %s", sock_path);
+
+    in->echo_fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
 }
 
 /* Parse one datagram. True with code and pressed filled in, or false for
@@ -646,6 +694,7 @@ static void input_defaults(nd_input *in)
 
     in->fd = -1;
     in->devkey_fd = -1;
+    in->echo_fd = -1;
     in->backend = ND_INPUT_NONE;
     in->may_reopen = false;
     in->reopen_after_us = 0u;
@@ -1211,6 +1260,8 @@ void nd_input_close(nd_input *in)
         nd_matrix_input_close(&in->matrix);
     if (in->owns_fd && in->fd >= 0)
         (void)close(in->fd);
+    if (in->echo_fd >= 0)
+        (void)close(in->echo_fd);
     if (in->devkey_fd >= 0) {
         char sock_path[ND_PATH_MAX];
 

@@ -215,14 +215,24 @@ nd_err nd_btaudio_cmd_build(nd_btaudio_cmd *out, const char *verb, const char *a
     return ND_OK;
 }
 
-/* Whole-file copy through ND_ROOT-resolved paths. Small files only -- an
- * asound.conf is a few hundred bytes and always will be. */
+/* Whole-file copy through ND_ROOT-resolved paths.
+ *
+ * Its own size, not ND_BTAUDIO_CONF_MAX. That bounds what THIS module
+ * writes; what it copies is whatever S17audio wrote, and with the debug
+ * link up that is the tapped route for `ndlink watch`, which is longer than
+ * 512 bytes. Copied through the old buffer it was cut short without a word,
+ * and disconnecting earbuds restored half an asound.conf -- no sound at all.
+ * A file that still does not fit is refused, never truncated: the restore
+ * path then falls through to regenerating a plain speaker route. */
+#define COPY_CONF_MAX 4096
+
 static nd_err copy_conf(const char *from, const char *to)
 {
-    char text[ND_BTAUDIO_CONF_MAX];
+    char text[COPY_CONF_MAX];
     char resolved[ND_PATH_MAX];
     FILE *f;
     size_t got;
+    int more;
 
     if (nd_path_resolve(resolved, sizeof resolved, from) != ND_OK)
         return ND_ERR_TOOLONG;
@@ -230,8 +240,11 @@ static nd_err copy_conf(const char *from, const char *to)
     if (f == NULL)
         return ND_ERR_NOTFOUND;
     got = fread(text, 1u, sizeof text - 1u, f);
+    more = fgetc(f) != EOF;
     text[got] = '\0';
     (void)fclose(f);
+    if (more)
+        return ND_ERR_TOOLONG;
 
     return nd_btaudio_write_conf(to, text);
 }

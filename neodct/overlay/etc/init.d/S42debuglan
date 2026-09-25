@@ -78,9 +78,14 @@ IFACE=eth0
 TELNET_PIDFILE=/run/telnetd.pid
 FTP_PIDFILE=/run/ftpd.pid
 VNC_PIDFILE=/run/nd-vncd.pid
+WATCH_PIDFILE=/run/nd-watchd.pid
 
 # nd-vncd serves /dev/fb0 -- a live view of the panel -- to a VNC client.
 VNCD=/NeoDCT/System/bin/nd-vncd
+
+# nd-watchd serves the panel, the speaker and the keys to `ndlink watch`.
+WATCHD=/NeoDCT/System/bin/nd-watchd
+WATCH_PORT=5901
 
 # ftpd serves this directory. It is run as root, so it chroots here -- "/" is
 # the whole rootfs, which is the point. FileZilla lands at /.
@@ -235,9 +240,31 @@ case "$1" in
                 say "failed to start nd-vncd"
             fi
         fi
+
+        # --- nd-watchd: panel, speaker and keys for ndlink watch --------------
+        # The same one-address bind as nd-vncd. 30 fps: a whole-screen change
+        # is ~20 Mbit/s in RGB565 and this link is 100.
+        #
+        # Then the audio. S17audio already ran, before this link existed, and
+        # wrote a plain route; it is asked again with NEODCT_AUDIO_TAP so
+        # "default" copies playback to nd-watchd --tap. Only once the daemon is
+        # really up: the tap is harmless without it, but a tap with no daemon
+        # behind it is a cost for nothing. The UI has not started yet (it is
+        # inittab's ::once, after rcS), so nothing is holding the card and
+        # nd_btaudio has not saved a route that this would go behind.
+        if [ -x "$WATCHD" ]; then
+            if start-stop-daemon --start --quiet --background \
+                    --make-pidfile --pidfile "$WATCH_PIDFILE" \
+                    --exec "$WATCHD" -- --bind "$ADDR" --port "$WATCH_PORT" --fps 30; then
+                say "ndlink watch on $ADDR:$WATCH_PORT -- panel, audio, keys, $IFACE only"
+                NEODCT_AUDIO_TAP="$WATCHD --tap" /etc/init.d/S17audio start
+            else
+                say "failed to start nd-watchd"
+            fi
+        fi
         ;;
     stop)
-        for pf in "$TELNET_PIDFILE" "$FTP_PIDFILE" "$VNC_PIDFILE"; do
+        for pf in "$TELNET_PIDFILE" "$FTP_PIDFILE" "$VNC_PIDFILE" "$WATCH_PIDFILE"; do
             [ -f "$pf" ] || continue
             start-stop-daemon --stop --quiet --pidfile "$pf"
             rm -f "$pf"

@@ -84,7 +84,8 @@ def fake_proc_asound(tmp_path, card=1, usb=True):
     return root
 
 
-def run_start(tmp_path, proc, amixer, settings=None, capture_level=None):
+def run_start(tmp_path, proc, amixer, settings=None, capture_level=None,
+              tap=None):
     """Drive `S17audio start`.
 
     NEODCT_SETTINGS is ALWAYS pointed somewhere under tmp_path, even when the
@@ -104,8 +105,11 @@ def run_start(tmp_path, proc, amixer, settings=None, capture_level=None):
                NEODCT_AMIXER=str(amixer),
                NEODCT_SETTINGS=str(settings or (tmp_path / "no-settings.prop")))
     env.pop("NEODCT_CAPTURE_LEVEL", None)
+    env.pop("NEODCT_AUDIO_TAP", None)
     if capture_level is not None:
         env["NEODCT_CAPTURE_LEVEL"] = str(capture_level)
+    if tap is not None:
+        env["NEODCT_AUDIO_TAP"] = tap
     result = subprocess.run(["sh", SCRIPT, "start"], capture_output=True,
                             text=True, env=env)
     return result, conf
@@ -313,3 +317,71 @@ def test_no_usb_card_is_not_an_error(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert not conf.exists()
+
+
+# ============ THE TAP FOR `ndlink watch` ============
+#
+# S42debuglan runs `start` a second time with NEODCT_AUDIO_TAP set once
+# nd-watchd is up. What these hold it to: the tap is on playback only (the
+# microphone is never streamed), it sits below plug so it sees the card's
+# format, and anything that would not survive being a quoted ALSA string is
+# refused in favour of the plain route rather than written into the file.
+
+TAP = "/NeoDCT/System/bin/nd-watchd --tap"
+
+
+def test_no_tap_unless_asked(tmp_path):
+    proc = fake_proc_asound(tmp_path)
+    amixer, _ = fake_amixer(tmp_path)
+
+    _, conf = run_start(tmp_path, proc, amixer)
+
+    assert "type file" not in conf.read_text()
+    assert "nd-watchd" not in conf.read_text()
+
+
+def test_the_tap_copies_playback_only(tmp_path):
+    proc = fake_proc_asound(tmp_path, card=3)
+    amixer, _ = fake_amixer(tmp_path)
+
+    result, conf = run_start(tmp_path, proc, amixer, tap=TAP)
+
+    text = conf.read_text()
+    assert result.returncode == 0, result.stderr
+    assert "type asym" in text
+    playback, capture = text.split("capture.pcm", 1)
+    assert 'file "|%s"' % TAP in playback
+    assert 'format "wav"' in playback
+    assert "type file" not in capture, "the microphone must never reach the tap"
+    # below plug: plug converts, the file plugin copies what the card gets
+    assert playback.index("type plug") < playback.index("type file") < \
+        playback.index("type hw")
+    assert text.count("card 3") == 3
+
+
+def test_the_tapped_file_is_still_owned_and_capture_still_enabled(tmp_path):
+    proc = fake_proc_asound(tmp_path)
+    amixer, log = fake_amixer(tmp_path)
+
+    result, _ = run_start(tmp_path, proc, amixer, tap=TAP)
+
+    assert "cset numid=5 on" in log.read_text()
+    assert "playback copied to" in result.stdout
+
+
+@pytest.mark.parametrize("bad", [
+    'nd-watchd --tap',                       # not an absolute path
+    '/bin/x" } pcm.evil { type hw',          # would close the ALSA string
+    '/bin/x\\',                             # a trailing backslash escapes it
+])
+def test_a_malformed_tap_writes_the_plain_route(tmp_path, bad):
+    proc = fake_proc_asound(tmp_path)
+    amixer, _ = fake_amixer(tmp_path)
+
+    result, conf = run_start(tmp_path, proc, amixer, tap=bad)
+
+    text = conf.read_text()
+    assert result.returncode == 0, result.stderr
+    assert "type file" not in text
+    assert "evil" not in text
+    assert "type plug" in text and "card 1" in text

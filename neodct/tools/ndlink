@@ -629,26 +629,81 @@ verb_update() {
     return 0
 }
 
-# watch -- a window showing the panel that also types into it.
+# watch -- a window showing the panel, playing the speaker, typing into it.
 #
-# There is deliberately NO custom viewer here. nd-vncd forwards RFB key events
-# into the devkey channel, which means ANY standard VNC client is already a
-# control window: vncviewer, gvncviewer, noVNC in a browser, a VNC app on a
-# tablet. Writing a bespoke GUI would have meant maintaining a second RFB
-# client and a second key map to arrive at the same place with fewer clients
-# supported.
+# The window is ndlink-watch talking to nd-watchd on :5901: 30 fps, scaled to
+# whatever size the window is, with the phone's audio. Both files' headers say
+# why that is its own protocol rather than VNC -- in short, RFB has no audio.
 #
-# So this finds a viewer and points it at the phone. --view-only asks nd-vncd's
-# side of that, not the client's, because a client-side "view only" is a
-# promise the client makes and this one is enforced where the keys would land.
+# nd-vncd is still on :5900, and --vnc still opens a stock VNC client against
+# it: that is the fallback when this machine has no pygame, and when the phone
+# runs an image from before nd-watchd existed.
+#
+# --view-only is enforced on the PHONE, for both servers: the daemon is
+# restarted with its own --view-only, because a client-side "view only" is a
+# promise the client makes and this one is kept where the keys would land.
 verb_watch() {
     _w_viewonly=0
-    [ "${1:-}" = "--view-only" ] && { _w_viewonly=1; shift; }
+    _w_vnc=0
+    _w_pass=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --view-only) _w_viewonly=1 ;;
+        --vnc) _w_vnc=1 ;;
+        --no-audio) _w_pass="$_w_pass --no-audio" ;;
+        --no-mute) _w_pass="$_w_pass --no-mute" ;;
+        --verbose | -v) _w_pass="$_w_pass --verbose" ;;
+        --latency | --scale)
+            [ $# -ge 2 ] || fail 5 "$1 needs a number"
+            case "$2" in '' | *[!0-9]*) fail 5 "$1 wants a whole number" ;; esac
+            _w_pass="$_w_pass $1 $2"
+            shift
+            ;;
+        *) fail 5 "watch: unknown option \"$1\"" ;;
+        esac
+        shift
+    done
     case "$TARGET" in
     hw) ;;
     qemu) fail 2 "watch on qemu: run_qemu.sh already has a window" ;;
     esac
 
+    if [ "$_w_vnc" = 0 ]; then
+        _w_why=""
+        if ! python3 -c 'import pygame' >/dev/null 2>&1; then
+            _w_why="no pygame on this machine (pacman -S python-pygame)"
+        elif ! port_open "$(hw_addr)" 5901; then
+            _w_why="nothing on $(hw_addr):5901 -- this image predates nd-watchd"
+        fi
+        if [ -z "$_w_why" ]; then
+            watch_native "$_w_viewonly" "$_w_pass"
+            return
+        fi
+        [ "$JSON" = 1 ] || printf 'ndlink: %s; falling back to VNC (no audio)\n' "$_w_why" >&2
+    fi
+    watch_vnc "$_w_viewonly"
+}
+
+watch_native() {
+    _w_addr=$(hw_addr)
+    if [ "$1" = 1 ]; then
+        hw_shell "kill \$(cat /run/nd-watchd.pid 2>/dev/null) 2>/dev/null; sleep 1; $(remote_tool nd-watchd) --bind $_w_addr --port 5901 --fps 30 --view-only >/dev/null 2>&1 & echo \$! > /run/nd-watchd.pid" >/dev/null 2>&1 || true
+        sleep 1
+    fi
+    emit_ok watch "\"viewer\":\"ndlink-watch\",\"address\":\"$_w_addr:5901\",\"audio\":true,\"input\":$([ "$1" = 1 ] && printf false || printf true)"
+    if [ "$JSON" != 1 ]; then
+        printf 'watching %s:5901 -- F2 scaling, F3 mute here, F4 phone speaker, F11 fullscreen, Ctrl+Q quits\n' "$_w_addr"
+        [ "$1" = 1 ] || printf 'Keys go to the phone: arrows, Enter=NaviKey, Backspace=C, 0-9, * #, M=menu\n'
+    fi
+    # The lock is dropped before exec for the reason watch_vnc gives.
+    eval "exec $LOCK_FD>&-" 2>/dev/null || true
+    # shellcheck disable=SC2086 # _w_pass is our own word list
+    exec python3 "$HERE/ndlink-watch" --host "$_w_addr" --port 5901 \
+        $([ "$1" = 1 ] && printf -- --view-only) $2
+}
+
+watch_vnc() {
+    _w_viewonly=$1
     _w_port=5900
     port_open "$(hw_addr)" "$_w_port" || fail 3 \
         "nothing listening on $(hw_addr):$_w_port -- is engineering mode on?"
@@ -661,7 +716,7 @@ verb_watch() {
     _w_addr="$(hw_addr):$_w_port"
     for _w_v in vncviewer gvncviewer vinagre remmina; do
         if command -v "$_w_v" >/dev/null 2>&1; then
-            emit_ok watch "\"viewer\":\"$_w_v\",\"address\":\"$_w_addr\",\"input\":$([ "$_w_viewonly" = 1 ] && printf false || printf true)"
+            emit_ok watch "\"viewer\":\"$_w_v\",\"address\":\"$_w_addr\",\"audio\":false,\"input\":$([ "$_w_viewonly" = 1 ] && printf false || printf true)"
             if [ "$JSON" != 1 ]; then
                 printf 'opening %s on %s\n' "$_w_v" "$_w_addr"
                 [ "$_w_viewonly" = 1 ] || printf 'Keys go to the phone: arrows, Enter=NaviKey, Backspace=C, 0-9, * and #\n'
@@ -1087,7 +1142,16 @@ Verbs built so far:
   state                version, RAM, card, backlight, battery (JSON)
   bugreport [OUT]      one tarball: state, logs, dmesg, screenshot, selftest
   selftest             run nd-selftest and report
-  watch [--view-only]  a window showing the panel that also types into it
+  watch [OPTS]         the phone in a window: panel at 30 fps, audio, keys
+                         --view-only  keys are refused on the phone
+                         --no-audio   picture and keys only
+                         --no-mute    leave the phone's speaker on (it is
+                                      muted while watching, restored after)
+                         --latency MS least audio buffer (60; grows to fit)
+                         --scale N    initial window size (3x)
+                         --verbose    a second window: the phone's pressed
+                                      keys (its own keypad too), CPU, RAM
+                         --vnc        a stock VNC client instead (no audio)
   apps                 installed apps on the card
   install PKG.nap      sideload an app package
   uninstall DIR        remove an installed app

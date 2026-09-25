@@ -1,0 +1,726 @@
+#!/usr/bin/env python3
+"""ndlink-watch -- the phone in a window: panel, speaker and keypad.
+
+    ndlink-watch --host H [--port 5901] [--view-only] [--no-audio]
+                 [--no-mute] [--latency MS] [--scale N] [--verbose]
+
+Run by `ndlink watch`. Speaks nd-watchd's protocol (neodct/src/watchd/
+nd-watchd.c has the wire format at the top; this file does not repeat it).
+
+============ WHY NOT A VNC CLIENT ANY MORE ============
+
+watch used to exec whatever VNC client it found. RFB has no audio, stock
+clients scale badly or not at all, and nd-vncd was pinned to 10 fps for a link
+that negotiated 10 Mbit/s. On the 100 Mbit link a whole-screen change at 30 fps
+is a fifth of the wire. nd-vncd is still on the phone for any other client;
+`ndlink watch --vnc` still opens one.
+
+============ SCALING ============
+
+The window is resizable and the panel is fitted to it with the aspect kept.
+"sharp" (the default) scales by the largest whole factor with nearest-neighbour
+and then smooths only the remaining fraction, so a 1-pixel line stays one even
+width across the screen -- plain nearest at 3.4x makes every fifth column
+fatter, which on a bitmap font reads as a rendering bug. F2 cycles sharp,
+nearest and smooth.
+
+============ AUDIO ============
+
+What the phone plays arrives in the card's format (S16_LE stereo, 44.1 or
+48 kHz on the C-Media) and is piped to the desktop's own player -- pw-play,
+else paplay, else aplay -- so it follows whatever output the desktop is set
+to. AudioOut says why that is not SDL. Anything the player cannot take within
+about --latency ms is dropped, whole frames at a time, so a stall on the wire
+costs a skip rather than a delay that never goes away.
+
+The phone's own speaker is switched off while the window is open (and back
+on when it closes) so the sound is not heard twice; --no-mute leaves it on,
+F4 toggles it. nd-watchd.c has how, and why it cannot leave a phone silent.
+
+--verbose opens a second window showing every key the phone is taking in --
+its own keypad included -- with its CPU and RAM every ten seconds.
+
+Keys: arrows, Enter = NaviKey, Backspace/Esc = C, 0-9, * #, M = menu.
+F2 scaling, F3 mute here, F4 mute the phone, F11 fullscreen, Ctrl+Q quits.
+"""
+
+import argparse
+import array
+import fcntl
+import os
+import re
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import termios
+import threading
+import time
+
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+import warnings  # noqa: E402
+
+# pygame warns about AVX2 on import on some distro builds. It is not ours to
+# fix and it is not something the person watching a phone needs to read.
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="importlib")
+
+try:
+    import pygame  # noqa: E402
+except ImportError:
+    sys.stderr.write("ndlink-watch: needs pygame (pacman -S python-pygame)\n")
+    sys.exit(6)
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+KEYCODES_H = os.path.join(HERE, "..", "src", "include", "nd_keycodes.h")
+
+FB_W, FB_H = 240, 175
+HDR = struct.Struct("<B3xI")
+
+
+def load_keycodes(path=KEYCODES_H):
+    """ND_KEY_* from the C header, so there is one keymap and not two."""
+    codes = {}
+    with open(path, encoding="utf-8") as f:
+        for m in re.finditer(r"#define\s+ND_KEY_(\w+)\s+(-?\d+)", f.read()):
+            codes[m.group(1)] = int(m.group(2))
+    return codes
+
+
+def build_keymap(nd):
+    """(by_char, by_key): what a keypress means on the phone.
+
+    Characters first, because '*' and '#' are shifted keys on most layouts
+    and the character is the only thing that says which one was meant."""
+    by_char = {str(d): nd[str(d)] for d in range(10)}
+    by_char.update({"*": nd["STAR"], "#": nd["HASH"], "-": nd["MINUS"],
+                    ".": nd["DOT"], ",": nd["COMMA"], " ": nd["SPACE"],
+                    "m": nd["MENU"], "M": nd["MENU"]})
+    by_key = {
+        pygame.K_UP: nd["UP"], pygame.K_DOWN: nd["DOWN"],
+        pygame.K_RETURN: nd["NAVIKEY"], pygame.K_KP_ENTER: nd["NAVIKEY"],
+        pygame.K_BACKSPACE: nd["CLEAR"], pygame.K_ESCAPE: nd["CLEAR"],
+        pygame.K_KP_MULTIPLY: nd["STAR"],
+    }
+    for d in range(10):
+        by_key[getattr(pygame, "K_KP%d" % d)] = nd[str(d)]
+    return by_char, by_key
+
+
+# ------------------------------------------------------------------ #
+# audio
+# ------------------------------------------------------------------ #
+
+def player_argv(rate, ch, bits, latency_ms):
+    """The desktop's own raw-PCM player, or None.
+
+    Not SDL. pygame's AudioDevice needs a device NAME -- it refuses None and
+    answers '' with "No such device" -- and a name pins the stream to one
+    output, so plugging in headphones would leave the phone in the speakers.
+    The sound server's own client follows the default output like any other
+    program on the desktop, and pw-play/paplay/aplay all take raw stdin."""
+    fmt = {8: ("u8", "U8"), 16: ("s16", "S16_LE"), 32: ("s32", "S32_LE")}.get(bits)
+    if fmt is None:
+        return None
+    if shutil.which("pw-play"):
+        return ["pw-play", "--raw", "--rate", str(rate), "--channels", str(ch),
+                "--format", fmt[0], "--latency", "%dms" % latency_ms, "-"]
+    if shutil.which("paplay"):
+        return ["paplay", "--raw", "--rate=%d" % rate, "--channels=%d" % ch,
+                "--format=%sle" % fmt[0] if bits > 8 else "--format=u8",
+                "--latency-msec=%d" % latency_ms]
+    if shutil.which("aplay"):
+        return ["aplay", "-q", "-t", "raw", "-f", fmt[1], "-r", str(rate),
+                "-c", str(ch), "-B", str(latency_ms * 1000), "-"]
+    return None
+
+
+class AudioOut:
+    """The phone's audio, piped into a player the desktop routes, through a
+    jitter buffer sized to how the audio actually arrives.
+
+    It arrives in bursts, and the burst is the APP'S choice, not ours: the
+    tap can only hand over what the app has written, and alsa-lib's file
+    plugin passes it on one app period at a time. aplay's default is a 500 ms
+    ring in 125 ms periods (the ringtones), mpv's is 20 ms. A fixed 80 ms
+    buffer was fine for mpv and choppy for every ringtone -- each 125 ms burst
+    overflowed it and the rest was thrown away.
+
+    So the target is measured: the longest gap between arrivals over the last
+    few seconds, plus a margin, never below --latency. Playback starts once
+    that much is queued; if the player runs dry it waits to refill rather
+    than stutter; and anything that would push the queue a full burst past
+    the target is dropped, whole frames only, so latency cannot creep.
+
+    The queue is the pipe to the player itself -- FIONREAD on the write end
+    says how full it is -- and every write is non-blocking: the network
+    thread writes here, and a stalled sound server must not stall the
+    picture with it."""
+
+    PLAYER_MS = 30          # the player's own buffer; ours is the pipe
+    MAX_TARGET_MS = 500
+
+    def __init__(self, latency_ms, argv_for=player_argv):
+        self.latency_ms = latency_ms
+        self.argv_for = argv_for
+        self.proc = None
+        self.fmt = None
+        self.muted = False
+        self.dropped = 0
+        self.underruns = 0
+        self.error = None
+        self.pending = b""      # the rest of a frame a short write cut in two
+        self.prime = bytearray()
+        self.primed = False
+        self.last = None
+        self.gaps = []          # (time, gap ms) over the last few seconds
+
+    def _start(self, fmt):
+        self.close()
+        self.fmt = fmt
+        self.pending = b""
+        self.prime = bytearray()
+        self.primed = False
+        argv = self.argv_for(*fmt, self.PLAYER_MS)
+        if argv is None:
+            self.error = "no audio: need pw-play, paplay or aplay for %d-bit" % fmt[2]
+            return
+        try:
+            self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE,
+                                         stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            self.error = "no audio: %s" % exc
+            return
+        fd = self.proc.stdin.fileno()
+        try:            # room for a whole second; the target keeps it far emptier
+            fcntl.fcntl(fd, 1031, max(65536, self._bpms() * 1000))  # F_SETPIPE_SZ
+        except OSError:
+            pass
+        os.set_blocking(fd, False)
+        self.error = None
+
+    def _bpms(self):
+        rate, ch, bits = self.fmt
+        return rate * ch * (bits // 8) // 1000
+
+    def target_ms(self):
+        worst = max((g for _, g in self.gaps), default=0.0)
+        return int(min(self.MAX_TARGET_MS, max(self.latency_ms, worst * 1.3 + 20)))
+
+    def queued_ms(self):
+        b = array.array("i", [0])
+        try:
+            fcntl.ioctl(self.proc.stdin.fileno(), termios.FIONREAD, b)
+        except OSError:
+            return 0.0
+        return (b[0] + len(self.prime)) / max(1, self._bpms())
+
+    def _write(self, data, frame):
+        data = self.pending + bytes(data)
+        self.pending = b""
+        try:
+            n = os.write(self.proc.stdin.fileno(), data)
+        except BlockingIOError:
+            n = 0
+        except OSError as exc:            # the player died
+            self.error = "no audio: player exited (%s)" % exc
+            self.proc = None
+            return
+        if n < len(data):
+            # A short write can stop inside a frame. Dropping the rest of it
+            # would shift every later sample -- noise, or the channels swapped
+            # -- for as long as the player runs, so the tail of that one frame
+            # is carried and only whole frames are ever dropped.
+            self.dropped += 1
+            cut = n % frame
+            if cut:
+                self.pending = data[n:n + frame - cut]
+
+    def push(self, rate, ch, bits, pcm, now=None):
+        now = time.monotonic() if now is None else now
+        fmt = (rate, ch, bits)
+        if fmt != self.fmt or (self.proc is not None and self.proc.poll() is not None):
+            self._start(fmt)
+            self.gaps = []
+            self.last = None
+        if self.last is not None:
+            self.gaps.append((now, (now - self.last) * 1000.0))
+        self.last = now
+        self.gaps = [(t, g) for t, g in self.gaps if now - t < 4.0]
+        if self.proc is None:
+            return
+        if self.muted:
+            self.primed = False
+            self.prime = bytearray()
+            return
+
+        frame = ch * (bits // 8)
+        target = self.target_ms()
+        if self.primed:
+            queued = self.queued_ms()
+            if queued <= 0:
+                # Ran dry: a gap now is better than one every burst from here on.
+                self.underruns += 1
+                self.primed = False
+            elif queued > target + max(g for _, g in self.gaps[-8:] or [(0, 0)]) + 60:
+                self.dropped += 1
+                return
+        if not self.primed:
+            self.prime += pcm
+            if len(self.prime) >= target * self._bpms():
+                data, self.prime = self.prime, bytearray()
+                self.primed = True
+                self._write(data, frame)
+            return
+        self._write(pcm, frame)
+
+    def close(self):
+        if self.proc is not None:
+            try:
+                self.proc.stdin.close()
+            except OSError:
+                pass
+            self.proc.terminate()
+            self.proc = None
+
+
+# ------------------------------------------------------------------ #
+# the connection
+# ------------------------------------------------------------------ #
+
+def recv_exact(sock, n):
+    out = bytearray()
+    while len(out) < n:
+        chunk = sock.recv(min(n - len(out), 1 << 16))
+        if not chunk:
+            raise ConnectionError("phone closed the connection")
+        out += chunk
+    return bytes(out)
+
+
+class Link:
+    """One connection to nd-watchd, re-made whenever it drops -- a phone that
+    reboots while you watch comes back into the same window."""
+
+    def __init__(self, host, port, audio, mute_phone):
+        self.host, self.port = host, port
+        self.mute_phone = mute_phone
+        self.audio = audio
+        self.lock = threading.Lock()
+        self.rects = []
+        self.sock = None
+        self.hello = None
+        self.status = "connecting to %s:%d" % (host, port)
+        self.stop = False
+        self.video_bytes = 0
+        self.frames = 0
+        self.audio_bytes = 0
+        self.key_events = []     # (code, down, monotonic) from the key echo
+        self.stats = None        # latest 'S' as a dict, with its arrival time
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        while not self.stop:
+            try:
+                s = socket.create_connection((self.host, self.port), timeout=3)
+                s.settimeout(10)
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
+                self._session(s)
+            except (OSError, ConnectionError, ValueError) as exc:
+                self.status = "reconnecting -- %s" % exc
+            finally:
+                with self.lock:
+                    self.sock = None
+            if not self.stop:
+                time.sleep(1)
+
+    def _session(self, s):
+        t, n = HDR.unpack(recv_exact(s, HDR.size))
+        body = recv_exact(s, n)
+        if t != ord("H") or body[:4] != b"NDW1":
+            raise ValueError("not nd-watchd on the other end")
+        w, h, pixfmt, keys, fps = struct.unpack_from("<HHBBH", body, 4)
+        if pixfmt != 1:
+            raise ValueError("pixel format %d not understood" % pixfmt)
+        self.hello = {"w": w, "h": h, "keys": bool(keys), "fps": fps}
+        with self.lock:
+            self.sock = s
+        self.status = ""
+        self.send_options()
+        # Idle is normal -- a phone with nothing changing sends nothing -- so
+        # the socket timeout is only for the connect and the hello.
+        s.settimeout(None)
+        while not self.stop:
+            t, n = HDR.unpack(recv_exact(s, HDR.size))
+            body = recv_exact(s, n)
+            if t == ord("V"):
+                x, y, rw, rh = struct.unpack_from("<HHHH", body)
+                with self.lock:
+                    self.rects.append((x, y, rw, rh, body[8:]))
+                self.video_bytes += n
+                self.frames += 1
+            elif t == ord("k"):
+                code, down = struct.unpack_from("<iB", body)
+                with self.lock:
+                    self.key_events.append((code, bool(down), time.monotonic()))
+            elif t == ord("S"):
+                cpu, _, total, avail, stotal, sfree = struct.unpack_from("<HHIIII", body)
+                self.stats = {"cpu": None if cpu == 0xFFFF else cpu / 10.0,
+                              "total": total, "avail": avail,
+                              "stotal": stotal, "sfree": sfree,
+                              "at": time.monotonic()}
+            elif t == ord("A"):
+                rate, ch, bits = struct.unpack_from("<IHH", body)
+                self.audio_bytes += n
+                if self.audio is not None:
+                    self.audio.push(rate, ch, bits, body[8:])
+            # anything else: skipped, as the protocol says
+
+    def take_key_events(self):
+        with self.lock:
+            e, self.key_events = self.key_events, []
+        return e
+
+    def take_rects(self):
+        with self.lock:
+            r, self.rects = self.rects, []
+        return r
+
+    def send_options(self):
+        """Ask the phone to mute its speaker while this window is open. Sent
+        on every connect, since the phone restores it when a viewer goes."""
+        self._send(HDR.pack(ord("O"), 4) + struct.pack("<B3x", 1 if self.mute_phone else 0))
+
+    def _send(self, data):
+        with self.lock:
+            s = self.sock
+        if s is None:
+            return
+        try:
+            s.sendall(data)
+        except OSError:
+            pass
+
+    def send_key(self, code, down):
+        self._send(HDR.pack(ord("K"), 8) + struct.pack("<iB3x", code, 1 if down else 0))
+
+
+# ------------------------------------------------------------------ #
+# the window
+# ------------------------------------------------------------------ #
+
+def blit_565(canvas, x, y, w, h, data):
+    """Paint one RGB565LE rectangle into the canvas. SDL does the colour
+    conversion in C; the rows are copied one by one only when SDL has padded
+    the surface's pitch past w*2."""
+    s = pygame.Surface((w, h), 0, 16, (0xF800, 0x07E0, 0x001F, 0))
+    pitch = s.get_pitch()
+    buf = s.get_buffer()
+    if pitch == w * 2:
+        buf.write(data, 0)
+    else:
+        for row in range(h):
+            buf.write(data[row * w * 2:(row + 1) * w * 2], row * pitch)
+    del buf
+    canvas.blit(s, (x, y))
+
+
+SCALERS = ("sharp", "nearest", "smooth")
+
+
+def fit(canvas, size, mode):
+    ww, wh = size
+    k = min(ww / FB_W, wh / FB_H)
+    dw, dh = max(1, int(FB_W * k)), max(1, int(FB_H * k))
+    if mode == "smooth":
+        img = pygame.transform.smoothscale(canvas, (dw, dh))
+    elif mode == "nearest":
+        img = pygame.transform.scale(canvas, (dw, dh))
+    else:
+        n = max(1, int(k))
+        img = pygame.transform.scale(canvas, (FB_W * n, FB_H * n))
+        if (dw, dh) != img.get_size():
+            img = pygame.transform.smoothscale(img, (dw, dh))
+    return img, ((ww - dw) // 2, (wh - dh) // 2)
+
+
+# ------------------------------------------------------------------ #
+# --verbose: the keys window
+# ------------------------------------------------------------------ #
+
+class KeysWindow:
+    """A second window: every key the phone is taking in right now, and its
+    CPU and RAM.
+
+    The keys are the PHONE's, not this window's: nd-core echoes each one it
+    queues -- its own keypad, the viewer's, nd-key's -- through nd-watchd, so
+    a finger on the real keypad lights up here. That is the point of it: the
+    one input a developer at the desk cannot otherwise see. (It needs the
+    key echo in nd-core; against an older image the keypad stays dark and
+    only the stats appear.)
+
+    CPU and RAM come from nd-watchd every ten seconds, the first a second
+    after connecting."""
+
+    W, H = 300, 500
+    BG, KEY, LIT, INK, DIM = (22, 22, 26), (52, 52, 60), (70, 170, 255), (235, 235, 235), (140, 140, 150)
+
+    def __init__(self, nd):
+        from pygame._sdl2 import video
+        self.video = video
+        self.win = video.Window("NeoDCT keys", size=(self.W, self.H))
+        self.ren = video.Renderer(self.win)
+        self.surf = pygame.Surface((self.W, self.H))
+        self.font = pygame.font.Font(None, 22)
+        self.small = pygame.font.Font(None, 18)
+        self.down = {}                 # code -> monotonic time pressed
+        self.log = []                  # recent (name, held seconds or None)
+        self.names = {}
+        for name, code in nd.items():  # the first name wins: NAVIKEY over ENTER
+            if name in ("NONE", "INCOMING_CALL", "M", "BACK", "ENTER", "KPENTER", "C"):
+                continue
+            self.names.setdefault(code, name)
+        # The phone's keys and no others: NaviKey, C, up, down, the twelve.
+        # None is an empty cell, so DOWN sits under UP as it does on the phone.
+        rows = [[("NAVI", nd["NAVIKEY"]), ("UP", nd["UP"]), ("C", nd["CLEAR"])],
+                [None, ("DOWN", nd["DOWN"]), None],
+                [("1", nd["1"]), ("2", nd["2"]), ("3", nd["3"])],
+                [("4", nd["4"]), ("5", nd["5"]), ("6", nd["6"])],
+                [("7", nd["7"]), ("8", nd["8"]), ("9", nd["9"])],
+                [("*", nd["STAR"]), ("0", nd["0"]), ("#", nd["HASH"])]]
+        self.grid = rows
+        self.on_grid = {cell[1] for row in rows for cell in row if cell}
+        for row in rows:                   # the history says what the key says
+            for cell in row:
+                if cell:
+                    self.names[cell[1]] = cell[0]
+
+    def is_window(self, ev):
+        w = getattr(ev, "window", None)
+        return w is not None and getattr(w, "id", None) == self.win.id
+
+    def feed(self, events):
+        for code, down, at in events:
+            if down:
+                self.down[code] = at
+            else:
+                start = self.down.pop(code, None)
+                self.log.append((self.names.get(code, str(code)),
+                                 None if start is None else at - start))
+                self.log = self.log[-6:]
+
+    def clear(self):
+        self.down.clear()
+
+    def _bar(self, y, label, frac, text):
+        s = self.surf
+        s.blit(self.small.render(label, True, self.DIM), (14, y))
+        pygame.draw.rect(s, self.KEY, (70, y, 216, 14), border_radius=3)
+        if frac is not None:
+            f = max(0.0, min(1.0, frac))
+            col = (90, 200, 120) if f < 0.6 else (230, 190, 70) if f < 0.85 else (235, 90, 80)
+            pygame.draw.rect(s, col, (70, y, max(2, int(216 * f)), 14), border_radius=3)
+        s.blit(self.small.render(text, True, self.INK), (74, y + 16))
+
+    def draw(self, link, now):
+        s = self.surf
+        s.fill(self.BG)
+        s.blit(self.font.render("Keys on the phone", True, self.INK), (14, 10))
+        bw, bh, gap, x0, y0 = 84, 38, 8, 14, 36
+        for r, row in enumerate(self.grid):
+            for c, cell in enumerate(row):
+                if cell is None:
+                    continue
+                label, code = cell
+                rect = pygame.Rect(x0 + c * (bw + gap), y0 + r * (bh + gap), bw, bh)
+                lit = code in self.down
+                pygame.draw.rect(s, self.LIT if lit else self.KEY, rect, border_radius=7)
+                t = self.font.render(label, True, (10, 10, 10) if lit else self.INK)
+                s.blit(t, t.get_rect(center=rect.center))
+        y = y0 + len(self.grid) * (bh + gap)
+        other = [self.names.get(c, str(c)) for c in self.down if c not in self.on_grid]
+        s.blit(self.small.render("also held: " + (", ".join(other) or "-"), True, self.DIM), (14, y))
+        y += 18
+        recent = "  ".join(n if h is None else "%s %.2fs" % (n, h) for n, h in reversed(self.log))
+        s.blit(self.small.render("last: " + (recent or "-"), True, self.DIM), (14, y))
+
+        y += 30
+        st = link.stats
+        if st is None:
+            s.blit(self.small.render("CPU / RAM: waiting for the phone...", True, self.DIM), (14, y))
+        else:
+            cpu = st["cpu"]
+            self._bar(y, "CPU", None if cpu is None else cpu / 100.0,
+                      "measuring..." if cpu is None else "%.1f%%" % cpu)
+            used = st["total"] - st["avail"]
+            self._bar(y + 38, "RAM", used / st["total"] if st["total"] else None,
+                      "%.1f of %.1f MB used" % (used / 1024.0, st["total"] / 1024.0))
+            if st["stotal"]:
+                su = st["stotal"] - st["sfree"]
+                self._bar(y + 76, "swap", su / st["stotal"],
+                          "%.1f of %.1f MB" % (su / 1024.0, st["stotal"] / 1024.0))
+            s.blit(self.small.render("updated %ds ago, every 10s" % int(now - st["at"]),
+                                     True, self.DIM), (14, self.H - 20))
+        tex = self.video.Texture.from_surface(self.ren, s)
+        self.ren.clear()
+        self.ren.blit(tex)
+        self.ren.present()
+
+    def close(self):
+        self.win.destroy()
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="ndlink-watch")
+    ap.add_argument("--host", required=True)
+    ap.add_argument("--port", type=int, default=5901)
+    ap.add_argument("--view-only", action="store_true")
+    ap.add_argument("--no-audio", action="store_true")
+    ap.add_argument("--no-mute", action="store_true",
+                    help="leave the phone's own speaker on while watching")
+    ap.add_argument("--latency", type=int, default=60,
+                    help="least audio buffer, ms (grows to fit bursty apps)")
+    ap.add_argument("--scale", type=int, default=3, help="initial window scale")
+    ap.add_argument("--verbose", action="store_true",
+                    help="a second window: the phone's pressed keys, CPU and RAM")
+    args = ap.parse_args(argv)
+
+    nd = load_keycodes()
+    by_char, by_key = build_keymap(nd)
+
+    # Not pygame.init(): that also opens the mixer, a stream of silence in
+    # the desktop's mixer that looks exactly like this viewer's audio and is
+    # not. Sound goes through AudioOut; only video and fonts come from here.
+    pygame.display.init()
+    pygame.font.init()
+    pygame.key.set_repeat()          # held state is the phone's to repeat
+    flags = pygame.RESIZABLE
+    screen = pygame.display.set_mode((FB_W * args.scale, FB_H * args.scale), flags)
+    pygame.display.set_caption("NeoDCT -- %s" % args.host)
+    font = pygame.font.Font(None, 22)
+
+    audio = None if args.no_audio else AudioOut(max(20, args.latency))
+    link = Link(args.host, args.port, audio, mute_phone=not args.no_mute)
+    canvas = pygame.Surface((FB_W, FB_H))
+    canvas.fill((0, 0, 0))
+    keys_win = KeysWindow(nd) if args.verbose else None
+    keys_drawn = 0.0
+
+    scaler = 0
+    fullscreen = False
+    held = {}                        # pygame key -> NeoDCT code sent down
+    dirty = True
+    clock = pygame.time.Clock()
+    stat_t = time.monotonic()
+    title = ""
+
+    running = True
+    while running:
+        for ev in pygame.event.get():
+            if ev.type == pygame.WINDOWCLOSE and keys_win is not None and keys_win.is_window(ev):
+                keys_win.close()
+                keys_win = None
+                continue
+            if ev.type == pygame.QUIT:
+                running = False
+            elif ev.type in (pygame.VIDEORESIZE, pygame.WINDOWSIZECHANGED):
+                dirty = True
+            elif ev.type == pygame.KEYDOWN:
+                mods = ev.mod
+                if ev.key == pygame.K_q and mods & pygame.KMOD_CTRL:
+                    running = False
+                elif ev.key == pygame.K_F2:
+                    scaler = (scaler + 1) % len(SCALERS)
+                    dirty = True
+                elif ev.key == pygame.K_F3 and audio is not None:
+                    audio.muted = not audio.muted
+                elif ev.key == pygame.K_F4:
+                    link.mute_phone = not link.mute_phone
+                    link.send_options()
+                elif ev.key == pygame.K_F11 or (ev.key == pygame.K_RETURN and mods & pygame.KMOD_ALT):
+                    fullscreen = not fullscreen
+                    pygame.display.toggle_fullscreen()
+                    dirty = True
+                elif not args.view_only and ev.key not in held:
+                    code = by_char.get(ev.unicode) if ev.unicode else None
+                    if code is None:
+                        code = by_key.get(ev.key)
+                    if code is not None:
+                        held[ev.key] = code
+                        link.send_key(code, True)
+            elif ev.type == pygame.KEYUP:
+                code = held.pop(ev.key, None)
+                if code is not None:
+                    link.send_key(code, False)
+            elif ev.type == pygame.WINDOWFOCUSLOST:
+                # A key held when focus leaves never gets its KEYUP here.
+                for code in held.values():
+                    link.send_key(code, False)
+                held.clear()
+
+        events = link.take_key_events()
+        if keys_win is not None:
+            now = time.monotonic()
+            if link.sock is None:
+                keys_win.clear()
+            if events or now - keys_drawn >= 1.0:
+                keys_win.feed(events)
+                keys_win.draw(link, now)
+                keys_drawn = now
+
+        for x, y, w, h, data in link.take_rects():
+            blit_565(canvas, x, y, w, h, data)
+            dirty = True
+
+        if dirty or link.status or (audio is not None and audio.error):
+            screen.fill((24, 24, 24))
+            img, pos = fit(canvas, screen.get_size(), SCALERS[scaler])
+            screen.blit(img, pos)
+            note = link.status or (audio.error if audio is not None else None)
+            if note:
+                txt = font.render(note, True, (255, 210, 80))
+                screen.blit(txt, (8, screen.get_height() - txt.get_height() - 6))
+            pygame.display.flip()
+            dirty = False
+
+        now = time.monotonic()
+        if now - stat_t >= 1.0:
+            dt = now - stat_t
+            parts = ["NeoDCT -- %s" % args.host]
+            if link.hello:
+                parts.append("%.0f fps" % (link.frames / dt))
+                parts.append("%.1f Mbit/s" % ((link.video_bytes + link.audio_bytes) * 8 / dt / 1e6))
+                if audio is not None and audio.proc is not None:
+                    parts.append("%g kHz%s, %d ms" % (audio.fmt[0] / 1000.0,
+                                                      " (muted)" if audio.muted else "",
+                                                      audio.target_ms()))
+                elif audio is not None and audio.error:
+                    parts.append("NO AUDIO")
+                if link.hello and not link.hello["keys"] or args.view_only:
+                    parts.append("view only")
+                parts.append("phone speaker %s" % ("off" if link.mute_phone and not args.view_only else "on"))
+                parts.append(SCALERS[scaler])
+            link.frames = link.video_bytes = link.audio_bytes = 0
+            stat_t = now
+            t = "  |  ".join(parts)
+            if t != title:
+                pygame.display.set_caption(t)
+                title = t
+
+        clock.tick(60)
+
+    for code in held.values():
+        link.send_key(code, False)
+    link.stop = True
+    if keys_win is not None:
+        keys_win.close()
+    if audio is not None:
+        audio.close()
+    pygame.quit()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

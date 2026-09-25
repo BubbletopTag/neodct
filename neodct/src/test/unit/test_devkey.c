@@ -318,6 +318,69 @@ static void test_the_channel_is_not_a_backend(void)
     nd_input_close(in);
 }
 
+/* ============ THE KEY ECHO ============
+ *
+ * Every key the core queues is echoed to ND_PATH_KEYECHO_SOCK for nd-watchd's
+ * key window. Held to the devkey channel's gate: the cases are that it
+ * arrives, and that engineering mode off means nothing is sent at all. */
+
+static int bind_echo_receiver(void)
+{
+    struct sockaddr_un addr;
+    char path[ND_PATH_MAX];
+    int fd;
+
+    pt_mkdir(ND_PATH_DEVKEY_DIR);
+    CHECK(nd_path_resolve(path, sizeof path, ND_PATH_KEYECHO_SOCK) == ND_OK);
+    (void)unlink(path);
+    fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    CHECK(fd >= 0);
+    memset(&addr, 0, sizeof addr);
+    addr.sun_family = AF_UNIX;
+    CHECK(strlen(path) < sizeof addr.sun_path);
+    memcpy(addr.sun_path, path, strlen(path));
+    CHECK(bind(fd, (const struct sockaddr *)&addr, sizeof addr) == 0);
+    return fd;
+}
+
+static void test_every_queued_key_is_echoed(void)
+{
+    nd_input *in = NULL;
+    char got[32];
+    ssize_t n;
+    int rx;
+
+    give_marker();
+    rx = bind_echo_receiver();
+    CHECK(nd_input_open(&in) == ND_OK);
+
+    CHECK(send_text("50 1"));
+    CHECK_INT(nd_input_read_key(in, 1.0), ND_KEY_MENU);
+    n = recv(rx, got, sizeof got - 1, 0);
+    CHECK(n > 0);
+    got[n > 0 ? n : 0] = '\0';
+    CHECK_STR(got, "50 1");
+
+    nd_input_close(in);
+    (void)close(rx);
+}
+
+static void test_no_echo_without_engineering_mode(void)
+{
+    nd_input *in = NULL;
+    char got[32];
+    int rx;
+
+    given_engineering_mode(false);
+    rx = bind_echo_receiver();
+    CHECK(nd_input_open(&in) == ND_OK);
+    CHECK(!nd_input_devkey_active(in));
+    CHECK(recv(rx, got, sizeof got, 0) < 0);
+
+    nd_input_close(in);
+    (void)close(rx);
+}
+
 static void test_reads_still_time_out_normally(void)
 {
     nd_input *in = NULL;
@@ -346,5 +409,7 @@ int main(void)
     RUN(test_a_trailing_newline_is_accepted);
     RUN(test_the_channel_is_not_a_backend);
     RUN(test_reads_still_time_out_normally);
+    RUN(test_every_queued_key_is_echoed);
+    RUN(test_no_echo_without_engineering_mode);
     return pt_report("test_devkey");
 }

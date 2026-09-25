@@ -194,6 +194,7 @@ BOOTBAR_SRCS := $(wildcard tools/nd_bootbar.c tools/nd_bootbar_ui.c)
 GENFONT_SRCS := $(wildcard tools/gen_bootfont.c)
 DISPLAYD_SRCS := $(wildcard displayd/*.c)
 VNCD_SRCS   := $(wildcard vncd/*.c)
+WATCHD_SRCS := $(wildcard watchd/*.c)
 RECUI_SRCS  := $(wildcard recovery/*.c)
 TEST_SRCS   := $(wildcard test/unit/*.c)
 
@@ -233,6 +234,7 @@ GENFONT_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(GENFONT_SRCS))
 BOOTBAR_LIB_OBJS := $(filter-out $(OBJDIR)/tools/nd_bootbar.o,$(BOOTBAR_OBJS)) $(BOOTFB_OBJS)
 DISPLAYD_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(DISPLAYD_SRCS))
 VNCD_OBJS   := $(patsubst %.c,$(OBJDIR)/%.o,$(VNCD_SRCS))
+WATCHD_OBJS := $(patsubst %.c,$(OBJDIR)/%.o,$(WATCHD_SRCS))
 RECUI_OBJS  := $(patsubst %.c,$(OBJDIR)/%.o,$(RECUI_SRCS))
 
 # The recovery UI's library half, without main(). test_recui links these
@@ -271,6 +273,7 @@ TARGETS += $(if $(BOOTBAR_SRCS),$(BINDIR)/nd-bootbar)
 TARGETS += $(if $(GENFONT_SRCS),$(BINDIR)/gen-bootfont)
 TARGETS += $(if $(DISPLAYD_SRCS),$(BINDIR)/neodct_displayd)
 TARGETS += $(if $(VNCD_SRCS),$(BINDIR)/nd-vncd)
+TARGETS += $(if $(WATCHD_SRCS),$(BINDIR)/nd-watchd)
 TARGETS += $(if $(RECUI_SRCS),$(BINDIR)/nd-recui)
 TARGETS += $(APP_SOS)
 
@@ -416,6 +419,24 @@ $(BINDIR)/nd-vncd: $(VNCD_OBJS)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)printf '  %-7s %s\n' 'LINK' '$@'
 	$(Q)$(CC) $(VNCD_OBJS) -o $@ $(SANFLAGS) $(NEODCT_LDFLAGS) $(LDFLAGS) -lvncserver
+
+# ---- nd-watchd: panel + speaker + keys for `ndlink watch` -----------
+#
+# nd-vncd's sibling and built the same way -- standalone, headers-only use of
+# include/, no -Wconversion for the pixel packing -- but libc only: it speaks
+# its own small protocol to neodct/tools/ndlink-watch, which is what lets it
+# carry audio. The file's header says why RFB could not.
+WATCHD_CFLAGS := $(VNCD_CFLAGS)
+
+$(OBJDIR)/watchd/%.o: watchd/%.c
+	$(Q)mkdir -p $(dir $@)
+	$(Q)printf '  %-7s %s\n' 'CC' '$<'
+	$(Q)$(CC) $(WATCHD_CFLAGS) $(CPPFLAGS) -c $< -o $@
+
+$(BINDIR)/nd-watchd: $(WATCHD_OBJS)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)printf '  %-7s %s\n' 'LINK' '$@'
+	$(Q)$(CC) $(WATCHD_OBJS) -o $@ $(SANFLAGS) $(NEODCT_LDFLAGS) $(LDFLAGS)
 
 # ---- nd-recui: the on-screen recovery UI ---------------------------
 #
@@ -744,6 +765,10 @@ install: all
 	@# nd-panic. S42debuglan starts it; it is harmless without a client and
 	@# binds only the debug address. See docs/DEBUG_LAN.md.
 	$(Q)$(if $(VNCD_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-vncd $(DESTDIR)$(PREFIX)/bin/,:)
+	@# nd-watchd beside it, and for the same reasons. Its --tap mode is what
+	@# S17audio names in asound.conf when the debug link is up, so the path
+	@# /NeoDCT/System/bin/nd-watchd is a contract with that script.
+	$(Q)$(if $(WATCHD_SRCS),$(INSTALL) -m 0755 $(BINDIR)/nd-watchd $(DESTDIR)$(PREFIX)/bin/,:)
 	@# neodct-play goes where the BROWSER looks for it, not where it would
 	@# be tidiest. netsurf-neodct/.../neodct_media.h has
 	@#   #define NEODCT_MEDIA_PLAYER "/NeoDCT/System/core/MediaWidget/neodct-play"
